@@ -17,6 +17,7 @@ import { makeBaseEnv } from './base.js'
 import { expandProgram } from './macro.js'
 import { help, describe, typeOf, arityOf, docOf, sourceOf, allVerbs } from './introspect.js'
 import { snapshotRegistry } from './verbRegistry.js'
+import { VERSION } from './index.js'
 
 /**
  * Meta-command dispatch table.
@@ -194,7 +195,7 @@ export async function startRepl(opts = {}) {
     exit: () => rl.close(),
   }
 
-  ctx.output('sakura-scheme 1.4.0  —  type ,help <verb> or ,exit')
+  ctx.output(`motoi ${VERSION}  —  type ,help <verb> or ,exit`)
   rl.prompt()
   rl.on('line', (line) => {
     const trimmed = line.trim()

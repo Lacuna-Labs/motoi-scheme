@@ -92,9 +92,9 @@ export {
 } from './slat-verbs.js'
 
 // Version pin. Consumers can check at runtime:
-//   import { VERSION } from 'sakura-scheme'
-//   if (VERSION.split('.')[0] !== '1') throw new Error('expected sakura-scheme@1.x')
-export const VERSION = '1.4.0'
+//   import { VERSION } from 'motoi-scheme'
+//   if (VERSION.split('.')[0] !== '0') throw new Error('expected motoi-scheme@0.x')
+export const VERSION = '0.1.0'
 
 // NOTE: `dispatch.js` was extracted with the six-file cut but currently
 // carries several hard imports of Curator internals (logbus, card-api,

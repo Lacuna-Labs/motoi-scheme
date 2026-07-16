@@ -1,16 +1,16 @@
-// sakura-scheme — bash CLI entry point
+// motoi — bash CLI entry point
 //
-// Called via bin/sakura-scheme (which is a shebang stub).
+// Called via bin/motoi (which is a shebang stub).
 //
-//   sakura-scheme repl              Interactive REPL.
-//   sakura-scheme eval "<code>"     Evaluate one expression, print result.
-//   sakura-scheme run <file.scm>    Run a program file to completion.
-//   sakura-scheme help <verb>       Print help for a verb.
-//   sakura-scheme docs              Print MD reference to stdout.
-//   sakura-scheme docs regen        Regenerate reference/ MD from live registry.
-//   sakura-scheme version           Print version + git sha.
-//   sakura-scheme slat parse <f>    Parse a .slat file; print as JSON.
-//   sakura-scheme slat emit <f>     Convert a JSONL log to slat.
+//   motoi repl              Interactive REPL.
+//   motoi eval "<code>"     Evaluate one expression, print result.
+//   motoi run <file.scm>    Run a program file to completion.
+//   motoi help <verb>       Print help for a verb.
+//   motoi docs              Print MD reference to stdout.
+//   motoi docs regen        Regenerate reference/ MD from live registry.
+//   motoi version           Print version + git sha.
+//   motoi slat parse <f>    Parse a .slat file; print as JSON.
+//   motoi slat emit <f>     Convert a JSONL log to slat.
 
 import { parse } from './reader.js'
 import { evaluate } from './interp.js'
@@ -24,9 +24,9 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { VERSION } from './index.js'
 
 function usage() {
-  return `sakura-scheme ${VERSION} — the language
+  return `motoi ${VERSION} — the base Scheme dialect
 
-Usage: sakura-scheme <command> [options]
+Usage: motoi <command> [options]
 
 Commands:
   repl                     Interactive REPL. Loads current dir's verb layer if present.
@@ -72,7 +72,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (!cmd || cmd === '--help' || cmd === '-h') { process.stdout.write(usage()); return 0 }
 
   if (cmd === 'version' || cmd === '--version' || cmd === '-v') {
-    process.stdout.write(`sakura-scheme ${VERSION}\n`)
+    process.stdout.write(`motoi ${VERSION}\n`)
     return 0
   }
 
@@ -83,7 +83,7 @@ export async function main(argv = process.argv.slice(2)) {
 
   if (cmd === 'eval' || cmd === '-e') {
     const src = argv.slice(1).join(' ')
-    if (!src) { process.stderr.write('usage: sakura-scheme eval "<code>"\n'); return 1 }
+    if (!src) { process.stderr.write('usage: motoi eval "<code>"\n'); return 1 }
     try {
       const result = evalSource(src)
       if (result !== undefined) process.stdout.write(format(result) + '\n')
@@ -96,7 +96,7 @@ export async function main(argv = process.argv.slice(2)) {
 
   if (cmd === 'run') {
     const file = argv[1]
-    if (!file) { process.stderr.write('usage: sakura-scheme run <file.scm>\n'); return 1 }
+    if (!file) { process.stderr.write('usage: motoi run <file.scm>\n'); return 1 }
     try {
       const src = await readFile(file, 'utf8')
       const result = evalSource(src)
@@ -110,7 +110,7 @@ export async function main(argv = process.argv.slice(2)) {
 
   if (cmd === 'help') {
     const verb = argv[1]
-    if (!verb) { process.stderr.write('usage: sakura-scheme help <verb>\n'); return 1 }
+    if (!verb) { process.stderr.write('usage: motoi help <verb>\n'); return 1 }
     const meta = help(verb)
     if (!meta) { process.stderr.write(`unknown verb: ${verb}\n`); return 1 }
     process.stdout.write(`${meta.name}  —  ${meta.doc || '(no doc)'}\n`)
@@ -123,7 +123,7 @@ export async function main(argv = process.argv.slice(2)) {
     const sub = argv[1]
     if (sub === 'regen') {
       const outDir = argv[2] || 'docs/reference'
-      const files = emitDocs({ outDir })
+      const files = await emitDocs({ outDir })
       process.stdout.write(`emitted ${files.length} files under ${outDir}\n`)
       return 0
     }
@@ -149,7 +149,7 @@ export async function main(argv = process.argv.slice(2)) {
       process.stdout.write(out)
       return 0
     }
-    process.stderr.write('usage: sakura-scheme slat <parse|emit> <file>\n')
+    process.stderr.write('usage: motoi slat <parse|emit> <file>\n')
     return 1
   }
 
