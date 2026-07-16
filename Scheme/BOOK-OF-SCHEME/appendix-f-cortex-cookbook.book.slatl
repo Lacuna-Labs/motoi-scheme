@@ -1,0 +1,228 @@
+;; appendix-f-cortex-cookbook.slat
+;; Book of Scheme (shipped) — Appendix F — Cortex integration cookbook
+(dialect :applies ("motoi" "sakura") :note "Default: applies to both dialects. When a split exists between Motoi and Sakura, add sibling records in the same doc, each tagged with a per-record :dialect override.")
+
+(appendix
+  :book             "Book of Scheme (shipped)"
+  :chapter-number   null
+  :title            "Appendix F — Cortex integration cookbook"
+  :source-path      "/Users/alfred/code/curator/scheme-books/book-of-slat/appendix-f-cortex-cookbook.md"
+  :size             5357
+  :sha256           "b002cf0c8de93094"
+  :prose
+"---
+slug: book-of-slat-app-f
+title: Appendix F — Cortex integration cookbook
+book: slat
+part: Appendix
+app: scheme-repl
+palette: book-standard
+canonical: true
+owner: docs-team (Jess)
+status: draft
+last-reviewed: 2026-07-12
+---
+
+# Appendix F — Cortex integration cookbook
+
+Patterns for storing state and reading it back.
+
+## Recipe 1 — remember a fact
+
+Write a `cortex-slice` with a small value.
+
+```sakura-scheme
+(cortex-write! 'kid.alfred.favorite-color 'blue)
+```
+
+Read it back later:
+
+```sakura-scheme
+(cortex-read 'kid.alfred.favorite-color)
+```
+
+Returns `'blue`. Persisted forever until you overwrite.
+
+## Recipe 2 — remember a structured record
+
+The value can be any legal slat.
+
+```sakura-scheme
+(cortex-write! 'kid.alfred.first-cart
+  '(cart-info :id \"cart-my-paddle\"
+              :first-run #inst \"2026-07-11T14:32:00Z\"
+              :atoms-learned (score-var mutation)))
+```
+
+Read:
+
+```sakura-scheme
+(define info (cortex-read 'kid.alfred.first-cart))
+(slat-key info 'atoms-learned)
+```
+
+Returns `(score-var mutation)`.
+
+## Recipe 3 — append to a stream
+
+For anything that happens over time — events, mood changes, chat
+turns — use a `.slatl` stream, not a single slice.
+
+```sakura-scheme
+(cortex-append! 'sakura.mood
+  (list 'event :ts (now) :kind :mood.changed :to :focused))
+```
+
+Read the stream:
+
+```sakura-scheme
+(define events (cortex-stream 'sakura.mood))
+(for-each display-mood events)
+```
+
+## Recipe 4 — snapshot + delta timeline
+
+For state that changes gradually — session progress, cart state — use
+snapshots plus deltas.
+
+```sakura-scheme
+(define (checkpoint! subject state)
+  (cortex-write!
+    (symbol-append subject '.snapshot)
+    (list 'snapshot :ts (now) :subject subject :body state)))
+
+(checkpoint! 'sakura.session
+  '(session :active #t :queue-depth 3 :last-user 'alfred))
+```
+
+Between snapshots, write deltas:
+
+```sakura-scheme
+(cortex-append! 'sakura.session-deltas
+  (list 'delta
+        :from-ts (previous-ts)
+        :to-ts   (now)
+        :changes '((queue-depth 3 -> 5))))
+```
+
+## Recipe 5 — verify before load
+
+For state coming from disk, verify the signature before trusting.
+
+```sakura-scheme
+(define slice (read-slice-from-disk 'kid.alfred.programs))
+(if (slat-verify slice :public-key sakuras-public-key)
+    (slat-key slice 'value)
+    (error \"cortex slice signature failed\"))
+```
+
+## Recipe 6 — encrypt at rest
+
+For sensitive slices — private thoughts, per-user secrets — encrypt.
+
+```sakura-scheme
+(define plaintext '(private-notes \"...text...\"))
+
+(define slice
+  (list 'cortex-slice
+        :key 'kid.alfred.private
+        :encrypted (encrypt-bytes (slat-dumps plaintext) session-key)
+        :encrypted-algo \"xchacha20-poly1305\"
+        :key-hint \"kid-2026\"
+        :owner 'sakura
+        :ts (now)))
+
+(cortex-write-slice! slice)
+```
+
+Read:
+
+```sakura-scheme
+(define slice (cortex-read-slice 'kid.alfred.private))
+(define plaintext-bytes
+  (decrypt-bytes (slat-key slice 'encrypted) session-key))
+(slat-loads (bytes->string plaintext-bytes))
+```
+
+## Recipe 7 — persona-continuity snapshot
+
+For \"restore Sakura's session next time she opens,\" snapshot her whole
+state at session-end and restore at session-start.
+
+```sakura-scheme
+(define (save-session)
+  (cortex-write! 'sakura.last-session
+    (list 'snapshot :ts (now) :subject 'sakura.session
+          :body (list
+                  (list 'mood     current-mood)
+                  (list 'user     current-user)
+                  (list 'queue    current-queue)
+                  (list 'last-cart current-cart)))))
+
+(define (restore-session)
+  (let ([snap (cortex-read 'sakura.last-session)])
+    (when snap
+      (let ([body (slat-key snap 'body)])
+        (set! current-mood     (cadr (assoc 'mood     body)))
+        (set! current-user     (cadr (assoc 'user     body)))
+        (set! current-queue    (cadr (assoc 'queue    body)))
+        (set! current-cart     (cadr (assoc 'last-cart body)))))))
+```
+
+At session-start, `restore-session`. At session-end, `save-session`.
+
+## Recipe 8 — content-addressed dedup
+
+If the value is an atom (training material, incident narrative), key
+it by content ID instead of a human-readable key.
+
+```sakura-scheme
+(define atom
+  '(atom :id \"atm-scheme-lambda-001\" :body '(lambda (x) x)))
+
+(define cid (slat-cid atom))
+
+(cortex-write! (symbol-append 'atom.by-cid. cid) atom)
+```
+
+Two writers producing the same atom store it once. Dedup for free.
+
+## Recipe 9 — trim old snapshots
+
+Storage is finite. Trim old snapshots on a schedule.
+
+```sakura-scheme
+(define (trim-snapshots subject keep-count)
+  (let* ([keys (cortex-keys-with-prefix (symbol-append subject '.snapshot))]
+         [sorted (sort keys > by-timestamp)]
+         [to-drop (drop sorted keep-count)])
+    (for-each cortex-delete! to-drop)))
+
+(trim-snapshots 'sakura.session 100)
+```
+
+Keeps the 100 most recent snapshots. Drops the rest.
+
+## Recipe 10 — search a stream
+
+Use a filter over the stream.
+
+```sakura-scheme
+(define recent-moods
+  (filter (lambda (event)
+            (equal? (slat-key event 'kind) :mood.changed))
+          (cortex-stream 'sakura.events)))
+
+(take recent-moods 10)
+```
+
+Or use Loam projections if the stream is big — Loam pre-projects the
+common queries.
+
+## Cross-links
+
+- [[book-of-slat-ch14]] — cortex slices, in prose.
+- [[book-of-self]] Chapter 4 — Thought and self-knowledge.
+
+---
+")

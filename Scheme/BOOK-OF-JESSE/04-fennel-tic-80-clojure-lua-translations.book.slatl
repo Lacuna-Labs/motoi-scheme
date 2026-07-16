@@ -1,0 +1,454 @@
+(dialect :applies ("motoi" "sakura") :note "Default: applies to both dialects. When a split exists between Motoi and Sakura, add sibling records in the same doc, each tagged with a per-record :dialect override.")
+(chapter
+  :book "Book of Jesse"
+  :chapter-number 5
+  :title "Chapter 4 — Fennel / TIC-80 / Clojure / Lua Translations"
+  :provenance
+    (:source-path "/Users/alfred/code/scheme-lang/docs/BOOK-OF-JESSE.md"
+     :source-sha "a4fe105b21fbbb37e6b52bd1b3884eed3a65127db421fa7e044480d4d024873e"
+     :recovered-at "2026-07-14"
+     :recovery-item "recovery-008")
+  :prose
+"## Chapter 4 — Fennel / TIC-80 / Clojure / Lua Translations
+
+This is the biggest chapter, because it's the biggest lift. Your intuitions transfer well; the syntax lands mostly where you'd guess. But the specifics matter.
+
+### 4.1 — Bindings
+
+**Fennel:**
+
+```fennel
+(let [x 3
+      y (* x x)]
+  (+ x y))
+```
+
+**Sakura Scheme:**
+
+```scheme
+(let ((x 3)
+      (y (* 3 3)))
+  (+ x y))
+```
+
+Two differences worth noting.
+
+One: Sakura Scheme's `let` binds *in parallel* — every RHS is evaluated in the *outer* environment. Fennel's `let` is sequential, like Scheme's `let*`. So Fennel's `y` sees the new `x`; Sakura Scheme's `y` does not. If you want Fennel's shape, use `let*`:
+
+```scheme
+(let* ((x 3)
+       (y (* x x)))
+  (+ x y))     ;; ⇒ 12
+```
+
+Two: bindings are wrapped in an extra pair of parens. `(let ((x 3) (y 4)) ...)`. The outer pair holds the binding list; each inner pair is one binding. That's real Scheme, not a typo.
+
+**Lua:**
+
+```lua
+local x = 3
+local y = x * x
+return x + y
+```
+
+**Sakura Scheme:**
+
+```scheme
+(let* ((x 3)
+       (y (* x x)))
+  (+ x y))
+```
+
+Same shape as translating from Fennel; `let*` for the sequential feel.
+
+**Clojure:**
+
+```clojure
+(let [x 3
+      y (* x x)]
+  (+ x y))
+```
+
+Clojure's `let` is sequential — same as `let*`. Same translation.
+
+### 4.2 — Destructuring
+
+Clojure and Fennel both let you destructure inside `let`. Scheme's classic `let` does not. Sakura Scheme has two paths.
+
+**The direct path — pattern-match with `let-values` or explicit accessors:**
+
+```clojure
+;; Clojure
+(let [{:keys [x y]} pos]
+  (+ x y))
+```
+
+```scheme
+;; Sakura Scheme — hash-tables
+(let ((x (hash-ref pos 'x))
+      (y (hash-ref pos 'y)))
+  (+ x y))
+```
+
+For pairs and lists:
+
+```fennel
+;; Fennel
+(let [[a b c] xs]
+  (+ a b c))
+```
+
+```scheme
+;; Sakura Scheme
+(let ((a (first  xs))
+      (b (second xs))
+      (c (third  xs)))
+  (+ a b c))
+```
+
+Or, more idiomatically:
+
+```scheme
+(let ((a (car xs))
+      (b (cadr xs))
+      (c (caddr xs)))
+  (+ a b c))
+```
+
+`car` / `cadr` / `caddr` are the classical Scheme accessors: head, second, third. They compose from `c` + `a`/`d` + `r` — `cadr` is *car of cdr*, `caddr` is *car of cdr of cdr*.
+
+**The syntactic-sugar path — write a macro:**
+
+If you want Fennel-shape destructuring badly enough, `syntax-rules` will get you there. A minimal one:
+
+```scheme
+(define-syntax let-list
+  (syntax-rules ()
+    ((_ ((name ...) expr) body ...)
+     (let ((tmp expr))
+       (let ((name (list-ref tmp _pos)) ...) body ...)))))
+```
+
+The above sketch is illustrative — a fully general destructurer wants recursion through nested patterns, and the standard `syntax-rules` restriction to pattern-matching-only makes it harder than a full macro system would. Most Sakura code doesn't need it: verbs return hash-tables you `hash-ref` into, or short lists you `car`/`cadr` into. If you find yourself reaching for destructuring often, a macro is one file to write.
+
+### 4.3 — Threading macros
+
+Fennel's `->` and `->>`:
+
+```fennel
+(-> xs (map inc) (filter even?) (reduce + 0))
+```
+
+Sakura Scheme has both, spelled the same way. Because `->` is a common identifier used elsewhere in the Scheme world (arrow constructors, coercions like `list->vector`), we ship them as macros you enable in your file with `(import (sakura threading))`. Then:
+
+```scheme
+(import (sakura threading))
+(-> xs (map inc _) (filter even? _) (reduce + 0 _))
+```
+
+Note the `_` — the \"hole\" that says where the threaded value goes. That's the *anaphoric* threading style (Clojure calls it `as->` when explicit); we default to explicit-hole because it's unambiguous under Scheme's argument-order rules. If you want Clojure's implicit-first-argument threading, use `->>` and the value threads into the *last* position:
+
+```scheme
+(->> xs (map inc) (filter even?) (reduce + 0))
+```
+
+That reads the same as Fennel's `->>`. Under the hood it expands to:
+
+```scheme
+(reduce + 0 (filter even? (map inc xs)))
+```
+
+If you prefer the anaphoric mark (Clojure's `as->`), that's:
+
+```scheme
+(as-> xs $ (map inc $) (filter even? $) (reduce + 0 $))
+```
+
+Same expansion, explicit binding name.
+
+### 4.4 — Multi-methods and dispatch
+
+Clojure's `defmulti` / `defmethod`:
+
+```clojure
+(defmulti area :shape)
+(defmethod area :circle [{:keys [r]}] (* Math/PI r r))
+(defmethod area :square [{:keys [side]}] (* side side))
+```
+
+Sakura Scheme does not ship `defmulti` in the core. Two paths.
+
+**Path one — `case` on a discriminator key.** For simple dispatch (three or four shapes, no third-party extension needed), this is idiomatic:
+
+```scheme
+(define (area shape)
+  (case (hash-ref shape 'shape)
+    ((circle) (* 3.14159265 (expt (hash-ref shape 'r) 2)))
+    ((square) (expt (hash-ref shape 'side) 2))
+    (else (error \"unknown shape\" shape))))
+```
+
+**Path two — a dispatch table.** For extensible dispatch (methods added at load time, defmulti-shape), build a hash-table of `discriminator → fn`:
+
+```scheme
+(define *area-methods* (make-hash))
+
+(define (register-area! kind fn)
+  (hash-set! *area-methods* kind fn))
+
+(define (area shape)
+  (let ((fn (hash-ref *area-methods* (hash-ref shape 'shape))))
+    (if fn
+        (fn shape)
+        (error \"unknown shape\" shape))))
+
+(register-area! 'circle
+  (lambda (s) (* 3.14159265 (expt (hash-ref s 'r) 2))))
+
+(register-area! 'square
+  (lambda (s) (expt (hash-ref s 'side) 2)))
+```
+
+That's `defmulti` / `defmethod` on ten lines of core Scheme. If you build up a house style around it, wrap it in a macro:
+
+```scheme
+(define-syntax defmulti
+  (syntax-rules ()
+    ((_ name dispatch-fn)
+     (begin
+       (define name-methods (make-hash))
+       (define (name arg)
+         (let ((fn (hash-ref name-methods (dispatch-fn arg))))
+           (if fn (fn arg) (error \"no method for\" (dispatch-fn arg)))))))))
+
+(define-syntax defmethod
+  (syntax-rules ()
+    ((_ name key fn)
+     (hash-set! name-methods key fn))))
+```
+
+That's the full-generality thing. Ship it as a library once, use forever.
+
+The verb registry itself (see Chapter 9) is a form of multimethod: every verb dispatches on its head symbol, resolves through the registry, and executes the bound function. So the language *is* a big defmulti — you're just usually calling into it, not extending it.
+
+### 4.5 — Lua tables ↔ Sakura hash-tables
+
+Lua tables serve two purposes: array-shape (`t[1], t[2], ...`) and dict-shape (`t.name, t.age`). In Sakura Scheme those are two data structures — `list` (or `vector`) for the array-shape and `hash-table` for the dict.
+
+**Lua array:**
+
+```lua
+local xs = {10, 20, 30}
+print(xs[2])       -- 20
+table.insert(xs, 40)
+```
+
+**Sakura Scheme:**
+
+```scheme
+(define xs (list 10 20 30))
+(list-ref xs 1)          ;; ⇒ 20  (zero-indexed)
+(append xs '(40))        ;; ⇒ (10 20 30 40)  — pure
+```
+
+Note: Sakura's lists are zero-indexed. Lua's are one-indexed. This trips people up on their first day.
+
+**Lua dict:**
+
+```lua
+local person = {name = \"Alfred\", age = 32}
+print(person.name)
+person.email = \"alfred@example.com\"
+```
+
+**Sakura Scheme:**
+
+```scheme
+(define person (make-hash))
+(hash-set! person 'name \"Alfred\")
+(hash-set! person 'age 32)
+(hash-ref person 'name)                            ;; ⇒ \"Alfred\"
+(hash-set! person 'email \"alfred@example.com\")
+```
+
+Symbols like `'name` are the idiomatic key; strings work too. If you want a literal-shape constructor:
+
+```scheme
+(define person (list->hash '((name \"Alfred\") (age 32))))
+```
+
+### 4.6 — TIC-80's cls / circ / spr ↔ Sakura's clear / circle / sprite
+
+TIC-80:
+
+```lua
+function TIC()
+  cls(0)
+  circ(120, 68, 20, 5)
+  spr(1, 100, 60)
+end
+```
+
+Sakura Scheme (fantasy-console shape, Chapter 6):
+
+```scheme
+(set-mode 240 136)                       ;; TIC-80's screen size
+
+(define (frame)
+  (clear 0)                              ;; cls(0)
+  (paint (circle 120 68 20) 5)
+  (paint-sprite 1 100 60))               ;; spr(1, 100, 60)
+
+(on-frame frame)                         ;; register the frame handler
+```
+
+Where `paint-sprite` is another one-line convenience:
+
+```scheme
+(define (paint-sprite n x y)
+  (surface-paint-dots (surf) 'base
+    (sprite/rasterize (sprite/address n 0) x y) 15))
+```
+
+TIC-80's global `TIC()` becomes a lambda passed to `on-frame`. The `cls` / `circ` / `spr` verbs each become one convenience wrapper — `clear`, `paint`, `paint-sprite` — over the underlying `surface-paint-dots` / `sprite/rasterize` machinery.
+
+The color model differs: TIC-80 hard-codes a 16-color palette; Sakura Scheme carries a palette per session, defaults to a 16-color set drawn from a curated theme, and lets you swap palettes via a config field (`theme:` in `config.slat`).
+
+### 4.7 — Closures
+
+The classic counter closure works exactly the same.
+
+**Fennel:**
+
+```fennel
+(fn make-counter []
+  (var n 0)
+  (fn [] (set n (+ n 1)) n))
+```
+
+**Sakura Scheme:**
+
+```scheme
+(define (make-counter)
+  (let ((n 0))
+    (lambda ()
+      (set! n (+ n 1))
+      n)))
+
+(define c (make-counter))
+(c)  ;; ⇒ 1
+(c)  ;; ⇒ 2
+(c)  ;; ⇒ 3
+```
+
+The lambda captures `n` from its enclosing environment. `set!` mutates the captured binding. Same as every Scheme, same as every Lisp, same as every functional-flavored Lua.
+
+Tail calls do get optimized. So:
+
+```scheme
+(define (loop n)
+  (if (= n 0)
+      'done
+      (loop (- n 1))))
+
+(loop 1000000)  ;; ⇒ done
+```
+
+works. The trampoline in `src/interp.js` unwinds tail positions without growing the JS call stack.
+
+### 4.8 — Anonymous functions
+
+Fennel `(fn [x] (+ x 1))` is Sakura `(lambda (x) (+ x 1))`. Same shape.
+
+Clojure `#(+ % 1)` is Sakura `(lambda (x) (+ x 1))`. There's no built-in `#(...)` reader macro in the base; if you want one, `define-syntax` will get you a decent approximation but the general case (multi-argument `%1`, `%2`, `%3`) is more work than it's worth. Most Sakura code just writes `lambda`.
+
+### 4.9 — Recursion, not iteration
+
+Fennel and Lua both give you `for`/`while`. Sakura Scheme has `do`, but idiomatic code uses tail-recursion.
+
+**Lua:**
+
+```lua
+local sum = 0
+for i = 1, 10 do sum = sum + i end
+return sum
+```
+
+**Sakura Scheme:**
+
+```scheme
+(define (sum-to n)
+  (let loop ((i 1) (acc 0))
+    (if (> i n)
+        acc
+        (loop (+ i 1) (+ acc i)))))
+
+(sum-to 10)  ;; ⇒ 55
+```
+
+The `let loop` shape is Scheme's named-let. It defines `loop` as a local recursive function and calls it once with the initial arguments — a `for` loop wearing a Lisp costume. If you like it as much as I do, you'll see it everywhere.
+
+If you want `for`-shape:
+
+```scheme
+(do ((i 1 (+ i 1))
+     (acc 0 (+ acc i)))
+    ((> i 10) acc))
+```
+
+But the named-let reads better. That's why Scheme code uses it.
+
+### 4.10 — Sequences
+
+`map`, `filter`, `reduce` — all present, all first-class. `reduce` is `fold-left` in Scheme parlance; both names are bound. `for-each` is the side-effecting variant that returns nothing (you write `for-each` when you want a side effect and don't care about the collection).
+
+**Clojure:**
+
+```clojure
+(->> data
+     (filter :active)
+     (map :score)
+     (reduce +))
+```
+
+**Sakura Scheme:**
+
+```scheme
+(->> data
+     (filter (lambda (x) (hash-ref x 'active)))
+     (map    (lambda (x) (hash-ref x 'score)))
+     (fold + 0))
+```
+
+`fold` takes the reducer and an initial value up front. `reduce` is bound too; it takes just the reducer and the list, using the head as the initial value:
+
+```scheme
+(reduce + '(1 2 3 4 5))  ;; ⇒ 15
+```
+
+### 4.11 — Quick reference table
+
+| You know (Fennel/Clojure/Lua/TIC-80) | Sakura Scheme |
+|---|---|
+| `(fn [x] ...)` | `(lambda (x) ...)` |
+| `(let [x 1 y 2] ...)` | `(let* ((x 1) (y 2)) ...)` |
+| `(->  x f g h)` | `(-> x (f _) (g _) (h _))` or `(->> x f g h)` |
+| `(defmulti name f)` | dispatch table + registrar (§4.4) |
+| `{:name \"x\"}` (map) | `(list->hash '((name \"x\")))` |
+| `[1 2 3]` (vector) | `(list 1 2 3)` or `(vector 1 2 3)` |
+| `nil` | `#f` (for false), `'()` (for empty list), `(void)` (for unit) |
+| `for i = 1, 10 do ... end` | `(let loop ((i 1)) (when (<= i 10) ... (loop (+ i 1))))` |
+| `cls(0)` | `(clear 0)` |
+| `circ(x, y, r, c)` | `(paint (circle x y r) c)` |
+| `spr(n, x, y)` | `(paint-sprite n x y)` — convenience over `sprite/rasterize` |
+| `btn(0)` | `(input/down? 'up)` |
+| `btnp(0)` | `(input/pressed? 'up)` |
+| `sfx(n)` | `(audio/play 'sound-n)` |
+| `music(n)` | `(audio/play 'music-n :loop #t)` |
+| `time()` | `(system/now)` |
+| `t = t + 1` global counter | `(game/frame world-id)` or state-passing (§4.9) |
+
+None of this is memorization homework. `,help <name>` or `,examples <name>` in the REPL gets you the up-to-date shape whenever you forget. Chapter 8 is your REPL exploration guide.
+
+---
+")

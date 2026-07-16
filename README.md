@@ -2,13 +2,25 @@
 
 **基** — foundation.
 
-Motoi Scheme is the base Scheme dialect that Sakura, Lacuna, and future forks
-share. It is intentionally small: reader, interpreter, macros, base library,
-verb registry, dispatch, REPL, CLI, docs emitter, and SLAT serialization.
-Everything else — cards, shops, sound, framebuffer, sidecars, deployments — is
-a *dialect* layered on top.
+Motoi Scheme is the base Scheme that dialects like Sakura and Lacuna share.
+It is intentionally small: reader, interpreter, macros, base library, verb
+registry, dispatch, REPL, CLI, docs emitter, and SLAT serialization.
+Everything else — cards, shops, sound, framebuffer, sidecars, deployments —
+is a **dialect** layered on top.
 
-Motoi is open. Fork it, dialect it, teach with it.
+## Dialects, variants, forks
+
+- **Dialect** — a verb layer + semantics on top of Motoi. `Sakura Dialect`,
+  `Lacuna Dialect`, and future dialects each declare their delta in a
+  `dialect.slat`. Motoi doesn't know about them; they know about Motoi.
+- **Variant** — a dialect that preserves Motoi's semantics and stays
+  round-trippable via adapters. Sakura is a variant today. Most dialects
+  should stay variants.
+- **Fork** — a dialect (or a rename of Motoi) that walks away from Motoi's
+  semantics. Can't round-trip back. Community-friendly, but consumers of the
+  fork are not consumers of Motoi.
+
+Motoi is open. Dialect it, variant it, teach with it. Forking is fine too.
 
 ## The 4-doc-type layout
 
