@@ -1,6 +1,6 @@
-# The Sakura Scheme REPL
+# The Motoi Scheme REPL
 
-The Sakura Scheme REPL is the interactive way to talk to the language.
+The Motoi Scheme REPL is the interactive way to talk to the language.
 Type an expression, press Enter when it's balanced, get a result. Type
 `,help` to see the command list.
 
@@ -353,7 +353,7 @@ next to the Sakura `dialect.json` in this repo.
 ```json
 {
   "name": "sakura",
-  "displayName": "Sakura Scheme",
+  "displayName": "Motoi Scheme",
   "version": "1.0.0",
   "core": true,
   "entrypoint": "./bin/sakura-scheme",

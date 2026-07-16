@@ -1524,7 +1524,7 @@ This shape is close to Rust's `Result` or Haskell's `Either`. It's more work to 
 
 ---
 
-## Chapter 13 — Working With Sakura Scheme's Extras
+## Chapter 13 — Working With Motoi Scheme's Extras
 
 Everything so far has been core Scheme. scheme-lang also ships four higher layers — media (framebuffer + sound + animation), AI (cortex memory), game (entities + physics), and commercial (opt-in). This chapter is a quick tour so you know what's there when you want to reach for it.
 
@@ -1696,7 +1696,7 @@ Here's a short guide to where to go next.
 
 **On Lisp.** By Paul Graham. Common Lisp, not Scheme, but the macro chapters are foundational reading for anyone who wants to write real macros.
 
-**The Book of Jesse.** In this same repo, `docs/BOOK-OF-JESSE.md`. If you already program in Fennel, TIC-80, Clojure, or Lua, that book maps your knowledge onto Sakura Scheme. Even if you don't, the animation chapters are worth reading.
+**The Book of Jesse.** In this same repo, `docs/BOOK-OF-JESSE.md`. If you already program in Fennel, TIC-80, Clojure, or Lua, that book maps your knowledge onto Motoi Scheme. Even if you don't, the animation chapters are worth reading.
 
 **Small Schemes to read.** Chibi Scheme and Chicken Scheme both have compact codebases; reading them will teach you how the language is implemented. scheme-lang itself is under `src/` — a few thousand lines of readable JavaScript. Reader, interpreter, macros, REPL, verb registry. That's the whole thing.
 

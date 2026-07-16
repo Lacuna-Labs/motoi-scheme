@@ -1,6 +1,6 @@
 # The Book of Jesse
 
-*An onboarding to Sakura Scheme for people who already ship in Fennel, TIC-80, Clojure, and Lua.*
+*An onboarding to Motoi Scheme for people who already ship in Fennel, TIC-80, Clojure, and Lua.*
 
 ---
 
@@ -10,7 +10,7 @@ Jesse,
 
 Alfred knows you use Clojure. Alfred knows you use Lua. Alfred knows you use Fennel. Alfred knows you use TIC-80. And he wanted to make sure that you were covered. So here's a book that teaches you how to use this, as a gift to you.
 
-The idea isn't to sell you on something. You already know how to program in a Lisp. You already know how to draw a circle on a framebuffer without a stack trace. You've written closures that captured a `dt`, you've fought with Lua's `nil`-as-truthy, you've reached for `->` in Fennel because it made the pipeline read left-to-right instead of like a Russian nesting doll. What follows is a translation manual, not a sales pitch. Where Sakura Scheme does something the same as what you already do, we'll say so and move on. Where it does something different, we'll show you the shape, and try to earn the difference.
+The idea isn't to sell you on something. You already know how to program in a Lisp. You already know how to draw a circle on a framebuffer without a stack trace. You've written closures that captured a `dt`, you've fought with Lua's `nil`-as-truthy, you've reached for `->` in Fennel because it made the pipeline read left-to-right instead of like a Russian nesting doll. What follows is a translation manual, not a sales pitch. Where Motoi Scheme does something the same as what you already do, we'll say so and move on. Where it does something different, we'll show you the shape, and try to earn the difference.
 
 The whole language is small enough that a careful reader can hold it in their head. The reference is the language — every verb is documented in a single file that the REPL, the docs site, the LLM tool-call schemas, and this book all read from. So when you finish this book and start writing your own things, you'll be reading the same source we did.
 
@@ -86,9 +86,9 @@ That's your first "hello, framebuffer." When you're ready to leave: `,exit` or C
 
 ---
 
-## Chapter 2 — What Sakura Scheme is
+## Chapter 2 — What Motoi Scheme is
 
-Sakura Scheme is a small Scheme with a framebuffer. It runs in Node. It has five layers that stack, portable adapters at the bottom of each, and a reference manual with 1,157 verbs that acts as the source of truth for everything downstream — REPL help, IDE hover, LLM tool-call schemas, and this book.
+Motoi Scheme is a small Scheme with a framebuffer. It runs in Node. It has five layers that stack, portable adapters at the bottom of each, and a reference manual with 1,157 verbs that acts as the source of truth for everything downstream — REPL help, IDE hover, LLM tool-call schemas, and this book.
 
 A few framings that might land:
 
@@ -228,7 +228,7 @@ This is the biggest chapter, because it's the biggest lift. Your intuitions tran
   (+ x y))
 ```
 
-**Sakura Scheme:**
+**Motoi Scheme:**
 
 ```scheme
 (let ((x 3)
@@ -238,7 +238,7 @@ This is the biggest chapter, because it's the biggest lift. Your intuitions tran
 
 Two differences worth noting.
 
-One: Sakura Scheme's `let` binds *in parallel* — every RHS is evaluated in the *outer* environment. Fennel's `let` is sequential, like Scheme's `let*`. So Fennel's `y` sees the new `x`; Sakura Scheme's `y` does not. If you want Fennel's shape, use `let*`:
+One: Motoi Scheme's `let` binds *in parallel* — every RHS is evaluated in the *outer* environment. Fennel's `let` is sequential, like Scheme's `let*`. So Fennel's `y` sees the new `x`; Motoi Scheme's `y` does not. If you want Fennel's shape, use `let*`:
 
 ```scheme
 (let* ((x 3)
@@ -256,7 +256,7 @@ local y = x * x
 return x + y
 ```
 
-**Sakura Scheme:**
+**Motoi Scheme:**
 
 ```scheme
 (let* ((x 3)
@@ -278,7 +278,7 @@ Clojure's `let` is sequential — same as `let*`. Same translation.
 
 ### 4.2 — Destructuring
 
-Clojure and Fennel both let you destructure inside `let`. Scheme's classic `let` does not. Sakura Scheme has two paths.
+Clojure and Fennel both let you destructure inside `let`. Scheme's classic `let` does not. Motoi Scheme has two paths.
 
 **The direct path — pattern-match with `let-values` or explicit accessors:**
 
@@ -289,7 +289,7 @@ Clojure and Fennel both let you destructure inside `let`. Scheme's classic `let`
 ```
 
 ```scheme
-;; Sakura Scheme — hash-tables
+;; Motoi Scheme — hash-tables
 (let ((x (hash-ref pos 'x))
       (y (hash-ref pos 'y)))
   (+ x y))
@@ -304,7 +304,7 @@ For pairs and lists:
 ```
 
 ```scheme
-;; Sakura Scheme
+;; Motoi Scheme
 (let ((a (first  xs))
       (b (second xs))
       (c (third  xs)))
@@ -344,7 +344,7 @@ Fennel's `->` and `->>`:
 (-> xs (map inc) (filter even?) (reduce + 0))
 ```
 
-Sakura Scheme has both, spelled the same way. Because `->` is a common identifier used elsewhere in the Scheme world (arrow constructors, coercions like `list->vector`), we ship them as macros you enable in your file with `(import (sakura threading))`. Then:
+Motoi Scheme has both, spelled the same way. Because `->` is a common identifier used elsewhere in the Scheme world (arrow constructors, coercions like `list->vector`), we ship them as macros you enable in your file with `(import (sakura threading))`. Then:
 
 ```scheme
 (import (sakura threading))
@@ -381,7 +381,7 @@ Clojure's `defmulti` / `defmethod`:
 (defmethod area :square [{:keys [side]}] (* side side))
 ```
 
-Sakura Scheme does not ship `defmulti` in the core. Two paths.
+Motoi Scheme does not ship `defmulti` in the core. Two paths.
 
 **Path one — `case` on a discriminator key.** For simple dispatch (three or four shapes, no third-party extension needed), this is idiomatic:
 
@@ -438,7 +438,7 @@ The verb registry itself (see Chapter 9) is a form of multimethod: every verb di
 
 ### 4.5 — Lua tables ↔ Sakura hash-tables
 
-Lua tables serve two purposes: array-shape (`t[1], t[2], ...`) and dict-shape (`t.name, t.age`). In Sakura Scheme those are two data structures — `list` (or `vector`) for the array-shape and `hash-table` for the dict.
+Lua tables serve two purposes: array-shape (`t[1], t[2], ...`) and dict-shape (`t.name, t.age`). In Motoi Scheme those are two data structures — `list` (or `vector`) for the array-shape and `hash-table` for the dict.
 
 **Lua array:**
 
@@ -448,7 +448,7 @@ print(xs[2])       -- 20
 table.insert(xs, 40)
 ```
 
-**Sakura Scheme:**
+**Motoi Scheme:**
 
 ```scheme
 (define xs (list 10 20 30))
@@ -466,7 +466,7 @@ print(person.name)
 person.email = "alfred@example.com"
 ```
 
-**Sakura Scheme:**
+**Motoi Scheme:**
 
 ```scheme
 (define person (make-hash))
@@ -494,7 +494,7 @@ function TIC()
 end
 ```
 
-Sakura Scheme (fantasy-console shape, Chapter 6):
+Motoi Scheme (fantasy-console shape, Chapter 6):
 
 ```scheme
 (set-mode 240 136)                       ;; TIC-80's screen size
@@ -517,7 +517,7 @@ Where `paint-sprite` is another one-line convenience:
 
 TIC-80's global `TIC()` becomes a lambda passed to `on-frame`. The `cls` / `circ` / `spr` verbs each become one convenience wrapper — `clear`, `paint`, `paint-sprite` — over the underlying `surface-paint-dots` / `sprite/rasterize` machinery.
 
-The color model differs: TIC-80 hard-codes a 16-color palette; Sakura Scheme carries a palette per session, defaults to a 16-color set drawn from a curated theme, and lets you swap palettes via a config field (`theme:` in `config.slat`).
+The color model differs: TIC-80 hard-codes a 16-color palette; Motoi Scheme carries a palette per session, defaults to a 16-color set drawn from a curated theme, and lets you swap palettes via a config field (`theme:` in `config.slat`).
 
 ### 4.7 — Closures
 
@@ -531,7 +531,7 @@ The classic counter closure works exactly the same.
   (fn [] (set n (+ n 1)) n))
 ```
 
-**Sakura Scheme:**
+**Motoi Scheme:**
 
 ```scheme
 (define (make-counter)
@@ -569,7 +569,7 @@ Clojure `#(+ % 1)` is Sakura `(lambda (x) (+ x 1))`. There's no built-in `#(...)
 
 ### 4.9 — Recursion, not iteration
 
-Fennel and Lua both give you `for`/`while`. Sakura Scheme has `do`, but idiomatic code uses tail-recursion.
+Fennel and Lua both give you `for`/`while`. Motoi Scheme has `do`, but idiomatic code uses tail-recursion.
 
 **Lua:**
 
@@ -579,7 +579,7 @@ for i = 1, 10 do sum = sum + i end
 return sum
 ```
 
-**Sakura Scheme:**
+**Motoi Scheme:**
 
 ```scheme
 (define (sum-to n)
@@ -616,7 +616,7 @@ But the named-let reads better. That's why Scheme code uses it.
      (reduce +))
 ```
 
-**Sakura Scheme:**
+**Motoi Scheme:**
 
 ```scheme
 (->> data
@@ -633,7 +633,7 @@ But the named-let reads better. That's why Scheme code uses it.
 
 ### 4.11 — Quick reference table
 
-| You know (Fennel/Clojure/Lua/TIC-80) | Sakura Scheme |
+| You know (Fennel/Clojure/Lua/TIC-80) | Motoi Scheme |
 |---|---|
 | `(fn [x] ...)` | `(lambda (x) ...)` |
 | `(let [x 1 y 2] ...)` | `(let* ((x 1) (y 2)) ...)` |
@@ -659,9 +659,9 @@ None of this is memorization homework. `,help <name>` or `,examples <name>` in t
 
 ## Chapter 5 — Fantasy Console Mode
 
-If you spend afternoons in TIC-80, this chapter is where Sakura Scheme starts feeling like home. The framebuffer, input, and audio primitives compose the same way `cls`/`circ`/`spr`/`btn`/`sfx` do — same shape, small differences in spelling.
+If you spend afternoons in TIC-80, this chapter is where Motoi Scheme starts feeling like home. The framebuffer, input, and audio primitives compose the same way `cls`/`circ`/`spr`/`btn`/`sfx` do — same shape, small differences in spelling.
 
-Before we dive in, a note on the API surface. The Sakura Scheme runtime exposes a low-level surface API — `surface-paint-dots`, `surface-paint-text`, `clear-surface-layer`, and friends — that takes a surface handle, a layer name, and a dot-list. That's the real underlying machinery, and if you want to know the exact shapes you'd look them up in the reference (`,help surface-paint-dots`). But most game code doesn't reach that deep. It goes through a small convenience layer we'll build here — a handful of one-line wrappers over the real verbs. This is exactly the same pattern TIC-80 uses: `circ()` is a wrapper around lower-level pixel operations, and you never think about that.
+Before we dive in, a note on the API surface. The Motoi Scheme runtime exposes a low-level surface API — `surface-paint-dots`, `surface-paint-text`, `clear-surface-layer`, and friends — that takes a surface handle, a layer name, and a dot-list. That's the real underlying machinery, and if you want to know the exact shapes you'd look them up in the reference (`,help surface-paint-dots`). But most game code doesn't reach that deep. It goes through a small convenience layer we'll build here — a handful of one-line wrappers over the real verbs. This is exactly the same pattern TIC-80 uses: `circ()` is a wrapper around lower-level pixel operations, and you never think about that.
 
 So we'll start by defining `clear`, `paint`, and `text` in a few lines. Everything else in the chapter uses those. If you'd rather skip the wrapper and write the underlying verb directly, `,help surface-paint-dots` will get you there.
 
@@ -689,7 +689,7 @@ That's the pattern. Now onward.
 (set-mode 240 136)
 ```
 
-That's TIC-80's default resolution. Sakura Scheme's default is the same. You can go bigger:
+That's TIC-80's default resolution. Motoi Scheme's default is the same. You can go bigger:
 
 ```scheme
 (set-mode 320 200)  ;; classic DOS
@@ -700,7 +700,7 @@ The framebuffer is one surface; you draw into it every frame, and the display la
 
 ### The frame loop
 
-Sakura Scheme doesn't have a magic `TIC()` global. Instead you register a frame handler with `on-frame`:
+Motoi Scheme doesn't have a magic `TIC()` global. Instead you register a frame handler with `on-frame`:
 
 ```scheme
 (define t 0)
@@ -964,7 +964,7 @@ Steering behaviors on top of physics on top of a framebuffer. Composable through
 
 ## Chapter 6 — SLAT: The Language Format
 
-SLAT is the shape of every persistent thing in Sakura Scheme: config, records, notebooks, session dumps, training corpora, cart definitions, animation storyboards. It's S-expressions. That's the whole trick.
+SLAT is the shape of every persistent thing in Motoi Scheme: config, records, notebooks, session dumps, training corpora, cart definitions, animation storyboards. It's S-expressions. That's the whole trick.
 
 ### Why not YAML or JSON
 
@@ -1166,7 +1166,7 @@ As you type `(map `, the row above the prompt dims to show `map`'s arity, argume
 
 ### Structural editing (paredit)
 
-Sakura Scheme's REPL supports paredit at the prompt:
+Motoi Scheme's REPL supports paredit at the prompt:
 
 - `Alt-]` — barf-forward (shrink current form on the right)
 - `Alt-\` — slurp-forward (grow current form to swallow the next form)
@@ -1217,7 +1217,7 @@ She sees your current bindings, the last few evaluations, and your question — 
 
 ## Chapter 8 — The Reference IS the Language
 
-Every verb in Sakura Scheme lives in one file:
+Every verb in Motoi Scheme lives in one file:
 
 ```
 docs/SAKURA-SCHEME-REFERENCE.slat
@@ -1374,7 +1374,7 @@ Speech-to-text via a cloud backend. Returns a pending structure; the wire is not
 
 ### When you'd reach for AI mode
 
-- Building a persona-shaped assistant on top of Sakura Scheme (this is what the curator dialect does).
+- Building a persona-shaped assistant on top of Motoi Scheme (this is what the curator dialect does).
 - Adding steering behaviors to a game (flocking crowds, arriving NPCs).
 - Wanting deferred reasoning for hard multi-step planning problems.
 
@@ -1424,7 +1424,7 @@ The reference documents each card verb in detail. If you're going to build on La
 
 Layer 4 is where money happens. Everything through it is auth-gated and audit-logged. Every call has a receipt. Nothing runs silently.
 
-If you're building a commercial dialect on top of Sakura Scheme (a curator, an inventory manager, a specialized POS), Layer 4 is your foundation. If you're building a game or a music visualizer, you'll never load it.
+If you're building a commercial dialect on top of Motoi Scheme (a curator, an inventory manager, a specialized POS), Layer 4 is your foundation. If you're building a game or a music visualizer, you'll never load it.
 
 ---
 
@@ -1434,7 +1434,7 @@ Every language has papercuts. Here are the ones that catch Fennel / TIC-80 / Clo
 
 ### `nil` and `#f`
 
-Lua has `nil`. Fennel has `nil`. Clojure has `nil`. Sakura Scheme does not have `nil` — it has `#f` (false), `'()` (empty list), and undefined behavior for reading an unbound variable (an error, not silent failure).
+Lua has `nil`. Fennel has `nil`. Clojure has `nil`. Motoi Scheme does not have `nil` — it has `#f` (false), `'()` (empty list), and undefined behavior for reading an unbound variable (an error, not silent failure).
 
 The subtle case: in Lua, `nil` is falsy. In Clojure, `nil` is falsy. In Scheme, *only `#f` is falsy*. Every other value — including `0`, `""`, `'()`, `(void)` — is truthy.
 
@@ -1446,7 +1446,7 @@ The subtle case: in Lua, `nil` is falsy. In Clojure, `nil` is falsy. In Scheme, 
     'missing)
 ```
 
-If `x` isn't in the dict, `hash-ref` returns... what? In Sakura Scheme's base, it returns `#f`, which is falsy, so the code works as you'd expect. But *some* hash implementations return `'()` (empty list) for missing keys, which is truthy under Scheme rules. Read the `:signature` in the reference. When in doubt, use `hash-has-key?`:
+If `x` isn't in the dict, `hash-ref` returns... what? In Motoi Scheme's base, it returns `#f`, which is falsy, so the code works as you'd expect. But *some* hash implementations return `'()` (empty list) for missing keys, which is truthy under Scheme rules. Read the `:signature` in the reference. When in doubt, use `hash-has-key?`:
 
 ```scheme
 (if (hash-has-key? maybe-empty-dict 'x)
@@ -1456,7 +1456,7 @@ If `x` isn't in the dict, `hash-ref` returns... what? In Sakura Scheme's base, i
 
 ### The `t = t + 1` frame counter
 
-TIC-80 gives you a global `t` you can increment each frame. Sakura Scheme's `on-frame` doesn't. You have two paths:
+TIC-80 gives you a global `t` you can increment each frame. Motoi Scheme's `on-frame` doesn't. You have two paths:
 
 **Global mutable, if that's your shape:**
 
@@ -1506,7 +1506,7 @@ for i = 1, 3 do fs[i] = function() return i end end
 -- all three return 3 in Lua 5.1's for loop (i is one shared binding)
 ```
 
-Sakura Scheme's `map` gives you a fresh `n` per iteration by construction, so the closures capture what you'd expect. If you build your own loop with `set!` and a shared variable, you'll get the Lua-shape bug:
+Motoi Scheme's `map` gives you a fresh `n` per iteration by construction, so the closures capture what you'd expect. If you build your own loop with `set!` and a shared variable, you'll get the Lua-shape bug:
 
 ```scheme
 ;; wrong — all closures share the same n
@@ -1537,7 +1537,7 @@ Same fix as Fennel's `local i = i` inside the loop.
 
 ### Module imports
 
-Sakura Scheme uses R7RS-style `import`:
+Motoi Scheme uses R7RS-style `import`:
 
 ```scheme
 (import (sakura threading))       ;; -> and ->> macros
@@ -1577,7 +1577,7 @@ Or just use the built-in `map`, which handles all of this for you.
 
 ### `define` inside `let`
 
-R7RS lets you `define` inside a `let` body, and Sakura Scheme respects this. The defines become local to the `let`, in the shape of an implicit `letrec`:
+R7RS lets you `define` inside a `let` body, and Motoi Scheme respects this. The defines become local to the `let`, in the shape of an implicit `letrec`:
 
 ```scheme
 (let ((x 10))
@@ -1597,11 +1597,11 @@ The rule is in `src/repl/repl.js` — `AUTO_QUOTE_HEADS`.
 
 ### Zero-indexing everywhere
 
-Lua indexes from 1. Fennel too (it's a Lua transpiler). Sakura Scheme indexes from 0. `(list-ref xs 0)` is the first element.
+Lua indexes from 1. Fennel too (it's a Lua transpiler). Motoi Scheme indexes from 0. `(list-ref xs 0)` is the first element.
 
 ### Numbers
 
-Sakura Scheme distinguishes exact and inexact numbers, R7RS-style. `1/3` is exact; `0.3333` is inexact. Most arithmetic between exacts stays exact — `(+ 1/3 1/6)` is `1/2`. As soon as an inexact enters, everything becomes inexact — `(+ 1/3 0.5)` is `0.8333...`. If you're used to Lua's one-number-type simplicity, you can force inexact with `exact->inexact`.
+Motoi Scheme distinguishes exact and inexact numbers, R7RS-style. `1/3` is exact; `0.3333` is inexact. Most arithmetic between exacts stays exact — `(+ 1/3 1/6)` is `1/2`. As soon as an inexact enters, everything becomes inexact — `(+ 1/3 0.5)` is `0.8333...`. If you're used to Lua's one-number-type simplicity, you can force inexact with `exact->inexact`.
 
 ### Error handling
 
@@ -1887,13 +1887,13 @@ Fork the repo. Change the name in `dialect.json`. Drop your verbs into `verbs/`.
 
 See `TEMPLATE-FOR-FORKS.md` for the fork pattern, and `TEMPLATE-FOR-FORKS-PAGES.md` for the browser-REPL-and-docs GitHub Pages pattern. Every fork gets Pages for free.
 
-Sakura Scheme itself is one fork — a dialect on top of the base language. Curator is another. Yours can be too.
+Motoi Scheme itself is one fork — a dialect on top of the base language. Curator is another. Yours can be too.
 
 ---
 
 ## Appendix A — Macros in ~10 minutes
 
-Macros in Sakura Scheme come in two flavors: hygienic (`syntax-rules`) and classic (`define-macro`). If you've written Clojure macros, `define-macro` is the closer analog; if you've written Fennel macros, `syntax-rules` will feel restrictive at first and pleasant later.
+Macros in Motoi Scheme come in two flavors: hygienic (`syntax-rules`) and classic (`define-macro`). If you've written Clojure macros, `define-macro` is the closer analog; if you've written Fennel macros, `syntax-rules` will feel restrictive at first and pleasant later.
 
 ### Hygienic macros — `syntax-rules`
 
@@ -1964,7 +1964,7 @@ Three cases. Empty `and` is `#t`. One argument is that argument. More than one: 
 
 A hand-rolled `->` (thread-first). `,` is unquote, `@` is unquote-splicing, backtick is quasiquote — same as Clojure's syntax-quote system.
 
-If you've built macros in Clojure, this is the same brain. The difference: Clojure gensyms are automatic behind `#`; here you write them explicitly with `(gensym)` if you need them. Sakura Scheme's `syntax-rules` is usually the right tool; `define-macro` is the escape hatch.
+If you've built macros in Clojure, this is the same brain. The difference: Clojure gensyms are automatic behind `#`; here you write them explicitly with `(gensym)` if you need them. Motoi Scheme's `syntax-rules` is usually the right tool; `define-macro` is the escape hatch.
 
 ### The macro-expansion window
 

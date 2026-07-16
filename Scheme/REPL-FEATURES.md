@@ -1,4 +1,4 @@
-# The Sakura Scheme REPL — feature bar
+# The Motoi Scheme REPL — feature bar
 
 A one-page cheat sheet of what the REPL does. If a command below rings
 the wrong bell, `,help` at the prompt has the details. If you want

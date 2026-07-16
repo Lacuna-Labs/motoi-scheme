@@ -1,8 +1,8 @@
-# The Sakura Scheme Book
+# The Motoi Scheme Book
 
 *A small Scheme for humans and AI to program together.*
 
-Sakura Scheme is a language. This book is how you learn it. Fifteen chapters, two appendices, one runnable example on every claim.
+Motoi Scheme is a language. This book is how you learn it. Fifteen chapters, two appendices, one runnable example on every claim.
 
 If you know Scheme already: skip to Chapter 9. That's the REPL, and the REPL is where this dialect earns its keep. If you're new to Scheme: start at Chapter 1, take your time, and don't worry about the parens — the REPL matches them for you.
 
@@ -10,7 +10,7 @@ If you know Scheme already: skip to Chapter 9. That's the REPL, and the REPL is 
 
 ## Chapter 1 — Hello
 
-### What Sakura Scheme is
+### What Motoi Scheme is
 
 A small Scheme dialect, written in JavaScript, that runs anywhere Node runs. The engine is under two thousand lines. The language is R7RS-shaped where R7RS is sensible, and a few careful extensions where it isn't. It's meant to be programmed with — by you, by a friend, by an AI collaborator sitting in the same REPL as you.
 
@@ -87,7 +87,7 @@ That's the whole story. You typed a define, the language remembered it, you mult
 
 ### Grammar
 
-A Sakura Scheme program is a sequence of forms. A form is an atom or a list. An atom is a number, a string, a boolean, or a symbol. A list is a sequence of forms wrapped in parentheses. That's the entire grammar.
+A Motoi Scheme program is a sequence of forms. A form is an atom or a list. An atom is a number, a string, a boolean, or a symbol. A list is a sequence of forms wrapped in parentheses. That's the entire grammar.
 
 ```scheme
 42          ; a number
@@ -540,7 +540,7 @@ Every error carries source position, expected type, and got type. Chapter 7 walk
 
 ### `await`
 
-Sakura Scheme is single-threaded but async-native. `await` yields to the event loop; the interpreter resumes when the awaited value settles.
+Motoi Scheme is single-threaded but async-native. `await` yields to the event loop; the interpreter resumes when the awaited value settles.
 
 ```scheme
 (define (fetch-title url)
@@ -957,7 +957,7 @@ A verb that turns out dialect-neutral (both consumers want it, same signature, s
 
 ## Chapter 13 — Slat
 
-Slat is Sakura Scheme's serialization format: line-delimited S-expressions. One complete `(form ...)` per line. Newlines inside a form are illegal. That constraint is the point — every slat file is `tail`-able, `grep`-able, `diff`-able.
+Slat is Motoi Scheme's serialization format: line-delimited S-expressions. One complete `(form ...)` per line. Newlines inside a form are illegal. That constraint is the point — every slat file is `tail`-able, `grep`-able, `diff`-able.
 
 ### The wire format
 
@@ -1015,7 +1015,7 @@ The complaints have been the same for forty years. Here's the shortlist and how 
 - **Parens are hard to read.** — Rainbow paren coloring, auto-close, structural editing (`Ctrl-→` slurp, `Ctrl-←` barf, `Ctrl-Shift-K` kill, `Ctrl-Shift-M` mark). Nobody counts parens in 2026.
 - **No IDE support.** — LSP shipping in v1.0 (`sakura-scheme lsp`). Plugins for VS Code, Cursor, Vim, Emacs. Format-on-save, hover-for-help, go-to-definition, find-references, live diagnostics.
 - **Small stdlib.** — Batteries included. Strings, lists, hashes, JSON, HTTP, file I/O, regex, time, date, path, url, math, stats, testing, logging, event emitter, environment. Every one has a doc page.
-- **Fragmented ecosystem.** — There is one Sakura Scheme. R7RS subset for the core; extensions marked as ours.
+- **Fragmented ecosystem.** — There is one Motoi Scheme. R7RS subset for the core; extensions marked as ours.
 - **Macros make debugging hard.** — `,expand` and `,expand-1` show what a macro turned into. Source-map through macro expansion, so errors point at the original source, not the expanded form.
 - **No modules.** — Modules from day one (Chapter 8).
 - **Terrible error messages.** — Rich error records (Chapter 7). Every error carries `:kind`, `:message`, `:source-pos`, `:did-you-mean`, `:fix`, `:examples`. And `sakura/fix` for the hard cases.

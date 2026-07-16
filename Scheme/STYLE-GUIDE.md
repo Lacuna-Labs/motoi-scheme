@@ -1,4 +1,4 @@
-# Sakura Scheme 1.0 — Style Guide
+# Motoi Scheme 1.0 — Style Guide
 
 > **Canonical engineering doc #9 of 9** per
 > [`CANONICAL-DOCS-FRAMEWORK-2026-06-27.md`](CANONICAL-DOCS-FRAMEWORK-2026-06-27.md).
@@ -10,7 +10,7 @@
 > on-device savant. Assumes the runtime contract (descriptors, FSM driver,
 > capability gate) is known; if not, read the Engineering manual first.
 >
-> **Posture.** Sakura Scheme is a small, opinionated dialect. This guide
+> **Posture.** Motoi Scheme is a small, opinionated dialect. This guide
 > names the shape we ship in. A cart that follows the guide expands
 > simply, lints clean, evaluates determinististically, and reads in one
 > sitting. A cart that fights the guide is almost always a cart that
@@ -25,7 +25,7 @@
 
 ## TABLE OF CONTENTS
 
-- [§0. The Sakura Scheme aesthetic](#0-the-sakura-scheme-aesthetic)
+- [§0. The Motoi Scheme aesthetic](#0-the-sakura-scheme-aesthetic)
 - [§1. The runtime contract](#1-the-runtime-contract)
 - [§2. The cart shape](#2-the-cart-shape)
 - [§3. Naming](#3-naming)
@@ -42,7 +42,7 @@
 
 ---
 
-## §0. The Sakura Scheme aesthetic
+## §0. The Motoi Scheme aesthetic
 
 A Sakura cart is a love letter written from one part of a small business
 to another. It is also a finite state machine over a capability bus, a
@@ -588,7 +588,7 @@ The rules:
    line, its envelope `:scout` field, and any operator-facing copy all
    use the same label.
 
-The scout label is the closest thing Sakura Scheme has to a *named
+The scout label is the closest thing Motoi Scheme has to a *named
 character*. It is how a cart introduces itself to the operator when
 its work surfaces. The corpus's best ones — *the analyst*, *the
 recovery scout*, *the horizon watcher*, *the bedtime engine* — read
@@ -1028,7 +1028,7 @@ for the linter. Both stay.
 
 ### §6.7 The `;;~ language` header (G5 — sealing protocol §3.5)
 
-Every cart shipped against Sakura Scheme 1.0 must declare its language
+Every cart shipped against Motoi Scheme 1.0 must declare its language
 version in the doc-block header:
 
 ```scheme
@@ -1053,7 +1053,7 @@ Any other value is a hard audit failure (`CART-LANGUAGE-UNKNOWN`). A
 missing header is a WARN during the transition window — the lint emits
 `CART-DOC-004-missing-language-header` and the build index treats the
 cart as `sakura-scheme-1.0` for back-compat. The WARN becomes an ERROR
-in Sakura Scheme 1.1.
+in Motoi Scheme 1.1.
 
 The check lives in three places, all in lockstep:
 
