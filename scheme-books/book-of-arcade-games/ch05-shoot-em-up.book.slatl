@@ -1,0 +1,485 @@
+;; ch05-shoot-em-up.book.slatl
+;; Book of Arcade Games — Chapter 5: The Shoot-Em-Up
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Arcade Games"
+  :chapter-number      5
+  :title               "The Shoot-Em-Up"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + game-design"
+  :book-version        "1.0.0"
+  :draws-from-preserved (:book "book-of-games-preserved" :ch 4 :ch 5)
+  :prose
+"The vertical shoot-em-up is the arcade cabinet's most-copied form.
+Player at the bottom. Enemies stream down. Bullets stream up. Sometimes
+the enemies fire back. The screen fills with sprites; your thumb
+becomes an instrument. In 1978 a game with fifty-five sprites broke
+Japan's supply of the 100-yen coin the government had to mint more.
+
+This chapter builds the whole shape in about a hundred lines. The heart
+of it is `collision/define-layers!`, which lets us have four kinds of
+entities on screen (player, enemy, player-bullet, enemy-bullet) without
+bullets hitting their owner or enemies bumping other enemies. And
+`world/find`, which iterates a tag pool efficiently so we can spawn a
+new wave without walking every entity in the world.
+
+By chapter end you have a small shmup with waves, layered collisions,
+and a difficulty that scales with `world/count`. Not a shipping game —
+that is chapter 16 — but a full playable session in one page.
+
+---
+
+## 5.1 The player and the pool
+
+Start with the player ship and a mechanism to fire bullets.
+
+```scheme
+;; Player at the bottom. Move left/right. Fire straight up on 'a'.
+(define (player-only)
+  (world/reset!)
+  (collision/define-layers!
+   '((player   :collides-with (enemy enemy-bullet))
+     (enemy    :collides-with (player player-bullet))
+     (player-bullet :collides-with (enemy))
+     (enemy-bullet  :collides-with (player))))
+  (let ((p (world/spawn 'player 160 220)))
+    (entity/shape! p 'triangle 8)
+    (entity/layer! p 'player)
+    (entity/solid! p #t)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -4 0))
+       (when (input/down? 'right) (entity/move! p 4 0))
+       (when (input/pressed? 'a)
+         (let ((b (world/spawn 'player-bullet (entity/x p) (- (entity/y p) 10))))
+           (entity/shape! b 'circle 2)
+           (entity/layer! b 'player-bullet)
+           (entity/set-vel! b 0 -6)))
+       (world/step)
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       (world/each 'player-bullet
+                   (lambda (b)
+                     (paint-cell 'bullet (entity/x b) (entity/y b) 2 2)
+                     ;; Despawn bullets that leave the top.
+                     (when (< (entity/y b) 0) (entity/despawn! b))))))))
+
+(big-bang player-only)
+```
+
+`collision/define-layers!` takes an alist of layer-name to allowed
+collision partners. Every subsequent `entity/layer! id 'name` puts the
+entity on a layer. The physics engine consults the layers before
+computing collisions — bullets never collide with their spawner.
+
+Note the bullet-cleanup at the bottom of the frame loop. Every bullet
+that has flown off the top gets despawned. Without this, the world
+fills up with hundreds of dead bullets and the entity count grows
+without bound. Every arcade shooter does exactly this cleanup pass.
+
+---
+
+## 5.2 Add enemies
+
+Enemies spawn at the top and drift down.
+
+```scheme
+;; Enemies drift down from the top. Spawn one every 30 frames.
+(define spawn-counter 0)
+
+(define (player-and-enemies)
+  (world/reset!)
+  (collision/define-layers!
+   '((player   :collides-with (enemy enemy-bullet))
+     (enemy    :collides-with (player player-bullet))
+     (player-bullet :collides-with (enemy))
+     (enemy-bullet  :collides-with (player))))
+  (let ((p (world/spawn 'player 160 220)))
+    (entity/shape! p 'triangle 8)
+    (entity/layer! p 'player)
+    (entity/solid! p #t)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -4 0))
+       (when (input/down? 'right) (entity/move! p 4 0))
+       (when (input/pressed? 'a)
+         (let ((b (world/spawn 'player-bullet (entity/x p) (- (entity/y p) 10))))
+           (entity/shape! b 'circle 2)
+           (entity/layer! b 'player-bullet)
+           (entity/set-vel! b 0 -6)))
+       ;; Every 30 frames: spawn a new enemy at random x.
+       (set! spawn-counter (+ spawn-counter 1))
+       (when (>= spawn-counter 30)
+         (set! spawn-counter 0)
+         (let ((e (world/spawn 'enemy
+                               (+ 20 (modulo (world/hash) 280))
+                               -10)))
+           (entity/shape! e 'rect 10 10)
+           (entity/layer! e 'enemy)
+           (entity/solid! e #t)
+           (entity/set-vel! e 0 1.5)))
+       (world/step)
+       ;; Collision handling — player-bullet hits enemy: both despawn.
+       (for-each
+        (lambda (pair)
+          (let ((a (car pair)) (b (cadr pair)))
+            (when (and (eq? (entity/kind a) 'player-bullet)
+                       (eq? (entity/kind b) 'enemy))
+              (entity/despawn! a) (entity/despawn! b))
+            (when (and (eq? (entity/kind b) 'player-bullet)
+                       (eq? (entity/kind a) 'enemy))
+              (entity/despawn! a) (entity/despawn! b))))
+        (world/collisions))
+       ;; Cleanup off-screen entities.
+       (world/each 'player-bullet
+                   (lambda (b) (when (< (entity/y b) 0) (entity/despawn! b))))
+       (world/each 'enemy
+                   (lambda (e) (when (> (entity/y e) 250) (entity/despawn! e))))
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       (world/each 'player-bullet
+                   (lambda (b) (paint-cell 'bullet (entity/x b) (entity/y b) 2 2)))
+       (world/each 'enemy
+                   (lambda (e) (paint-cell 'enemy (entity/x e) (entity/y e) 10 10)))))))
+
+(big-bang player-and-enemies)
+```
+
+We have a game. Ship moves. Bullets fire. Enemies stream in. Bullets
+kill enemies. Enemies escape off the bottom. The layer system prevents
+bullets from stopping on the player or ricocheting off other enemies.
+
+`(world/hash)` returns a pseudo-random integer that changes each call.
+`(modulo (world/hash) 280) + 20` gives us x-values in [20, 299]. A
+cheap random-x. If you want deterministic (for replay), pipe your own
+seed instead — see chapter 14 for tape replay.
+
+---
+
+## 5.3 Enemies that shoot back
+
+Add enemy fire. Enemies emit a bullet on a fixed pulse.
+
+```scheme
+;; Enemies fire down periodically using world/after.
+(define spawn-counter 0)
+
+(define (enemies-fire)
+  (world/reset!)
+  (collision/define-layers!
+   '((player   :collides-with (enemy enemy-bullet))
+     (enemy    :collides-with (player player-bullet))
+     (player-bullet :collides-with (enemy))
+     (enemy-bullet  :collides-with (player))))
+  (let ((p (world/spawn 'player 160 220)))
+    (entity/shape! p 'triangle 8)
+    (entity/layer! p 'player)
+    (entity/hp! p 3)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -4 0))
+       (when (input/down? 'right) (entity/move! p 4 0))
+       (when (input/pressed? 'a)
+         (let ((b (world/spawn 'player-bullet (entity/x p) (- (entity/y p) 10))))
+           (entity/shape! b 'circle 2)
+           (entity/layer! b 'player-bullet)
+           (entity/set-vel! b 0 -6)))
+       (set! spawn-counter (+ spawn-counter 1))
+       (when (>= spawn-counter 30)
+         (set! spawn-counter 0)
+         (let ((e (world/spawn 'enemy
+                               (+ 20 (modulo (world/hash) 280))
+                               -10)))
+           (entity/shape! e 'rect 10 10)
+           (entity/layer! e 'enemy)
+           (entity/solid! e #t)
+           (entity/set-vel! e 0 1.5)
+           ;; Every enemy fires 60 frames after spawn.
+           (world/after 60 'enemy-shoot e)))
+       (world/step)
+       (for-each
+        (lambda (pair)
+          (let ((a (car pair)) (b (cadr pair)))
+            (cond
+              ((and (eq? (entity/kind a) 'player-bullet)
+                    (eq? (entity/kind b) 'enemy))
+               (entity/despawn! a) (entity/despawn! b))
+              ((and (eq? (entity/kind b) 'player-bullet)
+                    (eq? (entity/kind a) 'enemy))
+               (entity/despawn! a) (entity/despawn! b))
+              ((and (eq? (entity/kind a) 'enemy-bullet)
+                    (eq? (entity/kind b) 'player))
+               (entity/despawn! a)
+               (entity/damage! b 1)
+               (world/camera-shake! 4 0.9))
+              ((and (eq? (entity/kind b) 'enemy-bullet)
+                    (eq? (entity/kind a) 'player))
+               (entity/despawn! b)
+               (entity/damage! a 1)
+               (world/camera-shake! 4 0.9)))))
+        (world/collisions))
+       (world/each 'player-bullet
+                   (lambda (b) (when (< (entity/y b) 0) (entity/despawn! b))))
+       (world/each 'enemy-bullet
+                   (lambda (b) (when (> (entity/y b) 240) (entity/despawn! b))))
+       (world/each 'enemy
+                   (lambda (e) (when (> (entity/y e) 250) (entity/despawn! e))))
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       (world/each 'player-bullet
+                   (lambda (b) (paint-cell 'bullet (entity/x b) (entity/y b) 2 2)))
+       (world/each 'enemy-bullet
+                   (lambda (b) (paint-cell 'enemy-bullet (entity/x b) (entity/y b) 3 3)))
+       (world/each 'enemy
+                   (lambda (e) (paint-cell 'enemy (entity/x e) (entity/y e) 10 10)))
+       (paint-text (string-append \"HP: \" (number->string (entity/hp! p 0)))
+                   10 10)))))
+```
+
+`world/after 60 'enemy-shoot e` schedules a callback in 60 frames.
+When the runtime fires the `enemy-shoot` event on entity `e`, we
+handle it (implicit — the runtime dispatches based on tag name, or you
+register a handler; see reference on `world/after`).
+
+For a chapter that keeps its footprint small, we use `world/after` as
+a self-firing timer and hook shot-firing by scanning enemies each
+frame. A more elaborate treatment would install a per-tag on-fire
+handler.
+
+`entity/damage! p 1` decrements the player's hp by 1. When hp reaches
+0, the entity is dead (game-over trigger belongs to chapter 14; here
+we just track).
+
+---
+
+## 5.4 Entity pooling
+
+At high enemy counts, spawning and despawning entities every few
+frames can allocate memory that garbage collection has to reclaim. In
+tight arcade action this matters. A pool is a fixed set of entities we
+recycle: mark inactive, then reuse on next spawn.
+
+```scheme
+;; Simple pool. We pre-spawn 50 bullets at (-100, -100) and toggle
+;; alive/dead via entity/set!.
+(define (init-bullet-pool)
+  (let loop ((i 0) (acc '()))
+    (if (= i 50)
+        (reverse acc)
+        (let ((b (world/spawn 'player-bullet -100 -100)))
+          (entity/shape! b 'circle 2)
+          (entity/layer! b 'player-bullet)
+          (entity/set! b 'alive #f)
+          (loop (+ i 1) (cons b acc))))))
+
+(define bullet-pool #f)
+
+(define (spawn-from-pool x y vx vy)
+  ;; Find first dead bullet; wake it.
+  (let loop ((bs bullet-pool))
+    (cond
+      ((null? bs) #f)   ;; pool exhausted
+      ((not (entity/state (car bs) 'alive))
+       (entity/set-pos! (car bs) x y)
+       (entity/set-vel! (car bs) vx vy)
+       (entity/set! (car bs) 'alive #t))
+      (else (loop (cdr bs))))))
+
+(define (release-to-pool b)
+  (entity/set-pos! b -100 -100)
+  (entity/set-vel! b 0 0)
+  (entity/set! b 'alive #f))
+```
+
+This is not the only way. For most kid-scale games, allocating and
+despawning is fine — the runtime is fast. But knowing the pool
+pattern lets you SCALE. If you build a bullet-hell with 500 bullets on
+screen and hit a frame-rate drop, come back here.
+
+---
+
+## 5.5 Waves and choreography
+
+The next level of shmup design is coordinated enemy waves.
+
+```scheme
+;; A wave spawns 8 enemies in a V-formation, one every 4 frames.
+(define (spawn-v-wave center-x)
+  (let loop ((i 0))
+    (when (< i 8)
+      (world/after (* i 4) 'v-spawn
+                   (list (+ center-x (* (- i 4) 15))
+                         (- -10 (abs (- i 4)) 10)))
+      (loop (+ i 1)))))
+```
+
+This uses `world/after` as a scheduler: 'four frames from now, fire a
+v-spawn event with these parameters.' You would install a handler for
+'v-spawn that reads its parameter and calls `world/spawn`. Cleanly:
+choreography as data — the wave shape lives in the list of scheduled
+events, not in a nested set of ifs.
+
+Real shmups build a whole library of waves this way — line, arc,
+spiral, funnel — and pull one at random each round.
+
+---
+
+## 5.6 The four patterns in a shoot-em-up
+
+**Composition.** Every entity in this chapter is composed from small
+verbs: shape, layer, solid, hp, velocity, tag. Add or remove a verb
+to change kind. The 'player' and 'enemy' entities differ only in
+their layer and their solid/sensor flags.
+
+**Orchestration.** The frame loop orchestrates: poll input, spawn
+enemies on the spawn-counter, spawn bullets on fire, step physics,
+walk collision pairs and dispatch by kind, cleanup off-screen entities,
+paint. Order matters HERE more than in earlier chapters — if we did
+collision-walk BEFORE step, we'd handle previous frame's collisions.
+
+**In-routing.** Three input handlers (left, right, fire) route to
+three player-state mutations. The `world/collisions` list is walked
+and routed by the (kind, kind) pair into different handlers. That
+routing table is the essence of the shmup's game logic.
+
+**Routing.** Every scheduled `world/after` call routes an event to
+its handler in the future. The scheduler IS a router. Sound calls
+route to audio; damage routes to hp; despawn routes to entity removal.
+Almost every action-verb the shmup emits routes through the runtime
+to something.
+
+---
+
+## 5.7 Common desktop tasks
+
+**Balloon-hunt promotion.** Enemies replaced by product-icons floating
+across the top of a shop page. Shooter is a virtual arrow. Hit five
+in ten seconds = free shipping. Layered collisions ensure you can't
+double-count.
+
+**Alert-triage minigame for the operator.** An operator has 30 pending
+customer messages. Each message is an enemy drifting down; the
+operator clicks the ones to auto-reply and lets the rest fall through
+for manual handling. The visualization is a coping game for an
+inbox-avalanche.
+
+---
+
+## 5.8 Pitfalls
+
+**Bullets hit their own spawner.** Layer setup incomplete —
+`player-bullet` still includes `player` in its collides-with list. Fix
+the alist.
+
+**Frame rate craters at 100 enemies.** You are collision-walking a
+list of all-pairs, which is O(n^2). For high counts use the pool
+pattern and let the engine's broadphase (built into `world/step`) do
+the winnowing. Also: check that you are cleaning up dead entities
+(off-screen bullets, etc.) each frame.
+
+**Enemy fires immediately on spawn, before moving on-screen.** Your
+`world/after 60` handler runs 60 frames after spawn but the enemy is
+still at y=-10 when it fires. Add `(when (>= (entity/y e) 0) ...)` to
+gate firing.
+
+**Collision-pair fires twice for the same collision.** The pair list
+has the same pair in both orders sometimes. Add a hash-set dedupe or
+handle only one order in your cond.
+
+**Enemies stream in but never on-screen.** Your spawn y is above
+where they can render, OR your enemy velocity is zero. Check
+`entity/set-vel!` on spawn.
+
+---
+
+## 5.9 Try this yourself
+
+1. Add a shield powerup: when the player has shield, damage decrements
+   shield instead of hp. Shield decays over 10 seconds.
+2. Add three enemy variants: fast-weak, slow-tough (2 hp), zigzag
+   (velocity flips x every 20 frames).
+3. Turn the shooter into an omni-shooter: 'a' fires down, 'b' fires
+   up, 'up' fires up-left, 'down' fires up-right. Chapter 15 covers
+   two-player; this is one-player two-thumbs.
+4. Difficulty scaling: as `world/count 'enemy` grows over 20, add
+   spawn-frequency; when it drops, slow spawn. Self-balancing pace.
+5. Boss preview: after 30 seconds, spawn one big enemy with 20 hp.
+   Chapter 12 covers bosses; this is your first sighting.
+6. Screen-clear bomb: 'b' despawns every enemy on-screen and
+   `world/camera-shake! 20 0.95`. Use once per life.
+
+---
+
+## 5.10 What we built
+
+A player, a bullet pool, waves of enemies, layered collisions, camera
+shake on hit, hp tracking. All in about 100 lines. The core of a shmup
+is that small.
+
+Next chapter: the same physics, but we tune FEEL. Same ship — with
+deadzone, camera lag, ease-in on rotation, screen-shake calibrated to
+impact velocity. Chapter 6 is the polish pass.")
+
+(code-block :chapter 5 :lang "scheme" :source
+"(define spawn-counter 0)
+(define (shmup-anchor)
+  (world/reset!)
+  (collision/define-layers!
+   '((player   :collides-with (enemy enemy-bullet))
+     (enemy    :collides-with (player player-bullet))
+     (player-bullet :collides-with (enemy))
+     (enemy-bullet  :collides-with (player))))
+  (let ((p (world/spawn 'player 160 220)))
+    (entity/shape! p 'triangle 8)
+    (entity/layer! p 'player)
+    (entity/solid! p #t)
+    (entity/hp! p 3)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -4 0))
+       (when (input/down? 'right) (entity/move! p 4 0))
+       (when (input/pressed? 'a)
+         (let ((b (world/spawn 'player-bullet (entity/x p) (- (entity/y p) 10))))
+           (entity/shape! b 'circle 2)
+           (entity/layer! b 'player-bullet)
+           (entity/set-vel! b 0 -6)))
+       (set! spawn-counter (+ spawn-counter 1))
+       (when (>= spawn-counter 30)
+         (set! spawn-counter 0)
+         (let ((e (world/spawn 'enemy
+                               (+ 20 (modulo (world/hash) 280))
+                               -10)))
+           (entity/shape! e 'rect 10 10)
+           (entity/layer! e 'enemy)
+           (entity/solid! e #t)
+           (entity/set-vel! e 0 1.5)))
+       (world/step)
+       (for-each
+        (lambda (pair)
+          (let ((a (car pair)) (b (cadr pair)))
+            (when (and (eq? (entity/kind a) 'player-bullet)
+                       (eq? (entity/kind b) 'enemy))
+              (entity/despawn! a) (entity/despawn! b))
+            (when (and (eq? (entity/kind b) 'player-bullet)
+                       (eq? (entity/kind a) 'enemy))
+              (entity/despawn! a) (entity/despawn! b))))
+        (world/collisions))
+       (world/each 'player-bullet
+                   (lambda (b) (when (< (entity/y b) 0) (entity/despawn! b))))
+       (world/each 'enemy
+                   (lambda (e) (when (> (entity/y e) 250) (entity/despawn! e))))
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       (world/each 'player-bullet
+                   (lambda (b) (paint-cell 'bullet (entity/x b) (entity/y b) 2 2)))
+       (world/each 'enemy
+                   (lambda (e) (paint-cell 'enemy (entity/x e) (entity/y e) 10 10)))))))
+(big-bang shmup-anchor)")

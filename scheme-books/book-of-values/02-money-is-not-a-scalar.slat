@@ -1,0 +1,370 @@
+;; 02-money-is-not-a-scalar.slat
+;; Book of Values — Chapter 2 — the doctrine chapter.
+
+(chapter
+  :book              "Book of Values"
+  :chapter-number    2
+  :title             "Money Is Not a Scalar"
+  :audience          :engineer
+  :dialect           "motoi"
+  :book-version      "1.1"
+  :provenance        "book-of-values-author-2026-07-16 book-of-values-expander-2026-07-17"
+  :training-eligible #t
+  :content-rating    :G
+  :prose
+"# Chapter 2 — Money Is Not a Scalar
+
+If you take one thing from this book, take this: **money is not a
+scalar**.
+
+The number `100` on its own is a scalar. You can add it, halve it,
+double it, sort it against other numbers. A scalar is a single number
+with no other information attached. That is what math class trained you
+to think with.
+
+Money is not that. Money is a number *plus a currency*, *plus a smallest
+representable unit*, *plus a set of rounding rules that depend on the
+currency*, *plus a moment in time when the amount was valid*.
+
+Treat money like a scalar and you will lose money.
+
+## What goes wrong
+
+Here is a scalar-style program. It computes a 15% tip on a $12.34 bill.
+
+```
+(* 12.34 0.15)
+;; -> 1.851
+```
+
+`1.851` dollars. Which is 185.1 cents. Cents are integers. There is no
+tenth of a cent in the real world. The number the program produced does
+not exist.
+
+You could round it.
+
+```
+(math/round-to-place (* 12.34 0.15) -2)
+;; -> 1.85
+```
+
+Better. Now suppose there are three people at the table and they each
+want a fair share.
+
+```
+(/ (* 12.34 0.15) 3)
+;; -> 0.617
+```
+
+61.7 cents each. Rounded, 62 cents each. Three people paying 62 cents
+each is 186 cents. But the total tip was supposed to be 185 cents.
+Somebody just paid a penny that isn't on the bill. That is how money
+disappears — or worse, appears out of nowhere.
+
+None of this is a bug in Motoi. It is a bug in *pretending money is a
+scalar*.
+
+## The doctrine
+
+**Money is not a scalar.** A money value has four parts.
+
+1. **Amount** — expressed in the *smallest unit* of the currency. Cents
+   for USD. Yen for JPY. Millimes for TND (yes, thousandths). Always an
+   integer. Never a float.
+
+2. **Currency** — the ISO code as a symbol. `'usd`, `'jpy`, `'eur`,
+   `'gbp`, `'krw`. The currency determines what the smallest unit is
+   and what the rounding conventions are. See Appendix A.
+
+3. **Provenance** *(optional but recommended)* — where this amount came
+   from. A bank feed. A user typed it in. A calculation from other
+   money. See Chapter 5.
+
+4. **Timestamp** *(optional but recommended)* — when the amount was
+   valid. A conversion rate from last Tuesday is not the same value as
+   the same rate today. See Chapter 4.
+
+We will build the minimum viable version now — amount and currency.
+Provenance and timestamps get their own chapters.
+
+## Money in Motoi
+
+Motoi does not have records. It has lists. A list with a tag on the
+front is enough.
+
+```
+(define (money currency minor-units)
+  (list 'money currency minor-units))
+
+(money 'usd 12345)
+;; -> (money usd 12345)
+```
+
+Read that: *$123.45, USD, expressed as 12345 cents*. The number **is
+the cent count**. There is no decimal. The decimal is a display
+concern, and we will get to display in Chapter 14.
+
+Accessors:
+
+```
+(define (money-currency m) (cadr m))
+(define (money-minor    m) (caddr m))
+
+(money-currency (money 'usd 12345))
+;; -> usd
+
+(money-minor (money 'usd 12345))
+;; -> 12345
+```
+
+Predicate:
+
+```
+(define (money? x)
+  (and (pair? x) (eq? (car x) 'money)))
+
+(money? (money 'usd 100))
+;; -> #t
+
+(money? 100)
+;; -> #f
+```
+
+The predicate is a wall. Any function that takes money can put this
+wall in front of its arguments. Anything that isn't money bounces off.
+
+DO: put a `money?` check at the entrance of every function that takes
+money.
+DON'T: assume the caller passed a well-shaped value because it's
+labeled `amount` in the parameter list.
+WHY: a five-line function protected at the boundary is where you want
+the bug to appear. Not fifteen frames later, when the number has
+laundered itself through three transformations.
+
+## Why cents, not dollars
+
+Cents are integers. Dollars are floats. That's the whole reason.
+
+```
+(+ 0.10 0.20)
+;; -> 0.30000000000000004
+```
+
+Chapter 6 develops this. For now: `+` on integer cents is exact.
+`+` on float dollars is close-enough-usually, until it isn't.
+Every time a decimal touches money, you have a decision — carry
+the decimal, and inherit float lies, or push to integer minor
+units, and never think about it again.
+
+```
+(+ 10 20)
+;; -> 30
+```
+
+30 cents. Exactly. Every time. Forever.
+
+DO: minor units. Cents for USD. Yen for JPY. Millimes for TND.
+DON'T: store money as a float that *looks* like dollars.
+WHY: every accounting system that survives longer than a year has
+learned this. Integers accumulate; floats drift.
+
+## Adding money
+
+Adding two money values is not the same as adding two numbers.
+
+Two USD amounts add.
+
+```
+(money 'usd 100)   ;; $1.00
+(money 'usd 250)   ;; $2.50
+;; sum should be (money 'usd 350)
+```
+
+Two amounts in different currencies do *not* add. You need a
+conversion, and conversion is a whole other operation (Chapter 4).
+
+Here is `money+` that adds when the currencies match and refuses when
+they don't.
+
+```
+(define (money+ a b)
+  (cond
+    ((not (money? a))
+       (list 'error 'money+ 'not-money a))
+    ((not (money? b))
+       (list 'error 'money+ 'not-money b))
+    ((not (eq? (money-currency a) (money-currency b)))
+       (list 'error 'money+ 'currency-mismatch
+             (money-currency a) (money-currency b)))
+    (else
+       (money (money-currency a)
+              (+ (money-minor a) (money-minor b))))))
+
+(money+ (money 'usd 100) (money 'usd 250))
+;; -> (money usd 350)
+
+(money+ (money 'usd 100) (money 'eur 250))
+;; -> (error money+ currency-mismatch usd eur)
+```
+
+The refusal is the point. `money+` will not add dollars and euros just
+because both happen to be numbers. It insists on being asked correctly.
+
+That refusal has a name in this book: a **shape check**. Shape checks
+are cheap to write and they catch the class of bug that costs the most.
+
+## Multiplying money
+
+Money times a scalar is money.
+
+```
+(define (money* m scalar)
+  (money (money-currency m)
+         (* (money-minor m) scalar)))
+
+(money* (money 'usd 100) 3)
+;; -> (money usd 300)
+```
+
+Money times money is *not* money. Cents-squared is not a currency. If
+you find yourself writing `(* (money-minor a) (money-minor b))` you
+have a bug. Do not build a helper for it. Let it stay ugly so future
+you notices.
+
+DO: money × scalar = money.
+DO: money × rate (as float or bp) = money, after rounding.
+DON'T: money × money — that's cents-squared, and it means nothing.
+WHY: units carry dimension. Money has dimension `currency`. Currency
+times currency is not a currency.
+
+## Dividing money
+
+Money divided by a scalar is money — usually. The catch is the
+remainder.
+
+```
+(define (money-split m parts)
+  (let* ((total  (money-minor m))
+         (share  (quotient  total parts))
+         (extra  (remainder total parts)))
+    (list 'split
+          (money (money-currency m) share)
+          :parts parts
+          :remainder extra)))
+
+(money-split (money 'usd 185) 3)
+;; -> (split (money usd 61) :parts 3 :remainder 2)
+```
+
+Three people, $1.85 tip. Each pays 61 cents. Two cents left over. **The
+remainder does not disappear.** Somebody pays the extra 2 cents, or the
+last person pays 63 cents, or the house eats it. The program tells you
+that the remainder exists so *you* decide what to do with it. If you
+had used floats the pennies would have vanished into the fifth decimal
+place and you would have wondered later where they went.
+
+## Never floats
+
+Floats are useful for physics and graphics. They are not useful for
+money. Chapter 6 explains why in detail. For now, three rules.
+
+- **Store money in integer minor units.** Cents, not dollars.
+- **Never multiply money by another float.** Multiply by an integer or
+  a rational-style pair (`numerator`, `denominator`).
+- **When you must apply a percentage, apply it as `(quotient (* amount
+  numerator) denominator)`.**
+
+Here is a 15% tip on $12.34 done right.
+
+```
+(define bill (money 'usd 1234))
+
+(define (money-percent m numerator denominator)
+  (money (money-currency m)
+         (quotient (* (money-minor m) numerator) denominator)))
+
+(money-percent bill 15 100)
+;; -> (money usd 185)
+```
+
+$1.85. Integer cents. Nothing to round because there was no fractional
+cent to begin with.
+
+## When you *want* floats
+
+Almost never. If you are aggregating billions of dollars for a
+back-of-envelope estimate and don't need penny-accuracy, a float total
+is fine — but then keep it out of any code that touches user-facing
+amounts. Convert once, at the boundary, on the way to the estimator.
+And convert back to minor units before displaying anything.
+
+Chapter 14 covers *displaying* money — dollars-and-cents strings for
+humans, integer minor units for storage.
+
+## Recap
+
+- Money is not a scalar. Amount plus currency plus (optionally)
+  provenance plus (optionally) timestamp.
+- Store the amount in the smallest unit of the currency. Integers only.
+- Wrap in a tagged list: `(money currency minor-units)`.
+- Add only when currencies match. Refuse otherwise.
+- Multiply by scalars, never by other money.
+- Division has a remainder. Do not throw it away.
+- No floats. Ever. See Chapter 6 for why.
+
+Money is the most bug-prone scalar in the world. Now it has shape.
+Everything else in this book is variations on the same trick.
+
+## Try it
+
+Build a coffee-shop total. Two lattes at $4.75, one muffin at $3.20,
+8.75% sales tax.
+
+```
+(define latte  (money 'usd 475))
+(define muffin (money 'usd 320))
+
+(define subtotal
+  (money+ (money+ latte latte) muffin))
+subtotal
+;; -> (money usd 1270)
+
+(define tax (money-percent subtotal 875 10000))
+tax
+;; -> (money usd 111)
+
+(money+ subtotal tax)
+;; -> (money usd 1381)
+```
+
+$13.81. All integer cents, all the way through. No floating-point
+ghost, no missing pennies.")
+
+(example :ref "ch2-scalar-tip"      :code "(* 12.34 0.15)"                     :expected 1.851)
+(example :ref "ch2-scalar-rounded"  :code "(math/round-to-place (* 12.34 0.15) -2)" :expected 1.85)
+(example :ref "ch2-money-ctor"
+         :code "(begin (define (money c m) (list 'money c m)) (money 'usd 12345))"
+         :expected "(money usd 12345)")
+(example :ref "ch2-money-minor"
+         :code "(begin (define (money c m) (list 'money c m)) (define (money-minor x) (caddr x)) (money-minor (money 'usd 12345)))"
+         :expected 12345)
+(example :ref "ch2-money-pred-yes"
+         :code "(begin (define (money? x) (and (pair? x) (eq? (car x) 'money))) (money? (list 'money 'usd 100)))"
+         :expected #t)
+(example :ref "ch2-money-pred-no"
+         :code "(begin (define (money? x) (and (pair? x) (eq? (car x) 'money))) (money? 100))"
+         :expected #f)
+(example :ref "ch2-percent"
+         :code "(begin (define (money c m) (list 'money c m)) (define (money-minor x) (caddr x)) (define (money-currency x) (cadr x)) (define (money-percent m n d) (money (money-currency m) (quotient (* (money-minor m) n) d))) (money-percent (money 'usd 1234) 15 100))"
+         :expected "(money usd 185)")
+(example :ref "ch2-split-remainder"
+         :code "(begin (define (money c m) (list 'money c m)) (define (money-minor x) (caddr x)) (define (money-currency x) (cadr x)) (define (split m parts) (list 'split (money (money-currency m) (quotient (money-minor m) parts)) ':remainder (remainder (money-minor m) parts))) (split (money 'usd 185) 3))"
+         :expected "(split (money usd 61) :remainder 2)")
+(example :ref "ch2-float-dime"
+         :code "(+ 0.10 0.20)"
+         :expected 0.30000000000000004
+         :teaching "Adding dimes in floats produces a ghost at the 17th decimal — that's why cents.")
+(example :ref "ch2-int-dime"
+         :code "(+ 10 20)"
+         :expected 30
+         :teaching "Adding dimes in integer cents is exact. Every time. Forever.")

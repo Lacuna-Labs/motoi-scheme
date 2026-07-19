@@ -1,0 +1,210 @@
+;; appendix-b-layered-collision-cookbook.book.slatl
+
+(dialect :applies ("motoi" "sakura"))
+
+(appendix
+  :book "Book of Arcade Games"
+  :letter "B"
+  :title "Layered Collision Cookbook"
+  :dialect "motoi"
+  :audience :kid
+  :also-for :adult
+  :content-rating :G
+  :author-lane "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible #t
+  :confidentiality "public"
+  :book-version "1.0.0"
+  :prose
+"`collision/define-layers!` sorts entities into named bins so the
+engine can skip collision checks between bins that don't need to
+collide. This cuts collision cost from O(n^2) to something much
+smaller AND lets you express game rules cleanly. This appendix is
+the recipe file.
+
+## The pattern
+
+```scheme
+(collision/define-layers!
+ '((layer-name :collides-with (other-layer-name ...))
+   ...))
+(entity/layer! ent 'layer-name)
+```
+
+Every layer lists what it CAN hit. The engine looks up the pair at
+collision time and skips if not in the list. Reciprocal? Not
+required — 'a collides with b' can be true while 'b collides with a'
+is false. But typical usage keeps them symmetric.
+
+## Recipe 1 — Basic shmup
+
+Player, enemy, player-bullet, enemy-bullet.
+
+```scheme
+(collision/define-layers!
+ '((player       :collides-with (enemy enemy-bullet))
+   (enemy        :collides-with (player player-bullet))
+   (player-bullet :collides-with (enemy))
+   (enemy-bullet  :collides-with (player))))
+```
+
+Rules encoded: player takes damage from enemy or enemy-bullet.
+Player-bullet kills enemy. No friendly fire. No player-bullet vs
+enemy-bullet (bullets pass through each other).
+
+## Recipe 2 — Bullet-vs-bullet cancels
+
+Same as basic, plus bullets can deflect.
+
+```scheme
+(collision/define-layers!
+ '((player       :collides-with (enemy enemy-bullet))
+   (enemy        :collides-with (player player-bullet))
+   (player-bullet :collides-with (enemy enemy-bullet))
+   (enemy-bullet  :collides-with (player player-bullet))))
+```
+
+Now bullets can destroy each other. Kids can 'shoot down' incoming
+bullets. Adds a defensive layer to the shmup.
+
+## Recipe 3 — Platformer with pickups
+
+```scheme
+(collision/define-layers!
+ '((player :collides-with (ground enemy pickup))
+   (ground :collides-with (player enemy))
+   (enemy  :collides-with (player ground))
+   (pickup :collides-with (player))))
+```
+
+Enemies walk on ground (won't fall through). Pickups don't interact
+with anything except player.
+
+## Recipe 4 — Multi-team fight
+
+Team A vs Team B. Bullets from each team hit the other.
+
+```scheme
+(collision/define-layers!
+ '((team-a          :collides-with (team-b team-b-bullet))
+   (team-b          :collides-with (team-a team-a-bullet))
+   (team-a-bullet   :collides-with (team-b))
+   (team-b-bullet   :collides-with (team-a))))
+```
+
+## Recipe 5 — Racing (no collision between racers)
+
+Racers pass through each other; only interact with the track and
+obstacles.
+
+```scheme
+(collision/define-layers!
+ '((racer    :collides-with (obstacle finish-line))
+   (obstacle :collides-with (racer))
+   (finish-line :collides-with (racer))))
+```
+
+## Recipe 6 — Ghost mode (temporary phase-through)
+
+Player has an invincibility state where they pass through enemies.
+Solution: two player layers.
+
+```scheme
+(collision/define-layers!
+ '((player       :collides-with (enemy enemy-bullet))
+   (player-ghost :collides-with ())
+   (enemy        :collides-with (player player-bullet))
+   (enemy-bullet :collides-with (player))
+   (player-bullet :collides-with (enemy))))
+
+;; Switch layer during ghost mode:
+(entity/layer! player 'player-ghost)
+;; Later, restore:
+(entity/layer! player 'player)
+```
+
+## Recipe 7 — Environmental layers
+
+Water tiles interact with sinking things; air tiles with flying.
+
+```scheme
+(collision/define-layers!
+ '((swimmer :collides-with (water shore))
+   (flyer   :collides-with (bird shore))
+   (walker  :collides-with (shore ground))
+   (water   :collides-with (swimmer))
+   (bird    :collides-with (flyer))
+   (shore   :collides-with (swimmer flyer walker))
+   (ground  :collides-with (walker))))
+```
+
+Same physics engine; different rules for different creature types.
+
+## Recipe 8 — Debug all-vs-all
+
+Development-time only.
+
+```scheme
+(collision/define-layers!
+ '((all :collides-with (all))))
+```
+
+Then set every entity to layer 'all. See EVERY collision. Useful
+when debugging why something isn't hitting.
+
+## Cost model
+
+Roughly: for each entity in a layer, the engine checks against
+entities in layers it can hit. With N entities across L layers with
+average pair-count K, cost is O(N * K). Well-partitioned layers keep
+K small; unpartitioned worlds have K ~ N and cost N^2.
+
+At kid-scale (< 100 entities on screen), the difference is invisible
+— everything runs at 60 FPS regardless. At bullet-hell scale (500+
+entities), layers matter.
+
+## Reading collisions with layers
+
+`world/collisions` still returns all colliding pairs. Layer filtering
+happens BEFORE that list is populated, not on the reading side. So
+your `for-each pair` loop is unchanged; it just has fewer pairs to
+walk.
+
+## Pitfalls
+
+**Layer defined but not attached.** You wrote the layer-alist but
+forgot `entity/layer! e 'name`. Entity uses default layer, doesn't
+match the alist rules. Fix: assign layer at spawn.
+
+**Asymmetric layer definition confuses.** 'a hits b' but 'b doesn't
+hit a.' The engine has to trigger the pair when EITHER side allows.
+Some runtimes require reciprocity. Test both directions of any
+new pair.
+
+**All bullets vanish.** Layer for bullets doesn't include ANYTHING
+in `:collides-with` list, so bullets have no collisions at all.
+Include their targets.
+
+**Layer typo silently fails.** `'plyaer` vs `'player`. The engine
+may not warn. Grep your code for consistency.
+
+## The debug-print layer helper
+
+```scheme
+(define (print-active-layers)
+  (world/each 'all
+              (lambda (e)
+                (display (entity/kind e))
+                (display \" layer: \")
+                (display (entity/state e 'layer))
+                (newline))))
+```
+
+Call once at setup to verify every entity landed on the layer you
+intended.
+
+## Rule of thumb
+
+Design your layer alist first, on paper. List every entity type.
+Draw arrows for who can collide with whom. Then convert to the
+alist. Layer bugs are HARD to debug after the fact; easy to prevent
+by drawing.")

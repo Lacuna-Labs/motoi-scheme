@@ -1,0 +1,909 @@
+;; ch11-control-flow-mastery.slat
+;; Book of Challenges — Chapter 11 — Control-Flow Mastery
+
+(chapter
+  :book             "Book of Challenges"
+  :chapter-number   null
+  :title            "Chapter 11 — Control-Flow Mastery"
+  :size             50314
+  :sha256           "edce1416eeeb346f"
+  :prose
+"# Chapter 11 — Control-Flow Mastery
+
+Control flow is the skeleton of a program — the bones that hold every decision, every branch, every recursive leap. A beginner writes code that runs straight down the page; a journeyman learns to branch with `if`; but mastery means *orchestrating* flow: knowing when to ladder your conditions, when to recurse, when two functions should call each other in turn, and when to bail early with grace. This chapter teaches you to write programs that *decide well* — cleanly, honestly, and without pretending a failure didn't happen.
+
+We'll start with tidy `cond` ladders that classify and route, then build guarded recursion that checks before it leaps, then mutual recursion where two functions solve one problem together by calling each other in careful turn. By the end, you'll write programs that feel like conversations between functions, each one trusting the other to do its part.
+
+Why does this matter to the runtime? Because the real world is messy. A customer's question might need three different strategies depending on what they said. A memory-search might return nothing, and she needs to try another route without pretending she found something. Two tasks might need to *ping-pong* between each other — validate, then enrich, then validate again — until the work is done. Mastery of control flow is mastery of *routing the truth* through a program until it becomes an answer.
+
+---
+
+## The Honest Ladder — `cond` as Decision Tree
+
+A `cond` is a ladder of questions. You ask them in order, top to bottom, and the first one that says \"yes\" wins. It's more honest than a pile of `if`-`else` because you can *see* the priority: \"try this first, then this, then this, and if nothing else fits, do this.\" The shape of the code is the shape of the logic.
+
+Let's start with a simple classifier. We'll take a number representing an hour of the day (0–23) and decide what part of the day it is. The logic is clear: night, morning, afternoon, evening. The code should look like the logic.
+
+```scheme
+;; Classify an hour (0-23) into a part of the day.
+;; This is the simplest cond ladder: just test, test, test, else.
+
+(define (part-of-day hour)
+  (cond
+    ((< hour 6) 'night)
+    ((< hour 12) 'morning)
+    ((< hour 18) 'afternoon)
+    ((< hour 21) 'evening)
+    (else 'night)))
+
+;; Run it
+(list
+  (part-of-day 3)   ; night
+  (part-of-day 9)   ; morning
+  (part-of-day 14)  ; afternoon
+  (part-of-day 19)  ; evening
+  (part-of-day 23)) ; night
+```
+
+Notice the `else` at the bottom — it's our safety net. If none of the guards match (which shouldn't happen here, but in a messier program it might), we have a fallback. Never write a `cond` without an `else` unless you're *certain* one of the earlier clauses will fire.
+
+Now let's add real consequence: each branch does something, not just returns a symbol. We'll classify a customer's message by keyword and decide which team should handle it. This time, the wired verb `text/normalize` cleans the message first, and we route based on what we find.
+
+```scheme
+;; Route a customer message to the right team based on keywords.
+;; This is a cond ladder with real verb use and honest-null handling.
+
+(define (route-message raw-message)
+  (let ((normalized (text/normalize raw-message)))
+    (if (eq? normalized 'nan)
+        (list 'error \"Could not normalize message\")
+        (cond
+          ((or (string-contains? normalized \"refund\")
+               (string-contains? normalized \"return\"))
+           (list 'team 'returns 'priority 'high))
+          ((or (string-contains? normalized \"shipping\")
+               (string-contains? normalized \"delivery\"))
+           (list 'team 'fulfillment 'priority 'medium))
+          ((or (string-contains? normalized \"product\")
+               (string-contains? normalized \"quality\"))
+           (list 'team 'support 'priority 'medium))
+          ((string-contains? normalized \"urgent\")
+           (list 'team 'escalation 'priority 'urgent))
+          (else
+           (list 'team 'general 'priority 'low))))))
+
+;; Define string-contains? for clarity (standard Scheme doesn't have it built-in everywhere)
+(define (string-contains? haystack needle)
+  (and (string? haystack)
+       (string? needle)
+       (let ((h-len (string-length haystack))
+             (n-len (string-length needle)))
+         (let loop ((i 0))
+           (cond
+             ((> (+ i n-len) h-len) #f)
+             ((string=? (substring haystack i (+ i n-len)) needle) #t)
+             (else (loop (+ i 1))))))))
+
+;; Run it
+(route-message \"Hi, I need a REFUND please!\")
+```
+
+See the pattern? We check for 'nan first (ESCAPE — the verb might have failed), then ladder through our conditions. Each branch is a complete thought: \"if you see this, route here with this priority.\" The code reads like instructions to a human.
+
+---
+
+## Guarded Recursion — Don't Leap Without Looking
+
+Recursion is beautiful when it works and catastrophic when it doesn't check its inputs. A recursive function should *guard* itself: before it recurses, it should ask \"am I allowed to keep going?\" The guard is usually at the top, in the base case. If the input is bad, or the work is done, stop. Never assume the recursive call will magically handle a problem you didn't check for.
+
+Here's a simple guarded recursion: summing a list of numbers. The guard is \"if the list is empty, the sum is zero.\" Otherwise, add the first number to the sum of the rest.
+
+```scheme
+;; Sum a list of numbers with a clear base-case guard.
+
+(define (sum-list nums)
+  (if (null? nums)
+      0
+      (+ (car nums) (sum-list (cdr nums)))))
+
+;; Run it
+(sum-list '(10 20 30 40))  ; 100
+```
+
+Trivial, yes — but notice the discipline. We check `(null? nums)` before we touch `car` or `cdr`. If we didn't, an empty list would crash. The guard *protects* the recursion.
+
+Now let's make it harder: we'll fetch a series of memories from `cortex/recall` by looping through a list of keys. But `cortex/recall` can fail (returning 'nan), so we need to guard each step. If any recall fails, we stop and return what we have so far plus an error flag.
+
+```scheme
+;; Recursively fetch memories by key, stopping early if any fetch fails.
+;; This is guarded recursion with honest-null handling at each step.
+
+(define (fetch-memories keys)
+  (if (null? keys)
+      '()  ; base case: no more keys, return empty list
+      (let ((key (car keys)))
+        (let ((memory (cortex/recall key)))
+          (if (eq? memory 'nan)
+              (list 'error \"Memory fetch failed\" 'at-key key)
+              (cons memory (fetch-memories (cdr keys))))))))
+
+;; Run it (assuming some keys exist in cortex)
+;; For demonstration, we'll show the structure even if cortex is empty
+(fetch-memories '(\"customer-prefs\" \"last-order\" \"contact-history\"))
+```
+
+The guard here is twofold: `(null? keys)` says \"we're done,\" and `(eq? memory 'nan)` says \"stop, something broke.\" We don't pretend the memory was there. We *escalate* the truth by returning an error shape. This is ESCAPE in action — honoring failure instead of hiding it.
+
+Let's go deeper. We'll write a tail-recursive accumulator that processes a list of product IDs, fetching inventory for each one, and accumulating the results. If any fetch fails, we include the failure in the result but keep going (a different policy than the previous example — here we're resilient, not strict).
+
+```scheme
+;; Tail-recursive inventory aggregation with per-item failure handling.
+;; We keep going even if one item fails, but we mark the failure.
+
+(define (aggregate-inventory ids)
+  (define (loop remaining acc)
+    (if (null? remaining)
+        (reverse acc)  ; done, reverse because we cons'd in reverse order
+        (let ((id (car remaining)))
+          (let ((inv (stock/on-hand id)))
+            (let ((entry (if (eq? inv 'nan)
+                             (list 'id id 'status 'failed)
+                             (list 'id id 'quantity inv 'status 'ok))))
+              (loop (cdr remaining) (cons entry acc)))))))
+  (loop ids '()))
+
+;; Run it
+(aggregate-inventory '(\"SKU123\" \"SKU456\" \"SKU789\"))
+```
+
+Notice the accumulator pattern: `loop` is a named-let (a tail-recursive helper inside the main function). We pass the remaining IDs and the accumulator down, consing each result onto the accumulator. The guard is `(null? remaining)`. The honest-null check is `(eq? inv 'nan)`, and we handle it by marking the entry as failed. This is *resilient* recursion — we don't stop, we adapt.
+
+---
+
+## Case — The Dispatch Table in Code
+
+`case` is a special kind of `cond` for when you're testing one value against many constants. It's cleaner than a pile of `(eq? x 'foo)` clauses. You write the value once, then list the cases. It's a dispatch table — \"if x is this, do that.\"
+
+Here's a simple example: we'll take a symbol representing a shipping method and return the expected delivery time in days.
+
+```scheme
+;; Dispatch table for shipping methods.
+
+(define (delivery-time method)
+  (case method
+    ((standard) 7)
+    ((expedited) 3)
+    ((overnight) 1)
+    ((international) 14)
+    (else 'unknown)))
+
+;; Run it
+(list
+  (delivery-time 'standard)      ; 7
+  (delivery-time 'overnight)     ; 1
+  (delivery-time 'carrier-pigeon)) ; unknown
+```
+
+Simple. Now let's use it in a real orchestration. We'll classify an order by its status symbol, and for each status we'll fetch different data from different verbs. Each case is a small pipeline.
+
+```scheme
+;; Multi-verb orchestration dispatched by order status.
+;; Each case fetches different data depending on the status.
+
+(define (enrich-order order-id status)
+  (case status
+    ((pending)
+     ;; Pending orders: fetch customer and inventory
+     (let ((cust (crm/read order-id)))
+       (if (eq? cust 'nan)
+           (list 'order order-id 'status status 'enrichment 'failed)
+           (list 'order order-id 'status status 'customer cust))))
+    ((shipped)
+     ;; Shipped orders: fetch tracking info
+     (let ((tracking (ship/trackers-list order-id)))
+       (if (eq? tracking 'nan)
+           (list 'order order-id 'status status 'tracking 'unavailable)
+           (list 'order order-id 'status status 'tracking tracking))))
+    ((delivered)
+     ;; Delivered orders: check for reviews
+     (let ((review (reviews/aggregate order-id)))
+       (list 'order order-id 'status status 'review review)))
+    ((cancelled)
+     ;; Cancelled orders: fetch refund status
+     (let ((refund (returns/read order-id)))
+       (list 'order order-id 'status status 'refund refund)))
+    (else
+     (list 'order order-id 'status 'unknown))))
+
+;; Run it
+(enrich-order \"ORD-99887\" 'shipped)
+```
+
+Each case is a distinct route. The shape of the `case` makes it obvious: \"for pending, do this; for shipped, do that.\" And every branch handles 'nan honestly. This is control flow as *routing logic* — the structure of the code mirrors the structure of the decision.
+
+---
+
+## Mutual Recursion — Two Functions, One Dance
+
+Mutual recursion is when two functions call each other. It sounds exotic, but it's natural for problems that have two alternating states. Think of parsing: you might have one function that handles an opening tag and another that handles the content, and they call each other as the structure nests. Or validating and enriching data: validate calls enrich, enrich calls validate again on a sub-piece.
+
+The key is that both functions must be defined before either one runs. In Scheme, we use `letrec` for this: it lets you define functions that refer to each other by name, and none of them get evaluated until you actually call one.
+
+Let's start simple. We'll write two functions that count down: `even-count` and `odd-count`. If you call `even-count` with 0, you're done. Otherwise, print the number and call `odd-count` with n-1. `odd-count` does the same but calls `even-count`. They ping-pong until n is zero.
+
+```scheme
+;; Mutually recursive countdown: even and odd functions call each other.
+
+(letrec ((even-count (lambda (n)
+                       (if (= n 0)
+                           'done
+                           (begin
+                             (display \"even: \")
+                             (display n)
+                             (newline)
+                             (odd-count (- n 1))))))
+         (odd-count (lambda (n)
+                      (if (= n 0)
+                          'done
+                          (begin
+                            (display \"odd: \")
+                            (display n)
+                            (newline)
+                            (even-count (- n 1)))))))
+  (even-count 6))
+```
+
+Run it and you'll see:
+```
+even: 6
+odd: 5
+even: 4
+odd: 3
+even: 2
+odd: 1
+```
+
+They alternate perfectly. Each function trusts the other to handle the next step. That's the essence of mutual recursion: *division of responsibility*.
+
+Now let's do something real. We'll parse a simple nested task list where tasks can have sub-tasks. The structure is a list of lists: `(task \"Do laundry\" (task \"Sort clothes\") (task \"Wash\") (task \"Fold\"))`. We need two functions: one to process a task, one to process a list of tasks. They call each other as the structure nests.
+
+```scheme
+;; Mutually recursive parser for nested task lists.
+;; A task is (task <description> <subtasks...>)
+;; We'll flatten it into a list of descriptions with indentation.
+
+(letrec ((process-task (lambda (t depth)
+                         ;; A task is (task description subtasks...)
+                         (if (and (pair? t) (eq? (car t) 'task))
+                             (let ((desc (cadr t))
+                                   (subtasks (cddr t)))
+                               (cons (list 'depth depth 'desc desc)
+                                     (process-tasks subtasks (+ depth 1))))
+                             '())))  ; malformed task, return empty
+         (process-tasks (lambda (ts depth)
+                          ;; A list of tasks
+                          (if (null? ts)
+                              '()
+                              (append (process-task (car ts) depth)
+                                      (process-tasks (cdr ts) depth))))))
+  (process-tasks
+   '((task \"Do laundry\"
+           (task \"Sort clothes\")
+           (task \"Wash\")
+           (task \"Fold\"))
+     (task \"Make dinner\"
+           (task \"Chop vegetables\")
+           (task \"Cook\")))
+   0))
+```
+
+`process-task` handles one task: it extracts the description, then calls `process-tasks` on the subtasks. `process-tasks` handles a list: it calls `process-task` on each one. They recurse into each other as the structure deepens. The result is a flat list of tasks with depth markers.
+
+Let's make it harder. We'll validate and enrich a customer record. Validation might find missing fields and try to enrich them by calling an enrichment function, which in turn needs to re-validate the enriched data. They call each other until the record is valid or we give up after N tries.
+
+```scheme
+;; Mutually recursive validation and enrichment with a retry limit.
+;; validate checks fields; if missing, calls enrich.
+;; enrich tries to fill fields; then calls validate again.
+;; Stop after max-tries to avoid infinite loops.
+
+(letrec ((validate (lambda (record tries-left)
+                     (cond
+                       ((<= tries-left 0)
+                        (list 'status 'failed 'reason \"Max retries exceeded\" 'record record))
+                       ((not (assoc 'email record))
+                        ;; Missing email, try to enrich
+                        (enrich record 'email tries-left))
+                       ((not (assoc 'phone record))
+                        ;; Missing phone, try to enrich
+                        (enrich record 'phone tries-left))
+                       (else
+                        (list 'status 'valid 'record record))))
+         (enrich (lambda (record field tries-left)
+                   ;; Try to fetch the missing field from CRM
+                   (let ((customer-id (cdr (assoc 'id record))))
+                     (if (not customer-id)
+                         (list 'status 'failed 'reason \"No customer ID\" 'record record)
+                         (let ((crm-data (crm/read customer-id)))
+                           (if (eq? crm-data 'nan)
+                               (list 'status 'failed 'reason \"CRM lookup failed\" 'record record)
+                               (let ((value (cdr (assoc field crm-data))))
+                                 (if value
+                                     ;; Got it, add to record and re-validate
+                                     (validate (cons (cons field value) record) (- tries-left 1))
+                                     ;; Still missing, fail
+                                     (list 'status 'failed 'reason \"Field not in CRM\" 'record record))))))))))
+  (validate '((id . \"CUST-123\") (name . \"Alice\")) 3))
+```
+
+`validate` checks the record. If a field is missing, it calls `enrich`. `enrich` fetches data from `crm/read`, adds it to the record, and calls `validate` again. They ping-pong until the record is valid or `tries-left` hits zero. This is mutual recursion with a *guard* — the `tries-left` counter prevents infinite loops.
+
+Notice how we handle 'nan from `crm/read`: we don't recurse, we return a failure. Mutual recursion doesn't mean *blind* recursion. Each function must still check its inputs and outputs honestly.
+
+---
+
+## Early Escape — Bailing When You Know Enough
+
+Sometimes the right move is to stop early. You're halfway through a computation, you realize the answer is already determined, and there's no point continuing. That's an *early escape*. In Scheme, it's usually just a well-placed `return` in the form of a conditional that skips the rest of the work.
+
+Here's a simple example: we're checking if any element in a list satisfies a predicate. As soon as we find one, we can stop — no need to check the rest.
+
+```scheme
+;; Early-escape search: stop as soon as we find a match.
+
+(define (any? pred lst)
+  (if (null? lst)
+      #f
+      (if (pred (car lst))
+          #t  ; found one, escape early
+          (any? pred (cdr lst)))))
+
+;; Run it
+(any? (lambda (x) (> x 100)) '(5 10 15 200 300))  ; #t, stops at 200
+```
+
+The moment `pred` returns true, we return `#t` and never recurse again. We *escape* the remaining work.
+
+Now let's use early escape in a multi-verb pipeline. We're building a product listing: fetch the product, check inventory, fetch images. But if inventory is zero, we don't need the images — we can escape early and return a \"sold out\" shape.
+
+```scheme
+;; Multi-stage pipeline with early escape if inventory is zero.
+
+(define (build-listing product-id)
+  (let ((product (printify/product product-id)))
+    (if (eq? product 'nan)
+        (list 'error \"Product fetch failed\")
+        (let ((inv (stock/on-hand product-id)))
+          (if (eq? inv 'nan)
+              (list 'error \"Inventory lookup failed\")
+              (if (= inv 0)
+                  ;; Early escape: no point fetching images
+                  (list 'id product-id 'status 'sold-out 'product product)
+                  ;; Inventory exists, fetch images
+                  (let ((images (printify/mockups product-id)))
+                    (list 'id product-id
+                          'status 'available
+                          'inventory inv
+                          'product product
+                          'images (if (eq? images 'nan) '() images)))))))))
+
+;; Run it
+(build-listing \"PROD-555\")
+```
+
+See the structure? We check inventory. If it's zero, we return immediately with `'sold-out` and never call `printify/mockups`. We saved a network call by escaping early. This is BACK — restraint in action. Do only the work you need.
+
+Let's go bigger: we're scoring a lead by checking several signals in sequence. Each signal is a verb call. If any signal is definitively disqualifying (say, a risk score above 90), we escape immediately and return \"rejected\" without checking the rest.
+
+```scheme
+;; Multi-signal lead scoring with early escape on disqualifying signals.
+
+(define (score-lead lead-id)
+  (let ((risk (risk/score lead-id)))
+    (if (eq? risk 'nan)
+        (list 'lead lead-id 'status 'error 'reason \"Risk check failed\")
+        (if (> risk 90)
+            ;; Early escape: risk too high
+            (list 'lead lead-id 'status 'rejected 'reason \"High risk\" 'risk risk)
+            ;; Risk OK, check sentiment
+            (let ((sentiment (sentiment/classify lead-id)))
+              (if (eq? sentiment 'nan)
+                  (list 'lead lead-id 'status 'error 'reason \"Sentiment check failed\")
+                  (if (eq? sentiment 'negative)
+                      ;; Early escape: sentiment disqualifying
+                      (list 'lead lead-id 'status 'rejected 'reason \"Negative sentiment\")
+                      ;; Sentiment OK, check engagement
+                      (let ((engagement (email/subscriber-engagement lead-id)))
+                        (if (eq? engagement 'nan)
+                            (list 'lead lead-id 'status 'error 'reason \"Engagement check failed\")
+                            (let ((score (+ (* risk -1) (* (if (eq? sentiment 'positive) 10 5) 1))))
+                              (list 'lead lead-id 'status 'qualified 'score score 'risk risk 'sentiment sentiment)))))))))))
+
+;; Run it
+(score-lead \"LEAD-7890\")
+```
+
+Each stage checks a signal. If a disqualifying condition is met, we escape and return the verdict. No wasted verb calls. This is control flow that *respects the cost* of each step.
+
+---
+
+## Cond Ladders with Verb Orchestration — Multi-Stage Decision Trees
+
+Now we combine everything: a `cond` ladder where each branch is a multi-verb pipeline, and we handle failure at every stage. This is the shape of real automation: \"depending on X, fetch Y and Z; if Y fails, do W instead; if Z fails, escalate.\"
+
+We'll classify an order and fulfill it differently depending on its type. Subscription orders go through one pipeline, one-time orders through another, and wholesale orders through a third. Each pipeline fetches different data and handles different failure modes.
+
+```scheme
+;; Order fulfillment router with multi-verb pipelines per order type.
+
+(define (fulfill-order order-id order-type)
+  (cond
+    ((eq? order-type 'subscription)
+     ;; Subscription: fetch customer, check next charge date, fetch product plan
+     (let ((customer (crm/read order-id)))
+       (if (eq? customer 'nan)
+           (list 'order order-id 'status 'failed 'reason \"Customer lookup failed\")
+           (let ((next-charge (subscribe/customer-read order-id)))
+             (if (eq? next-charge 'nan)
+                 (list 'order order-id 'status 'failed 'reason \"Subscription data unavailable\")
+                 (list 'order order-id
+                       'type 'subscription
+                       'customer customer
+                       'next-charge next-charge
+                       'status 'ready))))))
+    ((eq? order-type 'one-time)
+     ;; One-time: fetch product, check inventory, get shipping rate
+     (let ((product (shopify/product-read order-id)))
+       (if (eq? product 'nan)
+           (list 'order order-id 'status 'failed 'reason \"Product lookup failed\")
+           (let ((inv (stock/on-hand order-id)))
+             (if (or (eq? inv 'nan) (= inv 0))
+                 (list 'order order-id 'status 'backorder 'product product)
+                 (let ((rate (ship/rate order-id)))
+                   (if (eq? rate 'nan)
+                       (list 'order order-id 'status 'failed 'reason \"Shipping rate unavailable\")
+                       (list 'order order-id
+                             'type 'one-time
+                             'product product
+                             'inventory inv
+                             'shipping-rate rate
+                             'status 'ready))))))))
+    ((eq? order-type 'wholesale)
+     ;; Wholesale: fetch account terms, validate credit, check bulk inventory
+     (let ((terms (crm/read order-id)))
+       (if (eq? terms 'nan)
+           (list 'order order-id 'status 'failed 'reason \"Account terms unavailable\")
+           (let ((credit-ok (risk/score order-id)))
+             (if (or (eq? credit-ok 'nan) (> credit-ok 70))
+                 (list 'order order-id 'status 'held 'reason \"Credit review required\")
+                 (list 'order order-id
+                       'type 'wholesale
+                       'terms terms
+                       'credit-score credit-ok
+                       'status 'ready))))))
+    (else
+     (list 'order order-id 'status 'unknown 'type order-type))))
+
+;; Run it
+(fulfill-order \"ORD-4455\" 'subscription)
+```
+
+Each branch is a small program. We ladder through the order types with `cond`, and inside each branch we chain verbs together, checking for 'nan at every step. This is control flow at scale: decisions, orchestration, and honest failure handling all woven together.
+
+Let's go even deeper. We'll write a content-publication pipeline that decides what to do based on the content type (blog post, video, product listing), and each type has its own multi-stage workflow. Some stages might fail, and we handle each failure differently.
+
+```scheme
+;; Content publication router with type-specific multi-verb workflows.
+
+(define (publish-content content-id content-type)
+  (cond
+    ((eq? content-type 'blog-post)
+     ;; Blog: generate SEO metadata, check for duplicates, publish
+     (let ((seo (seo/gsc-query content-id)))
+       (if (eq? seo 'nan)
+           ;; SEO check failed, continue anyway with a warning
+           (let ((published (content/publish content-id)))
+             (if (eq? published 'nan)
+                 (list 'content content-id 'status 'failed 'reason \"Publish failed\")
+                 (list 'content content-id 'type 'blog-post 'status 'published 'seo-warning #t)))
+           ;; SEO OK, publish
+           (let ((published (content/publish content-id)))
+             (if (eq? published 'nan)
+                 (list 'content content-id 'status 'failed 'reason \"Publish failed\")
+                 (list 'content content-id 'type 'blog-post 'status 'published 'seo seo))))))
+    ((eq? content-type 'video)
+     ;; Video: upload to platform, generate captions, publish
+     (let ((uploaded (youtube/playlists-insert content-id)))
+       (if (eq? uploaded 'nan)
+           (list 'content content-id 'status 'failed 'reason \"Video upload failed\")
+           (let ((captions (youtube/captions-list content-id)))
+             ;; Captions optional, continue if they fail
+             (list 'content content-id
+                   'type 'video
+                   'status 'published
+                   'video-id uploaded
+                   'captions (if (eq? captions 'nan) 'none captions))))))
+    ((eq? content-type 'product-listing)
+     ;; Product: fetch images, validate inventory, publish to marketplace
+     (let ((images (printify/mockups content-id)))
+       (if (eq? images 'nan)
+           (list 'content content-id 'status 'failed 'reason \"Image fetch failed\")
+           (let ((inv (stock/on-hand content-id)))
+             (if (or (eq? inv 'nan) (= inv 0))
+                 (list 'content content-id 'status 'held 'reason \"No inventory\")
+                 (let ((published (printify/product-publish content-id)))
+                   (if (eq? published 'nan)
+                       (list 'content content-id 'status 'failed 'reason \"Marketplace publish failed\")
+                       (list 'content content-id
+                             'type 'product-listing
+                             'status 'published
+                             'images images
+                             'inventory inv))))))))
+    (else
+     (list 'content content-id 'status 'unsupported 'type content-type))))
+
+;; Run it
+(publish-content \"POST-123\" 'blog-post)
+```
+
+Each branch is a complete workflow. The `cond` is the top-level router, and each clause is a pipeline. We check for 'nan at every verb call, and we make different decisions depending on whether the failure is critical (stop) or tolerable (continue with a warning). This is mastery: control flow that adapts to reality.
+
+---
+
+## Recursive Retry with Backoff — When at First You Don't Succeed
+
+Sometimes a verb fails not because the data is bad, but because the service is busy. The right move is to *retry* — but not immediately. Wait a moment, then try again. If it fails again, wait longer. This is exponential backoff: double the wait time with each retry, up to some max.
+
+We'll write a function that wraps any verb call in retry logic. It takes the verb, the arguments, a max number of retries, and an initial wait time. It tries the call; if it returns 'nan, it waits and tries again.
+
+```scheme
+;; Retry wrapper with exponential backoff.
+;; Tries a verb call up to max-retries times, doubling wait-ms each time.
+
+(define (retry-with-backoff verb args max-retries wait-ms)
+  (define (attempt n wait)
+    (let ((result (apply verb args)))
+      (if (not (eq? result 'nan))
+          result  ; success, return it
+          (if (<= n 1)
+              (list 'escalate \"Max retries exceeded\" (list 'verb verb 'args args))
+              (begin
+                ;; Wait (simulate with a computation delay since we don't have sleep)
+                ;; In real usage, you'd use a system/sleep or similar
+                (let loop ((i 0))
+                  (if (< i wait) (loop (+ i 1)) 'ok))
+                (attempt (- n 1) (* wait 2)))))))  ; double the wait
+  (attempt max-retries wait-ms))
+
+;; Example: wrap a cortex/recall call with retry
+(define (resilient-recall key)
+  (retry-with-backoff cortex/recall (list key) 3 100))
+
+;; Run it
+(resilient-recall \"customer-profile-XYZ\")
+```
+
+The recursion happens in `attempt`. Each time it fails, it waits (we simulate the wait with a busy loop here; in real usage you'd call a sleep verb) and recurses with a decremented retry counter and doubled wait time. If it exhausts retries, it escalates. This is *resilient* control flow — we try hard before we give up.
+
+Now let's use it in a bigger program: a multi-stage pipeline where each stage is wrapped in retry logic. We're fetching a product, checking inventory, and getting a shipping rate. Each call is retried independently.
+
+```scheme
+;; Multi-stage pipeline where each verb call is retried independently.
+
+(define (retry-verb verb args)
+  ;; Simplified retry: try twice
+  (let ((result (apply verb args)))
+    (if (not (eq? result 'nan))
+        result
+        (let ((retry (apply verb args)))
+          (if (not (eq? retry 'nan))
+              retry
+              (list 'escalate \"Verb failed after retry\" (list 'verb verb 'args args)))))))
+
+(define (resilient-listing product-id)
+  (let ((product (retry-verb printify/product (list product-id))))
+    (if (and (pair? product) (eq? (car product) 'escalate))
+        product  ; escalate early
+        (let ((inv (retry-verb stock/on-hand (list product-id))))
+          (if (and (pair? inv) (eq? (car inv) 'escalate))
+              inv  ; escalate early
+              (let ((rate (retry-verb ship/rate (list product-id))))
+                (if (and (pair? rate) (eq? (car rate) 'escalate))
+                    rate  ; escalate early
+                    (list 'product product 'inventory inv 'shipping-rate rate 'status 'complete))))))))
+
+;; Run it
+(resilient-listing \"PROD-999\")
+```
+
+Each verb call is wrapped in `retry-verb`, which tries twice. If both fail, it escalates. We check for escalation at each stage and bail early if we hit one. This is *layered resilience* — retry at the verb level, early-escape at the pipeline level.
+
+---
+
+## Mutual Recursion with Accumulation — Ping-Pong with State
+
+We've seen mutual recursion, and we've seen tail recursion with accumulators. Now let's combine them: two functions that call each other, passing an accumulator along, building up a result as they go.
+
+We'll parse a simple expression tree. An expression is either a number, or `(op left right)` where `op` is `'add` or `'mul`. We'll have two functions: `eval-expr` evaluates an expression, `eval-list` evaluates a list of expressions. They call each other as they descend into nested structures, accumulating results.
+
+```scheme
+;; Mutually recursive evaluator for arithmetic expression trees.
+;; An expr is either a number or (op left right).
+
+(letrec ((eval-expr (lambda (expr)
+                      (if (number? expr)
+                          expr
+                          (let ((op (car expr))
+                                (left (cadr expr))
+                                (right (caddr expr)))
+                            (let ((l-val (eval-expr left))
+                                  (r-val (eval-expr right)))
+                              (case op
+                                ((add) (+ l-val r-val))
+                                ((mul) (* l-val r-val))
+                                (else 0)))))))
+         (eval-list (lambda (exprs)
+                      (if (null? exprs)
+                          '()
+                          (cons (eval-expr (car exprs))
+                                (eval-list (cdr exprs)))))))
+  (eval-list '((add 3 4) (mul 5 6) (add (mul 2 3) 10))))
+```
+
+`eval-expr` handles one expression, recursing into its left and right parts. `eval-list` handles a list of expressions, mapping `eval-expr` over them. The mutual recursion happens when `eval-expr` encounters a nested `(mul ...)` inside an `(add ...)` — it recurses into itself, but if we had a structure where lists could appear inside expressions, we'd call `eval-list` from `eval-expr` and vice versa.
+
+Now let's make it harder: a real-world example where we're processing a nested task graph. Tasks can have dependencies, and dependencies can have sub-dependencies. We need to resolve them all, and we need to accumulate a list of all task IDs in resolution order.
+
+```scheme
+;; Mutually recursive dependency resolver with accumulation.
+;; A task is (task id deps...) where each dep is also a task.
+
+(letrec ((resolve-task (lambda (t acc)
+                         ;; Resolve one task: add its ID to acc, then resolve its dependencies
+                         (if (not (and (pair? t) (eq? (car t) 'task)))
+                             acc  ; malformed, skip
+                             (let ((id (cadr t))
+                                   (deps (cddr t)))
+                               (let ((acc-with-id (cons id acc)))
+                                 (resolve-tasks deps acc-with-id)))))
+         (resolve-tasks (lambda (ts acc)
+                          ;; Resolve a list of tasks
+                          (if (null? ts)
+                              acc
+                              (let ((acc-after-first (resolve-task (car ts) acc)))
+                                (resolve-tasks (cdr ts) acc-after-first))))))
+  (reverse
+   (resolve-tasks
+    '((task \"build-site\"
+            (task \"compile-assets\")
+            (task \"bundle-js\"
+                  (task \"transpile\")
+                  (task \"minify\")))
+      (task \"deploy\"
+            (task \"test\")))
+    '())))
+```
+
+`resolve-task` adds a task's ID to the accumulator, then calls `resolve-tasks` on its dependencies. `resolve-tasks` walks a list, calling `resolve-task` on each. The accumulator threads through both functions, growing as we descend. The result is a flat list of task IDs in dependency-resolution order.
+
+This is mutual recursion *with state* — the accumulator is the state, and it flows through the recursive calls like a river. It's beautiful when you get the pattern right.
+
+---
+
+## Complex Cond Orchestration — Decision Trees with Real Work
+
+Now we put it all together: a `cond` ladder where each branch is a complex multi-verb orchestration, with nested `cond`s and recursive calls inside. This is the hardest shape in the chapter — control flow that feels like a choose-your-own-adventure book written in code.
+
+We'll write a customer support auto-responder. Depending on the message topic (detected by keywords), we route to different workflows. Each workflow fetches different data, checks different conditions, and might recurse into sub-workflows.
+
+```scheme
+;; Complex customer support router with nested workflows.
+
+(define (auto-respond message)
+  (let ((normalized (text/normalize message)))
+    (if (eq? normalized 'nan)
+        (list 'response \"I'm sorry, I couldn't process your message.\")
+        (cond
+          ;; CASE 1: Refund request
+          ((or (string-contains? normalized \"refund\")
+               (string-contains? normalized \"money back\"))
+           (let ((order-id (extract-order-id normalized)))
+             (if (not order-id)
+                 (list 'response \"Please provide your order number so I can help with a refund.\")
+                 (let ((order (shopify/orders order-id)))
+                   (if (eq? order 'nan)
+                       (list 'response \"I couldn't find that order. Please check the number and try again.\")
+                       (let ((eligible (returns/eligibility order-id)))
+                         (if (eq? eligible 'nan)
+                             (list 'response \"I'm having trouble checking refund eligibility. Please try again later.\")
+                             (cond
+                               ((assoc 'eligible eligible)
+                                (let ((approved (returns/approve order-id)))
+                                  (if (eq? approved 'nan)
+                                      (list 'response \"Refund approved, but processing failed. A human will follow up.\")
+                                      (list 'response \"Refund approved! You'll see it in 3-5 days.\"))))
+                               (else
+                                (list 'response \"This order isn't eligible for a refund. Here's why: \"
+                                      (cdr (assoc 'reason eligible))))))))))))
+          ;; CASE 2: Shipping inquiry
+          ((or (string-contains? normalized \"shipping\")
+               (string-contains? normalized \"delivery\")
+               (string-contains? normalized \"tracking\"))
+           (let ((order-id (extract-order-id normalized)))
+             (if (not order-id)
+                 (list 'response \"Please provide your order number so I can check shipping.\")
+                 (let ((tracking (ship/trackers-list order-id)))
+                   (if (eq? tracking 'nan)
+                       (list 'response \"I couldn't retrieve tracking info. Please try again later.\")
+                       (cond
+                         ((null? tracking)
+                          (list 'response \"Your order hasn't shipped yet. It should go out within 24 hours.\"))
+                         (else
+                          (let ((status (cdr (assoc 'status (car tracking)))))
+                            (case status
+                              ((in-transit)
+                               (list 'response \"Your package is on the way! Track it here: \" (cdr (assoc 'url (car tracking)))))
+                              ((delivered)
+                               (list 'response \"Your package was delivered. If you didn't receive it, let me know.\"))
+                              (else
+                               (list 'response \"Tracking info: \" status)))))))))))
+          ;; CASE 3: Product question
+          ((or (string-contains? normalized \"product\")
+               (string-contains? normalized \"item\")
+               (string-contains? normalized \"available\"))
+           (let ((product-id (extract-product-id normalized)))
+             (if (not product-id)
+                 (list 'response \"Which product are you asking about? Please provide a product name or ID.\")
+                 (let ((product (printify/product product-id)))
+                   (if (eq? product 'nan)
+                       (list 'response \"I couldn't find that product. Please check the ID.\")
+                       (let ((inv (stock/on-hand product-id)))
+                         (if (eq? inv 'nan)
+                             (list 'response \"Product found, but I can't check inventory right now.\")
+                             (if (> inv 0)
+                                 (list 'response \"Yes, we have \" inv \" in stock! Ready to ship.\")
+                                 (list 'response \"Sorry, that item is out of stock. Want me to notify you when it's back?\")))))))))
+          ;; DEFAULT: General inquiry
+          (else
+           (list 'response \"I'm here to help! For fastest service, mention 'refund,' 'shipping,' or 'product' and include your order number.\"))))))
+
+;; Helper to extract order ID from message (simplified pattern match)
+(define (extract-order-id msg)
+  ;; In real usage, regex or more sophisticated parsing
+  ;; Here we fake it — assume order ID is any token starting with \"ORD-\"
+  (if (string-contains? msg \"ORD-\")
+      \"ORD-12345\"  ; mock
+      #f))
+
+(define (extract-product-id msg)
+  (if (string-contains? msg \"PROD-\")
+      \"PROD-789\"  ; mock
+      #f))
+
+;; Run it
+(auto-respond \"I want a refund for order ORD-12345\")
+```
+
+This is a small program, but it's *dense*. The top-level `cond` routes by topic. Each branch is a sub-program: extract an ID, fetch data, check conditions, recurse into more `cond`s, handle 'nan at every step. It's a decision tree made of code, and every path leads to an honest response.
+
+This is control-flow mastery: you can hold a complex branching structure in your head, you know where each path leads, and you trust your guards and checks to keep it honest.
+
+---
+
+## Full-Pipeline Orchestration with Conditional Retry
+
+Let's close with the hardest example in the chapter. We'll build a complete product-publishing pipeline that fetches data from multiple sources, validates it, retries failures, and routes through different sub-workflows depending on what we find. This is every technique in the chapter working together.
+
+```scheme
+;; Full product-publishing pipeline with retry, validation, and conditional routing.
+
+(define (publish-product-pipeline product-id)
+  ;; Stage 1: Fetch product with retry
+  (let ((product (retry-fetch printify/product product-id 2)))
+    (if (and (pair? product) (eq? (car product) 'escalate))
+        product  ; failed, escalate
+        ;; Stage 2: Validate product data
+        (let ((valid (validate-product product)))
+          (if (not valid)
+              (list 'escalate \"Product validation failed\" product)
+              ;; Stage 3: Check inventory
+              (let ((inv (retry-fetch stock/on-hand product-id 2)))
+                (if (and (pair? inv) (eq? (car inv) 'escalate))
+                    inv  ; failed, escalate
+                    (cond
+                      ;; Route A: No inventory, create backorder workflow
+                      ((= inv 0)
+                       (let ((backorder (create-backorder product-id product)))
+                         (list 'status 'backorder 'product product 'backorder backorder)))
+                      ;; Route B: Low inventory, warn but continue
+                      ((< inv 5)
+                       (let ((published (retry-publish product-id 2)))
+                         (if (and (pair? published) (eq? (car published) 'escalate))
+                             published
+                             (list 'status 'published 'product product 'inventory inv 'warning \"Low stock\"))))
+                      ;; Route C: Normal inventory, full publish workflow
+                      (else
+                       (let ((images (retry-fetch printify/mockups product-id 2)))
+                         (if (and (pair? images) (eq? (car images) 'escalate))
+                             ;; Images failed, publish without them
+                             (let ((published (retry-publish product-id 2)))
+                               (list 'status 'published 'product product 'inventory inv 'images 'none))
+                             ;; Images OK, full publish
+                             (let ((published (retry-publish product-id 2)))
+                               (if (and (pair? published) (eq? (car published) 'escalate))
+                                   published
+                                   (list 'status 'published 'product product 'inventory inv 'images images))))))))))))))
+
+;; Helper: retry a fetch verb twice
+(define (retry-fetch verb arg retries)
+  (let ((result (verb arg)))
+    (if (not (eq? result 'nan))
+        result
+        (if (<= retries 1)
+            (list 'escalate \"Fetch failed after retries\" (list 'verb verb 'arg arg))
+            (retry-fetch verb arg (- retries 1))))))
+
+;; Helper: retry a publish action
+(define (retry-publish product-id retries)
+  (let ((result (printify/product-publish product-id)))
+    (if (not (eq? result 'nan))
+        result
+        (if (<= retries 1)
+            (list 'escalate \"Publish failed after retries\" product-id)
+            (retry-publish product-id (- retries 1))))))
+
+;; Helper: validate product shape (simplified)
+(define (validate-product product)
+  (and (pair? product)
+       (assoc 'id product)
+       (assoc 'title product)))
+
+;; Helper: create a backorder record
+(define (create-backorder product-id product)
+  ;; In real usage, write to a DB or queue
+  (list 'backorder-id (string-append \"BO-\" product-id) 'product product 'created (time/now)))
+
+;; Run it
+(publish-product-pipeline \"PROD-XYZ\")
+```
+
+Let's walk through it:
+1. Fetch the product with retry. If it fails after retries, escalate immediately.
+2. Validate the product shape. If invalid, escalate.
+3. Fetch inventory with retry. If it fails, escalate.
+4. **Conditional routing**: if inventory is zero, create a backorder workflow and return. If inventory is low, publish with a warning. If inventory is normal, proceed to fetch images.
+5. Fetch images with retry. If it fails, publish without images (a tolerable failure). If it succeeds, publish with images.
+6. Every publish action is retried. If it fails after retries, escalate.
+
+This is the full symphony: retry logic, honest-null checks, early escapes, conditional routing, multi-verb orchestration, and clean escalation. It's hard, but every piece is a technique we've already drilled. You can read this code and understand the flow because the structure is honest.
+
+---
+
+## Challenges
+
+You've seen control flow at every level: simple ladders, guarded recursion, mutual recursion, early escape, retry logic, and complex orchestration. Now it's your turn to compose. These challenges ask you to combine the techniques in new ways. Each one is at or slightly above the hardest examples in the chapter.
+
+1. **Recursive Validator with Multi-Stage Enrichment**  
+   Write a program that takes an incomplete customer record and recursively enriches it by calling different verbs depending on which fields are missing. If `email` is missing, call `crm/contact-search`. If `phone` is missing, call `crm/read`. If `address` is missing, call `geo/geocode-address` using the `name` field. After each enrichment, re-validate the record. Stop when the record is complete or after 5 tries. Return the final record and a status.
+
+2. **Mutually Recursive Order Processor**  
+   Write two functions, `process-order` and `process-line-items`, that call each other to validate and enrich an order. An order has a customer ID and a list of line items. `process-order` fetches the customer, then calls `process-line-items` on the items. `process-line-items` fetches product data and inventory for each item, and if an item is out of stock, it calls `process-order` with a modified order (switching to a substitute product). Use `letrec` and guard against infinite recursion with a depth counter.
+
+3. **Conditional Retry with Escalation Ladder**  
+   Write a program that attempts to publish a listing to three marketplaces in sequence: Etsy, eBay, and Shopify. For each marketplace, try the publish verb twice (retry once on failure). If both tries fail, try the next marketplace. If all three fail, escalate with a detailed report of all failures. If any succeeds, return success immediately (early escape). Use a `cond` to route between marketplaces and a helper function for retry.
+
+4. **Complex Workflow Router with Nested Cond and Recursion**  
+   Write a support-ticket router that classifies a ticket by keywords and routes it through different workflows. Keywords: \"billing\" → fetch payment history, check for disputes, escalate if dispute exists. \"technical\" → fetch product logs, check for known issues, escalate if unrecognized. \"shipping\" → fetch tracking, if delivered offer refund eligibility check, else offer re-ship. Each workflow is a nested `cond` with multiple verb calls. If any verb fails, return a partial result with an error flag but continue where possible.
+
+5. **Tail-Recursive Aggregator with Early Escape**  
+   Write a tail-recursive function that aggregates data from a list of IDs by calling a fetch verb on each. Accumulate results in a list. If any fetch returns a value below a threshold (say, inventory < 10), stop immediately (early escape) and return the accumulator plus a warning. If all fetches succeed and are above the threshold, return the full accumulator. Use named-let for the recursion.
+
+6. **Multi-Stage Pipeline with Exponential Backoff and Mutual Recursion**  
+   Write a pipeline that fetches a product, validates it, enriches it (by fetching related products), re-validates, and publishes. Each stage can fail and should be retried with exponential backoff (wait 100ms, then 200ms, then 400ms). If any stage fails after max retries, escalate. Use mutual recursion between `validate` and `enrich` (validate might find missing data and call enrich; enrich fetches and calls validate again). Use a retry wrapper for each verb call.
+
+---
+
+You've reached the end of Control-Flow Mastery. You can now write programs that *route truth* through complex decision trees, retry when the world is flaky, recurse when functions need to call each other, and escape early when you know enough. These are the bones of real automation — the structures that let the runtime handle a messy world with grace and honesty.
+
+The next chapter will teach *data transformation mastery* — map, filter, fold, and higher-order pipelines that reshape information until it fits the need. But you've already learned the hardest part: how to make a program *decide well*. Everything else is just composition.
+")

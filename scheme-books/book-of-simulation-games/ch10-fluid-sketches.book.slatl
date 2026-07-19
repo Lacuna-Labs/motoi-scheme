@@ -1,0 +1,273 @@
+;; ch10-fluid-sketches.book.slatl
+;; Book of Simulation Games — Chapter 10: Fluid Sketches
+;; Authored 2026-07-16 by simulation-games-engineer-lane.
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Simulation Games"
+  :chapter-number      10
+  :title               "Fluid Sketches"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "simulation-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + physics-simulation-emergent"
+  :book-version        "1.0.0"
+  :provenance          ((:authored-by "Engineer") (:date "2026-07-16"))
+  :prose
+"Real fluid simulation is hard. Navier-Stokes has been studied for
+two hundred years and there is a million-dollar prize for a general
+existence-and-smoothness proof. Real engineering-grade fluid solvers
+run on supercomputer clusters and take days to compute a second of
+turbulent flow.
+
+Fake fluid, which is what we want for games and for the shop, is
+surprisingly easy. Take 500 particles. Give each a strong short-range
+repulsion — that's surface tension. Give the whole cloud gravity —
+that's weight. Enclose it in a container. Pour, splash, settle. It
+looks like water. It IS a valid fluid approximation called Smoothed
+Particle Hydrodynamics, or SPH, in its simplest incarnation. Real
+SPH has better kernels and pressure formulations, but the gestalt of
+the fluid is already there in the simple version.
+
+This chapter builds a poured fluid, adds a container with walls, adds
+a splash, adds a paddle to swirl it. Then we visualize the flow with
+velocity vectors. Finally we upgrade the particle rendering to a
+smooth surface using a marching-squares approximation.
+
+---
+
+## 10.1 Five hundred drops in a bowl
+
+```scheme
+(define (bowl)
+  (world/reset!)
+  (world/gravity! 0 0.4)
+  ;; Bowl walls
+  (world/wall! 100 380 380 380)      ;; floor
+  (world/wall! 100 200 100 380)      ;; left wall (angled outward for bowl)
+  (world/wall! 380 200 380 380)      ;; right wall
+  ;; Spawn a column of fluid at the top
+  (let loop ((i 0))
+    (when (< i 500)
+      (let ((p (world/spawn 'fluid
+                 (+ 200 (* 80 (random)))
+                 (+  20 (* 60 (random))))))
+        (entity/mass!    p 0.2)
+        (entity/drag!    p 0.02)
+        (ai/separate     p 'fluid 8 3.0)   ;; strong short-range repulsion
+        (ai/cohere       p 'fluid 20 0.3)) ;; weak medium-range cohesion
+      (loop (+ i 1)))))
+
+(bowl)
+(on-frame
+  (lambda (t)
+    (world/step)
+    (world/each 'fluid
+      (lambda (p)
+        (let ((pos (entity/pos p)))
+          (paint-circle (car pos) (cdr pos) 2 blue))))))
+```
+
+Five hundred drops fall. They pile up in the bowl. The pile has a
+level surface because gravity flattens the top, and it has a curved
+container-hugging shape at the bottom because the walls constrain it.
+Splash a paddle in and it swirls. Poke it with your mouse and it
+displaces.
+
+That's fluid. Not a metaphor for fluid; a real fluid, to the
+approximation SPH allows.
+
+## 10.2 Pour and drain
+
+Add a spout that spawns fluid at a rate and a drain that despawns
+fluid at the bottom:
+
+```scheme
+(define spout-rate 3)
+
+(on-frame
+  (lambda (t)
+    (world/step)
+    ;; Spout: N new particles at (200, 20) every frame
+    (let loop ((i 0))
+      (when (< i spout-rate)
+        (let ((p (world/spawn 'fluid
+                   (+ 200 (- (* 8 (random)) 4))
+                   (+  20 (* 6 (random))))))
+          (entity/mass!    p 0.2)
+          (entity/drag!    p 0.02)
+          (ai/separate     p 'fluid 8 3.0)
+          (ai/cohere       p 'fluid 20 0.3)
+          (entity/set-vel! p 0 1))
+        (loop (+ i 1))))
+    ;; Drain: despawn particles at the very bottom
+    (world/each 'fluid
+      (lambda (p)
+        (when (> (entity/y p) 460)
+          (entity/despawn! p))))
+    (world/each 'fluid
+      (lambda (p)
+        (let ((pos (entity/pos p)))
+          (paint-circle (car pos) (cdr pos) 2 blue))))))
+```
+
+Spout in, drain out. Adjust `spout-rate` and see the fluid level rise
+or fall. A slow spout with no drain fills the bowl. A fast spout with
+a fast drain reaches steady state at some intermediate level. That
+steady state is what you'd get analytically from Bernoulli's equation
+— but here you're seeing it emerge.
+
+## 10.3 Visualize velocity
+
+Draw an arrow at each particle showing its velocity. Or draw a
+sparser overlay: sample the velocity field at grid points and paint
+arrows.
+
+```scheme
+(define (paint-velocity-field)
+  (plot/vector-field
+    (lambda (x y)
+      (let ((near (world/near 'fluid x y 30)))
+        (if (null? near)
+            (vec/make 0 0)
+            (let* ((sum (reduce
+                          (lambda (acc p)
+                            (vec/+ acc (entity/vel-vec p)))
+                          (vec/make 0 0)
+                          near)))
+              (vec/scale sum (/ 1.0 (length near)))))))
+    :region '(100 100 380 380)
+    :spacing 20))
+```
+
+The velocity field shows swirls, downdrafts under the spout, upward
+displacement flows around the paddle, back-eddies near walls. Real
+fluid dynamics visible as arrows.
+
+## 10.4 A paddle you can swirl the fluid with
+
+Make an entity that follows the mouse. Its motion pushes fluid
+particles out of the way via the separation force.
+
+```scheme
+(define paddle #f)
+
+(define (setup-paddle)
+  (set! paddle (world/spawn 'paddle 0 0))
+  (entity/mass! paddle 100)
+  (entity/pin!  paddle)
+  (ai/separate  paddle 'fluid 20 5.0))     ;; pushes fluid away
+
+(on-frame
+  (lambda (t)
+    (let ((m (input/mouse-pos)))
+      (entity/set-pos! paddle (car m) (cdr m)))
+    (world/step)
+    (paint-circle (entity/x paddle) (entity/y paddle) 15 gray)))
+```
+
+Drag the paddle. Watch the fluid flow around it. Swirl in a circle and
+you set up a vortex. The fluid follows for a moment after you stop —
+that's the inertia of the particles carrying the flow.
+
+## 10.5 Smooth surface via marching squares
+
+Individual particles are visible as dots. To get a smooth surface, we
+overlay a density grid: at each grid cell, count particles nearby; if
+count > threshold, cell is 'fluid,' else 'air.' Then draw the boundary
+of the fluid region as a smooth line using marching squares.
+
+```scheme
+(define (paint-fluid-surface)
+  (let ((density (grid-init 40 30)))
+    ;; Fill density from particle positions
+    (world/each 'fluid
+      (lambda (p)
+        (let ((cx (quotient (entity/x p) 12))
+              (cy (quotient (entity/y p) 12)))
+          (grid-inc! density cx cy 1))))
+    ;; Marching squares: draw contour where density crosses threshold
+    (grid/marching-squares density 3   ;; threshold: 3+ particles = fluid
+      :color blue
+      :fill? #t)))
+```
+
+Now the fluid is a shape, not a cloud of dots. It looks like water in
+a glass. This is one of the cheapest ways to make particle sims look
+like solids — marching squares in 2D or marching cubes in 3D.
+
+Appendix J case-studies show this technique applied to five other
+particle sims: lava (dense, slow), gel (very dense, high separation),
+smoke (thin, wispy, no marching), sand (medium, low separation).
+
+---
+
+## 10.6 The four routing patterns in fluid
+
+**Composition.** The fluid is composed: gravity + separation +
+cohesion + container walls + spout + drain + paddle. Each piece is
+a small verb; the fluid IS the composition.
+
+**Orchestration.** The demo orchestrates: bowl → pour → observe →
+drain → repeat. Or: fill → freeze frame → measure highest point →
+compare to Bernoulli prediction → unfreeze.
+
+**In-routing.** Mouse events route to paddle updates. When a
+particle exits the bowl (below the drain), that event routes to
+despawn. When too many particles pack in one cell, an over-density
+event could route to a visualization highlight.
+
+**Routing.** Particles route to the framebuffer, either as dots or as
+the marching-squares boundary. Velocity field routes to a vector-arrow
+overlay. Steady-state fill level routes to a plot over time. the runtime
+could route 'this spout rate + this drain area = steady level 240px'
+to Cortex — later, if asked about the same configuration, she
+already has the answer.
+
+---
+
+## 10.7 Common desktop tasks
+
+An operator running a bathroom fixtures shop asked: 'if we have a
+sink with a 1-inch drain and a faucet flowing at 2 GPM, will the sink
+fill or drain?' The particle-fluid sketch approximates this: scale
+particles/frame to GPM, drain cell radius to inches. The steady state
+matches (approximately) the analytic answer. Not
+plumbing-code-accurate, but useful for a shop's 'will this setup
+work' question.
+
+## 10.8 Try this
+
+1. Change gravity to zero. What does the fluid do?
+2. Set separation to zero. Do particles stack into a single line?
+3. Give particles color based on depth (deep = darker blue).
+4. Add a temperature: hot particles rise (negative gravity), cold
+   sink. Model convection.
+5. Two fluids: `'water` (blue) and `'oil` (yellow). Give oil lower
+   density (negative gravity relative to water). Watch them separate.
+
+## 10.9 Pitfalls
+
+**Instability at boundaries.** Fluid particles pressing on a wall can
+oscillate against it. `world/wall!` with slight damping in the
+collision helps.
+
+**Uneven density.** SPH particles need roughly uniform spacing at
+rest. If they clump, increase separation or reduce spawn rate.
+
+**Marching artifacts.** Marching squares looks lumpy at low
+resolution. Increase grid density, or blur the density field before
+contouring.
+
+**Cost.** N-body separation is O(n^2). For 1000+ particles use
+`world/spatial-index` for neighbor queries.
+
+---
+
+Next: the RLC circuit and the mass-spring-damper. Same math, two
+costumes. Damping demystified.")

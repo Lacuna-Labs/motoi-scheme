@@ -1,0 +1,654 @@
+(engineering-doc
+  :name "Composer 2 — Code + Distribution: how Motoi carts are written, shared, forked, and remembered"
+  :version "2.0-design"
+  :date "2026-07-17"
+  :audience "Motoi runtime + Curator team; cart-format spec authors; Cortex integrators; Book of Modules + Book of Distribution authors"
+  :dialect "motoi"
+  :section "engineering/composer-family"
+  :status "design-draft-for-alfred-review"
+  :training-eligible #f
+  :confidentiality "public"
+
+  :provenance
+    (:asked-by "Alfred"
+     :ask "Give me a good design from Lacuna that solves the issues of PICO-8 and TIC-80 — for the CODE + DISTRIBUTION side (token limits, monofile carts, sharing, versioning, communities)."
+     :date "2026-07-17"
+     :sibling-doc "COMPOSER-1.0.ENG.slat (the widget layer)"
+     :research-basis
+       ("Lexaloffle BBS thread 28177 — Why token count favors ugly code so much"
+        "Lexaloffle BBS thread 3205 — A compressed size limit rant"
+        "Lexaloffle BBS thread 30717 — are limitations too strict?"
+        "Lexaloffle BBS thread 3335 — Version Control (binary cart complaint)"
+        "Lexaloffle BBS thread 43341 — Dev tools"
+        "Lexaloffle BBS thread 42367 — Debugging tutorial: PRINTH / PQ"
+        "Lexaloffle BBS thread 2436 — debug command?"
+        "Lexaloffle BBS thread 47278 — PICO-8 Education Edition for Web"
+        "Lexaloffle BBS thread 2029 — Android Support"
+        "itch.io TIC-80 thread 124930 — Questions regarding code limit"
+        "itch.io TIC-80 thread 1004455 — PRO code limit confusion"
+        "GitHub nesbox/TIC-80 issue 591 — Token limit?"
+        "GitHub nesbox/TIC-80 issue 2059 — Enforce CPU and RAM limits"
+        "GitHub nesbox/TIC-80 discussion 1831 — How can I edit/delete my carts on tic80.com"
+        "P8PNGFileFormat wiki (pico-8.fandom.com)"
+        "picotool README (github.com/dansanderson/picotool)"))
+
+  :sibling-context
+"# What sits alongside this doc
+
+  COMPOSER-1.0.ENG.slat — the widget layer (sliders, piano-rolls, sprite-grids). Round-trip UI ↔ Scheme.
+  This doc (COMPOSER-2)   — the code and distribution layer.  Round-trip cart ↔ world.
+
+  Composer-1 answered: 'how does a widget compose Scheme?'
+  Composer-2 answers:  'how does that Scheme get written, split into modules, debugged, shipped, forked, and found again?'
+
+  Same doctrine as Composer-1: text on disk is Scheme, no binary blobs, no hidden state, every operation reversible."
+
+  :prior-art-diagnosis
+"# Where PICO-8 and TIC-80 break
+
+The prior art is generous, honest, and well-loved. Its ceilings are visible in the forums; kids and adults hit them and either dig out or leave. The complaints are consistent across a decade of BBS threads.
+
+The pattern: constraint framed as pedagogy sometimes IS pedagogy, sometimes is a wall the kid can't see over. This design keeps the toy-first feel of a fantasy console AND opens the ceilings that made people give up."
+
+  :diagnostic-table
+"# 12 code + distribution problems and Motoi's fix
+
+Row shape: PROBLEM | prior art | quoted pain | Motoi's fix
+
+01 | Token limit forces ugly code
+     PICO-8 caps at 8192 tokens; forum quote: 'I feel like I am fighting a war of having clean code vs having less tokens' (BBS 28177). Object-oriented style burns 450+ tokens on the word 'self'.
+     Motoi: NO token cap. Cart size is bounded only by the runtime's fuel budget at execution time. The runtime bills VERB CALLS (metering already lives at dispatch), not source tokens. A kid writes clear code and long comments without penalty.
+
+02 | Binary cart blob resists version control
+     PICO-8 .p8.png is a PNG-encoded blob. BBS 3335: 'the output is a binary (which technically can be checked in but would be difficult to diff).' The .p8 text format helps but graphics/sound are hex blobs mid-file.
+     Motoi: .slat is Scheme s-expressions all the way down. Sprites are (sprite/from-grid '((0 0 8 8) ...)). Music is (sequence (note ...) ...). git diff shows real edits. Two people editing a cart merge like source code, not like fighting over a JPEG.
+
+03 | Can't split code across files
+     PICO-8 added #include as a workaround; multi-cart games load other carts via reload. TIC-80 offers 8 memory banks in PRO. Both are workarounds around single-file-first design.
+     Motoi: (import (motoi cart snake ai)) is the ordinary case. A cart IS a module; a module IS a cart. No difference. See Module/Import Model below.
+
+04 | Debugger absent; printh is the whole story
+     BBS 42367 documents printh as the debugger. BBS 2436: developers begging for a step-through since 2015. Every printh call must be manually wrapped: printh('xy '..tostr(x)..' '..tostr(y)), and crashes on nil.
+     Motoi: (inspect x) prints any value with structure; (,inspect) in the REPL peeks the current cart. (trace verb) wraps a verb to log calls. (break-on 'draw) drops into REPL when draw runs. See Debug + Inspect verbs below.
+
+05 | Debugging fights the token limit
+     BBS quote: 'someone with a nearly-finished app that's utilizing most of the allowed tokens is going to be absolutely unable to use any form of dev tool, debugging library, or even just print() debugging.'
+     Motoi: debug verbs live in a separate module (motoi dev debug) that isn't shipped with the cart. Adding trace calls doesn't grow the cart because they are stripped by the publish step or kept behind (when-dev ...).
+
+06 | No package manager; sharing library code is copy-paste
+     PICO-8 explicitly refuses a library ecosystem. Every kid re-implements collision detection.
+     Motoi: (require 'jamie/tiny-physics :version '~1.0) fetches a module by author + name from the shared registry (Curator's cart directory). Registry is content-addressed, versioned, no name-squatting. See Module/Import Model.
+
+07 | Sharing = upload cart to BBS; discovery = scroll Splore
+     Splore is one big feed. BBS 47278 shows Education Edition trying to gate content because Splore is unfiltered. Ranking is opaque. Cached downloads have data-loss bugs (BBS Splore issues).
+     Motoi: cart lives at a stable URL like motoi.cart/alfred/snake@1.2.0. Discovery is Cortex-shaped per-kid (see Cortex-shaped Distribution). No global feed to compete for.
+
+08 | Remix = save-as; provenance is a metadata field nobody checks
+     TIC-80's 'Update cart' button and .tic download support remix, but attribution is a courtesy. Fork trees are invisible on the site.
+     Motoi: (fork motoi.cart/alfred/snake) creates a new cart whose .slat header contains (:parent alfred/snake@1.2.0 :diverged-at 2026-07-17). Curator draws the tree. Credit is a data field, not a caption.
+
+09 | Cross-cart asset borrowing = manual copy of bytes
+     A kid who loves Alfred's sprite can only recreate it or download the cart and copy the graphics section by hand.
+     Motoi: (import-asset 'alfred/snake :sprite 'hero) pulls the specific sprite record into the current cart, with a provenance stamp. See Cross-Cart References.
+
+10 | Mobile authoring is thin
+     PICO-8 iOS/Android was 'planned after 1.0' for a decade. iPad web version's file upload dialog doesn't show (BBS 2029, 47278). Kids without a laptop can't ship.
+     Motoi: Curator runs on iPad (already a first-class surface). The composer widgets from Composer-1 are touch-native. Publishing a cart = a button, no file picker required.
+
+11 | Publishing has friction
+     TIC-80 GitHub discussion 1831: users can't edit or delete their own cart page. PICO-8 requires terminal use + PNG export.
+     Motoi: (publish!) on the current cart is the whole gesture. Update = (publish! :bump 'patch). Unpublish = (unpublish!). All from inside the cart's REPL.
+
+12 | Distribution loses the person
+     PICO-8 and TIC-80 know nothing about you: what you liked, what you almost made, what you gave up on. Discovery starts from zero every visit.
+     Motoi: Cortex remembers what you played, remixed, opened-and-closed, abandoned mid-build. Discovery becomes 'here is another cart the shape of what you were trying'. See Cortex-shaped Distribution."
+
+  :cart-format-doctrine
+"# Why .slat, what it costs, what it enables
+
+A Motoi cart is a single .slat file, or a directory of .slat files with a manifest. Both are Scheme forms, top to bottom, no binary sections. Files a kid can read with `less`.
+
+## The whole file
+
+  (cart
+    :name          \"snake-classic\"
+    :author        \"alfred\"
+    :version       \"1.2.0\"
+    :parent        (:from motoi.cart/nesbox/snake@0.9.0 :diverged-at 2026-07-14)
+    :verbs-used    (display for-each range sprite/blit input/read)
+    :audience      :kid
+    :one-line      \"Snake, but the food fights back.\")
+
+  (import (motoi core))
+  (import (motoi framebuffer))
+  (import (motoi input))
+  (import (jamie tiny-physics :version ~1.0))
+
+  (define WIDTH 160)
+  (define HEIGHT 128)
+
+  (define hero-sprite
+    (sprite/from-grid '((0 0 0 8 8 0 0 0)
+                        (0 0 8 8 8 8 0 0)
+                        (0 8 8 8 8 8 8 0)
+                        ...)))
+
+  (define theme-song
+    (sequence
+      (note :pitch 'C4 :vel 0.8 :at 0)
+      (note :pitch 'E4 :vel 0.7 :at 4)
+      ...))
+
+  (define (draw)
+    (framebuffer/clear 'black)
+    (sprite/blit hero-sprite hero-x hero-y)
+    ...)
+
+  (composer/canvas (:bind '(theme-song))
+    (composer/piano-roll :bind '(theme-song) :range '(C3 . C6) :steps 32))
+
+Read it end to end. Sprites are lists of palette indices. Music is a sequence of note records. The composer declaration that produced the piano-roll UI is preserved so reopening the cart in Curator re-renders the widgets. Every artifact round-trips.
+
+## What it costs
+
+  - Files are larger than a binary blob. A 16×16 sprite is ~50 tokens of list versus 128 bytes of PNG data. Kids' carts stay small; big art will not. We pay for readability with disk.
+  - Loading is a full parse, not a memcpy. The reader is already fast enough (see src/reader.js AST cache).
+  - Pretty-printers become load-bearing — a huge (sprite/from-grid ...) needs a canonical multiline layout or a git diff is a wall of numbers. `(cart/format cart)` is a required verb before publish.
+
+## What it enables
+
+  - git diff between two versions shows exactly which cells of a sprite changed.
+  - Two authors merge cart edits with a normal three-way merge.
+  - The cart IS its documentation — no separate 'view source' step; loading the cart shows you the source.
+  - A cart can be authored in a text editor, in Curator, in the REPL, on a phone terminal, or piped from another program. All produce the same file shape.
+  - Assets are addressable: (cart/asset 'hero-sprite) returns the sprite form; you can copy it, fork it, print it.
+  - Sub-parts are quotable. A cart can share its sprite bank by publishing it as its own cart with only sprite records and no game loop.
+
+## Sub-format: multi-file cart directory
+
+For carts larger than one screen or authored by several people, a cart can be a DIRECTORY with a manifest:
+
+  snake-classic/
+    cart.slat            ;; the (cart :name ...) header + imports
+    logic.slat           ;; game logic
+    sprites.slat         ;; asset records
+    song.slat            ;; music
+    composer.slat        ;; the composer canvas declarations
+
+  (cart :name \"snake-classic\" :multi-file #t :files (\"logic\" \"sprites\" \"song\" \"composer\"))
+
+Loading treats the directory as one logical cart. Publish tars it into a single .slat.tgz for transport, but the on-disk form stays split. Kids who outgrow single-file carts are not forced back to it."
+
+  :module-import-model
+"# How a kid asks for someone else's verb
+
+The lesson from npm and CPAN: package managers reward volume, tolerate name-squatting, punish beginners with dependency resolution error messages. The lesson from PICO-8: refusing a package ecosystem means every kid reimplements collision detection.
+
+Motoi splits the difference by keeping ONE registry, no scopes, and namespaced-by-author from the first day.
+
+## The four kinds of module
+
+  1. CORE — (motoi core), (motoi framebuffer), (motoi input). Ships with the runtime. Never versioned separately.
+  2. STANDARD — (motoi lib physics), (motoi lib pathfind). Ships alongside the runtime, versioned WITH the runtime. Curated by the Motoi maintainers.
+  3. AUTHORED — (jamie tiny-physics), (alfred snake-utils). Anybody can publish. Author is a first-class part of the module name.
+  4. CART-LOCAL — a file in a multi-file cart directory. Not published separately; only visible inside that cart.
+
+## Import forms
+
+  (import (motoi framebuffer))                           ;; core, always latest
+  (import (motoi lib physics :version 3.2))              ;; standard, pinned
+  (import (jamie tiny-physics :version ~1.0))            ;; authored, semver caret
+  (import (alfred snake-utils :as utils))                ;; authored, aliased
+  (import ./sprites)                                     ;; cart-local, relative
+
+Every non-core import resolves to a content hash. A cart's .slat header records the resolved hash of each import (in the :verbs-used or a :resolved field) so a reader in 2030 can fetch the exact bytes a 2026 cart used.
+
+## What we borrowed and what we did not
+
+Borrowed from R6RS: hierarchical library names.
+Borrowed from Deno: import by URL / content-hash pinning at the leaf.
+Borrowed from Elm: one registry, no scopes, semver enforced by the registry.
+REFUSED from npm: nested node_modules, dependency-of-dependency versions. Motoi carts are FLAT — every import resolves to exactly one version across the whole cart. Conflict during resolve is a publish-time error the AUTHOR sees, never a kid running someone else's cart.
+
+## Kid-facing surface
+
+A kid does not learn the phrase 'semantic versioning'. In Curator, requiring someone else's verb looks like:
+
+  press 'i' → 'import a friend's cart'
+  type 'jamie' → autocompletes to their carts
+  select 'tiny-physics'
+  → (import (jamie tiny-physics)) is prepended to the cart
+
+The version pins itself. If jamie ships a breaking change, the kid's cart still uses the pinned old version until the kid explicitly upgrades. Nothing breaks silently.
+
+## The trust model
+
+Every authored module is signed by the author's Curator key. Verbs from an unsigned module refuse to run in the paid tier. Kids' free carts run unsigned code but Curator warns once, in kid language: 'this cart uses code by somebody Curator hasn't checked. Play anyway?' That warning is a data field, not a policy — Alfred edits the copy."
+
+  :composer-code-interplay
+"# How composer output coexists with kid-written code
+
+A composer canvas emits a form. A kid writes lambdas around that form. The two must not fight.
+
+The rule: every composer emission is a NAMED TOP-LEVEL define that the kid can call by name. The composer never writes into a kid's function; it writes to a slot, and the kid's function references the slot.
+
+  ;; composer wrote this
+  (define theme-song
+    (sequence (note :pitch 'C4 :vel 0.8 :at 0) ...))
+
+  ;; kid wrote this
+  (define (on-start)
+    (play theme-song))
+
+  ;; composer canvas declaration — describes the widget that produced theme-song
+  (composer/canvas (:bind '(theme-song))
+    (composer/piano-roll :bind '(theme-song) :range '(C3 . C6) :steps 32))
+
+Editing the piano-roll in Curator mutates (theme-song) — not (on-start). The kid's function keeps working. The kid can rename (theme-song) to (boss-theme) by hand; the composer's :bind path updates automatically when the file is reloaded (path is symbolic, not indexed).
+
+If a kid deletes a composer-managed form by hand, the canvas rebuilds it as blank on next open — nothing is lost, the widget just shows an empty piano roll.
+
+If a kid writes code that computes what would normally be composer-managed data:
+
+  (define theme-song (procedurally-generate-song seed))
+
+then opening the piano-roll in Curator shows the CURRENT VALUE of theme-song, greyed-out with a badge 'computed elsewhere'. Editing is disabled until the kid replaces (procedurally-generate-song seed) with a plain literal. The composer never overwrites a kid's expression."
+
+  :debug-inspect-verbs
+"# What the kid sees when things break
+
+An 11-year-old does not want to configure a debugger. They want to know why the hero is off-screen. The surface should read as a set of nouns, not as a debugger UI.
+
+## Core introspection verbs
+
+  (inspect x)
+    → pretty-prints x with structure, colours, and depth-limited nesting.
+    → in Curator, opens a tree view the kid can click.
+
+  (,inspect)     ;; REPL directive
+    → shows the currently-loaded cart's top-level bindings.
+
+  (,inspect 'hero-x)
+    → shows the value of hero-x plus the last three places it was mutated.
+
+  (,trace 'draw)
+    → wraps (draw) so every call logs its arguments and return value to a scrollback panel.
+
+  (,untrace 'draw)
+    → removes the wrapper. No cart bytes changed.
+
+  (,break-on 'draw)
+    → next time (draw) is called, execution pauses and drops into the REPL with all locals in scope. Continue with (,continue).
+
+  (,step)
+    → after break, run one form at a time.
+
+  (,where)
+    → prints a source-position stack. (Motoi reader tags list forms with line/col; the interp threads them through — see src/reader.js POS map.)
+
+  (,history)
+    → last 100 REPL forms; arrows browse.
+
+  (,replay 'draw)
+    → re-runs (draw) from a saved snapshot; useful for 'that bug happened, let me see it again without moving the mouse'.
+
+  (,fuel-report)
+    → shows per-verb execution counts + fuel spent last frame; the kid-visible profiler.
+
+## Kid-visible error shape
+
+An unbound symbol error today reads 'unbound symbol: hero-y'. Motoi's error shape adds:
+
+  unbound symbol: hero-y
+    referenced from  (draw)  at cart.slat:34:8
+    similar bindings:  hero-x   hero-hp   enemy-y
+    did you forget to (define hero-y ...) at the top?
+
+Similar-bindings suggestion runs a small Levenshtein against the environment. The 'did you forget' hint is triggered when a similar name exists AND was recently seen at the REPL. Both are pure data — no LLM in the loop. Sakura CAN offer a fuller explanation if invited, but the base error is legible without her.
+
+## What debug verbs are NOT in the cart
+
+Debug verbs live in (motoi dev debug). Cart authors import them during development:
+
+  (import (motoi dev debug))  ;; only in dev
+
+(publish!) strips this import by default and warns if any (,trace) or (,break-on) calls remain in top-level code. A kid can (publish! :keep-debug #t) to ship a cart with debug verbs still callable, useful for teaching."
+
+  :publishing-model
+"# How a kid ships a cart in one click, how another finds it
+
+## Shipping
+
+Inside a cart REPL:
+
+  (publish!)
+
+That's the primitive. Under the covers:
+
+  1. (cart/format current-cart)         — canonicalise whitespace / order.
+  2. (cart/lint current-cart)           — no bare (,trace), no unresolved imports, no missing :name / :author / :version.
+  3. (cart/sign current-cart my-key)    — sign with the kid's Curator key.
+  4. (registry/put current-cart)        — POST to the shared registry; server returns the canonical URL.
+  5. Return the URL as a string.
+
+  (publish! :bump 'patch)    ;; bumps :version from 1.2.0 to 1.2.1
+  (publish! :bump 'minor)    ;; 1.2.0 → 1.3.0
+  (publish! :bump 'major)    ;; 1.2.0 → 2.0.0
+  (publish! :as 'draft)      ;; publishes as a draft URL, unlisted, shareable
+  (unpublish!)               ;; hides the current version; a note remains that this version existed (no delete)
+
+## The URL shape
+
+  motoi.cart/alfred/snake@1.2.0
+
+Human-typeable. Alfred's account, cart name 'snake', version 1.2.0. Curator's browser opens it. `motoi run motoi.cart/alfred/snake` on the CLI runs it, pinning to the resolved version at first fetch.
+
+A permanent short link — motoi.cart/8fJ2q — is issued at publish for QR codes and printed material. Both resolve to the same cart.
+
+## Finding
+
+Discovery in Curator is Cortex-shaped (see below). Discovery on the web is:
+
+  motoi.cart/                    — landing page, curated slate, updated by the Motoi maintainers.
+  motoi.cart/alfred              — Alfred's cart list.
+  motoi.cart/tag/puzzle          — carts tagged 'puzzle' by their authors.
+  motoi.cart/search?q=snake      — full-text over :name, :one-line, tags.
+
+There is no all-time global feed to compete for. There is no leaderboard for cart plays. A cart's public page shows how many people played it and, if the author allowed, a screenshot from the last frame — nothing more. Kids do not ship a cart to farm engagement; they ship because someone will play it."
+
+  :remix-model
+"# Fork, edit, ship, credit
+
+## The gesture
+
+  press 'f' in Curator on any cart page → 'fork this cart'
+  or in the REPL: (fork motoi.cart/alfred/snake)
+
+Effect: a new cart is copied into the kid's local workspace with:
+
+  (cart
+    :name          \"snake\"          ;; same name allowed within own namespace
+    :author        \"jamie\"          ;; kid's account
+    :version       \"0.1.0\"
+    :parent        (:from motoi.cart/alfred/snake@1.2.0 :diverged-at 2026-07-17)
+    ...)
+
+The :parent field is not a courtesy — it's a data field the registry uses to draw the fork tree. On the parent cart's page, forks appear as a small tree with the current cart highlighted. On the fork's page, 'forked from alfred/snake' is a link.
+
+## The Scheme-level ops
+
+  (fork url)              → copy cart into local workspace; add :parent header.
+  (parent)                → return the parent cart URL of the current cart, or #f.
+  (ancestors)             → walk :parent chain; return list of URLs.
+  (siblings)              → other forks of the same parent; queries registry.
+  (upstream-updates)      → check if the parent has published newer versions; returns list of versions + a summary of changes.
+  (pull-upstream :from 1.2.0 :to 1.3.0)   → three-way merge parent's diff into fork; conflicts surface as (conflict :our-form ... :their-form ...) records the kid resolves in the editor.
+
+## Credit rules
+
+  - :parent is required on a forked cart. Removing it before publish is a lint error.
+  - :original-author appears in the cart's public page even after the fork diverges arbitrarily. The person who started it stays visible.
+  - A fork that hits 100x the parent's plays does NOT retroactively demote the parent. Both stand.
+  - A parent CAN mark a fork as 'featured child' — a data field. The fork's author cannot force this."
+
+  :cortex-shaped-distribution
+"# Cortex records; discovery becomes personal
+
+Cortex is the accretion layer that remembers a user across sessions (see CORTEX-1.0.ENG.slat). For distribution it means:
+
+## What Cortex stores per kid
+
+  (played cart-url :at time :duration secs)
+  (opened cart-url :closed-in secs)      ;; opened, gave up
+  (remixed cart-url :into new-url)
+  (imported-verb 'jamie/tiny-physics :in cart-url)
+  (finished cart-url)                    ;; reached the cart's own (cart/finished!) marker
+  (abandoned cart-url)                   ;; opened as a fork, never published
+  (looked-at cart-url :and-copied 'hero-sprite)
+
+Each is a record with provenance. Kid can (,my-cortex) to see it all; can (,cortex-forget cart-url) to remove entries.
+
+## What Cortex shapes
+
+  DISCOVERY.
+    Instead of a global feed, Curator's home screen shows:
+      - 'carts by kids you've forked from'
+      - 'carts using verbs you've imported'
+      - 'carts near what you were trying to build' (semantic similarity over :one-line + verbs-used, computed offline, no live LLM required)
+      - 'carts whose parent you played' (the fork's kid saw the same source; likely shares taste)
+
+  ONE-CLICK RESUME.
+    Cortex remembers the kid abandoned 'tetris-attempt-3'. The home screen offers to reopen it and shows a Sakura note: 'you were adding a level counter. Want to keep going?' The note is a Sakura verb call, not a canned string — she can also stay silent.
+
+  INTRODUCTION AT THE RIGHT TIME.
+    Cortex sees the kid is on their 4th platformer and struggling with collision. It surfaces (jamie tiny-physics) with a one-line: 'jamie wrote a collision helper that snap-fits into your (draw)'. Not an ad — surfaced ONCE, dismissible forever with (,not-interested 'jamie/tiny-physics).
+
+  RESHARING.
+    'You looked at hero-sprite in alfred/snake and then drew your own. Want to import his original for comparison?' — one-tap import, credit auto-added.
+
+## What Cortex refuses to do
+
+  - No cross-account tracking. Cortex is per-kid, on the kid's device (or their Curator account). Nothing leaves without an explicit (share-with 'friend :cortex-slice 'plays).
+  - No engagement optimisation. Cortex does not surface carts to maximise session length. It surfaces carts SIMILAR to what the kid is doing. Session-length signals are not fed back into ranking.
+  - No public leaderboard of who-remixed-whom. Fork trees are public; play counts are per-cart public if the author opts in; nothing else."
+
+  :cross-cart-references
+"# Can a cart import another cart's sprites or sounds?
+
+Yes. Sub-form addressability makes it cheap.
+
+## The verb
+
+  (import-asset 'alfred/snake :as hero-sprite :from 'hero-sprite)
+    ;; fetches alfred/snake@latest, extracts the top-level define named 'hero-sprite,
+    ;; binds it locally as hero-sprite. Records provenance in cart header:
+    ;;   (:imports-from ((alfred/snake@1.2.0 hero-sprite hero-sprite)))
+
+  (import-asset 'alfred/snake :as boss-theme :from 'theme-song :version 1.1.0)
+    ;; pin to a specific version
+
+  (import-asset-list 'alfred/snake :from '(hero-sprite theme-song background))
+    ;; multiple in one call; each recorded in provenance
+
+## Rules
+
+  - Only top-level (define name ...) forms are importable. Internal lambdas are NOT.
+  - Author's cart declares :assets-shareable '(hero-sprite theme-song ...) — a whitelist. Assets not on the list refuse to import. Default is empty.
+  - A cart importing an asset from another cart pays no runtime fuel to do so; the import is done at load time. This is a design choice: sharing is free.
+
+## Credit
+
+Every imported asset shows on the cart's public page as a tile with the source. The kid didn't just 'use' the sprite — the sprite is publicly cited. A cart with 12 imported assets shows 12 credits. This surfaces the community without a leaderboard."
+
+  :worked-example
+"# End to end: two kids, one sprite
+
+## Day 1: Alfred publishes snake
+
+Alfred authors carts/snake-classic.sks in the composer:
+
+  (cart
+    :name          \"snake\"
+    :author        \"alfred\"
+    :version       \"1.0.0\"
+    :assets-shareable (hero-sprite theme-song))
+
+  (import (motoi core))
+  (import (motoi framebuffer))
+
+  (define hero-sprite
+    (sprite/from-grid '((0 0 0 8 8 0 0 0)
+                        (0 0 8 8 8 8 0 0)
+                        (0 8 8 8 8 8 8 0)
+                        (8 8 8 8 8 8 8 8)
+                        (8 8 8 8 8 8 8 8)
+                        (0 8 8 8 8 8 8 0)
+                        (0 0 8 8 8 8 0 0)
+                        (0 0 0 8 8 0 0 0))))
+
+  ...  ;; rest of the game
+
+  (composer/canvas (:bind '(hero-sprite))
+    (composer/sprite-grid :bind '(hero-sprite) :size '(8 . 8) :palette 'motoi-8))
+
+Alfred runs (publish!). Returns:
+
+  → motoi.cart/alfred/snake@1.0.0
+
+## Day 2: Jamie sees it, imports the sprite
+
+Jamie is building a new cart 'space-shooter'. He wants Alfred's cute round hero as his player ship.
+
+In Curator, Jamie opens motoi.cart/alfred/snake, hovers over hero-sprite in the source view, clicks 'import to my cart'.
+
+The composer inserts into Jamie's cart:
+
+  (import-asset 'alfred/snake :as hero-sprite :from 'hero-sprite)
+
+Cart header updates:
+
+  (cart
+    :name          \"space-shooter\"
+    :author        \"jamie\"
+    :version       \"0.3.0\"
+    :imports-from  ((alfred/snake@1.0.0 hero-sprite hero-sprite)))
+
+Jamie writes (draw) using hero-sprite. Ships:
+
+  → motoi.cart/jamie/space-shooter@0.3.0
+
+## Day 3: Alfred sees it in Cortex
+
+Alfred opens Curator. The home screen shows a card:
+
+  A cart used your hero-sprite
+  motoi.cart/jamie/space-shooter@0.3.0
+  [open]  [see all borrowers]
+
+Because Alfred allowed :assets-shareable on hero-sprite, Cortex knows to surface downstream uses. Alfred taps 'see all borrowers' — six carts. Alfred hasn't shipped a cart in a week but this signal — six kids used his art — is what pulls him back to open the composer again.
+
+## Day 4: Jamie forks Alfred's snake for his own snake variant
+
+Jamie types in the REPL:
+
+  (fork motoi.cart/alfred/snake)
+
+Curator copies the cart to Jamie's workspace, header now:
+
+  (cart
+    :name          \"snake\"
+    :author        \"jamie\"
+    :version       \"0.1.0\"
+    :parent        (:from motoi.cart/alfred/snake@1.0.0 :diverged-at 2026-07-19))
+
+Jamie changes the movement policy, then ships:
+
+  (publish!)   → motoi.cart/jamie/snake@0.1.0
+
+On alfred/snake's public page, the fork tree now shows:
+      alfred/snake@1.0.0
+        └── jamie/snake@0.1.0
+
+Alfred can (upstream-updates) from Jamie's fork if he wants — the traffic is bidirectional.
+
+## What the composer did during all of this
+
+Every step above went through composer verbs (fork, publish!, import-asset) that emit Scheme forms into the cart file. There is no Curator-only state. If Alfred and Jamie both used the CLI instead of Curator the outcomes are identical. The composer is a texture over a well-defined verb layer, not a container for hidden state."
+
+  :what-we-dont-copy
+"# Prior-art choices Motoi does not repeat
+
+  1. TOKEN BUDGET AS PEDAGOGY.
+     PICO-8's argument is that constraint teaches. We buy the argument for graphics/audio (16-colour palettes, low sample rates — Motoi keeps these). We reject it for code. A kid learning programming should be allowed to write a comment. Long variable names should not cost.
+
+  2. BINARY CART FORMATS.
+     No .p8.png equivalent. Ever. The single-file distribution artifact stays text. If we later want a shareable 'plays offline' bundle, it is a .tgz of text files, not a hex blob mid-PNG.
+
+  3. IN-CONSOLE SPLORE-STYLE FEED.
+     Splore is a global scrolling feed that competes for the kid's attention. We do not build it. Discovery is per-kid (Cortex) or per-author (curated slates by Motoi maintainers). No infinite scroll.
+
+  4. SILENT DEPENDENCY VERSIONING.
+     Neither PICO-8 nor npm handle this well. Motoi's answer: flat resolve, publish-time conflict-or-nothing, pinned hashes in the cart header. If a kid's cart worked yesterday it works today, forever.
+
+  5. FORCED-COURTESY ATTRIBUTION.
+     PICO-8/TIC-80 attribution is a comment field. Motoi's :parent, :imports-from, :original-author are DATA FIELDS enforced at publish. Provenance is not politeness.
+
+  6. DEBUGGER AS SEPARATE APP.
+     A kid should not learn two tools to write and to fix. Debug verbs share the same REPL, cart, and composer. Nothing to install; nothing to configure.
+
+  7. UPLOAD-AS-PUBLISH.
+     Neither prior art distinguishes 'save to my workspace' from 'ship to the world'. Motoi does. (publish!) is a verb call with intent; save-on-edit is automatic.
+
+  8. HIDDEN CART LIFECYCLE.
+     TIC-80 users cannot edit or delete their own cart page (GitHub discussion 1831). Motoi's (unpublish!), (publish! :bump 'patch), and version history are Scheme verbs a kid can read.
+
+  9. LEADERBOARDS.
+     No cart gets a global 'most played' badge. Play counts are per-cart, opt-in, and never fed into ranking. What we do NOT reward is what shapes the community."
+
+  :the-11-year-old-test
+"# Can an 11-year-old use this?
+
+Concrete gestures Motoi requires an 11-year-old to perform, and the surface they touch:
+
+  GOAL                         GESTURE                              SURFACE
+  Make a cart                  press 'new' in Curator               composer canvas opens
+  Change the hero's colour     click the sprite grid, pick colour   composer/sprite-grid widget
+  Save                         nothing — autosaves                   nothing to learn
+  Ship to friends              press 'publish!'                     one verb, one URL back
+  Share with a specific friend copy the URL, text it                text is the URL
+  See if anyone played it      open cart page                       one number, one row of forks
+  Try someone else's cart      tap the link they sent               loads in Curator
+  Fork it                      press 'f' → 'fork this'              (fork url) verb
+  Change what they made        click a widget, change a number      composer round-trip
+  Send it back to them         press 'publish!' → copy URL          one gesture
+  Learn what went wrong        error message names the file/line    reader's POS map
+  Find the bug                 (,inspect 'hero-x)                   inspect verb
+  Give up cleanly              close the tab                        no data loss; Cortex remembers
+
+The kid never types 'git', 'npm', 'commit', 'push', 'merge', 'debugger', or 'export'. They type verbs that read as English words. Every gesture is a Scheme form the composer emits, so the same kid two years later, when they open the .slat file in a text editor and see (fork ...), (publish!), (import-asset ...), reads what they've been doing all along."
+
+  :implementation-plan
+"# What ships to make this real
+
+Phase A — cart format + basic publish (~3 days):
+  - Cart header spec (:name :author :version :parent :assets-shareable) — locked.
+  - cart/format, cart/lint, cart/sign verbs registered.
+  - Local registry stub (motoi.cart/ resolves against a local dir or a config-pointed URL).
+  - (publish!), (unpublish!), (fork) verbs, tested against local stub.
+  - Multi-file cart directory support in the reader.
+
+Phase B — module resolution (~4 days):
+  - Author-scoped registry keys and signature verification.
+  - Flat resolver with publish-time conflict detection.
+  - import-asset + :assets-shareable enforcement.
+  - Content-hash pinning in cart header.
+
+Phase C — debug verbs (~2 days):
+  - inspect, trace, break-on, step, where, replay, fuel-report as (motoi dev debug) module.
+  - Kid-friendly error shape with similar-bindings suggestion (Levenshtein over env).
+  - Publish-time stripping of (,trace) calls.
+
+Phase D — Cortex hooks (~3 days):
+  - Local Cortex records for played / opened / remixed / imported / finished / abandoned.
+  - Curator home screen surfaces based on Cortex (offline similarity, no live LLM).
+  - (,my-cortex), (,cortex-forget), (,not-interested) REPL directives.
+
+Phase E — starter carts + book chapters (~2 days):
+  - carts/publish/hello-published.slat — a cart whose docstring shows the publish flow.
+  - carts/remix/snake-remix.slat — a fork of snake with the parent chain visible.
+  - carts/import/cross-asset-example.slat — a cart that imports another's sprite.
+  - Book of Modules chapters 1-3: modules, imports, publishing.
+  - Book of Distribution chapters 1-3: forking, remixing, credit.
+
+Total ~14 days of build work; corpus material folds in alongside."
+
+  :open-questions-for-alfred
+"# Decisions this design does not lock
+
+  1. Registry hosting: Curator-hosted or a Motoi-controlled endpoint (motoi.cart) separate from Curator? Design assumes the latter for open source Motoi's benefit; Curator uses it as a client.
+  2. Free tier vs paid tier around publishing: publish is free in this design. Paid tier only touches metered verbs (external network calls). Confirm.
+  3. Kid signing keys: how kids get one. Curator account = key issuance? Or a separate Motoi identity? Design assumes tied-to-Curator-account for now.
+  4. Cortex slice sharing: (share-with 'friend :cortex-slice 'plays) is sketched but not designed. Left as future work.
+  5. Registry moderation: no design here for how to un-publish something harmful. Assume Motoi maintainers can (registry/quarantine url) — details TBD."
+
+  :status "DESIGN-DRAFT-FOR-ALFRED-REVIEW-2026-07-17; sibling to COMPOSER-1.0.")

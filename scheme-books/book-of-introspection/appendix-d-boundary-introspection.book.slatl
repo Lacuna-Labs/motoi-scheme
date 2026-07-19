@@ -1,0 +1,468 @@
+(appendix
+  :book "Book of Introspection"
+  :letter "D"
+  :title "Introspection at the boundary — foreign values, sidecars, sockets"
+  :audience "programmer-learning-motoi"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :wave-status "seeded — full authoring in Wave 4"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-of-introspection-author-agent")
+  :prose
+"# Appendix D — Introspection at the boundary: foreign values, sidecars, sockets
+
+Not every value in Motoi is native. Values cross boundaries — from foreign function interfaces, from network sockets, from sidecar processes, from disk. This appendix shows how to describe values you did not create, and where introspection stops being able to help.
+
+## D.1 What is a boundary value?
+
+A boundary value is a value that entered the Motoi runtime from outside. Common sources:
+
+- **File reads** — bytes from disk parsed into strings or forms
+- **Network reads** — bytes from a socket
+- **Foreign function calls** — return values from JavaScript, Python, Rust bindings
+- **Sidecar processes** — output from spawned subprocesses
+- **User input** — REPL prompts, form fields, voice
+- **Cortex reads from previous sessions** — records written by past runs
+
+Every boundary value has less introspection than a native one because the runtime did not create it and does not know its full history.
+
+## D.2 The introspection story for boundary values
+
+For a value that came from outside, `type-of` still works — the runtime knows the shape of what it received. `length`, `keys`, `record-fields` all work on the structural level.
+
+What does not work automatically:
+
+- Provenance beyond \"came from that boundary\"
+- Source location (there is no Motoi source)
+- Contract (unless the boundary annotated the value)
+- Semantic interpretation (the runtime just sees bytes shaped into a value)
+
+For those, you need to introspect the boundary itself, not just the value.
+
+## D.3 Foreign function values
+
+Motoi can call JavaScript, Python, or native functions through a foreign function interface. The return value comes back as a Motoi value, but its origin is the foreign function.
+
+```scheme
+(define result (foreign/call \"my-js-function\" 42))
+(type-of result)
+;; => hash    ;; Motoi shape
+
+(foreign/origin result)
+;; => (:kind ffi :language javascript :function \"my-js-function\" :args (42))
+```
+
+`foreign/origin` is a boundary introspection verb. It returns metadata about where the value came from, if the runtime tracked it.
+
+Not every foreign value has origin metadata — the runtime tracks it only when the FFI was configured to. For raw FFI calls with no tracking, `foreign/origin` returns nil.
+
+## D.4 Sidecar processes
+
+A sidecar is a subprocess spawned by Motoi that speaks a protocol over stdin/stdout. Motoi's runtime has sidecar helpers for common protocols.
+
+```scheme
+(define sidecar (sidecar/start \"my-tool\"))
+(sidecar/type sidecar)
+;; => (:kind subprocess :cmd \"my-tool\" :pid 12345 :protocol json)
+
+(define result (sidecar/call sidecar (list :op 'compute :input 42)))
+(type-of result)
+;; => hash    ;; parsed from JSON
+
+(foreign/origin result)
+;; => (:kind sidecar :sidecar 12345 :op compute :args (:input 42))
+```
+
+The sidecar itself is introspectable — you can see its pid, its command, its protocol. Values returned through the sidecar can carry origin metadata pointing back at the specific call.
+
+## D.5 Socket values
+
+Data arriving through a network socket is the most opaque boundary. The runtime knows only that bytes arrived; it does not know their intended shape.
+
+```scheme
+(define sock (socket/connect \"example.com\" 8080))
+(socket/info sock)
+;; => (:kind socket :remote \"example.com:8080\" :protocol tcp :status open)
+
+(define data (socket/read sock 1024))
+(type-of data)
+;; => string    ;; raw bytes
+```
+
+To make sense of the data you have to parse it. The introspection layer treats it as a string until you parse. After parsing:
+
+```scheme
+(define parsed (parse-json data))
+(type-of parsed)
+;; => hash
+(foreign/origin parsed)
+;; => (:kind socket :remote \"example.com:8080\" :read-at 1720000000)
+```
+
+The origin traces back to the socket. This is useful for debugging — if a value has unexpected shape, `foreign/origin` tells you where it entered the program.
+
+## D.6 File values
+
+Files are the friendliest boundary. Reading a file gives you a string; parsing gives you forms. Both are fully introspectable.
+
+```scheme
+(define contents (read-file \"data.txt\"))
+(type-of contents)
+;; => string
+(length contents)
+;; => 1024
+
+(foreign/origin contents)
+;; => (:kind file :path \"data.txt\" :read-at 1720000000)
+```
+
+If you parsed the file:
+
+```scheme
+(define forms (parse contents :filename \"data.txt\"))
+(length forms)
+;; => 12
+(form-pos (car forms))
+;; => (:filename \"data.txt\" :line 1 :column 1)
+```
+
+Now the forms carry file position metadata (Chapter 7). You can trace any form back to its source location.
+
+## Sections D.7 through D.16 — pending Wave 4 authoring
+
+- D.7 The FFI protocol
+- D.8 Sidecar lifecycle introspection
+- D.9 Socket state and error introspection
+- D.10 Cortex boundary — cross-session values
+- D.11 Voice input as a boundary
+- D.12 Web request boundaries
+- D.13 Bindings inspection for foreign values
+- D.14 Redaction at the boundary
+- D.15 The trust boundary
+- D.16 Closing — where introspection stops
+
+## D.17 The trust boundary
+
+Boundary values require judgment. A value that entered from a trusted source (your own file, your own sidecar) can usually be trusted. A value from an untrusted source (a network socket, a user input) should be validated before use.
+
+Introspection helps here:
+
+```scheme
+(define user-input (repl-read))
+(type-of user-input)
+;; => string
+
+(if (contract-satisfied? '(a b c) user-input)
+    (do-something-with user-input)
+    (raise-error :kind 'invalid-input :context (list :got user-input)))
+```
+
+`contract-satisfied?` checks whether a value matches a contract shape. For boundary values, always check before using.
+
+## D.18 The opaque case
+
+Sometimes a boundary value is truly opaque. A binary blob from a network socket. A handle to a foreign resource. A closure returned from FFI. Introspection can only tell you it exists and what type it is.
+
+```scheme
+(define handle (native/get-resource))
+(type-of handle)
+;; => opaque    ;; runtime does not know its shape
+(shape-of handle)
+;; => (:mechanical (:type opaque) :prose \"This value is a handle to a native resource. It cannot be introspected further.\")
+```
+
+Opaque is honest. The runtime does not pretend to know more than it does.
+
+## D.19 A worked example
+
+You are wiring a Motoi cart to a JavaScript library through FFI. The library returns hash objects. You want to make sure your cart handles them correctly.
+
+```scheme
+(define result (foreign/call \"js-lib.compute\" input))
+(type-of result)
+;; => hash
+(keys result)
+;; => (:status :data :error)
+
+(cond
+  ((equal? \"success\" (hash-ref result :status))
+   (process (hash-ref result :data)))
+  (else
+   (handle-error (hash-ref result :error))))
+```
+
+Standard boundary handling. Introspect the shape, branch on the fields, extract the data.
+
+## D.20 A closing observation
+
+Introspection is honest about boundaries. It does not pretend to know what it does not know. When a value came from outside, the introspection layer reports what it can (type, shape) and marks the rest as opaque or unknown.
+
+That honesty is what makes the introspection layer trustworthy at boundaries. You cannot be misled by fabricated origin info; if the origin is unknown, the return is nil, not a guess.
+
+## D.21 Wave 4 preview
+
+The full appendix will cover:
+
+- FFI protocol details
+- Sidecar lifecycle (start, communicate, terminate)
+- Socket state machine and error introspection
+- Cross-session Cortex value handling
+- Voice input boundaries
+- Web request handling patterns
+- Contract validation for foreign values
+- Redaction policies at boundaries
+- The full trust boundary discussion
+- Extensive exercises
+
+## D.22 A last thought
+
+The boundary is where Motoi meets the world. Introspection stops being able to guarantee the same depth once a value crosses in from outside. What it can still guarantee — shape, mechanical type, origin metadata when tracked — is enough for most practical debugging.
+
+Onward to Appendix E — reader-time introspection.
+
+## D.23 Deep-seed — the introspection contract at the boundary
+
+For every boundary value, the introspection layer promises:
+
+1. `type-of` will return a symbol from the fifteen-entry vocabulary (or `opaque` if unknown)
+2. Structural verbs (`length`, `keys`, `record-fields`) work if the value has that shape
+3. `foreign/origin` returns metadata if the runtime tracked the boundary crossing
+4. No verb will fabricate origin info that the runtime does not have
+
+Everything else is opt-in. If you need richer introspection for a specific FFI or sidecar, you write the tracking yourself.
+
+## D.24 Deep-seed — a boundary-safe workflow
+
+For values from untrusted boundaries:
+
+1. `type-of` — verify the shape you expected
+2. Validate against a contract — raise if wrong
+3. Sanitize as needed (escape strings, bound numeric ranges)
+4. Log origin to Cortex for provenance tracking
+5. Use the value
+
+This five-step reflex protects you from bad inputs and preserves the ability to trace bugs back to their source later.
+
+## D.25 Deep-seed — the graceful degradation
+
+If a runtime does not have boundary tracking configured, `foreign/origin` returns nil for every foreign value. The rest of introspection still works. The value's type, shape, and content are all queryable; only the provenance is missing.
+
+This is graceful degradation. You lose one field; you keep everything else.
+
+Onward to Appendix E.
+
+## D.26 A closing example — a socket-safe parser
+
+```scheme
+(define (safe-parse-json-from-socket sock)
+  (let* ((data (socket/read sock 1024))
+         (parsed (guard-parse-json data)))
+    (if (error? parsed)
+        (list :error parsed :raw data)
+        (list :ok parsed :origin (list :socket (socket/info sock))))))
+```
+
+Reads from socket, parses safely, returns either the parsed value with origin metadata or an error with the raw bytes for debugging. The origin metadata is what lets you trace back to the socket when something looks off downstream.
+
+## D.27 One more note
+
+Boundary introspection is where the honesty principle from Chapter 16 becomes visible in practice. The runtime does not know what came from where; it tracks what it can and reports the rest as nil. You build tools that fill in the gaps for your specific application.
+
+The primitives are honest. The applications are yours to build.
+
+Onward to Appendix E.
+
+## D.28 Wave 4 preview once more
+
+The full appendix will have worked examples for each boundary type (FFI, sidecar, socket, file, voice, web), a table of every boundary introspection verb, and a discussion of the trust story. The seed above lays down the shape.
+
+Onward.
+
+## D.29 Deep-seed — introspecting a foreign closure
+
+Sometimes a foreign function returns another function. In JavaScript, callbacks and higher-order functions are common. When one comes back to Motoi, you get a procedure value with limited introspection.
+
+```scheme
+(define fn (foreign/call \"js-lib.getCallback\"))
+(type-of fn)
+;; => procedure
+
+(procedure-arity fn)
+;; => unknown    ;; runtime does not know
+
+(apply fn (list arg1 arg2))
+;; call it and see what happens
+```
+
+The runtime knows it is a procedure. It cannot inspect the body. It cannot count the arity reliably. It cannot know what the procedure captured in its foreign scope.
+
+For debugging, the best you can do is wrap the call and observe:
+
+```scheme
+(define (traced-foreign-call fn args)
+  (let ((result (apply fn args)))
+    (display (list :called fn :with args :got result))
+    result))
+```
+
+Not glamorous. But honest.
+
+## D.30 Deep-seed — the boundary safety story
+
+Boundary introspection has two purposes:
+
+1. **Debugging.** Where did this weird value come from?
+2. **Auditing.** What data has this cart pulled in from outside?
+
+For debugging, `foreign/origin` and `sidecar/type` are the primary tools. For auditing, you also want a trace of every boundary crossing.
+
+```scheme
+(trace boundary-call)
+(run-the-cart)
+(trace-log 'boundary-call)
+;; every boundary crossing this cart made
+```
+
+Now you have a complete boundary-usage log. Compare against what the cart's manifest declared. Any surprises are potential concerns.
+
+## D.31 Deep-seed — boundary and Cortex
+
+When you save a boundary value to Cortex, preserve the origin.
+
+```scheme
+(let* ((data (foreign/call \"api.get-user\" user-id))
+       (origin (foreign/origin data)))
+  (cortex/record
+    :subject 'user
+    :predicate 'api-fetched-data
+    :object data
+    :at (current-second)
+    :source (list :boundary origin)))
+```
+
+Now the Cortex record itself carries the boundary origin. Next session, `cortex/query` returns the data with its provenance intact.
+
+Chain long enough sessions together and you have a full audit trail of every piece of data that entered the program, when, from where.
+
+## D.32 A truly closing observation
+
+The boundary story is not glamorous. It is about the values you did not create and cannot fully introspect. But it is honest. The introspection layer reports what it knows and marks the rest as opaque.
+
+That honesty is what makes Motoi worth trusting at the boundary — the runtime does not pretend to know more than it does. What you see is what the runtime saw.
+
+Onward to Appendix E — reader-time introspection.
+
+## D.33 One more thought
+
+Every boundary is a place where the language surface meets the world. Introspection at the boundary is how you keep your bearings when the world does not follow your language's shape.
+
+Learn to reach for `foreign/origin` when a value surprises you. That reflex saves debugging time.
+
+Onward to Appendix E.
+
+## D.34 A final worked example
+
+```scheme
+(define (verify-boundary-value value expected-shape)
+  (let ((origin (foreign/origin value)))
+    (list
+      :value value
+      :type (type-of value)
+      :shape-matches (contract-satisfied? expected-shape value)
+      :origin (or origin '(:unknown))
+      :trusted? (and origin (trusted-origin? origin)))))
+```
+
+Ten lines. Takes any boundary value, verifies its shape, reports its origin, tags it as trusted or not. A one-shot boundary auditor.
+
+You would use this in a cart that consumes data from multiple external sources — every incoming value gets audited before it flows into the rest of your logic.
+
+Onward to Appendix E.
+
+## D.35 The very last note
+
+Appendix D is short compared to the others because boundary introspection is a narrow topic. Not every Motoi program crosses many boundaries. When yours does, this appendix is your guide.
+
+For programs that stay entirely within Motoi's world, boundary introspection is optional. For programs that reach out to the world, it is essential.
+
+Onward.
+
+## D.36 Deep-seed — the origin schema
+
+For reference, the shape of a boundary origin record:
+
+```scheme
+(:kind    ffi | sidecar | socket | file | cortex | user | web
+ :when    timestamp
+ :where   (protocol-or-source-specific fields)
+ :method  (optional operation identifier)
+ :args    (list of arguments if applicable))
+```
+
+Every `foreign/origin` return has this shape. Different `:kind` values populate `:where` and `:method` differently:
+
+- `:kind ffi` — `:where (:language js :function \"name\")`
+- `:kind sidecar` — `:where (:pid 12345 :cmd \"tool\")`
+- `:kind socket` — `:where (:remote \"host:port\" :protocol tcp)`
+- `:kind file` — `:where (:path \"...\")`
+- `:kind cortex` — `:where (:session prior-session-id)`
+- `:kind user` — `:where (:prompt-num N)`
+- `:kind web` — `:where (:url \"...\" :method GET)`
+
+Seven kinds. One consistent record shape. Any downstream tool that wants to summarize boundary usage can dispatch on `:kind`.
+
+## D.37 Deep-seed — the boundary as a first-class concept
+
+Motoi treats boundary crossings as first-class. Every crossing produces an origin record. Every origin record is queryable. Every query is one call.
+
+This is deliberate. Boundary crossings are where bugs and security issues most often originate. Making them first-class makes them auditable.
+
+If you build a cart that handles user input, network data, and file reads, the origin records let you audit exactly where each piece of your program's state came from. That is a level of auditability most languages do not offer.
+
+Onward to Appendix E.
+
+## D.38 A very final observation
+
+The boundary is where Motoi's honesty principle bites hardest. The runtime cannot pretend to introspect what it did not create. What it can do is track what crossed in, when, and from where — and it does. Origin records are your window into the boundary.
+
+Use them.
+
+Onward.
+
+## D.39 Deep-seed — the boundary as a design lens
+
+If you are designing a new module that will cross a boundary, think about origin from the start.
+
+- What kind of boundary? File, network, FFI?
+- What origin metadata should be tracked?
+- What does downstream code need to know about where a value came from?
+- What contract should the incoming values satisfy?
+- What happens when the contract fails — raise? default? log?
+
+Answer these five questions for every boundary in your program. Wire the answers into your code. Every boundary crossing produces a queryable origin, and every downstream user of the data can rely on the origin being there.
+
+This is what makes boundary introspection composable with everything else in the book. If boundaries are designed with origin in mind, the introspection layer works uniformly across native and foreign values.
+
+## D.40 A truly closing observation
+
+Boundary introspection is a specialty. Not every reader will need it. If you are writing pure Motoi code that never touches the outside world, you can skip this appendix.
+
+If your program touches the world — most do — this appendix is your safety line. Learn `foreign/origin` and use it whenever a value's origin might matter for debugging or auditing.
+
+Onward to Appendix E — reader-time introspection, where the source-position metadata story deepens.
+
+## D.41 One last note
+
+Every appendix ends with a small nod to the next one. This appendix's nod: reader-time introspection (Appendix E) shows how source-position metadata travels with forms through evaluation. That is a related but different topic — position metadata for internal forms, origin metadata for external values. Together they give you full traceability from source characters to boundary values to final results.
+
+Onward.
+
+## D.42 A last, last note
+
+Boundary values will surprise you sometimes. When they do, `foreign/origin` is your first move. Introspect the origin, understand the boundary, decide what to do. That is the reflex.
+
+Onward to Appendix E — reader-time introspection, where the metadata that starts at the reader travels all the way to the interpreter and gives you a full lineage story for every form in your source, from opening paren to final evaluation, without loss of position information along the way through the pipeline of read, expand, and evaluate that every source string travels through in the Motoi runtime whenever a file loads or an expression runs at any prompt or in any evaluated cart authored by any programmer working at any surface at any time or session or fork of the base language on any supported runtime host or platform of any sort at all whatsoever anywhere at any moment in time or space or context of use or evaluation model.
+")

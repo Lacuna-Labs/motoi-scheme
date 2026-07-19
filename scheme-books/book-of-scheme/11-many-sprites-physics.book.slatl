@@ -1,0 +1,306 @@
+;; 11-many-sprites-physics.book.slatl
+;; The Book of Motoi Scheme — Chapter 11 — Many Sprites and a Little Physics
+
+(chapter
+  :book             "The Book of Motoi Scheme"
+  :chapter-number   11
+  :title            "Chapter 11 — Many Sprites and a Little Physics"
+  :audience         :any
+  :dialect          "motoi"
+  :book-version     "1.0"
+  :provenance       "book-of-scheme-author-2026-07-17"
+  :training-eligible #t
+  :content-rating   :G
+  :prose
+"# Chapter 11 — Many Sprites and a Little Physics
+
+Chapter 2 gave you one entity. This chapter gives you *lots* of entities, and lets them bump into each other.
+
+By the end you'll have a small scene with a hero, some falling coins, some walls the hero can't walk through, and a physics loop that runs it all. It's the first *game* in this book — small, but a game.
+
+## Spawn a hundred
+
+`world/spawn` returns an id. If you spawn ten times, you get ten ids. If you spawn a hundred, a hundred. Motoi doesn't care.
+
+```
+(world/reset!)
+(for-each
+  (lambda (i)
+    (world/spawn 'coin (* i 8) 40 8 8))
+  (range 0 10))
+
+(world/count)
+```
+
+```
+10
+```
+
+Ten coins, spaced 8 pixels apart on row y=40. `(world/count)` returns how many entities exist. Nothing about the spawn cared that there were ten of them; it'd handle ten thousand the same way (up to memory and performance limits).
+
+Add a hero:
+
+```
+(world/spawn 'hero 0 20 16 16)
+(world/count)
+```
+
+```
+11
+```
+
+Eleven entities. Each has its own position, velocity, size. Each ticks independently every time you call `world/step`.
+
+## The physics defaults
+
+Motoi's world has:
+
+- **Gravity** — default 0.5 units per step (downward, i.e. y increases).
+- **Friction** — 0.98 per step. Velocities decay by 2% each tick.
+- **No floors** by default — things fall forever unless you catch them.
+- **No collision response** by default — entities can walk through each other.
+
+That last one surprises people. `world/step` doesn't automatically bounce entities off each other or off walls. You *detect* collisions with `world/collisions` and then *respond* however your game logic wants. This is the pattern most engines use — detection and response are separate concerns.
+
+## Detecting collisions
+
+```
+(world/reset!)
+(world/spawn 'a 10 10 8 8)
+(world/spawn 'b 12 12 8 8)
+(world/collisions)
+```
+
+```
+((\"w1\" \"w2\"))
+```
+
+`world/collisions` returns a list of colliding pairs. Each pair is a two-element list of ids. Two entities that overlap show up as one pair. If nothing overlaps, you get `'()`.
+
+If you want just yes/no on two specific entities:
+
+```
+(entity/overlaps? \"w1\" \"w2\")  ;; => #t
+```
+
+`entity/overlaps?` takes two ids and returns `#t` if their bounding boxes overlap, `#f` otherwise.
+
+## Responding to a collision — a coin pickup
+
+Suppose you want your hero to *pick up* a coin — when they overlap, the coin disappears.
+
+```
+(world/reset!)
+(world/gravity! 0)
+(define hero (world/spawn 'hero 40 40 16 16))
+(define coins
+  (map
+    (lambda (i) (world/spawn 'coin (* i 20) 40 8 8))
+    (range 1 6)))
+
+(define (pickup-nearby-coins)
+  (for-each
+    (lambda (coin)
+      (when (entity/overlaps? hero coin)
+        (entity/despawn! coin)))
+    coins))
+
+(entity/set-pos! hero 20 40)
+(pickup-nearby-coins)
+(world/count)
+```
+
+Read carefully. Hero starts at (40, 40). Five coins are spawned at x = 20, 40, 60, 80, 100 (all at y=40). We define `pickup-nearby-coins` — for each coin, if hero overlaps it, despawn it. Then we teleport hero to (20, 40) — right on top of coin #1 — and run pickup.
+
+```
+$ motoi run pickup.scm
+5
+```
+
+Wait — count is 5? Should be 5 total (hero + 4 remaining coins after picking up 1). Yes: 1 hero + 4 remaining coins = 5. If instead of one pickup you'd swept across every coin position, you'd end up with just the hero.
+
+Note the pattern: we hold `coins` as a list of ids (returned by `world/spawn`), and then walk that list to check collisions. Once you have a list of your things, you can iterate however you like.
+
+## A world with gravity
+
+Turn gravity back on. Drop coins from the top of the screen:
+
+```
+(world/reset!)
+(define coins
+  (map
+    (lambda (i) (world/spawn 'coin (* i 10) 0 6 6))
+    (range 0 10)))
+
+(let loop ((n 0))
+  (when (< n 5)
+    (world/step)
+    (loop (+ n 1))))
+
+;; Now check where they are:
+(map entity/y coins)
+```
+
+Each coin was spawned at y=0 with velocity 0. Five ticks of gravity pull them down. Read the list of final y-values — they're all the same, because they started with the same y and had gravity applied uniformly.
+
+```
+(2.4260200000000002 2.4260200000000002 2.4260200000000002 2.4260200000000002 2.4260200000000002 2.4260200000000002 2.4260200000000002 2.4260200000000002 2.4260200000000002 2.4260200000000002)
+```
+
+Each fell by 2.43 units in five ticks. That's the accumulation of gravity + friction. In a real game you'd let this run for hundreds of frames and coins would rain down the screen.
+
+## `world/impulse!` — a sudden push
+
+An *impulse* is a one-frame velocity change. Perfect for jumps, explosions, bumps.
+
+```
+(world/reset!)
+(define hero (world/spawn 'hero 40 100 16 16))
+(world/impulse! hero 5 -20)  ;; kick right and up
+(world/step)
+(entity/state hero)
+```
+
+```
+(\"w1\" 44.9 80.89 4.9 -19.11 16 16)
+```
+
+Hero moved from (40, 100) to (44.9, 80.89) in one step because the impulse gave a velocity of (5, -20) — friction takes small chips (5 * 0.98 = 4.9, -20 * 0.98 = -19.6, but gravity also added 0.5 giving -19.11), and position updated by the resulting velocity.
+
+Impulse is your jump button, your explosion, your gust of wind. Anytime you want to change velocity *right now* rather than over time, impulse.
+
+## A tiny scene loop
+
+Let's put it all together. Save as `scene.scm`:
+
+```
+(world/reset!)
+
+;; Setup — a hero on the left, coins in the middle, walls on the right.
+(define hero (world/spawn 'hero 20 60 8 8))
+(define coins
+  (map
+    (lambda (i) (world/spawn 'coin (+ 40 (* i 15)) 60 6 6))
+    (range 0 4)))
+(define wall (world/spawn 'wall 120 50 8 24))
+
+;; Hero gets a rightward push.
+(entity/set-vel! hero 3 0)
+
+;; Simulate 15 frames.
+(let loop ((frame 0))
+  (when (< frame 15)
+    (world/step)
+    ;; Pick up any coin the hero touches.
+    (for-each
+      (lambda (c)
+        (when (entity/overlaps? hero c)
+          (entity/despawn! c)))
+      coins)
+    ;; Report.
+    (display \"frame \") (display frame)
+    (display \" hero-x=\") (display (entity/x hero))
+    (display \" coins-left=\") (display (world/count))
+    (newline)
+    (loop (+ frame 1))))
+```
+
+Run it:
+
+```
+$ motoi run scene.scm
+frame 0 hero-x=22.94 coins-left=6
+frame 1 hero-x=25.82 coins-left=6
+frame 2 hero-x=28.64 coins-left=6
+frame 3 hero-x=31.41 coins-left=6
+frame 4 hero-x=34.12 coins-left=5
+frame 5 hero-x=36.78 coins-left=5
+frame 6 hero-x=39.39 coins-left=5
+frame 7 hero-x=41.94 coins-left=5
+frame 8 hero-x=44.44 coins-left=5
+frame 9 hero-x=46.89 coins-left=5
+frame 10 hero-x=49.29 coins-left=4
+frame 11 hero-x=51.65 coins-left=4
+frame 12 hero-x=53.95 coins-left=4
+frame 13 hero-x=56.21 coins-left=4
+frame 14 hero-x=58.43 coins-left=4
+```
+
+Hero moves right (x increases each frame, less than 3 per frame because friction slows him). At frame 4 he touched the first coin (which was spawned at x=40) — count drops from 6 to 5. At frame 10 the second coin at x=55 — count drops to 4. He'll clear more if you extend the loop.
+
+That's a *scene*. Hero, coins, walls, gravity, friction, collisions, physics — all in one loop. About 20 lines of code. It's not Zelda, but it's the *structure* of Zelda.
+
+## Composing the pieces
+
+Notice how each piece we built is small and independent.
+
+- Entities are separate. Nothing about a coin's code references the hero.
+- Physics is one line — `(world/step)`.
+- Collisions are queried per pair, or all at once with `world/collisions`.
+- Responses are yours to write — pickup, damage, bounce, whatever.
+
+This *separation* is a design choice. In some game engines, entities *know* how to respond to collisions themselves — every coin has a script attached. In Motoi's base, the world is the *data* and your game code decides the *behavior*. You'd need less code for a two-object demo the other way; you get more control with this way when you want a hundred different entities all with different rules.
+
+## An arena of many bouncing dots
+
+```
+(world/reset!)
+(with-seed 42
+  (for-each
+    (lambda (i)
+      (let ((e (world/spawn 'dot (randint 0 120) (randint 0 40) 4 4)))
+        (entity/set-vel! e (random-range -3 3) (random-range -3 3))))
+    (range 0 20)))
+
+;; Step 30 frames.
+(let loop ((n 0))
+  (when (< n 30)
+    (world/step)
+    (loop (+ n 1))))
+
+(world/count)
+```
+
+Twenty dots spawned at random positions with random velocities. Step 30 times. All of them fall (gravity), all of them slow down (friction), all of them drift horizontally. 20 dots at frame 30 all in different positions. If you tracked collisions, you'd see them clump.
+
+Now imagine what you can do:
+- Make some dots the size of moons.
+- Make some dots have negative gravity — they float.
+- Detect collisions and reverse velocities on impact — actual bouncing.
+- Tag some as *food* and some as *predators*.
+- Loop and query which predator is closest to which food.
+
+You have every primitive you need. Chapter 14 and 15 will introduce modules and packaging, so you can bundle a game up and ship it.
+
+## A note on performance
+
+Motoi's base physics is deliberately simple. Every `world/step` is O(n) — linear in the number of entities. Collision detection with `world/collisions` is O(n²) — quadratic — because it checks every pair. That's fine for tens of entities, workable for hundreds, slow for thousands, and not appropriate for millions.
+
+Game engines with millions of entities use *spatial partitioning* — quadtrees, hash grids — to avoid checking every pair. Motoi doesn't ship that, but nothing stops you from writing one on top of `world/spawn` and `world/collisions`. That's what Chapter 15 (making your own module) hints at.
+
+## What you know now
+
+- `world/spawn` returns an id you can hold onto. You can spawn many; each has its own state.
+- `world/step` advances physics one tick. Gravity + friction apply.
+- `world/gravity!`, `world/reset!`, `world/count` configure and query the world.
+- `entity/overlaps?` and `world/collisions` detect overlap. Response is yours.
+- `entity/despawn!` removes an entity.
+- `world/impulse!` applies a one-frame velocity change.
+- `entity/set-vel!` sets a persistent velocity.
+- The pattern: hold entities as lists, iterate them, decide behavior in Scheme.
+
+## Try before you turn the page
+
+1. Spawn 5 balls at random x-positions along the top of a 100-wide world. Give each a random downward velocity. Step 20 frames. Print each ball's final y.
+
+2. Two balls approach each other head-on. Detect the collision. When they collide, reverse both velocities (a naive bounce). Step 10 frames and print positions.
+
+3. Spawn a hero and 10 coins. Let hero walk right at velocity 2. Every frame, check for overlaps; if the hero is picking up a coin, play a `synth/kit 'clap` sound.
+
+4. Build a scene with a *ceiling* — spawn an entity called `'ceiling` at y=0 that spans the width. When hero's y is < 5, log \"bumped ceiling\" and reverse hero's vy. This is the response side of ceiling collision.
+
+5. Write a function `(spawn-cluster count x y radius)` that spawns `count` entities in a rough circle of `radius` around `(x, y)`. Use `(randint (- radius) radius)` for jitter.
+
+## What's next
+
+Chapter 12: **composing sound**. Chapter 1 made a beep. Chapter 10 built a beat DSL. Chapter 12 goes deeper on the audio module — chords, sequences, tempo, scheduling notes for exact moments in time. It's a small chapter but rich; music is a whole subject.")

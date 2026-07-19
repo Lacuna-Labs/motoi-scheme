@@ -1,0 +1,170 @@
+(chapter
+  :book "Book of Composition"
+  :chapter-number 15
+  :title "HTTP server — publish and play"
+  :audience "programmer-fluent-in-other-languages"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-of-composition-author-agent"
+     :cli-verified #t)
+  :prose
+"# Chapter 15 — HTTP server
+
+Composer v1.1 shipped an HTTP host. Kids run a small server on their local machine and share a link so a friend on the same wifi can play their cart in a browser. The server hosts carts from a local directory and gates the composer view behind a local-only permission by default.
+
+## 15.1 The four verbs
+
+```
+(http/serve :port N :cart-dir DIR :compose-perm 'local-only)  ;; -> server-record
+(http/wait-until-ready server [timeout-ms])                    ;; -> server-record with bound port
+(http/stop server)                                             ;; -> #t
+(http/serve-info server)                                       ;; -> alist of server info
+```
+
+All four verify against the runtime.
+
+## 15.2 Starting the server
+
+```scheme
+(define s (http/serve :port 8080 :cart-dir \"carts\" :compose-perm 'local-only))
+```
+
+Starts an HTTP server on port 8080 serving carts from the `carts/` directory. `:compose-perm 'local-only` gates the `/compose/` route to local requests.
+
+If `:port 0` is passed, the server picks an unused port; use `http/wait-until-ready` to learn the actual port.
+
+## 15.3 Waiting for the server to bind
+
+```scheme
+(http/wait-until-ready s 2000)
+```
+
+Waits up to 2000 milliseconds for the server to bind. Returns the server record with the actual `:port` field populated.
+
+## 15.4 Stopping the server
+
+```scheme
+(http/stop s)
+;; => #t
+```
+
+Closes the server and removes it from the registry.
+
+## 15.5 Server info
+
+```scheme
+(http/serve-info s)
+;; => ((:id 1) (:port 8080) (:cart-dir \"/absolute/path/carts\") (:compose-perm local-only))
+```
+
+Returns an alist describing the server.
+
+## 15.6 The three routes
+
+The server exposes three route families:
+
+1. `/` — landing page listing carts.
+2. `/play/:cart` — browser shell for playing a cart. Public.
+3. `/compose/:cart` — browser shell for composing a cart. Permission-gated.
+
+## 15.7 The landing page
+
+Visit `http://localhost:8080/` and you see:
+
+- The ASCII tree logo.
+- Three brand stripes (pink, green, brown).
+- A list of all carts in the cart directory, each with a play link and a compose link.
+
+The landing page is HTML with inline CSS. Nothing served from a CDN. Everything the browser needs comes from the server itself.
+
+## 15.8 The play route
+
+`/play/:cart` serves a page that shows the cart's source (for v1.1) and a link to compose. The browser runtime that actually executes the cart lives in a later wave — v1.1 gets you as far as viewing and sharing the source. The security review in the source documents this: the play route is READ-ONLY delivery of the composer bundle.
+
+## 15.9 The compose route
+
+`/compose/:cart` opens a compose view. By default `:compose-perm 'local-only` means only requests from 127.0.0.1 or ::1 can hit this route. A remote request receives a 403.
+
+The permission check reads the raw socket's remote address. X-Forwarded-For and other client-supplied headers are IGNORED. A remote client cannot lie its way past the local-only gate by setting a header.
+
+## 15.10 Path-traversal defense
+
+The server refuses:
+
+- URLs containing null bytes.
+- URLs containing `..` (literal, not URL-encoded).
+- Cart names not matching `/^[A-Za-z0-9._-]+$/` per segment.
+- Cart names with more than 4 path segments.
+- Cart names longer than 256 characters.
+
+Every cart name is decoded, split on `/`, checked segment-by-segment, and only served if the resolved path is still under the cart directory. A cart named `../../etc/passwd` will not resolve; the server returns 404.
+
+The full path-safety code is in `lib/net/http-serve.js` — `safeCartPath`, `safeCartPathWithSubdir`, and `safeResolveCartDir`. These are the functions Appendix H covers in depth.
+
+## 15.11 GET only
+
+Only GET requests are honored. POST, PUT, DELETE return 405. This is deliberate: v1.1 does not accept cart writes over HTTP. Edits round-trip through the composer's own save/load, not the HTTP layer. A later wave may add a WebSocket edit channel — until then, the HTTP surface is read-only.
+
+## 15.12 Compose-vs-play separation
+
+The `compose-perm` option is the whole model:
+
+- `'local-only` (default) — the compose view only opens for requests from the machine running the server. A remote friend can play carts but cannot compose them.
+- `'anyone` — opens compose to all requests. Only use this on trusted networks.
+
+The play view has NO permission gate — anyone reachable by the port can play. This matches the sharing model: kids WANT friends to play their carts, don't want strangers to edit them.
+
+## 15.13 A worked example
+
+Start a server:
+
+```scheme
+(define s (http/serve :port 8080 :cart-dir \"carts\" :compose-perm 'local-only))
+(http/wait-until-ready s 2000)
+```
+
+Visit `http://localhost:8080/` in a browser. See the landing page. Click a cart link. See the play view.
+
+Try to visit `/compose/synth-patch` from another machine on the network. Get a 403 (`compose is local-only`).
+
+Stop:
+
+```scheme
+(http/stop s)
+```
+
+## 15.14 The cart directory
+
+`:cart-dir \"carts\"` is a relative path. The server resolves it against the process's current working directory and refuses to escape the cwd.
+
+If the resolved cart-dir does not exist, `http/serve` throws. If it exists but is not a directory, `http/serve` throws.
+
+The server walks the cart-dir at request time (not startup) and lists `.slat` and `.sks` files. This means adding a new cart to the directory shows up on the next request without a server restart.
+
+## 15.15 Cart naming rules
+
+Cart names in URLs are limited to `[A-Za-z0-9._-]`. This excludes spaces, slashes (except as path separators within a subdirectory cart name), and any character that could carry a URL-encoding trick.
+
+Kids naming carts should stick to lowercase letters, digits, hyphens, and underscores. `hero-sample`, `snake_v2`, `demo.1` all work. `hero sample` (with a space) does not — rename to `hero-sample`.
+
+## 15.16 The security model in one paragraph
+
+The HTTP server is a local sharing tool. Play is public within reach of the port. Compose is local-only by default. Path traversal is defended in depth. Only GET is accepted. Forwarded-for headers are ignored. Cart names are strict-regexed. The security review in the source (`lib/net/http-serve.js`) calls out each defense and its reasoning. Appendix H walks the whole model.
+
+## 15.17 What to remember from this chapter
+
+- `http/serve` starts a small HTTP server on a port, from a cart directory.
+- `http/wait-until-ready` returns once the server has bound.
+- `http/stop` closes the server.
+- `http/serve-info` returns metadata about a running server.
+- Three routes: `/` (landing), `/play/:cart` (public), `/compose/:cart` (permission-gated).
+- `:compose-perm 'local-only` (default) restricts compose to 127.0.0.1 / ::1.
+- Path traversal is defended: only alphanumeric-dot-underscore-hyphen cart names, no `..`, no null bytes, no header spoofing.
+- Only GET is accepted. Writes come later.
+
+Chapter 16 walks a full worked example — sprite plus sound plus tile-map plus HTTP publish plus friend plays.
+")

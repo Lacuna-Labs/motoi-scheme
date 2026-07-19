@@ -1,0 +1,276 @@
+;; ch11-rlc-circuit-and-worlds-damping.book.slatl
+;; Book of Simulation Games — Chapter 11: The RLC Circuit and the World's Damping
+;; Authored 2026-07-16 by simulation-games-engineer-lane.
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Simulation Games"
+  :chapter-number      11
+  :title               "The RLC Circuit and the World's Damping"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "simulation-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + physics-simulation-emergent"
+  :book-version        "1.0.0"
+  :provenance          ((:authored-by "Engineer") (:date "2026-07-16"))
+  :prose
+"Take a mass on a spring in a viscous fluid. Pull it, let go, watch it
+oscillate with slowly-shrinking amplitude. That is the
+mass-spring-damper — the M-K-B system, they call it in mechanical
+engineering.
+
+Take an inductor, a capacitor, and a resistor in series with a
+voltage source. Charge the capacitor, disconnect the source, watch
+the voltage across the capacitor oscillate with slowly-shrinking
+amplitude. That is the RLC circuit — resistor-inductor-capacitor.
+
+Same math. Different costume. The M-K-B and the RLC obey identical
+second-order linear differential equations with damping. In
+mechanical language: `m*x'' + b*x' + k*x = 0`. In electrical:
+`L*Q'' + R*Q' + Q/C = 0`. Rewrite one and it's the other, symbol for
+symbol.
+
+This chapter builds the mass-spring-damper, tunes it through the
+three damping regimes (under-, critical, over-), builds the RLC
+circuit as its exact numerical twin, and shows how one Motoi Scheme
+verb — `phys/rlc-damping` — analyzes both. The chapter ends with a
+tribute to the strange fact that the same equation describes the
+damping of a shock absorber, the ringing of a struck bell, the
+decay of an antenna transient, and the settling of a stock price
+after a shock. Physics is more shape than substance.
+
+---
+
+## 11.1 Mass-spring-damper
+
+```scheme
+(define (msd)
+  (world/reset!)
+  (world/gravity! 0 0)                 ;; no external gravity
+  (let ((anchor (world/spawn 'anchor 240 100))
+        (mass   (world/spawn 'mass   240 200)))
+    (entity/pin!  anchor)
+    (entity/mass! mass 1.0)
+    (let ((spring (world/link! anchor mass)))
+      (world/link-rest!      spring 100)
+      (world/link-stiffness! spring 0.10)     ;; k
+      (world/link-damping!   spring 0.02))    ;; b
+    ;; Pull the mass down and release
+    (entity/set-pos! mass 240 250)
+    mass))
+
+(define mass (msd))
+(define amp-history '())
+
+(on-frame
+  (lambda (t)
+    (world/step)
+    (set! amp-history (cons (- (entity/y mass) 200) amp-history))
+    (when (= 0 (modulo t 60))
+      (plot/line (reverse (take amp-history 300))
+                 :region '(20 300 460 120)))))
+```
+
+Pull, release, oscillate, decay. The amplitude envelope is
+exponential: `A(t) = A0 * exp(-t/tau)`, where `tau = 2m/b`. Log-plot
+the envelope; you'll see a straight line.
+
+## 11.2 The three regimes
+
+Damping ratio zeta = b / (2 * sqrt(m*k)).
+
+- zeta < 1: underdamped. Oscillates, amplitude decays.
+- zeta = 1: critically damped. Returns to rest as fast as possible
+  without overshooting.
+- zeta > 1: overdamped. Returns slowly, no oscillation.
+
+```scheme
+;; Compute critical damping for our system
+(define k 0.10)
+(define m 1.0)
+(define b-critical (* 2 (sqrt (* m k))))    ;; = 0.632
+
+;; Test each regime
+(define (regime b-value name)
+  (world/reset!)
+  (let ((anchor (world/spawn 'anchor 240 100))
+        (mass   (world/spawn 'mass   240 200)))
+    (entity/pin!  anchor)
+    (entity/mass! mass m)
+    (let ((spring (world/link! anchor mass)))
+      (world/link-rest!      spring 100)
+      (world/link-stiffness! spring k)
+      (world/link-damping!   spring b-value))
+    (entity/set-pos! mass 240 250)
+    (let loop ((n 300) (max-y 200))
+      (world/step)
+      (if (<= n 0)
+          (list name 'settle-y (entity/y mass))
+          (loop (- n 1) (max max-y (entity/y mass)))))))
+
+(regime 0.10                  'underdamped)
+(regime b-critical            'critically-damped)
+(regime (* 2 b-critical)      'overdamped)
+```
+
+Critical damping is the fastest settle without overshoot. Car
+suspensions target near-critical (slightly under, because a bounce or
+two is more comfortable than a slow slog). Door closers target
+slightly overdamped so they never slam.
+
+## 11.3 The RLC circuit
+
+Same math, symbolically. We install it as a differential-equation
+simulation.
+
+```scheme
+;; RLC: state is (Q, I), where Q is charge on capacitor, I is current
+(define R 2.0)     ;; resistance
+(define L 1.0)     ;; inductance
+(define C 0.5)     ;; capacitance
+
+(define (rlc)
+  (world/reset!)
+  ;; No spatial world — this is a pure ODE.
+  (define Q 1.0)      ;; capacitor starts fully charged
+  (define I 0.0)      ;; current starts at zero
+  (define dt (/ 1.0 60))
+  (define (step!)
+    (let* ((V-cap (/ Q C))
+           (V-res (* R I))
+           (V-ind (- (- V-cap) V-res))       ;; L * dI/dt = -V-cap - V-res
+           (dI    (* V-ind (/ dt L)))
+           (I*    (+ I dI))
+           (Q*    (- Q (* I dt))))
+      (set! I I*)
+      (set! Q Q*)))
+  (let loop ((n 300) (history '()))
+    (if (<= n 0)
+        (reverse history)
+        (begin (step!) (loop (- n 1) (cons Q history))))))
+
+(define q-trace (rlc))
+```
+
+Plot `q-trace`. It oscillates and decays. The oscillation frequency
+is `omega = sqrt(1/(L*C) - (R/(2L))^2)`. The decay is exponential
+with time constant `tau = 2L/R`. Same equations as the mechanical
+system with `m = L`, `b = R`, `k = 1/C`.
+
+## 11.4 phys/rlc-damping — the analyzer
+
+```scheme
+(phys/rlc-damping :R 2.0 :L 1.0 :C 0.5)
+;; => (:regime underdamped
+;;     :omega-0     1.414
+;;     :omega-d     1.323
+;;     :zeta        0.500
+;;     :tau         1.000
+;;     :half-life   0.693)
+```
+
+This works for both the RLC and the mass-spring-damper (with the
+substitution above). It's one verb that gives you the whole picture:
+which regime, natural frequency, damped frequency, damping ratio,
+time constant, half-life.
+
+## 11.5 Uncertainty and measurement
+
+Real experiments have measurement error. `phys/uncertainty-add` and
+`phys/uncertainty-mul` propagate errors through arithmetic.
+
+```scheme
+(define R-measured (phys/quantity 2.0 :error 0.1 :unit 'ohm))
+(define L-measured (phys/quantity 1.0 :error 0.05 :unit 'henry))
+(define C-measured (phys/quantity 0.5 :error 0.02 :unit 'farad))
+
+(phys/rlc-damping :R R-measured :L L-measured :C C-measured)
+;; => (:regime underdamped
+;;     :omega-0     (1.414 +/- 0.06)
+;;     :zeta        (0.500 +/- 0.03)
+;;     ...)
+```
+
+Uncertainty in inputs becomes uncertainty in outputs. This is what
+real experimentalists do — every measurement has an error bar, and
+those bars propagate through formulas. Kids can see the error bar
+grow when they multiply two uncertain quantities.
+
+## 11.6 The bell, the antenna, the market
+
+The M-K-B / RLC equation shows up everywhere.
+
+- Struck bell: air resistance is `b`, spring constant of the bell
+  material is `k`, mass of the vibrating bell is `m`. Rings, decays.
+- Antenna receiving a pulse: the same equation with `R`, `L`, `C`
+  from the antenna's electrical properties.
+- Stock price after news shock: some models treat the price as a
+  damped oscillator settling toward a new equilibrium.
+- Population of a species around a stable equilibrium.
+
+Physics is not a subject; physics is a set of shapes that recur.
+Damped harmonic oscillator is one of the shapes. Once you learn it,
+you see it everywhere.
+
+---
+
+## 11.7 The four routing patterns
+
+**Composition.** The MSD is composed of anchor + mass + spring +
+damping. The RLC is composed of R + L + C + initial charge. Both
+compose with `phys/rlc-damping` for analysis.
+
+**Orchestration.** The tuning workflow orchestrates: pick k, pick m,
+compute critical b, run three sims (0.5x, 1.0x, 2.0x b-critical),
+compare settling behavior. A live demo orchestrates: input slider
+values → run → paint → update plot.
+
+**In-routing.** Slider events route to parameter updates. 'Reset the
+mass to y=250' events route to entity position set.
+
+**Routing.** The amplitude history routes to a plot. The regime
+classification routes to a label overlay. The runtime-side inference:
+'user's spring feels too bouncy → increase damping toward critical.'
+That routes to a recommendation the operator can accept or ignore.
+
+---
+
+## 11.8 Common desktop tasks
+
+An operator asked: 'we're selling a rocking chair. Customers ask how
+smoothly it stops rocking. Can you demonstrate?' The MSD sim with
+tuned k (chair spring constant when tilted) and b (friction at the
+rockers) plots the amplitude envelope. Then the runtime says: 'four seconds
+to half-amplitude, twelve seconds to nearly still. Slightly
+underdamped — comfortable, doesn't slam.' That is a specific answer,
+grounded in physics, appropriate for a listing.
+
+## 11.9 Try this
+
+1. Set damping to zero. Does the MSD oscillate forever?
+2. Set damping to 5x critical. How long to settle from y=250 to y<205?
+3. Build an RLC circuit with C=0.05 (very small capacitor). What's
+   the oscillation frequency?
+4. Match: given `omega_0 = 3.0` and `zeta = 0.3`, what R, L, C
+   satisfy it? (Many possible; pick one.)
+5. Add a driving force (`world/impulse! mass 0 5` every 60 frames).
+   Does the amplitude reach steady state? What determines it?
+
+## 11.10 Pitfalls
+
+**Numerical over-damping.** Very stiff springs with plain-Euler
+integration add artificial damping. Compare against the analytic
+envelope; if numerical decays faster, switch to Verlet or shorten dt.
+
+**Unit soup.** RLC in SI vs 'game units.' Use `phys/quantity` for
+dimensional-analysis-checked calculations; use raw numbers for game
+physics where a bounce coefficient is unitless.
+
+---
+
+Next: game theory. Nim, Wythoff, Grundy. A simulation of thinking.")

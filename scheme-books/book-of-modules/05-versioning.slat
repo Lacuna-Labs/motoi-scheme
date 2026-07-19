@@ -1,0 +1,133 @@
+(chapter
+  :book "Book of Modules"
+  :chapter-number 5
+  :title "Versioning"
+  :audience "programmer-fluent-in-other-languages"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-completion-orchestrator")
+  :prose
+"# Chapter 5 — Versioning
+
+Every module in Motoi carries a semantic version. Major.minor.patch. Three numbers. Each has a defined meaning. When you follow the rules, versioning is one of the most useful things the module system does. When you break the rules, you break the world.
+
+This chapter covers what each number means, when to bump which, and how version pins in import forms interact with what is actually available on disk or in the registry.
+
+## 5.1 The three numbers
+
+- **Major** — bumped when you make a change that breaks existing users. Removed a verb; renamed an exported name; changed the shape of a returned value; changed what an argument means.
+- **Minor** — bumped when you add something new without breaking existing users. New verb; new optional argument with a safe default; expanded set of values a verb can return, when the caller can safely ignore new cases.
+- **Patch** — bumped when you fix a bug without changing behavior anyone should have been relying on. The verb produces the correct answer where it produced the wrong answer before.
+
+`1.4.7` means: major 1, minor 4, patch 7. If I go from `1.4.7` to `1.4.8`, I have fixed a bug. From `1.4.7` to `1.5.0`, I have added something. From `1.4.7` to `2.0.0`, I have broken something.
+
+Two rules follow from these definitions:
+
+- Never bump minor or patch when the change is breaking. If you do, downstream programs that trusted your minor/patch to be safe will break silently.
+- Never bump major when the change is not breaking. If you do, downstream programs that pinned to `1.x` will refuse to load your new version even though it would have worked fine.
+
+## 5.2 Declaring a version
+
+Modules declare their version in the header:
+
+```scheme
+(module manners
+  :version \"1.0.0\"
+  (export greet farewell)
+  ...)
+```
+
+If you do not declare, Motoi assigns `0.1.0` and records that the version was defaulted. Zero-major versions are conventionally *anything can change* — no compatibility promises during 0.x. Bump to 1.0.0 when the module's shape stabilizes.
+
+## 5.3 Version pins revisited
+
+From chapter 2, the import form can pin a version:
+
+```scheme
+(import manners :version \"1.x\")
+```
+
+This says: I want `manners` at any 1.n.m. If a 2.0.0 exists, do not use it — I have not verified that my code still works against it.
+
+Version pins are the mechanism by which your program says *what it expects*. Motoi's job is to honor the pin or refuse to load if it cannot.
+
+The pin syntax is flexible. Every shape has a precise meaning.
+
+- `\"1.4.7\"` — exactly 1.4.7. Nothing else.
+- `\"1.4.x\"` — any 1.4.n. Patches allowed.
+- `\"1.x\"` — any 1.n.m. Minor and patch allowed.
+- `\">=1.4.7\"` — 1.4.7 or newer, up to the next major.
+- `\">=1.4.7 <2.0.0\"` — the explicit range.
+- `\"~1.4.7\"` — approximately 1.4.7, meaning 1.4.7 through 1.4.x (patches only).
+- `\"^1.4.7\"` — compatible with 1.4.7, meaning 1.4.7 through 1.x (patches and minors).
+
+Most programs should pin to `^` (compatible) or `~` (patch-only). Exact pins are for reproducibility; open pins are for prototyping.
+
+## 5.4 What a major bump feels like
+
+If you bump a module from 1.5.3 to 2.0.0, every downstream program pinned to `1.x` refuses to load your 2.0.0. That is the whole point. They opted in to major 1; you took major 1 away.
+
+The migration path:
+
+1. Downstream reads your changelog. It says: `2.0.0 removed the `greet-caps` verb; use `greet` and call `string-upcase` on the result.`
+2. Downstream updates its code to use the new shape.
+3. Downstream widens its pin to `^2.0.0` or `2.x`.
+4. Motoi now allows the load.
+
+Each of these steps requires a human. A responsible module author gives downstreams time — usually publishes 2.0.0 alongside a 1.x that still works, deprecates the old shape in 1.x with warnings, and only removes support after a fair transition period.
+
+## 5.5 What a minor bump feels like
+
+If you bump from 1.5.3 to 1.6.0, everyone pinned to `1.x` or `^1.5.3` picks up 1.6.0 on next load. This should be invisible to them — the new stuff is opt-in, the old stuff still works.
+
+The temptation, when adding a new feature, to sneak in a small breaking change is real. Resist it. If you cannot add the feature without breaking something, you owe the world a major bump. There is no middle path that keeps everyone happy.
+
+## 5.6 What a patch bump feels like
+
+If you bump from 1.5.3 to 1.5.4, everyone pinned to anything that allows 1.5.x picks up the fix. No behavior change; a bug is fixed.
+
+Patch bumps are the least dramatic and the most common. A responsible module author bumps patch often — every time a real bug is fixed.
+
+## 5.7 Version comparison
+
+Motoi compares versions component-wise, left to right, numerically.
+
+- `1.10.0` is newer than `1.9.9`. (Ten is greater than nine.)
+- `2.0.0` is newer than `1.99.99`. (Major dominates.)
+- `1.0.0-alpha` is *older* than `1.0.0`. (Pre-release suffixes sort before the plain release.)
+- `1.0.0-alpha.2` is newer than `1.0.0-alpha.1`.
+
+The pre-release suffix (`-alpha`, `-beta`, `-rc1`) lets you publish work-in-progress versions without them being picked up by `^` pins. `^1.0.0-alpha` matches pre-releases; plain `^1.0.0` does not.
+
+## 5.8 Version pins in Cortex
+
+Cortex logs the version that was actually resolved for each import.
+
+```scheme
+(cortex/query :predicate 'module-version-resolved)
+;; ⇒ ((program-a module-version-resolved
+;;      (:module manners :requested \"^1.0.0\" :resolved \"1.5.3\")
+;;      1720000000))
+```
+
+This is useful because it tells you what your program actually ran against, even when your pin was open. If a bug appears intermittently, the resolved version might be the clue: the pin was open, and last week Motoi picked 1.5.3, this week 1.5.4, and 1.5.4 has the bug.
+
+## 5.9 Practical guidance
+
+A short list of habits.
+
+- **Pin with `^` in application code.** You want patches and minors automatically; you do not want majors surprise-upgrading.
+- **Pin with exact versions in signed carts.** Reproducibility beats convenience for anything that ships.
+- **Bump major only when you have to.** It is expensive for everyone.
+- **Bump patch often.** Cheap, and downstreams appreciate the fixes.
+- **Read the changelog before widening a pin.** If someone says 2.0.0 removed the verb you love, do not blindly update.
+
+## 5.10 Try it
+
+Author a module `manners` at version 1.0.0 with `greet` and `farewell`. Import it from a program with `:version \"^1.0.0\"`. Bump the module to 1.1.0 by adding a `greet-loud` verb; verify the program still works. Bump to 2.0.0 by removing `farewell`; verify the program refuses to load. Read the error.
+
+Chapter 6 covers hashes and signatures — the tamper-evident layer under versioning. Turn the page.")

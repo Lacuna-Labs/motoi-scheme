@@ -1,0 +1,344 @@
+;; 08-time-is-a-value.slat
+;; Book of Values — Chapter 8
+
+(chapter
+  :book              "Book of Values"
+  :chapter-number    8
+  :title             "Time Is A Value"
+  :audience          :engineer
+  :dialect           "motoi"
+  :book-version      "1.1"
+  :provenance        "book-of-values-author-2026-07-16 book-of-values-expander-2026-07-17"
+  :training-eligible #t
+  :content-rating    :G
+  :prose
+"# Chapter 8 — Time Is A Value
+
+Time is the value that broke the most programs in the twentieth
+century and will break the most in this one.
+
+It looks simple. It says `1784258622855`. What could go wrong with a
+number?
+
+Everything.
+
+## What that number is
+
+Motoi has `time/now`. Call it.
+
+```
+(time/now)
+;; -> 1784258622855
+```
+
+That is *milliseconds since the Unix epoch*. The Unix epoch is
+midnight on 1 January 1970, UTC. So `1784258622855 ms` is roughly
+`56.5 years` after 1970. Roughly July 2026. Correct.
+
+Motoi also has `time/iso` which formats the same instant as ISO 8601:
+
+```
+(time/iso)
+;; -> \"2026-07-17T03:23:42.945Z\"
+```
+
+Both are *the same value*. Different presentations. The number is
+compact and machine-friendly. The string is human-readable and
+carries the timezone marker `Z` which means UTC.
+
+## Four kinds of time value
+
+Time is not one thing. It's at least four:
+
+1. **A moment on the wall clock.** *3:15pm on July 16.* This is what
+   humans mean by *time*. It depends on where you are.
+
+2. **A moment as an absolute UTC instant.** The same physical instant,
+   but expressed in a form independent of location. Unix milliseconds
+   are one way to express it. ISO 8601 with `Z` suffix is another.
+
+3. **A duration.** *3 seconds.* An interval, not a moment. Adding two
+   moments makes no sense. Subtracting two moments gives a duration.
+   Adding a duration to a moment gives a moment.
+
+4. **A monotonic reading.** Time that only ever moves forward, used
+   for measuring how long something took. Not tied to the wall clock.
+   Not affected by the user changing their clock or by daylight
+   saving. Different from wall time.
+
+Programs mix these up all the time. That's the bug.
+
+## Adding two moments is meaningless
+
+```
+(+ 1784258622855 1784258622855)
+;; -> 3568517245710
+```
+
+Motoi computed that. It's a number. It is not a time. It is roughly
+the year 4083. Adding two *moments* has the same units problem as
+Chapter 3: two Julys don't add up to a valid August.
+
+What *does* add up:
+
+- moment + duration = moment
+- moment − moment = duration
+- duration + duration = duration
+- duration × scalar = duration
+
+That is the algebra of time. Enforce it with shape.
+
+```
+(define (instant ms)  (list 'instant ms))
+(define (duration ms) (list 'duration ms))
+
+(define (instant-ms i)  (cadr i))
+(define (duration-ms d) (cadr d))
+
+(define (time+ a b)
+  (cond
+    ((and (eq? (car a) 'instant) (eq? (car b) 'duration))
+       (instant (+ (instant-ms a) (duration-ms b))))
+    ((and (eq? (car a) 'duration) (eq? (car b) 'duration))
+       (duration (+ (duration-ms a) (duration-ms b))))
+    ((and (eq? (car a) 'instant) (eq? (car b) 'instant))
+       (list 'error 'time+ 'cannot-add-two-instants))
+    (else
+       (list 'error 'time+ 'bad-shapes (car a) (car b)))))
+
+(time+ (instant 1000) (duration 500))
+;; -> (instant 1500)
+
+(time+ (instant 1000) (instant 500))
+;; -> (error time+ cannot-add-two-instants)
+```
+
+Shape refuses the nonsense. The nonsense would have compiled
+otherwise.
+
+## Timezones lie
+
+The wall clock in Tokyo, New York, and London reads different numbers
+at the same physical instant. A meeting scheduled for *9 AM* in
+London happens at *4 AM* in New York — and *4 AM the next day* if
+London is meaning tomorrow.
+
+When you store time, store it as an *instant* (UTC ms, or an ISO
+string with `Z`). Display it in whatever timezone the user cares
+about. Never store *3 PM* alone. `3 PM` is meaningless without a
+timezone, and *`3 PM` in whatever timezone this laptop happens to be
+in* is a bug waiting for the user to travel.
+
+## Daylight saving is the worst
+
+Twice a year, in most of North America and Europe, the wall clock
+jumps. In the spring it jumps forward an hour. In the fall it jumps
+back an hour.
+
+- **Spring forward.** Between 2:00 AM and 3:00 AM one Sunday, an
+  hour of wall-clock time does not exist. A cron job that runs at
+  2:30 AM does not run that day. Or it does — twice — depending on
+  the scheduler's opinion.
+
+- **Fall back.** Between 1:00 AM and 2:00 AM the wall clock happens
+  twice. Which of the two instants is *1:30 AM*? Both. A cron job
+  running at 1:30 AM might run once, or twice, or not at all.
+
+The fix is: schedulers should schedule on *UTC*. Wall time is a
+display concern. If a business rule says *run at 2:30 AM local time
+every day*, translate that to a UTC instant at scheduling time and
+run against UTC.
+
+## Monotonic vs wall time
+
+**Wall time** can jump backward. NTP corrects your clock. The user
+changes it. Daylight saving happens.
+
+**Monotonic time** cannot jump backward. It always advances. It is
+useful for timing how long something took.
+
+Do not measure elapsed time by subtracting two wall-clock readings.
+The wall might have moved between them for a reason unrelated to
+your code.
+
+Motoi's `time/now` is wall time. For a durable microbenchmark you
+would want a monotonic reading. At the time of writing, Motoi's base
+env exposes wall time only.
+
+<!-- NEEDS-ALFRED: The frozen CORE has time/now, time/iso,
+     time/from-ms, time/to-ms, time/across, time/during,
+     time/every-ms, time/until, time/when, time/then. Verify which of
+     these are wall-clock and which (if any) are monotonic. -->
+
+## The Y2K38 cliff
+
+Any system that stores time as a 32-bit signed number of *seconds*
+since 1970 will wrap on **19 January 2038 at 03:14:07 UTC**. On the
+next second, the counter overflows and the year becomes 1901.
+
+Motoi uses 64-bit-safe numbers (up to `2^53`, per Chapter 7), and
+milliseconds — so Motoi is fine into the year 285,000-something. But
+any external system you talk to might not be. Check the ceiling.
+
+## Duration arithmetic — the algebra in code
+
+Chapter opens with the four kinds of time. Here's the arithmetic laid
+out with runnable examples. Assume the `instant` / `duration` shapes
+from earlier.
+
+**Adding durations.** Two durations add cleanly. `500 ms + 250 ms` is
+`750 ms`. No timezone. No offset. Just numbers.
+
+```
+(+ 500 250)
+;; -> 750
+```
+
+**Subtracting instants.** Two instants subtract to a duration —
+*how long between them*. The result is a duration, not another
+instant.
+
+```
+(- 2000 1000)
+;; -> 1000
+```
+
+That's a millisecond duration of 1 second. If you tag the result
+you'd write `(duration 1000)`.
+
+**Scaling a duration.** Multiply a duration by a scalar and you get a
+duration. Ten intervals of 500 ms is 5 seconds.
+
+```
+(* 500 10)
+;; -> 5000
+```
+
+**Dividing durations.** Divide a duration by a duration and you get a
+*ratio* — a unitless number. *How many of B fit in A?*
+
+```
+(/ 5000 500)
+;; -> 10
+```
+
+Ten 500-ms intervals fit in 5 seconds. That is a dimensionless number
+you can use to schedule *n* ticks across a span.
+
+**Dividing a duration by a scalar.** Duration divided by a plain
+scalar gives a duration.
+
+```
+(/ 5000 10)
+;; -> 500
+```
+
+Five seconds split into ten pieces is 500 ms per piece.
+
+DO: treat `duration ÷ duration` as a *count* — a number that means
+'how many of these fit in that'.
+DON'T: assume `duration - duration` gives you a duration and
+`duration + duration` gives you an instant. That's not the algebra.
+WHY: same units on both sides means you're subtracting/adding same-
+kind values. Different units means one side is a ratio, the other a
+delta. The type shape refuses the confusion.
+
+## Wall clock vs monotonic — a picture
+
+Wall clock: the number your watch reads. Can go backward (NTP,
+daylight saving, user changes clock, leap seconds under some rules).
+
+Monotonic: an ever-increasing count of ticks since some arbitrary
+start point (usually system boot). Cannot go backward. Meaningless
+across boots or across machines.
+
+If you measure *how long a request took*:
+
+```
+;; Pseudocode showing the shape, not verbatim frozen verbs.
+(define start (time/now))          ;; wall time — could jump
+(do-the-thing)
+(define end (time/now))
+(- end start)                       ;; could be negative if wall jumped
+```
+
+If your wall clock jumped backward during the request (because NTP
+noticed a 3-second drift), the subtraction returns a negative
+number and your dashboard shows *request took -2.7 seconds*.
+Monotonic time avoids this. Use it for durations. Reserve wall
+clock for *what time was it* questions where the answer needs to
+match what a human sees on a clock.
+
+## ISO 8601 as the wire format
+
+When you write a time value to disk, or over the network, or into a
+log line, use ISO 8601 with the `Z` suffix. Every language on earth
+can parse it. Every human on earth can read it.
+
+```
+(time/iso)
+;; -> \"2026-07-17T03:23:42.945Z\"
+```
+
+The parts:
+
+- `2026-07-17` — year, month, day
+- `T` — separator between date and time
+- `03:23:42.945` — hour, minute, second, milliseconds
+- `Z` — Zulu / UTC
+
+Never write a bare `2026-07-17 03:23:42`. Somebody will parse it as
+local time in their timezone and everything downstream will drift.
+The `Z` is the whole point.
+
+## Recap
+
+- Time is not one value. It is *at least* four: wall time, UTC
+  instant, duration, monotonic.
+- `time/now` returns a UTC instant in milliseconds. `time/iso`
+  formats it as an ISO 8601 string.
+- Adding two instants is meaningless. Subtracting two instants gives
+  a duration. Adding a duration to an instant gives an instant.
+- Store times as UTC instants. Display in the user's timezone.
+- Daylight saving invalidates the assumption that wall time advances
+  monotonically. Schedule against UTC.
+- Wall time can jump backward. Measure elapsed time with monotonic
+  clocks where available.
+- 32-bit epoch-second systems fail on 19 January 2038. Know what
+  width the systems you talk to use.
+
+Next: how to compare values correctly — currencies, floats, times,
+and everything else that isn't just `=`.")
+
+(example :ref "ch8-now-ms"
+         :code "(number? (time/now))"
+         :expected #t
+         :teaching "time/now returns a number. The value itself changes every call.")
+(example :ref "ch8-iso-string"
+         :code "(string? (time/iso))"
+         :expected #t)
+(example :ref "ch8-plain-add-nonsense"
+         :code "(+ 1784258622855 1784258622855)"
+         :expected 3568517245710
+         :teaching "Motoi lets you add two moments. The result is meaningless.")
+(example :ref "ch8-shape-add-ok"
+         :code "(begin (define (instant ms) (list 'instant ms)) (define (duration ms) (list 'duration ms)) (define (instant-ms i) (cadr i)) (define (duration-ms d) (cadr d)) (define (time+ a b) (cond ((and (eq? (car a) 'instant) (eq? (car b) 'duration)) (instant (+ (instant-ms a) (duration-ms b)))) (else (list 'error 'time+ 'bad-shapes (car a) (car b))))) (time+ (instant 1000) (duration 500)))"
+         :expected "(instant 1500)")
+(example :ref "ch8-shape-add-refuse"
+         :code "(begin (define (instant ms) (list 'instant ms)) (define (duration ms) (list 'duration ms)) (define (time+ a b) (cond ((and (eq? (car a) 'instant) (eq? (car b) 'duration)) (list 'instant (+ (cadr a) (cadr b)))) ((and (eq? (car a) 'instant) (eq? (car b) 'instant)) (list 'error 'time+ 'cannot-add-two-instants)) (else (list 'error 'time+ 'bad-shapes)))) (time+ (instant 1000) (instant 500)))"
+         :expected "(error time+ cannot-add-two-instants)")
+(example :ref "ch8-dur-plus-dur"
+         :code "(+ 500 250)"
+         :expected 750)
+(example :ref "ch8-inst-minus-inst"
+         :code "(- 2000 1000)"
+         :expected 1000)
+(example :ref "ch8-dur-scale"
+         :code "(* 500 10)"
+         :expected 5000)
+(example :ref "ch8-dur-ratio"
+         :code "(/ 5000 500)"
+         :expected 10)
+(example :ref "ch8-dur-split"
+         :code "(/ 5000 10)"
+         :expected 500)

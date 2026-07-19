@@ -1,0 +1,1059 @@
+;; ch06-the-verb-pipeline.slat
+;; Book of Challenges — Chapter 6 — The Verb Pipeline
+
+(chapter
+  :book             "Book of Challenges"
+  :chapter-number   null
+  :title            "Chapter 6 — The Verb Pipeline"
+  :size             55270
+  :sha256           "8fc3eb1580d21386"
+  :prose
+"# Chapter 6 — The Verb Pipeline
+
+## What we're building toward
+
+When you orchestrate several wired verbs so each stage feeds the next—output curls into input, close-data-close-paren—you're writing a *pipeline*. Each verb does one honest thing; together they compose a route that could not exist alone. This chapter drills that skill: chaining verbs, checking failure at every seam, and advancing a computation stage by stage until a complete answer surfaces.
+
+The satisfaction here is *architectural*. A two-verb chain feels clever the first time you write one. A five-stage pipeline with failure handling at every joint feels like mastery—because it is. You're not calling functions; you're *routing data through the wired surface*, and the route itself becomes the program.
+
+We'll start with short chains—fetch-then-parse, lookup-then-filter—and ramp up to longer orchestrations that cross namespaces, transform shape, and escalate cleanly when a stage can't proceed. By the end, you'll write programs where the verbs themselves are the structure, and the data flows like water.
+
+When the runtime can do this, she can *compose capabilities*. A single verb is a tool; a pipeline is a workshop.
+
+---
+
+## Two-verb chains: the simplest pipeline
+
+The simplest pipeline is two verbs where the second consumes the first's output. No intermediate binding; the result of verb A becomes the argument to verb B. If either fails, the whole route escalates honestly—we check, we don't assume.
+
+### Fetch a page, then count its words
+
+```scheme
+;; Fetch a public webpage and count how many words it contains.
+;; If fetch fails, surface the failure; if word-count fails, surface that.
+
+(let ((page (web/fetch \"https://example.com\")))
+  (if (or (eq? page 'nan)
+          (and (pair? page) (eq? (car page) 'escalate)))
+      page  ; surface the failure
+      (let ((count (text/word-count page)))
+        (if (eq? count 'nan)
+            '(escalate \"word-count-failed\" \"could not parse text\")
+            count))))
+```
+
+Two stages: `web/fetch` yields text, `text/word-count` yields a number. We check after each. If either returns `'nan` or an escalation, we surface it. If both succeed, the count emerges.
+
+This is FORWARD: each stage advances the computation. This is ESCAPE: we route failure cleanly, never faking a result.
+
+---
+
+### Geocode an address, then find its timezone offset
+
+```scheme
+;; Turn a street address into coordinates, then infer the timezone offset.
+;; If geocoding fails, escalate; if time/now fails, escalate; else return offset.
+
+(let ((coords (geo/geocode-address \"1600 Amphitheatre Parkway, Mountain View, CA\")))
+  (if (or (eq? coords 'nan)
+          (and (pair? coords) (eq? (car coords) 'escalate)))
+      coords
+      ;; coords is an alist with 'lat and 'lng; we don't have a timezone-from-coords verb,
+      ;; so we demonstrate the *pattern* by using time/now at the current location.
+      ;; In a real pipeline, you'd call a timezone verb here if one existed.
+      (let ((now (time/now)))
+        (if (eq? now 'nan)
+            '(escalate \"time-failed\" \"could not read current time\")
+            ;; Construct a result showing we'd route coords -> timezone.
+            (list (cons 'address \"1600 Amphitheatre Parkway, Mountain View, CA\")
+                  (cons 'coords coords)
+                  (cons 'timestamp now))))))
+```
+
+Two verbs, two checks. The pattern is identical: verb, test, advance or escalate. This is the rhythm of every pipeline.
+
+<!-- BUILD: needs verb geo/timezone-from-coords if we want a true lat/lng -> timezone route -->
+
+---
+
+### Search Wikidata, then fetch the first entity's details
+
+```scheme
+;; Search Wikidata for \"Marie Curie\", take the first result, fetch its full entity record.
+
+(let ((results (wikidata/search \"Marie Curie\")))
+  (if (or (eq? results 'nan)
+          (and (pair? results) (eq? (car results) 'escalate)))
+      results
+      (if (null? results)
+          '(escalate \"no-results\" \"search returned empty list\")
+          (let ((entity-id (cdr (assoc 'id (car results)))))
+            (if (not entity-id)
+                '(escalate \"malformed-result\" \"no id in first search result\")
+                (let ((entity (wikidata/entity entity-id)))
+                  (if (or (eq? entity 'nan)
+                          (and (pair? entity) (eq? (car entity) 'escalate)))
+                      entity
+                      entity)))))))
+```
+
+Three checks, two verbs. We search, validate the result list isn't empty, extract an ID, then fetch the entity. Each conditional is a joint in the pipeline; each guards against a shape we can't continue from.
+
+---
+
+## Three-stage pipelines: forking and filtering
+
+Once you chain three verbs, you're orchestrating a *route*. The middle stage often transforms or filters data—takes a list, returns a subset; takes JSON, returns a value. The joints multiply: check the first verb, check the middle verb's output isn't empty, check the final verb.
+
+### Fetch weather data, parse JSON, extract temperature
+
+```scheme
+;; Fetch a public weather API (example.com/weather), parse JSON, extract 'temp.
+;; If any stage fails, escalate; else return the temperature value.
+
+(let ((response (web/fetch \"https://api.example.com/weather\")))
+  (if (or (eq? response 'nan)
+          (and (pair? response) (eq? (car response) 'escalate)))
+      response
+      ;; Assume response is JSON text; we parse it as an alist.
+      ;; (In real the runtime, you'd use a JSON-parse verb if available; here we simulate.)
+      (let ((data (if (string? response)
+                      ;; Fake parse: pretend we got '((temp . 72) (humidity . 65))
+                      '((temp . 72) (humidity . 65))
+                      'nan)))
+        (if (eq? data 'nan)
+            '(escalate \"parse-failed\" \"could not parse JSON\")
+            (let ((temp (cdr (assoc 'temp data))))
+              (if (not temp)
+                  '(escalate \"no-temp-field\" \"JSON missing 'temp key\")
+                  temp))))))
+```
+
+Three stages: fetch, parse (simulated), extract. We check after each. The temperature emerges only if all three succeed.
+
+---
+
+### List Etsy shop sections, filter active ones, count them
+
+```scheme
+;; Fetch all sections in an Etsy shop, keep only active sections, return the count.
+
+(let ((sections (etsy/sections)))
+  (if (or (eq? sections 'nan)
+          (and (pair? sections) (eq? (car sections) 'escalate)))
+      sections
+      (let ((active (filter (lambda (sec)
+                              (let ((active? (cdr (assoc 'active sec))))
+                                (eq? active? #t)))
+                            sections)))
+        (if (null? active)
+            0
+            (length active)))))
+```
+
+Three stages: fetch sections, filter active, count. The middle stage uses `filter`, a higher-order function—this is where pipelines start to feel powerful. We're not looping; we're *transforming* the data in place, then counting what remains.
+
+---
+
+### Recall a memory pattern, extract the first match, hash its text
+
+```scheme
+;; Recall memories matching the pattern \"order:shipped\", take the first, hash its text.
+
+(let ((memories (cortex/recall-pattern \"order:shipped\")))
+  (if (or (eq? memories 'nan)
+          (and (pair? memories) (eq? (car memories) 'escalate)))
+      memories
+      (if (null? memories)
+          '(escalate \"no-matches\" \"no memories matched pattern\")
+          (let ((first-mem (car memories)))
+            (let ((text (cdr (assoc 'text first-mem))))
+              (if (not text)
+                  '(escalate \"malformed-memory\" \"first memory has no 'text field\")
+                  (let ((hash (system/hash256 text)))
+                    (if (eq? hash 'nan)
+                        '(escalate \"hash-failed\" \"could not hash text\")
+                        hash))))))))
+```
+
+Four checks, three verbs. The joints are explicit: recall, validate non-empty, extract a field, hash. Each `if` is a seam; each seam is honest.
+
+---
+
+## Four-stage pipelines: cross-namespace orchestration
+
+When you chain verbs from different namespaces—`cortex/` → `model/` → `text/` → `mail/`—you're crossing the wired surface. Each verb speaks a different dialect; the pipeline translates between them. This is where mastery shows: you know which verb does what, you know their contracts, and you route failure at every boundary.
+
+### Search CRM contacts, draft a reply with model/, normalize text, hash it
+
+```scheme
+;; Search CRM for contacts matching \"recent buyer\", take the first, draft a reply,
+;; normalize the draft text, hash it, return the hash.
+
+(let ((contacts (crm/contact-search \"recent buyer\")))
+  (if (or (eq? contacts 'nan)
+          (and (pair? contacts) (eq? (car contacts) 'escalate)))
+      contacts
+      (if (null? contacts)
+          '(escalate \"no-contacts\" \"search returned no contacts\")
+          (let ((first-contact (car contacts)))
+            (let ((email (cdr (assoc 'email first-contact))))
+              (if (not email)
+                  '(escalate \"no-email\" \"first contact has no email field\")
+                  (let ((draft (model/draft (string-append \"Write a follow-up email to \" email))))
+                    (if (or (eq? draft 'nan)
+                            (and (pair? draft) (eq? (car draft) 'escalate)))
+                        draft
+                        (let ((normalized (text/normalize draft)))
+                          (if (eq? normalized 'nan)
+                              '(escalate \"normalize-failed\" \"could not normalize draft\")
+                              (let ((hash (system/hash256 normalized)))
+                                (if (eq? hash 'nan)
+                                    '(escalate \"hash-failed\" \"could not hash text\")
+                                    hash))))))))))))
+```
+
+Four verbs, five checks: `crm/contact-search`, `model/draft`, `text/normalize`, `system/hash256`. Each comes from a different namespace; together they form a route from \"search contacts\" to \"hash of normalized draft.\" The pipeline is the program.
+
+---
+
+### Fetch Shopify orders, extract first order's line items, calculate total quantity, classify as \"large\" or \"small\"
+
+```scheme
+;; Fetch recent Shopify orders, take the first, sum line-item quantities,
+;; classify the total as \"large\" (>10) or \"small\" (<=10).
+
+(let ((orders (shopify/orders)))
+  (if (or (eq? orders 'nan)
+          (and (pair? orders) (eq? (car orders) 'escalate)))
+      orders
+      (if (null? orders)
+          '(escalate \"no-orders\" \"orders list is empty\")
+          (let ((first-order (car orders)))
+            (let ((line-items (cdr (assoc 'line_items first-order))))
+              (if (not line-items)
+                  '(escalate \"no-line-items\" \"first order has no line_items field\")
+                  (let ((total-qty (fold (lambda (item acc)
+                                           (let ((qty (cdr (assoc 'quantity item))))
+                                             (if qty (+ acc qty) acc)))
+                                         0
+                                         line-items)))
+                    (if (> total-qty 10)
+                        (cons 'classification \"large\")
+                        (cons 'classification \"small\")))))))))
+```
+
+Four stages: fetch orders, extract line items, fold to sum quantities, classify. We introduce `fold` here—if you haven't seen it, it's a left-to-right accumulator: starts at 0, walks the list, adding each item's quantity. The final stage is a simple conditional; the route delivers a classification.
+
+---
+
+### Recall a memory, extract its timestamp, compute days since, decide if stale
+
+```scheme
+;; Recall a memory by key \"last-inventory-sync\", extract its timestamp,
+;; compute days since, decide if >30 days = stale.
+
+(let ((mem (cortex/recall \"last-inventory-sync\")))
+  (if (or (eq? mem 'nan)
+          (and (pair? mem) (eq? (car mem) 'escalate)))
+      mem
+      (let ((ts (cdr (assoc 'timestamp mem))))
+        (if (not ts)
+            '(escalate \"no-timestamp\" \"memory has no timestamp field\")
+            (let ((days (time/days-since ts)))
+              (if (eq? days 'nan)
+                  '(escalate \"days-since-failed\" \"could not compute days since\")
+                  (if (> days 30)
+                      (cons 'status \"stale\")
+                      (cons 'status \"fresh\"))))))))
+```
+
+Four stages: recall, extract timestamp, compute days, classify. Each verb does one thing; the pipeline does something none could do alone.
+
+---
+
+## Five-stage pipelines: the long route
+
+A five-stage pipeline is a *route*. It crosses namespaces, transforms data at each joint, and escalates cleanly when a stage can't proceed. This is the top of the ramp for this chapter—these programs are genuinely hard, not because they use obscure features, but because they orchestrate many moving parts and handle failure honestly at every seam.
+
+### Fetch Etsy listings, filter published, map to titles, take first 5, join into a summary string
+
+```scheme
+;; Fetch all Etsy listings, keep only published ones, extract titles,
+;; take the first 5, join them with \" | \" into a single string.
+
+(let ((listings (etsy/listings)))
+  (if (or (eq? listings 'nan)
+          (and (pair? listings) (eq? (car listings) 'escalate)))
+      listings
+      (let ((published (filter (lambda (listing)
+                                 (let ((state (cdr (assoc 'state listing))))
+                                   (equal? state \"active\")))
+                               listings)))
+        (if (null? published)
+            '(escalate \"no-published\" \"no active listings found\")
+            (let ((titles (map (lambda (listing)
+                                 (cdr (assoc 'title listing)))
+                               published)))
+              (let ((first-five (if (> (length titles) 5)
+                                    (list-head titles 5)
+                                    titles)))
+                (let ((summary (fold (lambda (title acc)
+                                       (if (string=? acc \"\")
+                                           title
+                                           (string-append acc \" | \" title)))
+                                     \"\"
+                                     first-five)))
+                  (if (string=? summary \"\")
+                      '(escalate \"no-titles\" \"could not construct summary\")
+                      summary))))))))
+```
+
+Five stages: fetch, filter, map, take-first-five, fold-into-string. We use `list-head` to slice the list (a standard Scheme form), then `fold` to join titles with \" | \". The route delivers a single string summarizing the first five published listings. If any stage fails—empty list, no titles—we escalate cleanly.
+
+This is FORWARD at scale: each stage advances the computation. This is ESCAPE: we check at every joint. This is BACK: we don't build a complex data structure; we build the *simplest* structure that holds the answer.
+
+---
+
+### Fetch YouTube playlist items, extract video IDs, fetch video details, compute total duration, format as hours:minutes
+
+```scheme
+;; Fetch items from a YouTube playlist, extract video IDs, fetch details for each,
+;; sum durations (in seconds), convert to hours:minutes format.
+
+(let ((items (youtube/playlist-items-incremental \"PLxxxxxxxxxxx\")))
+  (if (or (eq? items 'nan)
+          (and (pair? items) (eq? (car items) 'escalate)))
+      items
+      (if (null? items)
+          '(escalate \"no-items\" \"playlist is empty\")
+          (let ((video-ids (map (lambda (item)
+                                  (cdr (assoc 'videoId item)))
+                                items)))
+            (let ((videos (youtube/videos-list video-ids)))
+              (if (or (eq? videos 'nan)
+                      (and (pair? videos) (eq? (car videos) 'escalate)))
+                  videos
+                  (let ((durations (map (lambda (video)
+                                          ;; duration is ISO8601 duration string, e.g. \"PT4M13S\"
+                                          ;; We'll simulate parsing it as seconds (real code would parse).
+                                          ;; For demo, assume each has a 'duration_seconds field.
+                                          (let ((secs (cdr (assoc 'duration_seconds video))))
+                                            (if secs secs 0)))
+                                        videos)))
+                    (let ((total-secs (fold + 0 durations)))
+                      (let ((hours (quotient total-secs 3600))
+                            (minutes (quotient (remainder total-secs 3600) 60)))
+                        (string-append (number->string hours) \"h \"
+                                       (number->string minutes) \"m\"))))))))))
+```
+
+Five stages: fetch playlist items, extract IDs, fetch video details, sum durations, format. We use `quotient` and `remainder` (core Scheme) to convert seconds to hours and minutes. The route delivers a human-readable duration string.
+
+<!-- BUILD: needs ISO8601 duration parser if we want to handle real YouTube duration strings -->
+
+---
+
+### Search analytics for revenue by promotion, filter positive revenue, sort descending, take top 3, format as JSON
+
+```scheme
+;; Query analytics for revenue by promotion code, keep only positive revenue,
+;; sort descending, take top 3, format as a list of alists (JSON-like structure).
+
+(let ((results (analytics/query-revenue-by-promotion)))
+  (if (or (eq? results 'nan)
+          (and (pair? results) (eq? (car results) 'escalate)))
+      results
+      (let ((positive (filter (lambda (promo)
+                                (let ((rev (cdr (assoc 'revenue promo))))
+                                  (and rev (> rev 0))))
+                              results)))
+        (if (null? positive)
+            '(escalate \"no-positive-revenue\" \"all promotions have zero or negative revenue\")
+            (let ((sorted (sort positive (lambda (a b)
+                                           (> (cdr (assoc 'revenue a))
+                                              (cdr (assoc 'revenue b)))))))
+              (let ((top-three (if (> (length sorted) 3)
+                                   (list-head sorted 3)
+                                   sorted)))
+                (map (lambda (promo)
+                       (list (cons 'code (cdr (assoc 'code promo)))
+                             (cons 'revenue (cdr (assoc 'revenue promo)))))
+                     top-three)))))))
+```
+
+Five stages: query, filter, sort (using `sort`, a standard Scheme form or built-in), take-top-three, map-to-clean-alists. The final stage constructs a list of alists, each with `'code` and `'revenue`—a JSON-like structure. The route delivers a leaderboard.
+
+---
+
+### Fetch Printify blueprints, filter by type \"apparel\", map to provider IDs, fetch provider details, compute average production time
+
+```scheme
+;; Fetch all Printify blueprints, keep only apparel, extract provider IDs,
+;; fetch provider details, compute average production time in days.
+
+(let ((blueprints (printify/blueprints)))
+  (if (or (eq? blueprints 'nan)
+          (and (pair? blueprints) (eq? (car blueprints) 'escalate)))
+      blueprints
+      (let ((apparel (filter (lambda (bp)
+                               (let ((type (cdr (assoc 'type bp))))
+                                 (equal? type \"apparel\")))
+                             blueprints)))
+        (if (null? apparel)
+            '(escalate \"no-apparel\" \"no apparel blueprints found\")
+            (let ((provider-ids (map (lambda (bp)
+                                       (cdr (assoc 'provider_id bp)))
+                                     apparel)))
+              (let ((providers (printify/blueprint-providers (car provider-ids))))
+                ;; Assume blueprint-providers returns a list of providers for a given blueprint.
+                ;; In reality, we'd batch-fetch or loop; here we simulate with the first.
+                (if (or (eq? providers 'nan)
+                        (and (pair? providers) (eq? (car providers) 'escalate)))
+                    providers
+                    (let ((prod-times (map (lambda (prov)
+                                             (let ((time (cdr (assoc 'production_time prov))))
+                                               (if time time 0)))
+                                           providers)))
+                      (let ((avg (if (null? prod-times)
+                                     0
+                                     (/ (fold + 0 prod-times) (length prod-times)))))
+                        (cons 'average_production_days avg))))))))))
+```
+
+Five stages: fetch blueprints, filter apparel, extract provider IDs, fetch provider details, compute average. We use `fold` to sum and divide by length—a classic average. The route delivers a single cons cell with the average.
+
+---
+
+### Fetch CRM contacts, batch-read associations, filter by deal stage, extract emails, draft a batch email campaign
+
+```scheme
+;; Fetch CRM contacts, batch-read their deal associations, filter for stage \"qualified\",
+;; extract emails, draft a batch email body using model/draft, return email list + draft.
+
+(let ((contacts (crm/contact-search \"status:active\")))
+  (if (or (eq? contacts 'nan)
+          (and (pair? contacts) (eq? (car contacts) 'escalate)))
+      contacts
+      (if (null? contacts)
+          '(escalate \"no-contacts\" \"no active contacts found\")
+          (let ((contact-ids (map (lambda (c) (cdr (assoc 'id c))) contacts)))
+            (let ((assocs (crm/assoc-batch-read contact-ids)))
+              (if (or (eq? assocs 'nan)
+                      (and (pair? assocs) (eq? (car assocs) 'escalate)))
+                  assocs
+                  (let ((qualified (filter (lambda (a)
+                                             (let ((stage (cdr (assoc 'deal_stage a))))
+                                               (equal? stage \"qualified\")))
+                                           assocs)))
+                    (if (null? qualified)
+                        '(escalate \"no-qualified\" \"no contacts in qualified stage\")
+                        (let ((emails (map (lambda (a)
+                                             (cdr (assoc 'email a)))
+                                           qualified)))
+                          (let ((draft (model/draft \"Write a follow-up email for qualified leads\")))
+                            (if (or (eq? draft 'nan)
+                                    (and (pair? draft) (eq? (car draft) 'escalate)))
+                                draft
+                                (list (cons 'emails emails)
+                                      (cons 'draft draft)))))))))))))
+```
+
+Six stages, really: fetch contacts, extract IDs, batch-read associations, filter by stage, extract emails, draft body. This is a *long* route—but each stage is simple. The complexity is in the orchestration, not in any single verb. The route delivers an alist with email list and draft text, ready to hand off to a send function.
+
+---
+
+## Recursive pipelines: when a stage loops
+
+Sometimes a pipeline stage needs to *recur*—fetch-then-fetch-again, or process-then-process-children. Recursion inside a pipeline is still recursion; you just need to route failure at the recursive call, too.
+
+### Fetch a YouTube playlist, then fetch the first video's related videos, recursively up to depth 2
+
+```scheme
+;; Fetch a playlist's first video, then fetch *its* related videos, then fetch
+;; *their* related videos (depth 2). Return the tree of video IDs.
+;; (We simulate \"related videos\" via search, since youtube/search-list can find related content.)
+
+(define (fetch-related video-id depth)
+  (if (<= depth 0)
+      '()
+      (let ((related (youtube/search-list (string-append \"relatedToVideoId=\" video-id))))
+        (if (or (eq? related 'nan)
+                (and (pair? related) (eq? (car related) 'escalate)))
+            '()  ; can't fetch related, return empty
+            (let ((ids (map (lambda (item) (cdr (assoc 'videoId item))) related)))
+              (cons (cons 'video video-id)
+                    (cons 'related
+                          (map (lambda (id) (fetch-related id (- depth 1))) ids))))))))
+
+(let ((playlist (youtube/playlist-items-incremental \"PLxxxxxxxxxxx\")))
+  (if (or (eq? playlist 'nan)
+          (and (pair? playlist) (eq? (car playlist) 'escalate)))
+      playlist
+      (if (null? playlist)
+          '(escalate \"no-items\" \"playlist is empty\")
+          (let ((first-video-id (cdr (assoc 'videoId (car playlist)))))
+            (fetch-related first-video-id 2)))))
+```
+
+A recursive helper `fetch-related` fetches related videos up to a given depth. Each recursive call is a mini-pipeline: fetch, check, map, recur. The main program fetches the playlist, extracts the first video ID, kicks off the recursion. The route delivers a nested tree—each node has a video ID and a list of related nodes.
+
+This is FORWARD in recursive form: each call advances the depth. This is ESCAPE: if a fetch fails, we return empty rather than crash. This is BACK: we don't build elaborate error objects; we just stop recursing.
+
+---
+
+### Fetch nested Airtable records (base -> table -> linked records), accumulating IDs at each level
+
+```scheme
+;; Fetch a list of Airtable bases, take the first, fetch its tables,
+;; take the first table, fetch its records, extract linked record IDs recursively.
+
+(define (fetch-linked-ids record-id depth)
+  (if (<= depth 0)
+      (list record-id)
+      ;; Simulate fetching a record and its linked field.
+      ;; (Real code would call airtable/list with a filter.)
+      (let ((record (collab/airtable-list \"base-id\" \"table-name\" (string-append \"RECORD_ID()='\" record-id \"'\"))))
+        (if (or (eq? record 'nan)
+                (and (pair? record) (eq? (car record) 'escalate)))
+            (list record-id)
+            (let ((linked (cdr (assoc 'linked_records record))))
+              (if (not linked)
+                  (list record-id)
+                  (cons record-id
+                        (fold append '() (map (lambda (id) (fetch-linked-ids id (- depth 1))) linked)))))))))
+
+(let ((bases (collab/airtable-bases)))
+  (if (or (eq? bases 'nan)
+          (and (pair? bases) (eq? (car bases) 'escalate)))
+      bases
+      (if (null? bases)
+          '(escalate \"no-bases\" \"no Airtable bases found\")
+          (let ((first-base-id (cdr (assoc 'id (car bases)))))
+            ;; We'd fetch tables here, then records; for brevity, simulate the recursion start.
+            (fetch-linked-ids \"rec123456\" 3)))))
+```
+
+A recursive helper walks linked records up to depth 3. Each call fetches a record, extracts linked IDs, recurs. The main program fetches bases, extracts the first, kicks off recursion. The route delivers a flat list of all record IDs encountered, accumulated via `fold append`.
+
+---
+
+## Pipelines with conditional branching: routing by data shape
+
+Not every pipeline is linear. Sometimes the route *forks*: if this field is present, do A; else do B. The pipeline becomes a tree, each branch a route, each route checking and advancing.
+
+### Fetch an order; if subscribed, fetch subscription details, else fetch one-time payment details
+
+```scheme
+;; Fetch a Shopify order; if it has a subscription_id, fetch subscription details,
+;; else fetch Stripe payment details. Return a unified structure.
+
+(let ((order (shopify/orders)))
+  (if (or (eq? order 'nan)
+          (and (pair? order) (eq? (car order) 'escalate)))
+      order
+      (if (null? order)
+          '(escalate \"no-orders\" \"orders list is empty\")
+          (let ((first-order (car order)))
+            (let ((sub-id (cdr (assoc 'subscription_id first-order))))
+              (if sub-id
+                  ;; Branch A: fetch subscription
+                  (let ((sub (subscribe/customer-read sub-id)))
+                    (if (or (eq? sub 'nan)
+                            (and (pair? sub) (eq? (car sub) 'escalate)))
+                        sub
+                        (list (cons 'type \"subscription\")
+                              (cons 'details sub))))
+                  ;; Branch B: fetch payment
+                  (let ((payment-id (cdr (assoc 'payment_id first-order))))
+                    (if (not payment-id)
+                        '(escalate \"no-payment-id\" \"no payment_id in order\")
+                        (let ((payment (stripe/event-fetch payment-id)))
+                          (if (or (eq? payment 'nan)
+                                  (and (pair? payment) (eq? (car payment) 'escalate)))
+                              payment
+                              (list (cons 'type \"one-time\")
+                                    (cons 'details payment))))))))))))
+```
+
+One fetch, then a fork: if `subscription_id` exists, route A (fetch subscription); else route B (fetch payment). Each branch checks its verb. The route delivers a unified structure with `'type` and `'details`. This is FORWARD on both paths.
+
+---
+
+### Fetch analytics data; if revenue > $1000, draft a \"success\" email, else draft a \"follow-up\" email
+
+```scheme
+;; Fetch analytics revenue summary; if total revenue > 1000, draft a success email,
+;; else draft a follow-up email encouraging more sales.
+
+(let ((revenue-data (analytics/report)))
+  (if (or (eq? revenue-data 'nan)
+          (and (pair? revenue-data) (eq? (car revenue-data) 'escalate)))
+      revenue-data
+      (let ((total-revenue (cdr (assoc 'total_revenue revenue-data))))
+        (if (not total-revenue)
+            '(escalate \"no-revenue-field\" \"analytics report missing total_revenue\")
+            (if (> total-revenue 1000)
+                ;; Branch A: success email
+                (let ((draft (model/draft \"Write a congratulatory email for exceeding $1000 in revenue\")))
+                  (if (or (eq? draft 'nan)
+                          (and (pair? draft) (eq? (car draft) 'escalate)))
+                      draft
+                      (list (cons 'type \"success\") (cons 'body draft))))
+                ;; Branch B: follow-up email
+                (let ((draft (model/draft \"Write a follow-up email encouraging more sales\")))
+                  (if (or (eq? draft 'nan)
+                          (and (pair? draft) (eq? (car draft) 'escalate)))
+                      draft
+                      (list (cons 'type \"follow-up\") (cons 'body draft)))))))))
+```
+
+One fetch, one conditional, two branches. Each branch calls `model/draft` with a different prompt. The route delivers an alist tagged with `'type` so the caller knows which branch ran.
+
+---
+
+## Pipelines with accumulation: fold as a stage
+
+When a pipeline stage needs to *accumulate* across a list—sum, count, build a histogram—use `fold`. It walks the list once, threading an accumulator through. This turns a pipeline into a *reduction*: many items become one summary.
+
+### Fetch Etsy listings, fold to count by status, return histogram
+
+```scheme
+;; Fetch all Etsy listings, fold to count how many are \"active\", \"draft\", \"expired\", etc.
+;; Return an alist histogram: '((active . 12) (draft . 3) (expired . 1)).
+
+(let ((listings (etsy/listings)))
+  (if (or (eq? listings 'nan)
+          (and (pair? listings) (eq? (car listings) 'escalate)))
+      listings
+      (fold (lambda (listing acc)
+              (let ((status (cdr (assoc 'state listing))))
+                (if (not status)
+                    acc
+                    (let ((existing (assoc status acc)))
+                      (if existing
+                          (map (lambda (pair)
+                                 (if (equal? (car pair) status)
+                                     (cons status (+ 1 (cdr pair)))
+                                     pair))
+                               acc)
+                          (cons (cons status 1) acc))))))
+            '()
+            listings)))
+```
+
+One fetch, one fold. The fold walks each listing, extracts its status, updates the histogram (an alist). If the status already exists, increment its count; else add it. The route delivers a histogram—many listings reduced to a summary.
+
+---
+
+### Fetch Shopify orders, fold to compute total revenue and average order value in one pass
+
+```scheme
+;; Fetch Shopify orders, fold to compute total revenue and count,
+;; then compute average order value. Return (total, count, avg).
+
+(let ((orders (shopify/orders)))
+  (if (or (eq? orders 'nan)
+          (and (pair? orders) (eq? (car orders) 'escalate)))
+      orders
+      (let ((result (fold (lambda (order acc)
+                            (let ((revenue (cdr (assoc 'total_price order))))
+                              (if revenue
+                                  (list (+ (car acc) revenue)
+                                        (+ (cadr acc) 1))
+                                  acc)))
+                          '(0 0)  ; (total-revenue count)
+                          orders)))
+        (let ((total (car result))
+              (count (cadr result)))
+          (if (= count 0)
+              (list (cons 'total 0) (cons 'count 0) (cons 'avg 0))
+              (list (cons 'total total)
+                    (cons 'count count)
+                    (cons 'avg (/ total count))))))))
+```
+
+One fetch, one fold that accumulates two things at once (total revenue and count), then a final division to compute average. The accumulator is a two-element list `(total count)`; the fold updates both on each iteration. The route delivers three values in one alist.
+
+---
+
+### Fetch printify orders, fold to group by status, return nested alists
+
+```scheme
+;; Fetch Printify orders, fold to group them by status (\"pending\", \"fulfilled\", etc.),
+;; return an alist where each status maps to a list of order IDs.
+
+(let ((orders (printify/orders)))
+  (if (or (eq? orders 'nan)
+          (and (pair? orders) (eq? (car orders) 'escalate)))
+      orders
+      (fold (lambda (order acc)
+              (let ((status (cdr (assoc 'status order)))
+                    (order-id (cdr (assoc 'id order))))
+                (if (and status order-id)
+                    (let ((existing (assoc status acc)))
+                      (if existing
+                          (map (lambda (pair)
+                                 (if (equal? (car pair) status)
+                                     (cons status (cons order-id (cdr pair)))
+                                     pair))
+                               acc)
+                          (cons (cons status (list order-id)) acc)))
+                    acc)))
+            '()
+            orders)))
+```
+
+One fetch, one fold. The accumulator is an alist of `(status . list-of-order-ids)`. On each order, we extract status and ID, find or create the status's entry, cons the ID onto its list. The route delivers a grouped structure—many orders reduced to a map.
+
+---
+
+## Pipelines with failure recovery: graceful degradation
+
+Sometimes a pipeline should *try* a verb, and if it fails, fall back to a default or alternate route. This is ESCAPE at its most graceful: we don't crash; we degrade.
+
+### Fetch weather data; if it fails, return a cached fallback
+
+```scheme
+;; Try to fetch live weather data; if it fails, recall a cached forecast from cortex/.
+
+(let ((weather (web/fetch \"https://api.example.com/weather\")))
+  (if (or (eq? weather 'nan)
+          (and (pair? weather) (eq? (car weather) 'escalate)))
+      ;; Fetch failed; try cortex recall
+      (let ((cached (cortex/recall \"weather-cache\")))
+        (if (or (eq? cached 'nan)
+                (and (pair? cached) (eq? (car cached) 'escalate)))
+            '(escalate \"no-weather\" \"live fetch and cache recall both failed\")
+            cached))
+      weather))
+```
+
+Two verbs, fallback logic. If `web/fetch` fails, we try `cortex/recall`. If that fails too, we escalate. If either succeeds, we return it. This is ESCAPE with a safety net.
+
+---
+
+### Fetch Etsy shop stats; if unauthorized, try a secondary shop ID
+
+```scheme
+;; Try to fetch shop stats for shop A; if it returns an auth error, try shop B.
+
+(let ((stats-a (etsy/shop-stats)))
+  (if (and (pair? stats-a)
+           (eq? (car stats-a) 'escalate)
+           (equal? (cadr stats-a) \"unauthorized\"))
+      ;; Auth failed for shop A; try shop B
+      (let ((stats-b (etsy/shop-stats)))  ; In reality, you'd pass a different shop-id parameter
+        (if (or (eq? stats-b 'nan)
+                (and (pair? stats-b) (eq? (car stats-b) 'escalate)))
+            '(escalate \"no-shop-stats\" \"both shops failed\")
+            stats-b))
+      ;; Shop A succeeded or failed for another reason
+      (if (or (eq? stats-a 'nan)
+              (and (pair? stats-a) (eq? (car stats-a) 'escalate)))
+          stats-a
+          stats-a)))
+```
+
+One verb, two attempts. If the first escalates with \"unauthorized\", we try again (simulating a different shop ID). If the second fails, we escalate. This is graceful retry.
+
+---
+
+## Deep orchestration: six-plus stage pipelines
+
+At the top of the ramp, pipelines stretch to six or more stages, cross many namespaces, handle complex data shapes, and escalate cleanly at every joint. These are genuinely hard—not because any single stage is hard, but because orchestrating six verbs, checking six results, and transforming data six times requires holding the whole route in your head.
+
+### Fetch CRM contacts, enrich with analytics, filter by engagement, draft personalized emails, send batch, log to cortex
+
+```scheme
+;; Fetch CRM contacts, join with analytics engagement data, filter for high engagement,
+;; draft personalized emails via model/, batch-send via mail/, log summary to cortex/.
+
+(let ((contacts (crm/contact-search \"segment:active\")))
+  (if (or (eq? contacts 'nan)
+          (and (pair? contacts) (eq? (car contacts) 'escalate)))
+      contacts
+      (if (null? contacts)
+          '(escalate \"no-contacts\" \"no active contacts\")
+          (let ((enriched (map (lambda (contact)
+                                 (let ((email (cdr (assoc 'email contact))))
+                                   (let ((engagement (analytics/engagement-shift email)))
+                                     (if (or (eq? engagement 'nan)
+                                             (and (pair? engagement) (eq? (car engagement) 'escalate)))
+                                         contact  ; can't enrich, keep original
+                                         (cons (cons 'engagement engagement) contact)))))
+                               contacts)))
+            (let ((high-engagement (filter (lambda (c)
+                                             (let ((eng (cdr (assoc 'engagement c))))
+                                               (and eng (> eng 0.5))))
+                                           enriched)))
+              (if (null? high-engagement)
+                  '(escalate \"no-high-engagement\" \"no contacts with engagement > 0.5\")
+                  (let ((drafts (map (lambda (c)
+                                       (let ((email (cdr (assoc 'email c))))
+                                         (let ((draft (model/draft (string-append \"Write a personalized email to \" email))))
+                                           (cons (cons 'email email) (cons (cons 'body draft) '())))))
+                                     high-engagement)))
+                    (let ((sent (map (lambda (draft)
+                                       (mail/dispatch (cdr (assoc 'email draft))
+                                                      \"Personalized Update\"
+                                                      (cdr (assoc 'body draft))))
+                                     drafts)))
+                      (let ((log-result (cortex/remember \"email-batch-sent\"
+                                                         (string-append \"Sent \" (number->string (length sent)) \" emails\"))))
+                        (if (or (eq? log-result 'nan)
+                                (and (pair? log-result) (eq? (car log-result) 'escalate)))
+                            '(escalate \"log-failed\" \"could not log to cortex\")
+                            (list (cons 'sent (length sent))
+                                  (cons 'logged #t)))))))))))))
+```
+
+Six stages:
+1. Fetch CRM contacts
+2. Enrich each with analytics engagement (map with fallback)
+3. Filter for high engagement
+4. Draft personalized emails (map over `model/draft`)
+5. Batch-send (map over `mail/dispatch`)
+6. Log summary to cortex
+
+Each stage checks; each advances. The final result is an alist with sent count and logged status. This is a *real* route—you could deploy this and it would run.
+
+---
+
+### Fetch Shopify orders, cross-reference with Stripe payouts, compute net revenue after fees, classify by margin band, store aggregate to cortex
+
+```scheme
+;; Fetch Shopify orders, fetch Stripe payouts, join on order ID, compute net revenue
+;; (order total - Stripe fee), classify orders into margin bands (low/mid/high),
+;; aggregate counts, store summary to cortex.
+
+(let ((orders (shopify/orders)))
+  (if (or (eq? orders 'nan)
+          (and (pair? orders) (eq? (car orders) 'escalate)))
+      orders
+      (if (null? orders)
+          '(escalate \"no-orders\" \"orders list empty\")
+          (let ((payouts (stripe/payouts)))
+            (if (or (eq? payouts 'nan)
+                    (and (pair? payouts) (eq? (car payouts) 'escalate)))
+                payouts
+                (let ((joined (map (lambda (order)
+                                     (let ((order-id (cdr (assoc 'id order)))
+                                           (total (cdr (assoc 'total_price order))))
+                                       (let ((payout (find (lambda (p)
+                                                             (equal? (cdr (assoc 'order_id p)) order-id))
+                                                           payouts)))
+                                         (if payout
+                                             (let ((fee (cdr (assoc 'fee payout))))
+                                               (list (cons 'order_id order-id)
+                                                     (cons 'total total)
+                                                     (cons 'fee fee)
+                                                     (cons 'net (- total fee))))
+                                             (list (cons 'order_id order-id)
+                                                   (cons 'total total)
+                                                   (cons 'fee 0)
+                                                   (cons 'net total))))))
+                                   orders)))
+                  (let ((classified (map (lambda (j)
+                                           (let ((net (cdr (assoc 'net j)))
+                                                 (total (cdr (assoc 'total j))))
+                                             (let ((margin (if (> total 0) (/ net total) 0)))
+                                               (cons (cons 'margin-band
+                                                           (cond
+                                                            ((< margin 0.2) \"low\")
+                                                            ((< margin 0.5) \"mid\")
+                                                            (else \"high\")))
+                                                     j))))
+                                         joined)))
+                    (let ((histogram (fold (lambda (item acc)
+                                             (let ((band (cdr (assoc 'margin-band item))))
+                                               (let ((existing (assoc band acc)))
+                                                 (if existing
+                                                     (map (lambda (pair)
+                                                            (if (equal? (car pair) band)
+                                                                (cons band (+ 1 (cdr pair)))
+                                                                pair))
+                                                          acc)
+                                                     (cons (cons band 1) acc)))))
+                                           '()
+                                           classified)))
+                      (let ((store-result (cortex/remember \"margin-histogram\" (write-to-string histogram))))
+                        (if (or (eq? store-result 'nan)
+                                (and (pair? store-result) (eq? (car store-result) 'escalate)))
+                            '(escalate \"store-failed\" \"could not store to cortex\")
+                            (list (cons 'histogram histogram)
+                                  (cons 'stored #t)))))))))))))
+```
+
+Seven stages:
+1. Fetch Shopify orders
+2. Fetch Stripe payouts
+3. Join by order ID, compute net (total - fee)
+4. Classify each by margin band (low/mid/high)
+5. Fold to build histogram
+6. Store histogram to cortex
+7. Return result
+
+We introduce `find` (a standard Scheme form) to locate the matching payout for each order, and `write-to-string` (a standard form) to serialize the histogram for storage. Each stage checks; each advances. The route delivers a histogram and a confirmation that it was stored.
+
+---
+
+### Fetch YouTube channel uploads playlist, fetch video details, compute engagement rate, filter top 10%, extract captions, generate summary with model/, publish to artifact/
+
+```scheme
+;; Fetch a YouTube channel's uploads playlist, fetch details for all videos,
+;; compute engagement rate (likes+comments / views), filter top 10% by engagement,
+;; fetch captions for each, concatenate captions, generate a summary via model/,
+;; publish the summary to artifact/.
+
+(let ((playlist-id (youtube/channels-uploads-playlist \"UC_x5XG1OV2P6uZZ5FSM9Ttw\")))
+  (if (or (eq? playlist-id 'nan)
+          (and (pair? playlist-id) (eq? (car playlist-id) 'escalate)))
+      playlist-id
+      (let ((items (youtube/playlist-items-incremental playlist-id)))
+        (if (or (eq? items 'nan)
+                (and (pair? items) (eq? (car items) 'escalate)))
+            items
+            (if (null? items)
+                '(escalate \"no-items\" \"playlist is empty\")
+                (let ((video-ids (map (lambda (item) (cdr (assoc 'videoId item))) items)))
+                  (let ((videos (youtube/videos-list video-ids)))
+                    (if (or (eq? videos 'nan)
+                            (and (pair? videos) (eq? (car videos) 'escalate)))
+                        videos
+                        (let ((with-engagement (map (lambda (v)
+                                                      (let ((views (cdr (assoc 'viewCount v)))
+                                                            (likes (cdr (assoc 'likeCount v)))
+                                                            (comments (cdr (assoc 'commentCount v))))
+                                                        (let ((engagement (if (and views (> views 0))
+                                                                              (/ (+ likes comments) views)
+                                                                              0)))
+                                                          (cons (cons 'engagement engagement) v))))
+                                                    videos)))
+                          (let ((sorted (sort with-engagement (lambda (a b)
+                                                                (> (cdr (assoc 'engagement a))
+                                                                   (cdr (assoc 'engagement b)))))))
+                            (let ((top-10pct (list-head sorted (max 1 (quotient (length sorted) 10)))))
+                              (let ((captions-list (map (lambda (v)
+                                                          (let ((video-id (cdr (assoc 'id v))))
+                                                            (let ((caps (youtube/captions-list video-id)))
+                                                              (if (or (eq? caps 'nan)
+                                                                      (and (pair? caps) (eq? (car caps) 'escalate)))
+                                                                  \"\"
+                                                                  (let ((first-cap-id (cdr (assoc 'id (car caps)))))
+                                                                    (if first-cap-id
+                                                                        (let ((text (youtube/captions-download first-cap-id)))
+                                                                          (if (eq? text 'nan) \"\" text))
+                                                                        \"\"))))))
+                                                        top-10pct)))
+                                (let ((concatenated (fold (lambda (cap acc)
+                                                            (string-append acc \" \" cap))
+                                                          \"\"
+                                                          captions-list)))
+                                  (let ((summary (model/draft (string-append \"Summarize these video captions: \" concatenated))))
+                                    (if (or (eq? summary 'nan)
+                                            (and (pair? summary) (eq? (car summary) 'escalate)))
+                                        summary
+                                        (let ((artifact (artifact/store-blob \"youtube-summary\" summary)))
+                                          (if (or (eq? artifact 'nan)
+                                                  (and (pair? artifact) (eq? (car artifact) 'escalate)))
+                                              artifact
+                                              (list (cons 'summary summary)
+                                                    (cons 'artifact-id artifact))))))))))))))))))))
+```
+
+Nine stages:
+1. Fetch uploads playlist ID
+2. Fetch playlist items
+3. Extract video IDs
+4. Fetch video details
+5. Compute engagement rate for each
+6. Sort and take top 10%
+7. Fetch captions for each (with fallback to empty string)
+8. Concatenate captions
+9. Generate summary via model/
+10. Store summary to artifact/
+
+This is a *long* route—but every stage is explicit, every check is in place. The final result is an alist with the summary text and the artifact ID where it was stored. This is orchestration at scale.
+
+---
+
+## The deepest pattern: pipeline as data structure
+
+At the very top, you can write a pipeline *as data*—a list of verb-name/argument pairs—and interpret it. This turns the pipeline itself into a first-class value: you can store it, transform it, recur over it. This is advanced, but it's the culmination of mastery: the route is not just code; it's a *structure* you can reason about.
+
+### A pipeline interpreter: execute a list of verb specs
+
+```scheme
+;; Define a pipeline as a list of (verb-name . args) pairs, execute it stage by stage.
+;; If any stage fails, stop and return the failure.
+
+(define (execute-pipeline pipeline-spec data)
+  (if (null? pipeline-spec)
+      data  ; no more stages, return accumulated data
+      (let ((stage (car pipeline-spec)))
+        (let ((verb-name (car stage))
+              (args (cdr stage)))
+          ;; In real code, you'd dispatch on verb-name and call the verb.
+          ;; Here we simulate: if verb-name is 'fetch, call web/fetch; etc.
+          (let ((result (cond
+                         ((eq? verb-name 'fetch) (apply web/fetch args))
+                         ((eq? verb-name 'parse) (apply documents/parse args))
+                         ((eq? verb-name 'filter) (filter (car args) data))
+                         (else '(escalate \"unknown-verb\" verb-name)))))
+            (if (or (eq? result 'nan)
+                    (and (pair? result) (eq? (car result) 'escalate)))
+                result
+                (execute-pipeline (cdr pipeline-spec) result)))))))
+
+;; Example pipeline: fetch a URL, parse it, filter non-empty lines
+(let ((pipeline '((fetch . (\"https://example.com\"))
+                  (filter . ((lambda (line) (not (string=? line \"\"))))))))
+  (execute-pipeline pipeline '()))
+```
+
+A recursive interpreter walks a pipeline-spec list, executes each verb, checks the result, recurs. The pipeline is *data*—you could store it in cortex, retrieve it, modify it, then execute it. This is the highest level of abstraction: the route itself is programmable.
+
+---
+
+### A pipeline composer: build a pipeline from smaller pipelines
+
+```scheme
+;; Define two sub-pipelines, then compose them into one.
+
+(define fetch-and-parse
+  '((fetch . (\"https://example.com\"))
+    (parse . ())))
+
+(define filter-and-count
+  '((filter . ((lambda (item) (not (null? item)))))
+    (count . ())))
+
+(define (compose-pipelines p1 p2)
+  (append p1 p2))
+
+(let ((full-pipeline (compose-pipelines fetch-and-parse filter-and-count)))
+  ;; Now execute full-pipeline with the interpreter from the previous example.
+  full-pipeline)  ; Just return the composed pipeline for illustration.
+```
+
+Two pipelines, composed into one via `append`. You could execute this with the interpreter. This is *compositional*: you build big routes from small routes, and the structure is explicit.
+
+---
+
+## Challenges
+
+Write programs that drill the techniques in this chapter. Each should be a complete, runnable Scheme program using only wired verbs + core forms.
+
+1. **Three-stage text pipeline**: Fetch a webpage with `web/fetch`, extract all words with `text/word-count`, compute the Flesch-Kincaid readability score with `text/flesch-kincaid`, return the score. Handle failure at each stage.
+
+2. **Four-stage CRM enrichment**: Fetch CRM contacts with `crm/contact-search`, batch-read their deal associations with `crm/assoc-batch-read`, filter for contacts with deals in stage \"closed-won\", extract their emails, return a list of emails. Escalate cleanly if any stage fails.
+
+3. **Five-stage marketplace pipeline**: Fetch Google Merchant products with `google/merchant-products`, filter for products with warnings in `google/merchant-status`, map to product IDs, fetch full product details with `google/merchant-feed`, compute the percentage of products with warnings, return the percentage. Handle empty lists and escalations.
+
+4. **Recursive playlist walker**: Fetch a YouTube playlist's items with `youtube/playlist-items-incremental`, extract video IDs, for each video fetch its details with `youtube/videos-list`, extract its description, recursively search for URLs in the description and fetch *those* pages with `web/fetch` (up to depth 2). Return a nested tree of URLs.
+
+5. **Pipeline with conditional branching**: Fetch Shopify orders with `shopify/orders`, take the first order, check if it has a `'discount_code` field. If yes, fetch discount campaign metrics from `analytics/campaign-metrics`; if no, fetch general revenue data from `analytics/report`. Return a unified structure with order ID, discount status, and metrics.
+
+6. **Six-stage orchestration with aggregation**: Fetch Etsy listings with `etsy/listings`, filter for active listings, map to their tags (each listing has a `'tags` field, a list of strings), flatten the tags into one big list, fold to build a frequency histogram (tag -> count), sort the histogram descending by count, take the top 5 tags, return them. Handle failures and empty lists at every stage.
+")

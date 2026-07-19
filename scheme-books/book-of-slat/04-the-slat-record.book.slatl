@@ -1,0 +1,326 @@
+;; 04-the-slat-record.slat
+;; Book of SLAT — Chapter 4 — The slat-record
+
+(chapter
+  :book             "Book of SLAT"
+  :chapter-number   4
+  :title            "Chapter 4 — The slat-record"
+  :size             8775
+  :sha256           "2272aa99dffb81bb"
+  :prose
+"---
+slug: book-of-slat-ch04
+title: The slat-record
+book: slat
+chapter: 4
+of: 16
+part: II
+app: scheme-repl
+palette: book-standard
+canonical: true
+owner: docs-team (Jess)
+status: draft
+last-reviewed: 2026-07-12
+---
+
+# Chapter 4 — The slat-record
+
+This is the chapter to re-read twice.
+
+The slat-record is the shape that carries almost everything the
+running system writes to disk or the wire. A mailbox message: record.
+An incident narrative: record. A cortex slice: record. A saved cart:
+record. When you see a chapter later that talks about \"the atom
+format\" or \"the message envelope\" or \"the artifact state,\" it means
+the slat-record.
+
+## The shape
+
+A slat-record is a list whose first element is a symbol, followed by
+any interleaving of `:keyword value` pairs and positional values.
+
+```motoi-scheme
+(slat-read
+  \"(event :ts #inst \\\"2026-07-11T18:22:00Z\\\" :kind \\\"card.opened\\\" :by 'motoi)\")
+```
+
+Four things happen at parse time.
+
+1. **The head symbol goes to `_form`.** In this example, `event`.
+2. **Each `:keyword value` pair goes to `_form[keyword] = value`.** So
+   `:ts` maps to the instant, `:kind` maps to the string, `:by` maps
+   to the symbol.
+3. **Each non-keyword value in the tail goes into `_positional` in
+   reader order.** In this example, no positional values.
+4. **Trailing comments** are captured into `_comment`.
+
+Reads as (in JSON-ish shorthand):
+
+```
+{ _form:  event,
+  ts:     Date(2026-07-11T18:22:00Z),
+  kind:   \"card.opened\",
+  by:     Symbol(motoi) }
+```
+
+## Head + keys + positional + comment
+
+Say it out loud. Four parts.
+
+- **Head** — the type of the record. A symbol at position 0.
+- **Keys** — named fields. Any number, in any order.
+- **Positional** — the tail. Variadic arguments.
+- **Comment** — optional prose that travels with the record.
+
+Once you have this pattern, you can read any slat in the tree. Let me
+show you.
+
+## An `atom` record
+
+```motoi-scheme
+(slat-read \"
+(atom
+  :id \\\"atm-scheme-lambda-001\\\"
+  :type 'code
+  :domain 'scheme
+  :weight 1.0
+  :body (lambda (x) (* x x)))\")
+```
+
+Head: `atom`. Keys: `:id`, `:type`, `:domain`, `:weight`, `:body`. No
+positional. No comment. That's a training-corpus atom.
+
+## A `message` record with positional data
+
+```motoi-scheme
+(slat-read \"
+(message
+  :v 1
+  :from 'foreman
+  :to 'worker/mlx-1
+  :ts #inst \\\"2026-07-11T18:22:00Z\\\"
+  :detail (start-training-run :seed 4137 :max-iter 68520))\")
+```
+
+Head: `message`. Keys: `:v`, `:from`, `:to`, `:ts`, `:detail`. The
+`:detail` value is itself a slat-record. Recursion is native — a
+record can carry another record as a field.
+
+## A `log` line with positional args
+
+```motoi-scheme
+(slat-read \"(log :level :warn :module 'training \\\"warmup pike detected\\\" iter-350)\")
+```
+
+Head: `log`. Keys: `:level`, `:module`. Positional: `\"warmup pike
+detected\"` and `iter-350`. The tail acts like variadic arguments — any
+number, in order.
+
+## What is NOT a record
+
+The head must be a symbol. So:
+
+```motoi-scheme
+(slat-read \"(1 2 3)\")
+```
+
+...is a **list**, not a record. Head is `1`, which is a number, not
+a symbol.
+
+```motoi-scheme
+(slat-read \"(\\\"hello\\\" :who \\\"world\\\")\")
+```
+
+...is a **list**, not a record. Head is `\"hello\"`, which is a string,
+not a symbol.
+
+The distinction matters. When the runtime tries to auto-assemble a
+record into a native object (Chapter 11), it only tries when the head
+is a symbol. Everything else stays as a plain list.
+
+## Dispatching on the head
+
+Because the head is a symbol, and the head is at position 0, and
+`car` gives you position 0, the runtime can dispatch on the type in one
+line:
+
+```motoi-scheme
+(define (handle line)
+  (let ([rec (slat-read line)])
+    (case (car rec)
+      ((event)              (handle-event rec))
+      ((message)            (handle-message rec))
+      ((incident-narrative) (learn-from rec))
+      ((atom)               (add-to-corpus rec))
+      (else                 (log-unknown rec)))))
+
+(handle \"(event :ts 1 :kind \\\"card.opened\\\")\")
+```
+
+That's the pattern. Read the line. Take the head. Case on it.
+Dispatch.
+
+Compare to the JSON world where every consumer has to look up a
+`_type` field, decide what to build, do a schema check, then dispatch.
+Multiply that pattern by fifty consumers and thousands of message
+kinds and you get the museum problem SLAT was built to solve.
+
+## Order-independence of keys
+
+You can write the keys in any order:
+
+```motoi-scheme
+(equal?
+  (slat-read \"(event :ts 1 :kind \\\"card.opened\\\" :by 'motoi)\")
+  (slat-read \"(event :by 'motoi :kind \\\"card.opened\\\" :ts 1)\"))
+```
+
+`#t`. Two records with the same head, same keys, same values, same
+positional tail — equal. Regardless of the order the keys were
+written in.
+
+The canonical writer sorts keys lexicographically. So the two records
+above produce identical bytes when written canonically. That's why
+content-addressed hashing works.
+
+## Adding a key later
+
+You wrote a record last month. Today you want to add a field.
+
+Old form:
+
+```
+(event :ts 1 :kind \"card.opened\")
+```
+
+New form:
+
+```
+(event :ts 1 :kind \"card.opened\" :surface 'desktop)
+```
+
+Old readers reading the new form: they see the new `:surface` key and
+either use it or ignore it. Nothing breaks. Schema evolution without a
+migration.
+
+Old writers writing the old form: new readers see them and get a
+record without `:surface`. They handle the absence — a default, a
+skip, a warning. Whatever makes sense.
+
+**The rule.** Adding a key is backwards-compatible. Renaming or
+removing a key is not. Rename by adding the new name first, waiting
+for consumers to catch up, then removing the old.
+
+## The reserved `_` prefix
+
+Any keyword starting with `:_` is reader-internal. Consumers cannot
+emit them.
+
+```
+_form         ; the head symbol
+_positional   ; the tail
+_comment      ; captured comments
+_meta         ; captured block-comment metadata
+_bad-line     ; tolerant-mode reader errors
+_tainted      ; taint tracking (Chapter 10)
+```
+
+Trying to emit `:_form` in a slat gives you a canonicalization error.
+This is a security decision — you can't smuggle a fake `:_signature`
+past the reader.
+
+## Naming conventions
+
+- **Head symbols:** `kebab-case`. `incident-narrative`, not
+  `incidentNarrative` or `incident_narrative`.
+- **Keywords:** `:kebab-case`. `:atom-refs`, not `:atomRefs`.
+- **Namespaced heads:** `namespace/name`. `case/artifacts`,
+  `forge/runs`. Slash is the sole permitted namespace separator.
+
+The naming rules keep the taxonomy readable across bindings. A
+JavaScript consumer sees `atom-refs` and knows the underscore-vs-hyphen
+question was decided at spec time.
+
+## Doc-comment metadata
+
+For hand-authored slats and specs, block comments can carry
+`key: value` metadata:
+
+```
+#| slat 1.0
+   summary: Reasoning about warmup pikes.
+   author:  the runtime
+   ts:      #inst \"2026-07-11T18:22:00Z\"
+|#
+
+(incident-narrative
+  :id \"in-1-001\"
+  :incident 'warmup-pike-350
+  :philosopher 'zain
+  :lesson \"Watch the val curve, not the train curve.\")
+```
+
+The reader captures the block comment into `_comment`. A doc-comment
+parser lifts the `key: value` fragments to a `_meta` dict when the
+block starts with `slat 1.0`. This is optional; consumers may ignore
+it.
+
+## Try this
+
+```motoi-scheme
+(let ([rec (slat-read \"(event :ts 1 :kind \\\"card.opened\\\" 'welcome 'motoi)\")])
+  (list
+    (cons 'head (car rec))
+    (cons 'ts   (slat-key rec 'ts))
+    (cons 'kind (slat-key rec 'kind))
+    (cons 'positional (slat-positional rec))))
+```
+
+You should get:
+
+```
+((head . event)
+ (ts   . 1)
+ (kind . \"card.opened\")
+ (positional . (welcome motoi)))
+```
+
+Two positional values after the keys. The tail.
+
+## The workhorse story in one line
+
+**Head + keys + positional + comment. Same shape, everywhere.**
+
+Every incident narrative in `docs/atoms/incident-narratives/*.slat`
+uses this pattern. Every mailbox message uses this pattern. Every
+saved cart uses this pattern. Every cortex slice uses this pattern.
+
+Once you can read the pattern, you can read any slat in the tree.
+
+## Auto-assembly, in one sentence
+
+When the runtime sees a record whose head symbol is in the registry
+(Chapter 11), it calls the registered builder to make a native
+object. When the head isn't in the registry, the runtime returns the
+generic record. Either way, the slat is legible.
+
+That's why unknown records don't break things. They just don't
+auto-rehydrate.
+
+## Where next
+
+Chapter 5 walks the fifteen record types that ship in the SLAT 1.0
+registry. Each one has a worked example from a real system.
+
+## Cross-links
+
+- [[appendix-c]] — every record type, one page each.
+- [[book-of-motoi-scheme]] Chapter 6 — Records and types, the
+  language-level view.
+- [[book-of-reason]] — incident-narrative records live there.
+- [[book-of-self]] — cortex-slice records live there.
+
+---
+
+Turn the page.
+")

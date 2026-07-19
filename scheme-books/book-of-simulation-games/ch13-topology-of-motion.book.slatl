@@ -1,0 +1,297 @@
+;; ch13-topology-of-motion.book.slatl
+;; Book of Simulation Games — Chapter 13: Topology of Motion
+;; Authored 2026-07-16 by simulation-games-engineer-lane.
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Simulation Games"
+  :chapter-number      13
+  :title               "Topology of Motion"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "simulation-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + physics-simulation-emergent"
+  :book-version        "1.0.0"
+  :provenance          ((:authored-by "Engineer") (:date "2026-07-16"))
+  :prose
+"An agent moves through the world. It leaves a trail. The trail is a
+shape. Is that shape a simple loop? Two loops touching? A knot? A
+disconnected pair? Topology is the branch of mathematics that studies
+shape properties that survive under continuous deformation — you can
+stretch the shape, bend it, but not tear or glue, and topological
+properties don't change.
+
+For simulation, topology is a lens. It tells us things about the
+long-term behavior of a system that geometry can't. Two orbits with
+identical average distance from the sun might have different
+topology — one is a simple ellipse, one is a tightly-wound
+precessing figure — and topology tells us which is stable.
+
+This chapter uses `topo/graph` to build graphs from agent
+interactions, `topo/persistence` for filtration-based analysis of
+trajectory clouds, `topo/knot` and `topo/writhe` for closed
+trajectories, and `curve/geodesic-distance` for path length on
+curved surfaces. It ends with the demonstration that topological
+invariants can predict, better than geometric measurements, which
+orbits are bound and which will escape.
+
+---
+
+## 13.1 A trajectory as a graph
+
+Every N frames, sample the agent's position. Connect consecutive
+samples. Now you have a graph.
+
+```scheme
+(define (agent-graph agent T sample-every)
+  (let loop ((n 0) (prev #f) (edges '()))
+    (if (>= n T)
+        (topo/graph edges)
+        (begin
+          (world/step)
+          (if (= 0 (modulo n sample-every))
+              (let ((now (entity/pos agent)))
+                (loop (+ n 1) now
+                      (if prev (cons (list prev now) edges) edges)))
+              (loop (+ n 1) prev edges))))))
+
+(define g (agent-graph runner 600 5))
+(topo/components g)
+;; => 1     (one connected component — the trail is a single thread)
+(topo/connected? g)
+;; => #t
+```
+
+`topo/components` counts connected components in a graph. For a single
+agent making a continuous trail, it's 1. For two agents, 2. For a
+graph built from 'boids close to each other,' it might be one (the
+whole flock is connected via near-neighbors) or many (the flock has
+split into sub-flocks).
+
+## 13.2 Flock topology over time
+
+```scheme
+;; Every frame, build the graph of 'boids within distance 40 of each other'
+(define (flock-topology-frame)
+  (let ((boids (world/find-all 'boid))
+        (edges '()))
+    (for-each
+      (lambda (b1)
+        (for-each
+          (lambda (b2)
+            (when (and (not (eq? b1 b2))
+                       (< (geom/distance (entity/pos b1) (entity/pos b2)) 40))
+              (set! edges (cons (list b1 b2) edges))))
+          boids))
+      boids)
+    (topo/graph edges)))
+
+;; Track components over time
+(define comp-history '())
+(on-frame
+  (lambda (t)
+    (world/step)
+    (when (= 0 (modulo t 10))
+      (let ((g (flock-topology-frame)))
+        (set! comp-history (cons (topo/components g) comp-history))))))
+```
+
+Watch `comp-history`. The number of connected components fluctuates:
+1 when the flock is together, 2 when it splits around a predator, 3
+when it further fragments, back to 1 when it reunites. This is
+topology telling us something about the flock's macroscopic behavior
+that no single boid measurement could.
+
+## 13.3 The persistence diagram
+
+Sample many points from a trajectory or a cluster. Build a
+'filtration': at scale epsilon, connect any two points closer than
+epsilon. At small epsilon, everything is disconnected. As epsilon
+grows, points connect, then form triangles, then fill in. Track when
+each topological feature is born and when it dies.
+
+```scheme
+(define (persistence-of-trajectory agent T)
+  (let ((points '()))
+    (let loop ((n 0))
+      (if (>= n T)
+          (let ((complex (topo/rips-filtration points :max-scale 100)))
+            (topo/persistence complex))
+          (begin
+            (world/step)
+            (when (= 0 (modulo n 5))
+              (set! points (cons (entity/pos agent) points)))
+            (loop (+ n 1)))))))
+
+(persistence-of-trajectory pendulum-bob 900)
+;; => ((:dim 0 :birth 0 :death 10)  <- points merged early
+;;     (:dim 1 :birth 12 :death 60) <- a loop that persisted
+;;     (:dim 1 :birth 8  :death 15) <- a short-lived loop (noise)
+;;     ...)
+```
+
+A persistent loop (born early, dies late — long lifespan) is a real
+topological feature of the trajectory: the pendulum LOOPS around a
+central region, so the trace has a hole in the middle, and that hole
+persists across scales. A short-lived loop is noise. This is how
+topological data analysis distinguishes signal from noise.
+
+`topo/betti` gives you the Betti numbers of the complex at a fixed
+scale: `b_0` = number of connected components, `b_1` = number of
+independent loops, `b_2` = number of enclosed 3D voids.
+
+```scheme
+(define complex (topo/rips-filtration my-points :max-scale 30))
+(topo/betti complex 30)
+;; => (b_0 . 1) (b_1 . 3) (b_2 . 0)
+```
+
+## 13.4 Knots and writhe
+
+A closed curve in 3D can be knotted. Even a curve in 2D can wind
+around itself in complex ways, measured by writhe (the signed count
+of self-crossings). Neither is a topological invariant under all
+continuous deformation, but knot type IS invariant under
+homeomorphism of the ambient space.
+
+```scheme
+;; Sample a 2D trajectory. Compute writhe.
+(define trace (world/tape-positions 'moon 2000))
+(topo/writhe trace)
+;; => 4     (average of signed crossings per pass)
+
+(topo/knot trace)
+;; => 'unknot   (in 2D this is either unknot or something requiring 3D)
+```
+
+For 3D trajectories (say, an orbit in a genuinely 3D solar-system
+sim), `topo/knot` returns the knot type — 'unknot, 'trefoil, 'figure-
+eight, or 'complex-{N-crossings}. Real orbits in the solar system
+are 'unknot' — they lie approximately in a plane.
+
+## 13.5 Geodesics on curved surfaces
+
+If the agent moves on a sphere or a torus, the shortest path between
+two points is not a straight line — it's a geodesic. `curve/geodesic-
+distance` computes it.
+
+```scheme
+;; A torus surface: parameterized by (u, v) in [0, 2*pi) x [0, 2*pi)
+(define torus-metric
+  (lambda (u v) ...))
+
+(curve/geodesic-distance torus-metric (0 0) (3.14 3.14))
+;; => 4.442     (the geodesic wraps around both directions)
+```
+
+If we simulate a particle moving under 'gravity' on the torus (a
+force that pulls toward the shortest path to a fixed point), the
+particle traces a geodesic. This is how relativity's 'straight lines'
+work — geodesics in a curved spacetime.
+
+## 13.6 Same energy, different topology, different fate
+
+The dramatic demo. Two three-body systems with the same total energy
+but different initial phase-space positions. One is a bound orbit;
+one escapes.
+
+```scheme
+(define (compare-orbits)
+  (world/reset!)
+  ;; Configuration A: bound
+  (three-body-init 1.0 2.0 :velocities '(1.5 1.5 2.0))
+  (let loop ((n 2000) (pts-A '()))
+    (if (<= n 0)
+        (let ((topo-A (topo/rips-filtration pts-A :max-scale 200)))
+          ;; Configuration B: unbound, same energy
+          (world/reset!)
+          (three-body-init 1.0 2.0 :velocities '(1.55 1.45 2.15))
+          (let loop-b ((m 2000) (pts-B '()))
+            (if (<= m 0)
+                (let ((topo-B (topo/rips-filtration pts-B :max-scale 200)))
+                  (list (list 'A (topo/betti topo-A 50))
+                        (list 'B (topo/betti topo-B 50))))
+                (begin (world/step)
+                       (when (= 0 (modulo m 5))
+                         (set! pts-B (cons (entity/pos (world/find 'body-1)) pts-B)))
+                       (loop-b (- m 1) pts-B)))))
+        (begin (world/step)
+               (when (= 0 (modulo n 5))
+                 (set! pts-A (cons (entity/pos (world/find 'body-1)) pts-A)))
+               (loop (- n 1) pts-A)))))
+
+(compare-orbits)
+;; => ((A ((b_0 . 1) (b_1 . 3) (b_2 . 0)))       <- bound: loops persist
+;;     (B ((b_0 . 1) (b_1 . 0) (b_2 . 0))))       <- unbound: no loops
+```
+
+The bound orbit has persistent 1-dimensional loops (holes). The
+escape trajectory has none — it goes and doesn't come back. Same
+energy, different topology, different fate. This is the sort of
+signal the runtime would use to answer 'is this initial condition
+stable?' without watching the whole simulation.
+
+---
+
+## 13.7 The four routing patterns
+
+**Composition.** Trajectory analysis is a composition: sample points
+→ build filtration → compute persistence → extract Betti numbers.
+Each is a small verb.
+
+**Orchestration.** Running the same sim from two initial conditions
+in sequence, then comparing their topological signatures, is
+orchestration. Recording tapes and later analyzing them is delayed
+orchestration.
+
+**In-routing.** When the persistent-b_1 drops to zero mid-sim, that
+event ('trajectory has become topologically trivial') could route to
+a 'this system is escaping' alarm.
+
+**Routing.** Betti numbers route to a comparison table. Persistence
+diagrams route to a plot with birth on x-axis, death on y-axis.
+Topological signatures route to Cortex for later similarity queries:
+'find me a previous sim with this same b_0 = 1, b_1 = 3 signature.'
+
+---
+
+## 13.8 Common desktop tasks
+
+An operator selling a fitness tracker asked: 'is this person's daily
+walking pattern the same as last month?' Sample GPS every 5 minutes.
+Compute the topological signature of the day's trajectory. Compare
+via persistent homology to last month's signature. If the b_0 or b_1
+counts have shifted, something in the routine has changed. This is
+much more robust than comparing individual routes.
+
+## 13.9 Try this
+
+1. Trace one pendulum for 900 frames. What is b_1 of the trajectory?
+2. Trace a double pendulum. Does b_1 change?
+3. Trace a flock. What's the graph's average degree? Number of
+   components over time?
+4. Compare two orbits: circular and highly elliptical. Same b_1?
+5. Sample points from a Life pattern. Is the population blob
+   topologically connected?
+
+## 13.10 Pitfalls
+
+**Sample rate matters.** Under-sampling misses loops; over-sampling
+makes them look continuous but is wasteful.
+
+**Scale choice.** Betti numbers depend on the filtration scale.
+Different scales reveal different features. `topo/persistence`
+returns them across ALL scales, which is why it's more robust.
+
+**Cost.** Rips filtration is O(n^2) or worse. For thousands of
+points, subsample or use approximate methods.
+
+---
+
+Next: agents that learn. No teacher, only the world. Policy weights
+that improve across generations.")

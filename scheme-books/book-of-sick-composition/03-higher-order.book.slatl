@@ -1,0 +1,170 @@
+(chapter
+  :book "Book of Sick Composition"
+  :chapter-number 3
+  :title "Higher-Order — functions that take functions"
+  :audience "kid-and-adult operators"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-18"
+     :sources ((:reference "MOTOI-SCHEME-REFERENCE.slat" :verbs (lambda define map filter apply compose))
+               (:book "book-of-scheme" :chapter 8 :section "higher-order")))
+  :prose
+"# Chapter 3 — Higher-Order
+
+A higher-order function is a function that takes another function as an argument, returns a function as its result, or both. That sounds theoretical. It is not theoretical. It is what lets you write a function like `map` once and never write a `for` loop again. You already used higher-order functions in Chapter 2. This chapter names them and shows you how to build your own.
+
+## Why this lib exists
+
+Some code shapes are the same every time except for one detail. Sorting numbers ascending vs descending — same walk, different comparator. Timing a function call — same start-clock/call/stop-clock, different function. Retrying on failure — same retry loop, different action.
+
+Without higher-order functions you copy the loop each time and edit the detail. With them, you write the loop once and pass the detail as an argument.
+
+This chapter has four steps: use a built-in higher-order, write one, return one, and compose several.
+
+## Problem 1 — Time how long a function takes
+
+Motoi has a millisecond clock. Wrap any function in a timer:
+
+```
+(define (time-it label thunk)
+  (let ((start (current-time-ms)))
+    (thunk)
+    (let ((elapsed (- (current-time-ms) start)))
+      (display label)
+      (display \": \")
+      (display elapsed)
+      (display \"ms\\n\"))))
+
+(time-it \"count to a million\"
+  (lambda ()
+    (let loop ((n 0))
+      (if (= n 1000000)
+          'done
+          (loop (+ n 1))))))
+;; => count to a million: 12ms
+```
+
+Read the shape. `time-it` takes a label and a `thunk` — a function of no arguments. It notes the clock, calls the thunk, notes the clock again, prints. Anywhere you want to time some code, wrap it in `(lambda () ...)` and hand it over.
+
+That `lambda ()` — no arguments in the parens — is the standard shape for `do this later`. Motoi will not run the body until someone calls the thunk. That is why the timer can straddle it.
+
+## Problem 2 — Write your own `keep-if`, which is just `filter` with the arguments swapped
+
+Some days you want the collection first and the predicate second. Rewriting `filter` from scratch teaches you the shape:
+
+```
+(define (keep-if lst pred)
+  (cond ((null? lst) '())
+        ((pred (car lst))
+         (cons (car lst) (keep-if (cdr lst) pred)))
+        (else
+         (keep-if (cdr lst) pred))))
+
+(display (keep-if (list 1 2 3 4 5 6) odd?))
+;; => (1 3 5)
+```
+
+`keep-if` is a higher-order function — it takes `pred` (which is a function). It is also recursive: if the list is empty, return empty; if the first element passes the predicate, cons it onto the result of recursing on the rest; otherwise, skip it and recurse on the rest. Chapter 4 talks about recursion at length. Here, notice: the predicate is just an argument like any other.
+
+## Problem 3 — A function that RETURNS a function
+
+This is where things start to feel like magic and then stop feeling like magic. `adder` takes a number and returns a function that adds that number to whatever it is called with:
+
+```
+(define (adder n)
+  (lambda (x) (+ x n)))
+
+(define add-ten (adder 10))
+(define add-hundred (adder 100))
+
+(display (add-ten 5))       ;; => 15
+(display (add-hundred 5))   ;; => 105
+(display ((adder 42) 8))    ;; => 50
+```
+
+`adder` is a factory. Every call produces a fresh function. That function remembers the `n` from when it was made — Scheme people call that a closure, and it just means the inner function closes over the outer function's variable.
+
+The last line, `((adder 42) 8)`, calls `adder` and immediately calls the result. Nothing stored. Same idea, more concise.
+
+You use this pattern any time you want to build a specialized version of a general operation. `(adder 10)` is `+ 10`, permanent. In graphics you might write `(coloring 'pink)` that returns a function that draws a shape pink. Same shape.
+
+## Problem 4 (pro) — Compose functions into a pipeline
+
+Sometimes you want to say `first do A, then do B, then do C` and have the result be a single function you can call once. That is composition:
+
+```
+(define (compose2 f g)
+  (lambda (x) (f (g x))))
+
+(define add-one (lambda (n) (+ n 1)))
+(define double  (lambda (n) (* n 2)))
+(define square  (lambda (n) (* n n)))
+
+(define do-all (compose2 square (compose2 double add-one)))
+
+(display (do-all 3))
+;; => 64
+```
+
+Trace it: `3` goes into `add-one`, becomes `4`. `4` goes into `double`, becomes `8`. `8` goes into `square`, becomes `64`. The function `do-all` bakes that whole pipeline into one callable value.
+
+Now the general version — compose any number of functions:
+
+```
+(define (compose . fns)
+  (if (null? fns)
+      (lambda (x) x)
+      (let ((first (car fns))
+            (rest  (apply compose (cdr fns))))
+        (lambda (x) (first (rest x))))))
+
+(define do-all-nice (compose square double add-one))
+
+(display (do-all-nice 3))
+;; => 64
+```
+
+The `. fns` in the lambda list means `collect all the arguments into a list`. `apply compose (cdr fns)` calls `compose` again with the rest of the functions as separate arguments. The base case — no functions left — returns the identity function.
+
+If you have never seen `apply` before: `apply f (list a b c)` is the same as `(f a b c)`. It spreads a list back into arguments. This is the bridge between variadic functions and lists.
+
+## Capstone — A rate-limiter that lets a function fire at most once per interval
+
+```
+(define (rate-limit interval-ms fn)
+  (let ((last-fire 0))
+    (lambda args
+      (let ((now (current-time-ms)))
+        (if (< (- now last-fire) interval-ms)
+            'throttled
+            (begin
+              (set! last-fire now)
+              (apply fn args)))))))
+
+(define greet (rate-limit 1000 (lambda (name)
+                                  (display \"hi, \")
+                                  (display name)
+                                  (display \"\\n\")
+                                  'greeted)))
+
+(greet \"Alfred\")   ;; => hi, Alfred      ;; result: greeted
+(greet \"Alfred\")   ;; => (no print)      ;; result: throttled
+;; wait 1 second...
+(greet \"Alfred\")   ;; => hi, Alfred      ;; result: greeted
+```
+
+Three ideas landed here. First: the outer `let` gives the returned function a private variable (`last-fire`) it can update between calls. That is a closure carrying state — a mutable cell only the returned function can see.
+
+Second: `lambda args` collects all arguments into a list called `args`, so the returned function works no matter how many arguments the wrapped function takes.
+
+Third: `apply fn args` calls the wrapped function with those arguments. The wrapper does not need to know what the wrapped function expects — it just passes everything through.
+
+This pattern shows up everywhere. A debouncer is the same shape with the condition inverted. A memoizer is the same shape with a hash-table replacing `last-fire`. A logger is the same shape with `display` around the call. Once you see it, you see it everywhere.
+
+## What's next
+
+Chapter 4 slows down and talks about recursion — the pattern that made `compose` and `keep-if` work above. If you have been reading and nodding but the recursive calls made your eyes cross, Chapter 4 is where we walk through them one at a time.
+")

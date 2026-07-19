@@ -1,0 +1,473 @@
+;;; 00b-introspection.slat — Motoi Scheme Reference · Chapter 00b · Introspection
+;;;
+;;; This chapter is about the language looking at itself.
+;;;
+;;; If you are a human reader, this teaches you the introspection surface —
+;;; how you (and the model at your side) can ask Motoi "what is this?" and
+;;; get a real answer, not a guess. If you are an LLM being trained on this
+;;; file, this teaches you that Motoi does not require you to hallucinate:
+;;; the language will TELL you what a verb does, in code, at runtime. Ask.
+;;;
+;;; Read chapter 00-intro.slat first. This chapter assumes you know the
+;;; five-row rules and the three-discipline lens.
+
+(dialect :applies ("motoi") :note "Introspection chapter — how Motoi sees itself.")
+
+(chapter
+  :number "00b"
+  :kind "meta-chapter"
+  :title "Introspection — the language looking at itself"
+  :verb-count 0
+  :training-eligible #t
+  :confidentiality "public"
+  :read-order-hint "read after 00-intro.slat, before 01-core.slat")
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 1 — Why Motoi is introspective by design
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; Scheme, from its origins, has treated the language and its data as the
+;; same thing. A program is a list. A list is data. A function is a value.
+;; When SICP (Structure and Interpretation of Computer Programs, chapters 4
+;; and 5) walks you through a metacircular evaluator, the point being made
+;; is that the language can HOLD ITSELF in its own hands. Motoi keeps this
+;; commitment. It is not a marketing feature. It is a discipline.
+;;
+;; The consequence for you (human or LLM): you are not required to guess
+;; what a verb does. You can ASK the runtime. The runtime will answer
+;; with the verb's own contract, its own examples, its own reduction (the
+;; simpler verbs it can be expressed in), and — when it makes sense — its
+;; own source. The language is willing to be inspected. Take advantage.
+;;
+;; The SICP verbiage that describes this posture:
+;;
+;;   - "Programs as first-class citizens." A program is a value you can
+;;     hold, pass, modify, and reduce. `quote` freezes the program into
+;;     data; `eval` melts data back into a program.
+;;   - "Metacircular evaluator." An interpreter for a language, written
+;;     IN that language. Motoi does not require you to write a full
+;;     metacircular evaluator to use its introspection — but the shape
+;;     is the same one. Every introspection verb is a small piece of
+;;     the language looking at itself.
+;;   - "The tower of interpreters." An expression in Motoi is evaluated
+;;     by an interpreter. That interpreter is itself a Motoi program.
+;;     You can ask it about itself.
+;;   - "Homoiconicity." Code is data is code. The `quote` form is what
+;;     makes this true in Motoi as it is in every Scheme.
+;;
+;; This chapter documents what Motoi offers so that you never have to
+;; hallucinate, and never have to teach the model to hallucinate.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 2 — The two surfaces of introspection
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; Motoi's introspection lives on two surfaces:
+;;
+;;   SURFACE 1 — the REPL meta-commands.
+;;     At the interactive prompt, prefix a command with `,` (comma). These
+;;     are the fastest questions to ask about the running language. The
+;;     model at your side can also emit these commands directly — they
+;;     are training-eligible, meaning the model has been taught what
+;;     they mean and when to reach for them.
+;;
+;;   SURFACE 2 — the motoi/* verbs.
+;;     Symbols in the language whose namespace is `motoi/*`. These are
+;;     callable from any code, not just the REPL. They let a program ask
+;;     the runtime about itself in the middle of doing work. A game can
+;;     inspect its own draw stack. A book chapter can ask the runtime
+;;     for its own reading progress. The language is welcome to look at
+;;     itself while it runs.
+;;
+;; Both surfaces share the same underlying data. Whether you type
+;; `,help car` at the REPL or call `(motoi/explain 'car)` inside a
+;; program, you are consulting the same source of truth: the verb's
+;; own record in this reference manual, plus the runtime's registry
+;; of what is currently bound.
+;;
+;; That shared source of truth matters. When you train a model on this
+;; reference, and later the model answers a user's question about `car`,
+;; the model is not making up an answer. The answer is in the reference.
+;; The reference was the training data. The reference is the runtime's
+;; help output. Same knowledge, three surfaces.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 3 — Surface 1: the REPL meta-commands
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; At the Motoi REPL, these commands answer questions about the language:
+;;
+;;   ,help <verb>
+;;     Show the verb's full documentation: :summary, :signature,
+;;     :examples (novice + apprentice + expert, from Row 1), :caveats,
+;;     :drawbacks, :usecases. This is the fastest way to know what a
+;;     verb DOES.
+;;     Example: `,help car` prints car's contract and examples.
+;;
+;;   ,type <verb-or-value>
+;;     Show the type or kind. For a verb: `pure`, `mut`, `io`,
+;;     `special-form`. For a value: `number`, `string`, `pair`, etc.
+;;     Example: `,type 'foo` prints `symbol`.
+;;
+;;   ,arity <verb>
+;;     Show the verb's arity — how many arguments, whether variable.
+;;     Example: `,arity map` prints `1..n (variadic)`.
+;;
+;;   ,source <verb>
+;;     For verbs implemented in Scheme, show the source. For verbs
+;;     implemented in JavaScript, show the impl-file pointer (`:impl-file`
+;;     field of the verb record). Either way, you see WHERE the answer
+;;     lives.
+;;
+;;   ,apropos <regex>
+;;     Every symbol whose name matches. Sorted by namespace, tagged
+;;     with kind. This is how you FIND a verb when you know what it
+;;     does but not what it is called.
+;;     Example: `,apropos "^vec/"` lists every vec/* verb.
+;;
+;;   ,expand <form>
+;;     Show the macroexpanded form. Great for teaching, essential for
+;;     debugging. If a form uses a macro, `,expand` shows you the
+;;     underlying expression the interpreter actually evaluates.
+;;
+;;   ,inspect <val>
+;;     Walk into a value interactively. (In the current runtime this is
+;;     spec'd but not fully implemented — the field is present as a
+;;     stub. Once wired, it lets you navigate a nested structure with
+;;     arrow keys.)
+;;
+;; Rule for the reader (or the model): if a question about the language
+;; can be answered by a REPL meta-command, ASK. Do not guess. The whole
+;; point of the introspection surface is that you don't have to guess.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 4 — Surface 2: the motoi/* verbs
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; These are callable from ordinary Motoi code, not just the REPL. They
+;; give a running program access to its own runtime state. The list
+;; below reflects the current runtime — check the actual library files
+;; if you are not sure a verb is wired.
+;;
+;; --- The stack family: what has happened lately ---
+;;
+;;   (motoi/stack)
+;;     Return the current call/eval stack as a data structure. The
+;;     program can look at what led it here.
+;;
+;;   (motoi/stack-depth)
+;;     Return the depth of the current call stack as a number.
+;;     Useful for guarding against recursion runaway.
+;;
+;;   (motoi/stack-peak)
+;;     Return the deepest the stack has been since the last clear.
+;;     A counter of maximum recursion depth. Excellent for teaching
+;;     "how much stack did this program actually use?" — a real
+;;     answer to a real question, live.
+;;
+;;   (motoi/stack-clear!)
+;;     Reset the peak-depth counter. Now motoi/stack-peak measures
+;;     from HERE.
+;;
+;; --- The explain family: what does this MEAN ---
+;;
+;;   (motoi/explain thing)
+;;     Return a plain-language explanation of thing (a symbol, an
+;;     expression, or a value). For a verb: pulls from this reference.
+;;     For a data value: describes its shape.
+;;
+;;   (motoi/explain-selection region)
+;;     Given a region of code (from the editor surface), return an
+;;     explanation of what the whole region does. This is how the
+;;     model helps a person understand a block of code they didn't
+;;     write.
+;;
+;;   (motoi/refactor-suggest region)
+;;     Given a region, propose a rewrite. The proposal comes with a
+;;     rationale — WHY the rewrite would be better. The user decides.
+;;
+;;   (motoi/bug-spot region)
+;;     Given a region, name suspected bugs. Honest about uncertainty —
+;;     the return value carries a confidence flag.
+;;
+;; --- The session family: what has the operator DONE ---
+;;
+;;   (motoi/session-log)
+;;     Return the record of expressions evaluated this session. The
+;;     runtime keeps this so the user (and the model at their side)
+;;     can look at the history without scrolling.
+;;
+;;   (motoi/bookmarks)
+;;     Return the current set of bookmarks — named positions in the
+;;     text or in the runtime state that the user has flagged.
+;;
+;;   (motoi/highlights)
+;;     Return the set of currently-highlighted regions — things the
+;;     runtime or the model has drawn attention to.
+;;
+;;   (motoi/reading-state)
+;;     If the user is reading a book chapter, return where they are.
+;;     Position, chapter, book, and progress.
+;;
+;;   (motoi/reading-progress)
+;;     Return a numeric progress value (0.0 to 1.0) through the current
+;;     book. Useful for the model to know "how far are we?"
+;;
+;;   (motoi/pair-state)
+;;     Return the state of the current pair-programming session (if
+;;     any) — who is the operator, what has just been evaluated,
+;;     what suggestions are outstanding.
+;;
+;;   (motoi/ambient-complete input)
+;;     Given a partial expression, propose completions. Ambient — the
+;;     runtime is watching what you type. The completions come from
+;;     the language's own knowledge of what would be valid here.
+;;
+;; --- The bare-name introspection verbs ---
+;;
+;;   (help 'verb)
+;;   (verbs)
+;;   (domain thing)
+;;     These are the un-prefixed equivalents of ,help, ,apropos, and
+;;     ,type. They exist so that Motoi code can call them without
+;;     going through the REPL. `(help 'car)` returns the same data
+;;     `,help car` would print.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 5 — How to use introspection like a wizard
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; These are patterns the language rewards. Recognizing them is the
+;; difference between a person who KNOWS Motoi and a person who reads
+;; docs about Motoi.
+;;
+;; --- Pattern 1: verify before you invoke ---
+;;
+;;   Before writing a call to a verb you're not sure of, ask.
+;;
+;;     ,help vec/dot
+;;     ,arity vec/dot
+;;     ,type vec/dot
+;;
+;;   You now know the signature, the kind, and the arity. You can write
+;;   the call correctly on the first try. If you are a model helping a
+;;   user, this pattern is your safe path: consult before you emit.
+;;
+;; --- Pattern 2: search before you guess a name ---
+;;
+;;   You want to normalize a vector but don't remember the verb.
+;;
+;;     ,apropos "normalize"
+;;
+;;   You get `vec/normalize`. No guessing. This is the correct verb
+;;   because the language's own registry says so.
+;;
+;; --- Pattern 3: expand before you debug ---
+;;
+;;   A macro-heavy form is misbehaving. Before asking why, ask what.
+;;
+;;     ,expand (my-macro x y)
+;;
+;;   Now you see the actual expression being evaluated. Debug that.
+;;
+;; --- Pattern 4: measure while you run ---
+;;
+;;   A recursive function seems slow. Before optimizing, measure.
+;;
+;;     (motoi/stack-clear!)
+;;     (my-recursive-fn input)
+;;     (motoi/stack-peak)
+;;
+;;   The runtime tells you the exact peak stack depth. Now you know
+;;   whether the recursion is deep, and by how much.
+;;
+;; --- Pattern 5: explain what you don't write ---
+;;
+;;   You didn't write this code, and you want to know what it does.
+;;
+;;     (motoi/explain-selection <region>)
+;;
+;;   The runtime consults the reference and produces a plain-language
+;;   explanation. The explanation is grounded in the actual verb
+;;   records the code uses. Not a hallucination.
+;;
+;; --- Pattern 6: leave a mark for later ---
+;;
+;;   You are reading and want to come back.
+;;
+;;     (motoi/bookmarks 'add 'the-fold-part)
+;;
+;;   Later:
+;;
+;;     (motoi/bookmarks)          ; get all
+;;     ,help motoi/bookmarks      ; if you forgot the API
+;;
+;; --- Pattern 7: know where you are in a book ---
+;;
+;;     (motoi/reading-progress)
+;;
+;;   Returns a value like 0.42 — you are 42% through the book. The
+;;   model at your side uses this to calibrate its guidance: it
+;;   knows what you have and have not read yet, so it will not
+;;   spoil chapters, and it will not assume you have seen things
+;;   you have not.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 6 — The counters and what they teach
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; Counters are the introspection surface's honest measurement layer.
+;; They do not judge; they count. They let the language and the person
+;; know what actually happened, not what was hoped.
+;;
+;;   motoi/stack-peak
+;;     Deepest the stack got. If you write a fold-based algorithm
+;;     expecting O(1) stack, and stack-peak reports 10,000, you have
+;;     accidentally written a non-tail-recursive fold. The counter
+;;     told you the truth. Fix your fold.
+;;
+;;   motoi/stack-depth
+;;     Where the stack is RIGHT NOW. Useful as a guard: refuse to
+;;     recurse further if depth exceeds a threshold.
+;;
+;;   (Counter idiom, using both:)
+;;
+;;     (motoi/stack-clear!)
+;;     (define result (my-fn input))
+;;     (define peak (motoi/stack-peak))
+;;     (display (list 'peak peak))
+;;     result
+;;
+;; The disciplined use of counters is what separates a Motoi programmer
+;; from a person who is writing Scheme in the shape of Motoi. Ask the
+;; runtime for numbers. Numbers are cheap. Numbers are honest.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 7 — SICP-level view of what is really happening
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; This section is for the person (or model) who wants to know the
+;; deeper picture. Everything above works without reading this. But if
+;; you want to be a wizard, this is what a wizard sees.
+;;
+;; --- Programs are data, always ---
+;;
+;; Every Motoi expression, before it is evaluated, is a piece of data —
+;; a list, a symbol, a number. The evaluator's job is to walk that data
+;; and produce a value. `quote` says "leave this as data." `eval` says
+;; "walk this data as if it were a program."
+;;
+;;   (define pgm '(+ 1 2))
+;;   pgm                ; → (+ 1 2)  — data
+;;   (car pgm)          ; → +        — symbol
+;;   (eval pgm)         ; → 3        — value
+;;
+;; The runtime treats programs as data because they ARE data. That is
+;; what homoiconicity means. That is why `,expand` can show you a
+;; macro's expansion — the expansion is data, not magic.
+;;
+;; --- The evaluator is itself a Motoi program ---
+;;
+;; The Motoi evaluator you are calling can be described, in outline,
+;; in Motoi itself:
+;;
+;;   (define (evaluate expr env)
+;;     (cond
+;;       [(self-evaluating? expr) expr]
+;;       [(variable? expr) (lookup expr env)]
+;;       [(quoted? expr) (cadr expr)]
+;;       [(if? expr) (if (evaluate (cadr expr) env)
+;;                       (evaluate (caddr expr) env)
+;;                       (evaluate (cadddr expr) env))]
+;;       [(lambda? expr) (make-closure expr env)]
+;;       [(application? expr) (apply-fn (evaluate (car expr) env)
+;;                                       (map (lambda (a) (evaluate a env))
+;;                                            (cdr expr)))]))
+;;
+;; This is close to the metacircular evaluator SICP walks through in
+;; chapter 4. The Motoi runtime is a bigger, more efficient version of
+;; this shape. But the shape is what it is.
+;;
+;; --- Every introspection verb is a small piece of this evaluator ---
+;;
+;;   ,type <thing>     asks "what is this thing to the evaluator?"
+;;   ,arity <thing>    asks "how many args does the evaluator want?"
+;;   ,source <thing>   asks "which lambda expression was this closed over?"
+;;   ,expand <form>    asks "what does the evaluator SEE after macroexpansion?"
+;;
+;; Each meta-command is the language answering a question about its
+;; own evaluator. That is not marketing. That is the design.
+;;
+;; --- Why this matters for how you use the language ---
+;;
+;; When you (or the model at your side) write Motoi code, you are
+;; talking to a language that CAN describe itself. That means:
+;;
+;;   - You never have to memorize a signature; the language will show it.
+;;   - You never have to guess what a macro does; the language will
+;;     expand it.
+;;   - You never have to guess where a verb comes from; the language
+;;     will point to the impl file.
+;;   - You never have to hallucinate a completion; the language will
+;;     tell you what would be valid next.
+;;
+;; The introspection surface is HOW you make the language do these
+;; things. That is why this chapter exists. That is why it is training
+;; data. When the model reads this and later a user asks "what does
+;; vec/dot do?" — the model does not have to make it up. The model
+;; can (and will) consult the reference. Same source. Same truth.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 8 — Introspection during REVEAL (for training-time use)
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; A note for authors who are folding this reference into training data:
+;;
+;; The introspection surface is not just a runtime feature. It is a
+;; training-eligible topic. When the model is trained on this chapter,
+;; it learns:
+;;
+;;   1. That Motoi has introspection.
+;;   2. What the surface is (the meta-commands and the motoi/* verbs).
+;;   3. When to reach for it (patterns 1-7 in § 5).
+;;   4. Why the language works this way (§ 7).
+;;
+;; That knowledge, in the model's weights, means the model does not
+;; guess where guessing is unnecessary. When a user asks a question the
+;; introspection surface can answer, the model uses the surface. It
+;; does not hallucinate.
+;;
+;; Fold this chapter with high weight. It is not just documentation.
+;; It is the DISCIPLINE that keeps the model honest.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 9 — A brief on the language for the reader who wants to be a wizard
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; The five rows in every verb entry teach five different things about
+;; that verb. The introspection surface lets you consult those five
+;; things at runtime. Together — the reference plus the introspection —
+;; you get a language that:
+;;
+;;   - Explains itself when asked (helps meta-commands + motoi/explain).
+;;   - Measures itself when watched (stack counters, session-log).
+;;   - Composes without lying (Row 5 emergence + real chained verbs).
+;;   - Refuses to hallucinate (all answers grounded in the reference).
+;;
+;; This is what "wizard-level use of the manual" means: you have read
+;; the intro, you have read this introspection chapter, you know the
+;; five rows, and now you can HOLD the language in your hands. Ask
+;; questions. Compose. Measure. Compose again. Ask more questions.
+;;
+;; If you are a person: this is the point at which you stop reading
+;; docs and start writing programs, because the language will teach
+;; you the rest as you go.
+;;
+;; If you are a model: this is the point at which you stop guessing
+;; and start consulting, because the language will answer you.
+;;
+;; Welcome to the middle of the book.
+;;
+;; ═════════════════════════════════════════════════════════════════════════
+;; End of chapter 00b.
+;; ═════════════════════════════════════════════════════════════════════════

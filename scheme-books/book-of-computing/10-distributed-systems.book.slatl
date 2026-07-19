@@ -1,0 +1,200 @@
+;; 10-distributed-systems.book.slatl
+;; Book of Computing — Chapter 10
+
+(dialect :applies ("motoi") :note "Motoi Book of Computing.")
+
+(chapter
+  :book             "Book of Computing"
+  :chapter-number   10
+  :title            "Chapter 10 — Distributed systems — RPC, sharding, consistency"
+  :audience         :any
+  :dialect          "motoi"
+  :book-version     "1.0"
+  :content-rating   :G
+  :training-eligible #t
+  :confidentiality  :public
+  :provenance       ((:authored-by "lane-2026-07-17-motoi-substrate")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Distributed_computing")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Remote_procedure_call")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Shard_(database_architecture)")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Consistency_model")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/CAP_theorem"))
+  :prose
+"# Chapter 10 — Distributed systems — RPC, sharding, consistency
+
+A distributed system is a system in which the components live on
+different networked computers. The users experience it as a single
+coherent system, but under the hood there are many machines
+coordinating.
+
+Every website you visit is a distributed system. Every cloud service.
+Every database at scale. Motoi is not one — Motoi runs locally on
+your machine. But understanding the shape of distributed systems is
+part of computer literacy, and Motoi can talk about it.
+
+## Why distribute at all
+
+Because one machine can't do enough. There is a limit to how much
+compute, memory, storage, and bandwidth you can put in one box. Past
+that limit, you need many boxes cooperating.
+
+Reasons to distribute:
+- **Scale**: too much data to fit on one machine.
+- **Speed**: too much work to do on one machine in reasonable time.
+- **Reliability**: if one machine fails, others take over.
+- **Geography**: users are all over the world, and light travels at
+  a fixed speed — you want a server near each user.
+
+Every distributed system pays a cost for these benefits. That cost
+usually shows up in complexity, not in the parts themselves.
+
+## RPC — remote procedure call
+
+The simplest way to get two machines to cooperate is: one machine
+calls a function on the other, waits for the result, uses it. This
+is called a remote procedure call. RPC.
+
+Under the hood, RPC involves:
+1. The caller packages up the function name and arguments.
+2. That package is sent as a network message to the remote machine.
+3. The remote machine unpacks the message, executes the function.
+4. The result is packaged up and sent back.
+5. The caller unpacks the result.
+
+Motoi Scheme's runtime uses a local variant of this idea when it
+dispatches to carts — the caller doesn't know whether the cart lives
+in the same process or somewhere else. Same shape, different
+substrate.
+
+RPC is convenient because it looks like a local function call. It's
+also dangerous for the same reason. The network can fail. The remote
+machine can crash. The message can take a long time. If your code
+treats RPC as identical to a local call, you'll get bad surprises.
+
+Every serious distributed-systems textbook has a section titled
+'the fallacies of distributed computing.' The fallacies (Peter
+Deutsch's list, 1994, plus one from James Gosling in 1997):
+
+1. The network is reliable.
+2. Latency is zero.
+3. Bandwidth is infinite.
+4. The network is secure.
+5. Topology doesn't change.
+6. There is one administrator.
+7. Transport cost is zero.
+8. The network is homogeneous.
+
+Every fallacy has bitten every generation of distributed-system
+programmers. Motoi doesn't have to deal with them — Motoi runs
+locally. But knowing they exist is honest computer literacy.
+
+## Sharding
+
+Sharding is what you do when your data is too big for one machine.
+You split it across several machines. Each machine holds a
+'shard' — a subset of the whole.
+
+Simple sharding strategies:
+- **By key range**: shard 1 holds keys 0-999, shard 2 holds 1000-1999,
+  etc. Good for range queries; bad if data is unevenly distributed
+  ('key 500 is really popular; shard 1 is overloaded').
+- **By hash**: hash(key) mod N tells you which of N shards holds it.
+  Evens out the load. But when you add or remove a shard, most keys
+  move.
+- **Consistent hashing**: a fancier scheme that only moves a small
+  fraction of keys when you add or remove a shard. The go-to for
+  serious distributed caches and databases.
+
+Sharding turns one problem ('too much data') into new problems
+('how do I query across all shards? how do I keep them consistent?
+what happens when a shard is offline?'). Distributed systems are a
+constant chain of solving old problems by creating new ones you
+have better tools for.
+
+## Consistency
+
+If your data lives on multiple machines, what does it mean for the
+data to be 'consistent'?
+
+Different systems answer differently:
+- **Strong consistency**: any read returns the most recently written
+  value. Feels intuitive; costs a lot in latency because writes have
+  to be acknowledged everywhere before they're considered committed.
+- **Eventual consistency**: writes eventually propagate everywhere.
+  In the meantime, different readers may see different (stale)
+  values. Cheap; fits a lot of use cases.
+- **Causal consistency**: guarantees that if event B happened
+  because of event A, everyone sees A before B. In between strong
+  and eventual. Useful for chat systems, collaborative documents.
+- **Read-your-writes**: I always see my own writes, even if other
+  users don't see them yet. A form of session consistency.
+
+The CAP theorem (Eric Brewer, 2000, proved by Gilbert and Lynch,
+2002) says: given the choice between consistency, availability, and
+partition tolerance, you can only have two. Since the network will
+sometimes partition (fallacies #1 and #5), and you usually want
+availability during partitions, you often accept weaker
+consistency.
+
+CAP is more nuanced than 'pick two of three,' but that is the
+sound-bite version. Real distributed databases usually pick a
+weaker-than-strong consistency and offer knobs.
+
+## What Motoi owes distributed systems
+
+Not much directly. Motoi runs locally, single-process, sequential.
+Cortex writes are local; verb dispatches are local. Motoi is honest
+about this — he doesn't pretend to be a distributed system.
+
+But Motoi respects distributed systems as an area of engineering.
+He knows the fallacies. He knows the tradeoffs. When someone asks
+about Google-scale or Facebook-scale services, Motoi can gesture at
+the shape without pretending to have expertise.
+
+## A tiny example
+
+Simulating consistent hashing in Motoi Scheme:
+
+```
+(define (make-ring nodes)
+  (let ((ring (map (lambda (n) (cons (hash n) n)) nodes)))
+    (sort ring (lambda (a b) (< (car a) (car b))))))
+
+(define (lookup ring key)
+  (let ((h (hash key)))
+    (let loop ((r ring))
+      (cond
+        ((null? r) (cdr (car ring)))    ;; wrap around
+        ((>= (car (car r)) h) (cdr (car r)))
+        (else (loop (cdr r)))))))
+
+(define ring (make-ring '(node-a node-b node-c node-d)))
+
+(lookup ring \"user-42\")     ;; => some consistent node
+(lookup ring \"user-42\")     ;; => same node every time
+(lookup ring \"user-43\")     ;; => probably different node
+```
+
+Real consistent hashing puts each node at multiple ring positions
+('virtual nodes') to smooth the distribution. The idea is the same
+though: keys map to positions on a ring; each key goes to the next
+node clockwise. Adding or removing a node only moves keys near that
+node's position.
+
+## What Motoi wants you to take from this
+
+Distributed systems are a very different discipline from local
+programming. The fundamental assumption 'the machine works' becomes
+'some machines work, most of the time, if you're lucky.' Every
+tool needs to be designed with failure as a normal case, not an
+exception.
+
+That is hard. It is why distributed-systems engineering is a
+specialty. Motoi is not that. Motoi is a single small language
+model running on your machine, and that's honest about it.
+
+But the tradition you are looking at — the discipline of
+engineering under uncertainty — is what makes the modern Internet
+possible. Every message you send. Every video that streams. Every
+photo that syncs. All of it is somebody managing distributed-system
+tradeoffs, carefully, at scale.")

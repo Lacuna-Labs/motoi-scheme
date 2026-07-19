@@ -1,0 +1,401 @@
+(dialect :applies ("motoi" "sakura") :note "Default: applies to both dialects.")
+
+(chapter
+  :book "Book of Logic"
+  :chapter-number 6
+  :title "System F — Polymorphism"
+  :dialect "sakura"
+  :audience :adult
+  :content-rating :G
+  :author-lane "the-engineer-book-of-logic-2026-07-16"
+  :training-eligible #t
+  :confidentiality "public"
+  :voice "sakura-teaching + gentle-formalist"
+  :classical-anchors ("Girard — Interprétation Fonctionnelle et Elimination des Coupures (1972)"
+                      "Reynolds — Towards a Theory of Type Structure (1974)"
+                      "Girard-Lafont-Taylor — Proofs and Types, chapters 11-14"
+                      "Pierce — Types and Programming Languages, chapter 23")
+  :prose
+"# Chapter 6 — System F: Polymorphic Lambda Calculus
+
+Where types themselves become abstractable, and where a single function
+can serve all types at once — while still, remarkably, terminating.
+
+Simply-typed lambda calculus gives us one function per type. If we want
+identity on booleans, we write `(λx : Bool. x)`. If we want identity on
+naturals, we write `(λx : Nat. x)`. If we want identity on functions
+from Bool to Nat, we write `(λx : (Bool → Nat). x)`. Ten copies of
+essentially the same code, each type-annotated for a specific type.
+That is inefficient and inelegant.
+
+*Polymorphism* is the escape. We want to write *one* identity function
+that works at every type. In ML and Haskell this is done informally by
+type inference: `id x = x` gets the type `∀α. α → α`, and every use
+site instantiates it. In System F — the *pure* polymorphic lambda
+calculus — the abstraction over types is explicit. You write:
+
+    id  =  ΛA. λx : A. x
+    id[Bool] true      →*   true
+    id[Nat]  5         →*   5
+
+The capital-lambda `Λ` abstracts over a *type variable*. The
+`id[Bool]` syntax *applies* a type-polymorphic function to a specific
+type. The result is a type-instantiated function that behaves like the
+STLC identity we wrote before.
+
+System F was invented independently by Girard (1972) and Reynolds
+(1974). It is one of the most beautiful objects in twentieth-century
+logic. And it still enjoys *strong normalization* — every well-typed
+System F program terminates.
+
+> **the runtime says**
+>
+> *System F feels like magic the first time you see it. You get all the
+> power of polymorphism, you keep the termination guarantee of STLC,
+> and — as we'll see — you don't even need to add built-in data types.
+> Naturals, pairs, lists, trees all fall out of the calculus itself.
+> The catch, and there's always a catch: type inference for the full
+> language is undecidable. But that's a story we'll tell after the
+> beauty.*
+
+## The syntax
+
+Two new syntactic categories.
+
+**Types.**
+
+    τ  ::=  α                    (type variable)
+         |  τ → τ                (function)
+         |  ∀α. τ                (universal type)
+
+**Terms.**
+
+    e  ::=  x                       (variable)
+         |  (λx : τ. e)              (typed lambda)
+         |  (e e)                    (application)
+         |  (Λα. e)                  (type abstraction)
+         |  (e [τ])                  (type application)
+
+```scheme
+;; type: symbol (variable) | (arrow τ₁ τ₂) | (forall α τ)
+;; term: symbol | (lam x τ body) | (app f arg) | (tlam α body) | (tapp e τ)
+;;
+;; The polymorphic identity:
+;;   (tlam A (lam x A x))
+;;   its type: (forall A (arrow A A))
+;;
+;; Instantiate at Bool:
+;;   (tapp (tlam A (lam x A x)) Bool)
+;;   its type: (arrow Bool Bool)
+```
+
+## Typing rules
+
+The three STLC rules are unchanged. Two new rules for the polymorphic
+extension.
+
+**Type abstraction.** If `Γ ⊢ e : τ` and `α` is not free in Γ, then
+`Γ ⊢ (Λα. e) : ∀α. τ`.
+
+The freshness condition on `α` is important. It says: the type variable
+we abstract over must not already be in play. If it were, we could
+smuggle information about a specific type into the polymorphic body.
+
+**Type application.** If `Γ ⊢ e : ∀α. τ` then for any type σ,
+`Γ ⊢ (e [σ]) : τ[α := σ]`.
+
+The type gets *instantiated*: every occurrence of the bound type
+variable in the body gets replaced by the actual type argument.
+
+```scheme
+(define (type-of term ctx tyctx)
+  ;; ctx is the term context; tyctx is the type-variable context.
+  (cond
+    ((symbol? term)
+     (lookup-type ctx term))
+    ((eq? (car term) 'lam)
+     (let* ((param    (cadr term))
+            (param-ty (caddr term))
+            (body     (cadddr term)))
+       (check-well-formed-type param-ty tyctx)
+       (list 'arrow param-ty
+             (type-of body
+                      (cons (cons param param-ty) ctx)
+                      tyctx))))
+    ((eq? (car term) 'app)
+     (let* ((fn      (cadr term))
+            (arg     (caddr term))
+            (fn-ty   (type-of fn  ctx tyctx))
+            (arg-ty  (type-of arg ctx tyctx)))
+       (cond
+         ((not (and (pair? fn-ty) (eq? (car fn-ty) 'arrow)))
+          (error \"application: non-function\" fn-ty))
+         ((not (equal? (cadr fn-ty) arg-ty))
+          (error \"application: type mismatch\"))
+         (else (caddr fn-ty)))))
+    ((eq? (car term) 'tlam)
+     (let* ((tyvar (cadr term))
+            (body  (caddr term)))
+       (list 'forall tyvar
+             (type-of body ctx (cons tyvar tyctx)))))
+    ((eq? (car term) 'tapp)
+     (let* ((e      (cadr term))
+            (arg-ty (caddr term))
+            (e-ty   (type-of e ctx tyctx)))
+       (check-well-formed-type arg-ty tyctx)
+       (cond
+         ((not (and (pair? e-ty) (eq? (car e-ty) 'forall)))
+          (error \"type-application: not polymorphic\" e-ty))
+         (else
+          (subst-type (caddr e-ty) (cadr e-ty) arg-ty)))))))
+```
+
+`check-well-formed-type` walks a type and makes sure every type variable
+it uses is in `tyctx`. `subst-type` substitutes a type for a type
+variable in a type, with the same capture-avoiding care as term
+substitution.
+
+## Church encodings, revisited
+
+In chapter 4 we showed Church encodings of numerals in the untyped
+calculus:
+
+    2 = (λf. λx. (f (f x)))
+
+In STLC we could not type this — what would the type of `f` be? Whatever
+type `x` has, `f` must have type `x-type → x-type`, and the whole thing
+would have to be typed for a particular choice of `x-type`.
+
+In System F we can. The Church numeral `2` is a polymorphic term:
+
+    2 = ΛA. λf : A → A. λx : A. (f (f x))
+    its type: ∀A. (A → A) → A → A
+
+Read that type. *For any type A, given a function from A to A and a
+starting element of A, produce an A.* It applies the function twice to
+the element. That is what "two" is at the level of types.
+
+Every Church numeral has this type. `zero = ΛA. λf : A → A. λx : A. x`.
+`succ = λn : Nat_Church. ΛA. λf : A → A. λx : A. (f (n [A] f x))`.
+
+```scheme
+(define Nat-Church '(forall A (arrow (arrow A A) (arrow A A))))
+
+(define zero-F
+  '(tlam A (lam f (arrow A A) (lam x A x))))
+
+(define succ-F
+  '(lam n (forall A (arrow (arrow A A) (arrow A A)))
+     (tlam A
+       (lam f (arrow A A)
+         (lam x A
+           (app f
+                (app (app (tapp n A) f) x)))))))
+
+(type-of zero-F '() '())
+;; => (forall A (arrow (arrow A A) (arrow A A)))
+
+(type-of succ-F '() '())
+;; => (arrow (forall A (arrow (arrow A A) (arrow A A)))
+;;           (forall A (arrow (arrow A A) (arrow A A))))
+```
+
+Read the type of `succ-F`. It takes a Nat-Church and returns a
+Nat-Church. All well-typed. All terminating.
+
+## Encoding pairs and sums
+
+Pairs.
+
+    Pair(A, B)  =  ∀R. (A → B → R) → R
+    (pair a b)  =  ΛR. λk : A → B → R. (k a b)
+    fst         =  ΛA. ΛB. λp : Pair(A,B). (p [A] (λa : A. λb : B. a))
+
+A pair is a function that takes a *continuation* and applies it to the
+two components. The type says: *for any result type R, if you give me a
+function that takes A and B and produces R, I will produce R for you.*
+By choosing different continuations we can extract the first component,
+the second component, or any function of both.
+
+Sums (A + B).
+
+    Sum(A, B)  =  ∀R. (A → R) → (B → R) → R
+    inl        =  ΛA. ΛB. λa : A. ΛR. λk₁. λk₂. (k₁ a)
+    inr        =  ΛA. ΛB. λb : B. ΛR. λk₁. λk₂. (k₂ b)
+    case       =  ΛA. ΛB. ΛR. λs : Sum(A,B). λk₁. λk₂. (s [R] k₁ k₂)
+
+A sum is a function that takes *two* continuations — one for each side
+— and applies the appropriate one. The tags `inl` and `inr` remember
+which side they came from and dispatch accordingly.
+
+This pattern generalises. Every algebraic data type (list, tree, natural
+number, expression tree) has a *Church encoding* — an encoding as a
+polymorphic function that consumes its data by taking a continuation
+for each constructor case. The technical term is *fold encoding*, and
+the Church encoding is the fold's function type.
+
+Lists:
+
+    List(A)  =  ∀R. R → (A → R → R) → R
+    nil      =  ΛA. ΛR. λnil-case : R. λcons-case : A → R → R. nil-case
+    cons     =  ΛA. λx : A. λxs : List(A).
+                  ΛR. λnil-case : R. λcons-case : A → R → R.
+                    (cons-case x (xs [R] nil-case cons-case))
+
+`List(A)` is the type of a *fold* over an A-valued list: given a base
+value for `nil` and a combining function for `cons`, produce the fold
+result. `nil` returns the base case; `cons x xs` calls the combining
+function on `x` and the recursively computed fold of `xs`.
+
+This is why System F is such a beautiful theory: **it needs no primitive
+data types**. Everything is a lambda term. And every one of these terms
+terminates.
+
+## Strong normalization for System F
+
+The theorem is the same as STLC's: every well-typed System F term
+reduces to a normal form in finite time. The proof (Girard 1972) is
+strictly harder than for STLC — it requires a technique called
+*candidates of reducibility* or *reducibility candidates* — because
+polymorphic instantiation can produce arbitrarily complex terms. But
+the theorem holds.
+
+This is a startling result. Consider: I can Church-encode arbitrary
+data types. I can Church-encode fold operations that traverse those
+data types. I can compose these into arbitrarily complex programs. And
+*every one of those programs terminates*. How can this be, given that
+System F is so expressive?
+
+The answer is that System F is expressive but not Turing-complete. Every
+System F program corresponds to a proof in second-order intuitionistic
+propositional logic (chapter 7 makes this precise). Every proof is
+finite. Therefore every program is finite in its execution.
+
+To get general recursion back, you must add it to System F as a
+primitive. This is what Coq and Agda do — they extend System F with
+inductive types and well-founded recursion, giving up strong
+normalization for general recursion but bounding recursion in ways that
+still guarantee termination for structurally-recursive definitions.
+
+## Type inference is undecidable
+
+Here is the catch. Type inference for the full System F is
+*undecidable* (Wells, 1994). This means: given an untyped term, there
+is no algorithm that always determines whether it has a System F type
+and, if so, what its most general type is.
+
+This is why ML and Haskell do not use full System F. They use
+*prenex polymorphism* — polymorphism restricted to the outermost level
+of a type — where inference *is* decidable (Hindley-Milner). Prenex
+polymorphism gives up expressiveness (you cannot have a function that
+takes a polymorphic function as an argument, for example) in exchange
+for full type inference.
+
+Higher-rank polymorphism — allowing `∀` inside function arguments —
+requires the programmer to add annotations at those points. GHC Haskell
+supports higher-rank types with an extension; you write `forall a. a ->
+a` explicitly at a function argument's type, and inference works within
+each rank.
+
+The moral: full polymorphism is a design tension between expressiveness
+and inference. You can have one or the other, not both.
+
+## Existential types
+
+System F has a hidden dual to `∀`: *existential types*, written `∃α. τ`.
+An existential type describes a value where *some* type α is used
+internally but the outside world does not know which type.
+
+    ∃α. (α, α → Int)
+
+Read this as: *there exists a type α and a pair whose first component
+has type α and whose second component is a function from α to Int.*
+This is the type of an *abstract data type*: a hidden representation
+plus operations on it.
+
+Existentials do not need to be added as primitives; they can be encoded
+in System F using universals. The encoding is:
+
+    ∃α. τ  ≡  ∀R. (∀α. τ → R) → R
+
+An existential is a function that takes a continuation which is
+polymorphic in α, and applies it. This encoding is what enables abstract
+data types in polymorphic languages like ML — every ADT is fundamentally
+an existential in disguise.
+
+The Church-encoded pattern shows up over and over in System F. Data
+becomes function; concrete becomes abstract; the two are unified by
+polymorphism.
+
+## Beyond System F: Fω and dependent types
+
+System F can be extended in two directions:
+
+- **System Fω.** Allow *type functions* — types that themselves take
+  types as arguments. Now `List` is not a type-family but a type-level
+  function: `List : ★ → ★`. You have kinds (types of types) and can do
+  type-level programming.
+- **Dependent types.** Allow types to depend on *values*. A vector of
+  length 3 becomes a genuinely different type from a vector of length
+  4. This is what Coq, Agda, and Idris implement.
+
+Both of these extend the correspondence between programs and proofs into
+richer logics. Chapter 7 explores this correspondence at the STLC/System F
+level; the higher extensions are homes for another book.
+
+## Variations to try
+
+Write a `map` function in System F. Its type should be `∀A. ∀B. (A → B)
+→ List(A) → List(B)`. Notice how the polymorphism does its work: the
+same code processes lists of any element type into lists of any other
+element type.
+
+Encode Peano naturals as a Church-numeral-alternative: `Nat = ∀A. A →
+(Nat → A) → A` (roughly). This is the *Scott encoding*, which supports
+`case` and `pred` in constant time — Church numerals require linear time
+for `pred`. Compare the two encodings on the same operations.
+
+Sketch how *existential types* enable a *counter* module: a type that
+hides its internal representation but exposes `new : Int → Counter`,
+`incr : Counter → Counter`, `read : Counter → Int`. The internal
+representation could be an integer, a list of ticks, a stateful record —
+the type keeps you honest about not peeking inside.
+
+## Try this
+
+Take Church-encoded `succ` and Church-encoded `2` from earlier in this
+chapter. Type-check `(succ 2)` and reduce it by hand to normal form. It
+takes about a dozen beta and type-application steps. The result should
+be a term equivalent to the Church numeral 3. Every step preserves the
+type — that is subject reduction — and the whole reduction terminates
+in finite time — that is strong normalization. Two theorems, one
+computation.
+
+## Closing
+
+System F is polymorphic lambda calculus. Types abstract over types.
+Data structures are Church-encoded polymorphic functions. Strong
+normalization holds. Type inference is undecidable in full generality,
+but the *checking* problem (does this annotated term have this type?)
+is straightforward.
+
+We now have three lambda calculi in hand: untyped, simply-typed, and
+polymorphically-typed. Each has trade-offs. Untyped is
+Turing-complete but has meaningless terms. STLC is well-behaved but
+weak. System F is well-behaved and strong but requires more annotation.
+
+Chapter 7 changes the frame. Instead of thinking of these as
+*programming languages*, we start thinking of them as *proof systems*.
+Every type is a proposition. Every well-typed term is a proof of the
+proposition its type expresses. This is the Curry-Howard correspondence,
+and it is one of the deepest connections in twentieth-century thought.
+"
+  :cross-refs
+    (:book-of-scheme :chapters (5 8)
+     :book-of-reason :chapters (5 6)
+     :book-of-reason-code :chapters (5 6))
+  :verbs-used ("cond" "eq?" "cons" "car" "cdr" "cadr" "caddr" "cadddr" "list"
+               "map" "filter" "member" "append" "null?" "pair?" "not" "and" "or"
+               "equal?" "symbol?" "define" "lambda" "let" "let*" "error")
+  :word-count-estimate 5600
+)

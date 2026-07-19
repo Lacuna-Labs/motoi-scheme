@@ -1,0 +1,239 @@
+;; 07-integer-overflow.slat
+;; Book of Values — Chapter 7
+
+(chapter
+  :book              "Book of Values"
+  :chapter-number    7
+  :title             "Integer Overflow, Silent Wrong"
+  :audience          :engineer
+  :dialect           "motoi"
+  :book-version      "1.1"
+  :provenance        "book-of-values-author-2026-07-16 book-of-values-expander-2026-07-17"
+  :training-eligible #t
+  :content-rating    :G
+  :prose
+"# Chapter 7 — Integer Overflow, Silent Wrong
+
+Chapter 6 warned about floats. Integers have their own trap. It bites
+less often. When it bites it does not raise an error. It just gives
+you the wrong number and moves on.
+
+## The number-line where integers stop
+
+Motoi runs on top of a JavaScript engine. That means numbers come in
+two flavors under the hood: **regular numbers** (IEEE 754 doubles,
+same as Chapter 6) and **big integers**.
+
+For any integer arithmetic the result depends on which flavor you
+land in.
+
+An integer literal parses as a regular number. Regular numbers can
+represent integers exactly up to `2^53 = 9,007,199,254,740,992`.
+Above that, precision breaks. Not by throwing. Silently.
+
+```
+(expt 2 53)
+;; -> 9007199254740992
+```
+
+That's `2^53`. Add one:
+
+```
+(+ (expt 2 53) 1)
+;; -> 9007199254740992
+```
+
+Nothing happened. The `+ 1` disappeared. `2^53 + 1` cannot be
+represented as a regular JS number, so it got rounded back to `2^53`.
+
+Now go further:
+
+```
+(- (+ (expt 2 53) 1) (expt 2 53))
+;; -> 0
+```
+
+Adding one and then subtracting the same value gave *zero*, not one.
+The one never existed in the first place — the addition silently
+threw it away.
+
+## Where this bites
+
+Anywhere you count large things. Timestamps. Byte counts on large
+files. Website analytics running for years. Aggregate sales figures
+over many customers. Anything that grows over time and might cross
+`2^53`.
+
+- `2^53 ≈ 9.0 × 10^15`
+- Milliseconds in one year: ~31.5 × 10^12 (about 3.5% of the cliff)
+- Milliseconds in 285 years: past the cliff
+- Bytes in a 9 petabyte drive: past the cliff
+- Cents in $90 trillion: past the cliff
+
+For most day-to-day programs you never come near. For a program that
+aggregates millisecond timestamps over decades, or byte counts for a
+large storage system, or any large-integer counter, the cliff is real
+and the failure is silent.
+
+## Big integers exist
+
+Motoi does support arbitrarily large integers through `expt` and
+multiplication chains that produce bigints under the hood. You can
+see this:
+
+```
+(expt 10 20)
+;; -> 100000000000000000000
+```
+
+`10^20` is way past `2^53`. Motoi returns it as a bigint and prints
+the full digits. Bigints in the underlying runtime *do* stay exact.
+
+But mixing regular numbers and bigints is where trouble lives. `2^53
++ 1` above stayed a regular number and lost the 1. If you build code
+that must stay exact at large magnitudes, you have to be careful that
+every operand in the chain stays a bigint.
+
+At the time of writing Motoi does not expose an explicit *coerce to
+bigint* verb in the base env. The pragmatic workaround: build large
+values by starting with `(expt N M)` where N and M are literals, so
+the runtime allocates bigint from the start.
+
+<!-- NEEDS-ALFRED: Confirm the intended verb (if any) for explicit
+     bigint coercion in the frozen 335-verb CORE. In the meantime the
+     workaround above is what this chapter recommends. -->
+
+## The old-fashioned overflow
+
+In fixed-width integer systems — C, Java's `int`, most databases'
+`INTEGER` — integers wrap around when they overflow.
+
+A 32-bit signed integer holds values from `-2,147,483,648` to
+`+2,147,483,647`. Add 1 to the max and you get the min. That is
+**wraparound**, and it is worse than the JS silent-round because the
+value goes negative, which changes the sign of every downstream
+comparison.
+
+Motoi doesn't wrap at 32 bits — it uses JS numbers. But if you talk
+to any external system (a database, a network protocol, an old file
+format) that uses 32-bit integers, you need to know:
+
+- Signed 32-bit int max: `2147483647`
+- Unsigned 32-bit int max: `4294967295`
+- Signed 64-bit int max:  `9223372036854775807`
+
+A total sale of $21.47 million (`2147483648` cents) will wrap a
+signed 32-bit cents field. Assume nothing about the width of the
+integer on the other side of any boundary.
+
+## Silent Wrong is worse than Loud Wrong
+
+Float `0.1 + 0.2 = 0.30000000000000004` at least gives you something
+weird-looking. When you see `0.30000000000000004` in a log you know
+to check.
+
+`(2^53 + 1) - 2^53 = 0` gives you `0`. Zero looks fine. Zero is a
+normal-looking answer. If you see a zero in a log you might not check.
+
+**A wrong answer that looks reasonable is worse than an obviously
+wrong answer.** Overflow is in the wrong category.
+
+DO: assume every accumulator can grow. Byte counters, request
+counters, cents-summed-over-a-year — anything that adds.
+DON'T: pick a fixed-width integer for a running total without
+asking *how big could this get before we notice*.
+WHY: overflow bugs sit dormant for months while the counter climbs.
+They fire on day 214 of production, at 3 AM, on a Sunday.
+
+## Defenses
+
+Three habits.
+
+**One. Assume no aggregate is small.** If a value could grow
+unbounded — bytes, milliseconds, cents, event counts — write your
+totalizer to work at bigint scale from the start. Even if today's
+values are small.
+
+**Two. Check at boundaries.** Any value coming in from an external
+system: know the integer width the other side uses, and either
+validate that the incoming value fits, or convert defensively.
+
+**Three. Test the ceiling.** Do not test only with small inputs.
+Deliberately push a test through the largest realistic aggregate.
+If the answer is silently wrong at scale you want to know now.
+
+## An overflow-aware sum
+
+Here is a defensive integer sum for Motoi. It refuses to sum values
+whose partial total would exceed 2^53.
+
+```
+(define (safe-sum-cents lst)
+  (define ceiling (expt 2 53))
+  (let loop ((xs lst) (acc 0))
+    (cond
+      ((null? xs) acc)
+      ((> (+ acc (car xs)) ceiling)
+         (list 'error 'sum-would-overflow
+               ':accumulated acc
+               ':adding (car xs)))
+      (else
+         (loop (cdr xs) (+ acc (car xs)))))))
+
+(safe-sum-cents (list 100 200 300))
+;; -> 600
+```
+
+Push it past the ceiling. Adding a *small* value after the sum reaches
+`2^53` won't trigger the check — the small value gets silently absorbed
+by the very precision loss we're guarding against. We have to push
+across the ceiling with a value big enough to be visible.
+
+```
+(safe-sum-cents (list (expt 2 52) (expt 2 52) (expt 2 40)))
+;; -> (error sum-would-overflow :accumulated 9007199254740992
+;;      :adding 1099511627776)
+```
+
+The refusal names *what would have happened*. You can catch it,
+switch to bigint arithmetic, or split the totalization into buckets.
+
+## Recap
+
+- JS-based integer arithmetic stays exact up to `2^53`. Above that,
+  silently loses precision.
+- Bigints exist under the hood; keep operand types consistent to
+  stay in bigint-land.
+- External systems (databases, protocols) often use fixed-width
+  integers. 32-bit max is `2,147,483,647`.
+- Overflow is silent. Silent Wrong is worse than Loud Wrong.
+- Assume aggregates can grow. Check ceilings at boundaries. Test the
+  large case deliberately.
+
+Next: time. The value that is a value, an interval, an offset, and a
+frame of reference, all at once.")
+
+(example :ref "ch7-2-to-53"
+         :code "(expt 2 53)"
+         :expected 9007199254740992)
+(example :ref "ch7-plus-one-vanishes"
+         :code "(+ (expt 2 53) 1)"
+         :expected 9007199254740992
+         :teaching "The +1 disappeared. Silent precision loss above 2^53.")
+(example :ref "ch7-net-zero"
+         :code "(- (+ (expt 2 53) 1) (expt 2 53))"
+         :expected 0
+         :teaching "Add one, subtract, get zero. The 1 was never really there.")
+(example :ref "ch7-bigint"
+         :code "(expt 10 20)"
+         :expected 100000000000000000000)
+(example :ref "ch7-32bit-max-plus-one"
+         :code "(+ 2147483647 1)"
+         :expected 2147483648
+         :teaching "Motoi does not wrap at 32 bits — it is JS. But an external system might.")
+(example :ref "ch7-safe-sum-ok"
+         :code "(begin (define (safe-sum lst) (define c (expt 2 53)) (let loop ((xs lst) (acc 0)) (cond ((null? xs) acc) ((> (+ acc (car xs)) c) (list 'error 'sum-would-overflow ':acc acc ':adding (car xs))) (else (loop (cdr xs) (+ acc (car xs))))))) (safe-sum (list 100 200 300)))"
+         :expected 600)
+(example :ref "ch7-safe-sum-refuse"
+         :code "(begin (define (safe-sum lst) (define c (expt 2 53)) (let loop ((xs lst) (acc 0)) (cond ((null? xs) acc) ((> (+ acc (car xs)) c) (list 'error 'sum-would-overflow ':acc acc ':adding (car xs))) (else (loop (cdr xs) (+ acc (car xs))))))) (safe-sum (list (expt 2 52) (expt 2 52) (expt 2 40))))"
+         :expected "(error sum-would-overflow :acc 9007199254740992 :adding 1099511627776)")

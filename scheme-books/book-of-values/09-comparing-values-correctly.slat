@@ -1,0 +1,303 @@
+;; 09-comparing-values-correctly.slat
+;; Book of Values — Chapter 9
+
+(chapter
+  :book              "Book of Values"
+  :chapter-number    9
+  :title             "Comparing Values Correctly"
+  :audience          :engineer
+  :dialect           "motoi"
+  :book-version      "1.1"
+  :provenance        "book-of-values-author-2026-07-16 book-of-values-expander-2026-07-17"
+  :training-eligible #t
+  :content-rating    :G
+  :prose
+"# Chapter 9 — Comparing Values Correctly
+
+Equality is easy in math and hard in code.
+
+In math, `a = b` means the two symbols name the same value. In code
+you have to say *what kind of equality*. Same bits? Same value at
+some tolerance? Same value ignoring case? Same value ignoring
+currency? Same value if you convert first? Every one is a different
+question with a different answer.
+
+## Motoi's family of equality
+
+Motoi ships a small family:
+
+- `=`      — numeric equality. Compares numbers.
+- `eq?`    — identity. Same object in memory.
+- `eqv?`   — value equality for atoms (numbers, symbols, chars).
+- `equal?` — structural equality. Two lists with same shape and
+  values.
+
+```
+(= 1 1.0)
+;; -> #t         (numerically equal)
+
+(eq? 'a 'a)
+;; -> #t         (same symbol)
+
+(equal? (list 1 2 3) (list 1 2 3))
+;; -> #t         (same shape and values)
+```
+
+Basic. Fine for scalars. Not enough for values that carry shape.
+
+DO: use `=` for numbers, `eq?` for symbols and identical objects,
+`equal?` for structural comparison of lists.
+DON'T: use `=` on strings, symbols, or lists — depending on the
+Scheme it either errors or gives a wrong answer.
+WHY: `=` is only defined on numbers. The other predicates exist
+because the number case is a small corner of the equality question.
+
+## Which equality applies?
+
+A quick chart to memorize:
+
+| You have    | Use       |
+|-------------|-----------|
+| Numbers     | `=`       |
+| Symbols     | `eq?`     |
+| Booleans    | `eq?`     |
+| Strings     | `equal?`  |
+| Pairs/lists | `equal?`  |
+| Mixed       | `equal?`  |
+
+`equal?` always works. It's the safe default. It's also the slowest
+when the value is deeply nested. For values you know the shape of,
+the specific predicate is both faster and more communicative.
+
+## Comparing money
+
+Two money values are equal when the amount matches *and* the
+currency matches.
+
+```
+(define (money c m) (list 'money c m))
+(define (money-currency x) (cadr x))
+(define (money-minor    x) (caddr x))
+(define (money? x) (and (pair? x) (eq? (car x) 'money)))
+
+(define (money=? a b)
+  (and (money? a)
+       (money? b)
+       (eq? (money-currency a) (money-currency b))
+       (= (money-minor a) (money-minor b))))
+
+(money=? (money 'usd 100) (money 'usd 100))
+;; -> #t
+
+(money=? (money 'usd 100) (money 'eur 100))
+;; -> #f
+```
+
+`(money 'usd 100)` and `(money 'eur 100)` are *not equal*. They are
+different currencies. `equal?` would tell you `#f` too, incidentally,
+because the currency symbols differ — but only by accident. If
+somebody stores currencies as strings in one place and symbols in
+another, `equal?` would silently disagree. `money=?` uses `eq?` on
+the currency slot, which is what we want.
+
+**Never rely on the interpreter's structural equality for shaped
+values. Write the equality predicate on purpose.**
+
+## Comparing floats: never with `=`
+
+Chapter 6 covered this. Here is the pattern.
+
+```
+(define (float=? a b eps)
+  (< (- (max a b) (min a b)) eps))
+
+(float=? 0.1 0.10000001 0.0001)
+;; -> #t
+
+(float=? 0.1 0.11 0.0001)
+;; -> #f
+```
+
+The tolerance `eps` is a value in its own right. If you pick a wrong
+tolerance you get a wrong equality. Pick the tolerance by looking at
+what a *meaningful* difference is in the domain.
+
+- Sensor readings: the sensor's noise floor.
+- Physics simulations: the smallest change that would matter.
+- User-visible numbers: the last decimal you display.
+
+There is no *universal* right epsilon. There is a right epsilon *for
+this thing*.
+
+## Comparing times
+
+Two instants are equal when their millisecond counts match.
+
+```
+(define (instant ms) (list 'instant ms))
+(define (instant-ms i) (cadr i))
+
+(define (instant=? a b)
+  (and (eq? (car a) 'instant)
+       (eq? (car b) 'instant)
+       (= (instant-ms a) (instant-ms b))))
+
+(instant=? (instant 1000) (instant 1000))
+;; -> #t
+
+(instant=? (instant 1000) (instant 1001))
+;; -> #f
+```
+
+But equality of *the same wall-clock reading in different timezones*
+is a different question. `9:00 AM Tokyo` and `12:00 AM New York` on
+the same day are the *same instant* but different wall-clock
+strings. If your equality compares strings, you get the wrong answer.
+If your equality compares UTC instants, you get the right answer.
+Convert to UTC before you compare.
+
+## Comparing distances
+
+Two distances with the same unit compare numerically.
+
+```
+(define (dist u m) (list 'dist u m))
+(define (dist-unit d) (cadr d))
+(define (dist-mag  d) (caddr d))
+
+(define (dist=? a b)
+  (and (eq? (dist-unit a) (dist-unit b))
+       (= (dist-mag a) (dist-mag b))))
+
+(dist=? (dist 'm 100) (dist 'm 100))
+;; -> #t
+
+(dist=? (dist 'm 100) (dist 'ft 100))
+;; -> #f
+```
+
+Should `(dist 'm 30.48)` equal `(dist 'ft 100)`? *Physically*, yes.
+*In the value system we've built*, no — they are different shapes.
+If you want physical equality across units, convert both to a
+canonical unit first, then compare (with an epsilon if you crossed
+into floats along the way).
+
+```
+(define (m->ft m) (/ m 0.3048))
+
+(define (dist-physically=? a b eps)
+  (float=? (dist-mag (if (eq? (dist-unit a) 'ft) a
+                         (dist a 'ft (m->ft (dist-mag a)))))
+           (dist-mag (if (eq? (dist-unit b) 'ft) b
+                         (dist a 'ft (m->ft (dist-mag b)))))
+           eps))
+```
+
+Two different equality predicates. Pick which one you want on
+purpose.
+
+## Comparing missing values
+
+`#f`, `()`, `0`, and \"missing\" all look like *nothing*. They are
+not the same. Chapter 13 covers missing values in depth. Preview:
+
+```
+(eq? #f #f)
+;; -> #t
+
+(equal? '() '())
+;; -> #t
+
+(= 0 0)
+;; -> #t
+
+(eq? #f '())
+;; -> #f    ;; false is not the empty list
+
+(equal? 0 #f)
+;; -> #f    ;; zero is not false
+```
+
+Motoi keeps these distinct, which is correct. Some other languages
+collapse them, which is a bug factory.
+
+## Ordering, not just equality
+
+Comparing for *less than* or *greater than* has the same shape
+problem. `(< a b)` only makes sense when both `a` and `b` are in the
+same value space.
+
+For money:
+
+```
+(define (money<? a b)
+  (and (eq? (money-currency a) (money-currency b))
+       (< (money-minor a) (money-minor b))))
+
+(money<? (money 'usd 100) (money 'usd 200))
+;; -> #t
+```
+
+For distances or times, the same shape. Compare only within the same
+unit. Convert first if you must compare across.
+
+## Sorting requires a total order
+
+Motoi does not ship `sort` in the base env at the time of writing.
+When it does, sorting a list of shaped values will require passing a
+comparator — a function that takes two of your values and returns
+`#t` if the first is less than the second.
+
+```
+(define (money-comparator a b)
+  (cond
+    ((not (eq? (money-currency a) (money-currency b)))
+       (list 'error 'cannot-sort-across-currencies))
+    (else
+       (< (money-minor a) (money-minor b)))))
+```
+
+If your comparator can fail (because currencies don't match) you
+have to decide upstream whether to filter, convert, or refuse.
+Sorting doesn't rescue you from the units problem — it just moves
+the decision to a different line.
+
+## Recap
+
+- `=`, `eq?`, `eqv?`, `equal?` cover scalars. Not enough for shaped
+  values.
+- Write the equality predicate on purpose. Currency, unit, timezone
+  all have to match.
+- Never compare floats with `=`. Use an epsilon appropriate to the
+  domain.
+- Convert to a canonical form (UTC, base SI, minor units) before
+  comparing across.
+- `#f`, `()`, `0`, and missing are all distinct in Motoi. Do not
+  conflate.
+- Ordering has the same shape rule as equality.
+- Sorting requires a comparator; the comparator inherits your
+  units-must-match rule.
+
+Next: composability. When you know two values are the same shape,
+what can you *do* with them?")
+
+(example :ref "ch9-num-eq"          :code "(= 1 1.0)"                :expected #t)
+(example :ref "ch9-eq-sym"          :code "(eq? 'a 'a)"              :expected #t)
+(example :ref "ch9-equal-lists"     :code "(equal? (list 1 2 3) (list 1 2 3))" :expected #t)
+(example :ref "ch9-money-eq-yes"
+         :code "(begin (define (money c m) (list 'money c m)) (define (money-currency x) (cadr x)) (define (money-minor x) (caddr x)) (define (money? x) (and (pair? x) (eq? (car x) 'money))) (define (money=? a b) (and (money? a) (money? b) (eq? (money-currency a) (money-currency b)) (= (money-minor a) (money-minor b)))) (money=? (money 'usd 100) (money 'usd 100)))"
+         :expected #t)
+(example :ref "ch9-money-eq-no"
+         :code "(begin (define (money c m) (list 'money c m)) (define (money-currency x) (cadr x)) (define (money-minor x) (caddr x)) (define (money? x) (and (pair? x) (eq? (car x) 'money))) (define (money=? a b) (and (money? a) (money? b) (eq? (money-currency a) (money-currency b)) (= (money-minor a) (money-minor b)))) (money=? (money 'usd 100) (money 'eur 100)))"
+         :expected #f)
+(example :ref "ch9-float-eq-yes"
+         :code "(begin (define (float=? a b eps) (< (- (max a b) (min a b)) eps)) (float=? 0.1 0.10000001 0.0001))"
+         :expected #t)
+(example :ref "ch9-float-eq-no"
+         :code "(begin (define (float=? a b eps) (< (- (max a b) (min a b)) eps)) (float=? 0.1 0.11 0.0001))"
+         :expected #f)
+(example :ref "ch9-false-not-nil"   :code "(eq? #f '())"             :expected #f)
+(example :ref "ch9-zero-not-false"  :code "(equal? 0 #f)"            :expected #f)
+(example :ref "ch9-money-lt"
+         :code "(begin (define (money c m) (list 'money c m)) (define (money-currency x) (cadr x)) (define (money-minor x) (caddr x)) (define (money<? a b) (and (eq? (money-currency a) (money-currency b)) (< (money-minor a) (money-minor b)))) (money<? (money 'usd 100) (money 'usd 200)))"
+         :expected #t)

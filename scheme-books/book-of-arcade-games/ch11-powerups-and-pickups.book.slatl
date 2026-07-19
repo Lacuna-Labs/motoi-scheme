@@ -1,0 +1,450 @@
+;; ch11-powerups-and-pickups.book.slatl
+;; Book of Arcade Games — Chapter 11: Powerups and Pickups
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Arcade Games"
+  :chapter-number      11
+  :title               "Powerups and Pickups"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + game-design"
+  :book-version        "1.0.0"
+  :prose
+"A coin appears. You touch it. Something in you fires a small dopamine
+burst. That dopamine is why arcades exist. Every arcade game is a
+carefully-timed sequence of small rewards designed to keep you
+playing. Coins. Hearts. Stars. Keys. Shields. Weapons. Speed boosts.
+Time slows.
+
+This chapter builds the pickup family. Coins that magnet to you when
+close. Hearts that restore hp. Invincibility stars that make you glow
+and pass through enemies. Keys that unlock doors. Persistent state via
+Cortex so the score survives sessions.
+
+The pattern is simple: sensor entity, collision handler, state
+mutation. Repeat with variations. By the end you have six pickup types
+that compose with everything else in the book.
+
+---
+
+## 11.1 The coin
+
+Touch to collect.
+
+```scheme
+;; A coin. You touch it, it disappears, score goes up.
+(define score 0)
+
+(define (basic-coin)
+  (world/reset!)
+  (world/gravity! 0 0.4)
+  (world/floor! 220)
+  (let ((p (world/spawn 'player 40 200))
+        (c (world/spawn 'coin 240 200)))
+    (entity/shape! p 'rect 12 20) (entity/solid! p #t)
+    (entity/shape! c 'circle 6) (entity/sensor! c #t)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/pressed? 'a)
+         (entity/set-vel! p (car (entity/vel p)) -10))
+       (world/step)
+       (for-each
+        (lambda (pair)
+          (let ((a (car pair)) (b (cadr pair)))
+            (when (and (eq? (entity/kind a) 'player)
+                       (eq? (entity/kind b) 'coin))
+              (entity/despawn! b)
+              (set! score (+ score 10))
+              (world/camera-shake! 1 0.9))
+            (when (and (eq? (entity/kind b) 'player)
+                       (eq? (entity/kind a) 'coin))
+              (entity/despawn! a)
+              (set! score (+ score 10))
+              (world/camera-shake! 1 0.9))))
+        (world/collisions))
+       (paint-clear)
+       (world/each 'coin
+                   (lambda (c) (paint-cell 'coin (entity/x c) (entity/y c) 6 6)))
+       (paint-cell 'player (entity/x p) (entity/y p) 12 20)
+       (paint-text (string-append \"Score: \" (number->string score))
+                   10 10)))))
+
+(big-bang basic-coin)
+```
+
+`entity/sensor! c #t` — a sensor is a collision-registering entity
+that does NOT physically block. The player passes through the coin
+(doesn't bounce off) but the collision fires. Every pickup uses
+sensors.
+
+The tiny camera-shake (1 pixel, 0.9 decay = one-frame twitch) is the
+game's kiss. It's imperceptible on paper. In your hand it's the whole
+feel.
+
+---
+
+## 11.2 Magnet coins
+
+Coins are more fun when they leap to meet you.
+
+```scheme
+;; Coins that gravitate toward the player when within 40 px.
+(define score 0)
+
+(define (magnet-coins)
+  (world/reset!)
+  (world/gravity! 0 0.4)
+  (world/floor! 220)
+  (let ((p (world/spawn 'player 40 200)))
+    (entity/shape! p 'rect 12 20) (entity/solid! p #t)
+    ;; Spawn 8 coins scattered.
+    (let loop ((i 0))
+      (when (< i 8)
+        (let ((c (world/spawn 'coin (+ 60 (* i 30)) (+ 150 (modulo (* i 17) 40)))))
+          (entity/shape! c 'circle 5)
+          (entity/sensor! c #t))
+        (loop (+ i 1))))
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/pressed? 'a)
+         (entity/set-vel! p (car (entity/vel p)) -10))
+       ;; Magnet: for each coin, if within 40 px, apply attraction.
+       (world/each 'coin
+                   (lambda (c)
+                     (when (< (entity/distance c p) 40)
+                       (world/attract! c (entity/x p) (entity/y p) 3))))
+       (world/step)
+       (for-each
+        (lambda (pair)
+          (let ((a (car pair)) (b (cadr pair)))
+            (when (or (and (eq? (entity/kind a) 'player)
+                           (eq? (entity/kind b) 'coin))
+                      (and (eq? (entity/kind b) 'player)
+                           (eq? (entity/kind a) 'coin)))
+              (entity/despawn!
+               (if (eq? (entity/kind a) 'coin) a b))
+              (set! score (+ score 10))
+              (world/camera-shake! 1 0.85))))
+        (world/collisions))
+       (paint-clear)
+       (world/each 'coin
+                   (lambda (c) (paint-cell 'coin (entity/x c) (entity/y c) 5 5)))
+       (paint-cell 'player (entity/x p) (entity/y p) 12 20)
+       (paint-text (string-append \"Score: \" (number->string score)) 10 10)))))
+
+(big-bang magnet-coins)
+```
+
+`world/attract! c (entity/x p) (entity/y p) 3` says 'attract coin c to
+the point (player-x, player-y) with strength 3.' The engine keeps
+applying that force each frame until you change or clear it.
+
+Coins near you START to leap. The game becomes about MOVEMENT — you
+don't need to touch every coin, you need to get CLOSE.
+
+---
+
+## 11.3 Hearts
+
+Restore hp.
+
+```scheme
+;; Hearts scattered around; touching restores 1 hp up to max 5.
+(define (heart-pickup)
+  (world/reset!)
+  (world/gravity! 0 0.4)
+  (world/floor! 220)
+  (let ((p (world/spawn 'player 40 200)))
+    (entity/shape! p 'rect 12 20)
+    (entity/solid! p #t)
+    (entity/hp! p 2)
+    (let loop ((i 0))
+      (when (< i 4)
+        (let ((h (world/spawn 'heart (+ 80 (* i 60)) 200)))
+          (entity/shape! h 'rect 10 10)
+          (entity/sensor! h #t))
+        (loop (+ i 1))))
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (world/step)
+       (for-each
+        (lambda (pair)
+          (let ((a (car pair)) (b (cadr pair)))
+            (let ((heart (cond ((eq? (entity/kind a) 'heart) a)
+                                ((eq? (entity/kind b) 'heart) b)
+                                (else #f))))
+              (when heart
+                (when (< (entity/hp! p 0) 5)
+                  (entity/hp! p (+ (entity/hp! p 0) 1))
+                  (entity/despawn! heart)
+                  (world/camera-shake! 2 0.9))))))
+        (world/collisions))
+       (paint-clear)
+       (world/each 'heart
+                   (lambda (h)
+                     (paint-cell 'heart (entity/x h) (entity/y h) 10 10)))
+       (paint-cell 'player (entity/x p) (entity/y p) 12 20)
+       (paint-text (string-append \"HP: \" (number->string (entity/hp! p 0)))
+                   10 10)))))
+
+(big-bang heart-pickup)
+```
+
+Note the trick: touching a heart at max hp does NOT despawn it. The
+heart persists for when you actually need it. Small design decision;
+massive quality-of-life win.
+
+---
+
+## 11.4 Invincibility star
+
+Timed effect.
+
+```scheme
+;; Grab star: 300 frames of invincibility. Star spawns at (200, 200).
+(define star-timer 0)
+
+(define (star-pickup)
+  (world/reset!)
+  (world/gravity! 0 0.4)
+  (world/floor! 220)
+  (let ((p (world/spawn 'player 40 200))
+        (s (world/spawn 'star 200 200))
+        (e (world/spawn 'enemy 280 200)))
+    (entity/shape! p 'rect 12 20) (entity/solid! p #t) (entity/hp! p 3)
+    (entity/shape! s 'rect 12 12) (entity/sensor! s #t)
+    (entity/shape! e 'rect 12 12) (entity/solid! e #t) (entity/max-speed! e 1)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       ;; Enemy chases if star not active; otherwise stays put.
+       (if (> star-timer 0)
+           (entity/set-vel! e 0 0)
+           (ai/seek e p))
+       (world/step)
+       (for-each
+        (lambda (pair)
+          (let ((a (car pair)) (b (cadr pair)))
+            (when (or (and (eq? (entity/kind a) 'player)
+                           (eq? (entity/kind b) 'star))
+                      (and (eq? (entity/kind b) 'player)
+                           (eq? (entity/kind a) 'star)))
+              (entity/despawn! (if (eq? (entity/kind a) 'star) a b))
+              (set! star-timer 300)      ;; 5 seconds at 60 fps
+              (world/camera-shake! 4 0.9))
+            ;; Player-enemy contact: only damage if NOT invincible.
+            (when (and (or (eq? (entity/kind a) 'player)
+                           (eq? (entity/kind b) 'player))
+                       (or (eq? (entity/kind a) 'enemy)
+                           (eq? (entity/kind b) 'enemy))
+                       (<= star-timer 0))
+              (entity/damage! p 1)
+              (world/camera-shake! 5 0.9))))
+        (world/collisions))
+       (when (> star-timer 0)
+         (set! star-timer (- star-timer 1)))
+       (paint-clear)
+       (world/each 'star
+                   (lambda (s) (paint-cell 'star (entity/x s) (entity/y s) 12 12)))
+       (paint-cell 'enemy (entity/x e) (entity/y e) 12 12)
+       ;; Draw player: sparkly if invincible.
+       (if (> star-timer 0)
+           (paint-cell 'invincible (entity/x p) (entity/y p) 12 20)
+           (paint-cell 'player (entity/x p) (entity/y p) 12 20))
+       (paint-text (string-append \"Star: \" (number->string star-timer)) 10 10)
+       (paint-text (string-append \"HP: \" (number->string (entity/hp! p 0))) 10 20)))))
+
+(big-bang star-pickup)
+```
+
+`star-timer` counts down each frame; while > 0, damage doesn't apply
+and the player renders in a different color. When it hits 0, back to
+normal. Classic five-second superpower.
+
+---
+
+## 11.5 Cortex — persistent state
+
+Score should survive the browser tab closing.
+
+```scheme
+;; Score persists across sessions via Cortex.
+(define (persistent-score)
+  (world/reset!)
+  (let ((score (or (cortex/read 'arcade-score) 0)))
+    (let ((p (world/spawn 'player 40 200))
+          (c (world/spawn 'coin 200 200)))
+      (entity/shape! p 'rect 12 20) (entity/solid! p #t)
+      (entity/shape! c 'circle 6) (entity/sensor! c #t)
+      (on-frame
+       (lambda ()
+         (when (input/down? 'left)  (entity/move! p -3 0))
+         (when (input/down? 'right) (entity/move! p 3 0))
+         (world/step)
+         (for-each
+          (lambda (pair)
+            (let ((a (car pair)) (b (cadr pair)))
+              (when (or (and (eq? (entity/kind a) 'player)
+                             (eq? (entity/kind b) 'coin))
+                        (and (eq? (entity/kind b) 'player)
+                             (eq? (entity/kind a) 'coin)))
+                (entity/despawn! (if (eq? (entity/kind a) 'coin) a b))
+                (set! score (+ score 10))
+                (cortex/write 'arcade-score score))))
+          (world/collisions))
+         (paint-clear)
+         (world/each 'coin
+                     (lambda (c)
+                       (paint-cell 'coin (entity/x c) (entity/y c) 6 6)))
+         (paint-cell 'player (entity/x p) (entity/y p) 12 20)
+         (paint-text (string-append \"Total Score: \" (number->string score))
+                     10 10))))))
+
+(big-bang persistent-score)
+```
+
+`cortex/read 'arcade-score` returns whatever was last written under
+that key, or `#f` if never written. `(or ... 0)` defaults to zero on
+first play.
+
+Every coin-pickup, we write back. The score IS the memory. Next
+session, `cortex/read` returns the total. The kid's persistence
+extends beyond the game session.
+
+---
+
+## 11.6 The four patterns
+
+**Composition.** Every pickup: shape + sensor + tag + optional
+per-pickup state. Each pickup is 4 verbs. The powerup catalog is a
+composition-shopping list — pick 3, drop them into your game.
+
+**Orchestration.** Frame loop orchestrates spawn (setup),
+pickup-collision handling, timer decrement, paint. Pickup effects are
+applied inside the collision walk, WHILE the physics step is complete.
+
+**In-routing.** Collision pairs route by (kind-a, kind-b) into
+pickup handlers. Each pickup type has its handler; the router picks
+by tag.
+
+**Routing.** Pickups route to state: score, hp, timer, or Cortex.
+`cortex/write` routes state to persistent storage. Persistence IS
+routing across sessions.
+
+---
+
+## 11.7 Common desktop tasks
+
+**Loyalty-point animation.** Every completed purchase spawns a coin
+that magnets toward the customer's loyalty-badge icon in the corner.
+Physics-first feedback for a real reward accrual.
+
+**Achievement-unlock burst.** When a customer reaches a milestone,
+spawn 20 sparkle-entities that scatter from the badge. Cortex persists
+the achievement.
+
+---
+
+## 11.8 Pitfalls
+
+**Coin despawns twice.** The collision walk found the pair in both
+orders. Add an `entity/alive?` guard.
+
+**Magnet coins fly away.** `world/attract!` strength too high combined
+with no `entity/max-speed!`. Cap velocity.
+
+**Star timer resets on second star.** Do you want stacking or refresh?
+Depending on design: `(max star-timer 300)` for refresh; `(+ star-timer
+150)` for stack.
+
+**Cortex read returns #f.** First-ever run — the key wasn't written
+yet. Always `(or (cortex/read 'k) default)`.
+
+**Player passes through everything after grabbing star.** You changed
+`entity/solid!` to `#f` for invincibility. Don't; use a soft flag
+(star-timer > 0) so physics still works.
+
+---
+
+## 11.9 Try this yourself
+
+1. Add a key pickup. Player carries it (blackboard). Door entity
+   opens only if player has key.
+2. Speed-boost pickup: `entity/max-speed! p 6` for 200 frames, then
+   back to 4.
+3. Shrink pickup: `entity/shape! p 'rect 6 10` for 300 frames —
+   player fits through smaller gaps.
+4. Bomb pickup: on 'b' press, despawn all enemies within 60 px and
+   `world/camera-shake! 15`.
+5. Score multiplier pickup: for 10 seconds, all coin pickups worth
+   2×.
+6. High-score leaderboard: Cortex list of last 10 scores. Sort. Show
+   top 5 on title screen.
+
+---
+
+## 11.10 What we built
+
+Sensor pickups. Magnet coins. Hearts with max-hp check. Invincibility
+star with timer. Cortex persistence. Six patterns; hundreds of possible
+combinations.
+
+Next chapter: the big enemy. One boss. Three phases. Bullet-hell
+finale. Everything from chapters 4-11 comes together.")
+
+(code-block :chapter 11 :lang "scheme" :source
+"(define score 0)
+(define (pickups-anchor)
+  (world/reset!)
+  (world/gravity! 0 0.4)
+  (world/floor! 220)
+  (let ((p (world/spawn 'player 40 200)))
+    (entity/shape! p 'rect 12 20) (entity/solid! p #t)
+    (let loop ((i 0))
+      (when (< i 8)
+        (let ((c (world/spawn 'coin (+ 60 (* i 30)) 150)))
+          (entity/shape! c 'circle 5)
+          (entity/sensor! c #t))
+        (loop (+ i 1))))
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/pressed? 'a)
+         (entity/set-vel! p (car (entity/vel p)) -10))
+       (world/each 'coin
+                   (lambda (c)
+                     (when (< (entity/distance c p) 40)
+                       (world/attract! c (entity/x p) (entity/y p) 3))))
+       (world/step)
+       (for-each
+        (lambda (pair)
+          (let ((a (car pair)) (b (cadr pair)))
+            (let ((coin (cond ((eq? (entity/kind a) 'coin) a)
+                              ((eq? (entity/kind b) 'coin) b)
+                              (else #f))))
+              (when (and coin (entity/alive? coin))
+                (entity/despawn! coin)
+                (set! score (+ score 10))
+                (world/camera-shake! 1 0.85)))))
+        (world/collisions))
+       (paint-clear)
+       (world/each 'coin
+                   (lambda (c) (paint-cell 'coin (entity/x c) (entity/y c) 5 5)))
+       (paint-cell 'player (entity/x p) (entity/y p) 12 20)
+       (paint-text (string-append \"Score: \" (number->string score)) 10 10)))))
+(big-bang pickups-anchor)")

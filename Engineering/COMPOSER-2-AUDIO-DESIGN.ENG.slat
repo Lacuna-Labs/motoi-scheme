@@ -1,0 +1,865 @@
+(engineering-doc
+  :name "Composer 2 — Audio + Music design (Wave 2 / v1.1) — solving PICO-8 + TIC-80"
+  :version "2.0-draft"
+  :date "2026-07-17"
+  :audience "Motoi + Sakura builders; Curator UI team; Book of Composer + Book of Music authors; the 11-year-old"
+  :status "design-draft-for-alfred-review"
+  :authored-by "Lacuna Engineering research + design lane"
+  :supersedes-nothing
+  :builds-on "engineering/COMPOSER-1.0.ENG.slat (Wave 1 — 15 composer/* verbs, spec-frozen)"
+
+  :provenance
+    (:asked-by "Alfred"
+     :ask "Give me a good design from Lacuna that solves the issues of PICO-8 and TIC-80 — specifically for the AUDIO/MUSIC composer domain."
+     :date "2026-07-17"
+     :research-basis "PICO-8 Lexaloffle BBS threads; TIC-80 GitHub issues; PICO-8/TIC-80 wiki + user manuals; Nerdy Teachers PICO-8 tutorial site; Composing Gloves piano-roll-vs-tracker essay; Renoise + ChipMusic forums on beginner tracker experience; LIKO-12 + Pixel Vision 8 comparison; itch.io fantasy-console discussion threads. Cited inline in :diagnostic-table records.")
+
+  :framing
+"# What this doc is
+
+Wave 1 (COMPOSER-1.0) shipped a THIN LAYER over Scheme forms — sliders, buttons, piano-roll, sprite-grid, timeline, ADSR, fx-chain, plus save/load/emit/apply for round-trip. All 15 widget verbs, all deterministic, no LLM required.
+
+Wave 2 is the AUDIO/MUSIC layer built ON that thin layer. It answers a specific question: what does an 11-year-old need to compose music inside Motoi that PICO-8 and TIC-80 don't give them? The answer is not 'more of the same widgets' — it is 'a substrate that emits the same Scheme regardless of which view the kid picks, plus effects + samples + song structure that fantasy-console constraints skipped over.'
+
+Nothing here contradicts Wave 1. Every widget below EITHER extends composer/piano-roll's emit-shape OR is a new widget layered on top of the existing verb surface OR is a runtime primitive (synth/*, fx/*, sample/*) that a Wave-1 widget's :emits form references. The round-trip doctrine holds unchanged.
+
+# What this doc is NOT
+
+- Not a re-spec of the Wave-1 widget verbs. Those are frozen; see COMPOSER-1.0.
+- Not a DAW. A kid ships a game in an afternoon; a DAW ships an album in a year. The scope is 'toy that a child can master' + 'enough headroom that a musician doesn't hit the ceiling in the first hour.'
+- Not a corporate product. Emitted Scheme references synth/sine, fx/reverb — never vendor names.
+- Not a specification of the Curator UI. The Curator team renders these widgets; this doc says what they must render + what Scheme comes out."
+
+  :diagnostic-table
+"# The 12 pain points and the fixes
+
+Each row: PICO-8/TIC-80 limitation → why it matters to a kid → Motoi fix → emitted Scheme form → runtime cost.
+
+Sources cited inline. Every citation is a URL the reader can visit.
+
+## Row 1 — Channel count is fixed at 4
+
+- Limitation: PICO-8 has exactly 4 audio channels; TIC-80 has exactly 4. When a fifth voice is needed (say a bass + drum + two-note chord + lead) the composer must drop one. (See https://www.lexaloffle.com/bbs/?pid=49025 and https://en.wikipedia.org/wiki/TIC-80.)
+- Why it matters to a kid: they write a melody, add a bass, add a drum, add a harmony — the harmony cuts the drum. The music sounds broken and the kid does not know why. The system has no error to teach them.
+- Fix: dynamic voice allocation up to 8 concurrent voices by default (Web Audio budget on a laptop laughs at 8), configurable via :voices in (song/config ...). The composer surfaces a 'voices used' meter so the kid sees the ceiling before hitting it. Voice-steal policy is documented: newest note wins, quietest voice dies first.
+- Emit shape: `(song/config :voices 8 :steal-policy 'quietest-first)` at song top.
+- Runtime cost: 8 voices = 8 OscillatorNode + GainNode + optional BiquadFilter — well under 1ms per note-on on any device we target.
+
+## Row 2 — Same-channel SFX collide silently
+
+- Limitation: PICO-8's `sfx()` command reportedly does not respect the channel parameter in all cases, so two SFX from the same page cut each other off. (See https://www.lexaloffle.com/bbs/?tid=43890.)
+- Why it matters: kid triggers a jump-sfx and a coin-sfx one frame apart; only one plays; kid thinks their code is broken.
+- Fix: (sfx/play ...) accepts :priority (0-10, default 5) and :allow-poly (boolean, default #t). If polyphony is on, both play. If off, higher priority wins.
+- Emit: `(sfx/play 'jump :priority 6)` or `(sfx/play 'coin :allow-poly #t)`.
+- Runtime: additional voice draw from the pool in row 1; policy check is a compare.
+
+## Row 3 — SFX cannot be used as instruments inside music
+
+- Limitation: PICO-8 lets you make a great drum SFX but you can't then USE that SFX as a note in the music editor's own channel. Users have asked for this on the forum; the answer is 'first 8 SFX only, and only as pitch-mapped instruments.' (See https://www.lexaloffle.com/bbs/?tid=27997 and https://nerdyteachers.com/pico-8/audio/?tutorial=15.)
+- Why it matters: kid designs a kick that sounds great; wants to use it in a beat; system says no; kid gives up on drums.
+- Fix: every SFX record IS a valid instrument. `(note :instrument 'my-kick :pitch 'C2)` triggers the SFX 'my-kick pitched to C2. No first-8 restriction; no separate 'custom instrument' concept.
+- Emit: `(instrument/define 'my-kick (sfx/kick :tune 'C2 :decay 0.15))` then `(note :instrument 'my-kick :pitch 'C2 :dur 'eighth)`.
+- Runtime: same voice pool; instrument dispatch is a symbol lookup.
+
+## Row 4 — No native reverb / delay / filter beyond four fixed presets
+
+- Limitation: PICO-8's per-channel effects are NOIZ, BUZZ, DETUNE-1, DETUNE-2, REVERB (2-or-4-tick echo), DAMPEN (low-pass) — all preset, all shallow. (See https://pico-8.fandom.com/wiki/Sfx and https://nerdyteachers.com/PICO-8/Guide/?Audio=.) TIC-80 is similar. Community wishlists ask for adjustable filters and richer reverb.
+- Why it matters: kid wants their song to sound 'big' or 'far away'. A single-parameter 2-tick reverb can't do that. Kid concludes the tool is a toy and moves to Garageband.
+- Fix: Wave-1's `composer/fx-chain` already emits (fx-chain (fx/... ) ...). Wave 2 provides the actual runtime primitives: fx/reverb (:room :wet), fx/delay (:time :feedback :wet), fx/filter (:type :cutoff :resonance), fx/chorus (:rate :depth), fx/distortion (:drive :tone), fx/bitcrush (:bits :rate). Six effects covers 90% of chiptune + modern needs; more is scope creep.
+- Emit: `(fx-chain (fx/reverb :room 0.6 :wet 0.4) (fx/delay :time 0.375 :feedback 0.35 :wet 0.3))`.
+- Runtime: ConvolverNode (reverb via impulse response), DelayNode + GainNode feedback (delay), BiquadFilterNode (filter), custom AudioWorklet or WaveShaperNode (chorus/distort/bitcrush). Total node count per song ~10-20; browsers eat that.
+
+## Row 5 — Volume is linear, ears are logarithmic
+
+- Limitation: PICO-8 uses linear volume; jumps at low values sound abrupt. (See https://www.lexaloffle.com/bbs/?tid=27997.)
+- Why it matters: kid pulls a slider from 0 to 1 expecting a smooth fade-in; hears a sudden jump around 0.15.
+- Fix: velocity and volume sliders use :log #t option (already in Wave 1 slider spec — see COMPOSER-1.0). Runtime converts to dB internally. Default for volume/velocity sliders becomes :log #t; kids who want linear opt in.
+- Emit: `(composer/slider :label \"Volume\" :bind '(song :volume) :min 0 :max 1 :step 0.01 :log #t)`.
+- Runtime: single Math.pow per slider event. Free.
+
+## Row 6 — Custom wave design is dot-by-dot trial-and-error
+
+- Limitation: TIC-80 users must plot custom waveforms sample-by-sample; no import, no draw-a-curve. (See https://github.com/nesbox/TIC-80/issues/2162 and https://github.com/nesbox/TIC-80/issues/2146.)
+- Why it matters: kid can't turn 'I want a warmer square' into a wave in under 20 clicks.
+- Fix: (wave/draw ...) widget lets the kid draw a waveform with the mouse/finger; (wave/from-samples ...) lets them import 16-bit mono WAV samples; (wave/harmonics ...) lets them stack sines with a small slider bank ('additive synthesis for 11-year-olds' — 4 sliders). All three emit the same underlying (wave :samples '(...)) form.
+- Emit: `(wave :name 'warm-square :samples '(0.0 0.3 0.6 0.85 1.0 1.0 1.0 1.0 0.85 0.6 0.3 0.0 -0.3 -0.6 ...))`.
+- Runtime: PeriodicWave for the harmonic form; direct AudioBuffer loop for sample form. Both browser-cheap.
+
+## Row 7 — 64 pattern slots run out on complex songs
+
+- Limitation: PICO-8 caps at 64 music patterns; some songs need 80+ 'unrolled' and hit the wall. (See https://pico-8.fandom.com/wiki/Music and https://medium.com/@megus/making-of-picochak-be39d383d87f.)
+- Why it matters: kid writes a longer song, gets stuck, does not know why the composer will not add another pattern.
+- Fix: no hard cap. Patterns are named symbols in an association list; the runtime addresses them by name. Kid can have 12 or 1200; the limit is disk and memory.
+- Emit: `(song :patterns '((intro ...) (verse-a ...) (chorus ...) (bridge ...) ...) :order '(intro verse-a chorus verse-a chorus bridge chorus))`.
+- Runtime: hash lookup per pattern change. Free.
+
+## Row 8 — Only one view (tracker) for note entry
+
+- Limitation: PICO-8 offers pitch mode + tracker mode of the same SFX, but the MUSIC editor is tracker-only. TIC-80 is tracker-only. Trackers are 'closer to coding music' and intimidating for beginners; piano rolls are 'more approachable.' (See https://www.composinggloves.com/courses/beginner-music-theory/intro/music-notation-the-piano-roll-the-tracker and https://note.com/hidekis/n/na7e9d9ce66d8?hl=en.)
+- Why it matters: an 11-year-old parses a piano roll faster than a hex tracker column. But some kids ALSO like the tracker's typing-not-clicking feel. Forcing either is wrong.
+- Fix: three views over ONE substrate. Piano-roll view (default for kids). Waveform view (for the SFX designers). Tracker view (for the kids who fell in love with LSDJ). All three emit the same (sequence ...) form. Pick with a view-tab; the file does not change. Detailed in :three-views section.
+- Emit shape: unchanged across views — `(sequence (note :pitch 'C4 :vel 0.8 :at 0) ...)`.
+- Runtime cost: view is a render function over the substrate; zero runtime cost outside the editor.
+
+## Row 9 — No MIDI import, WAV export only sometimes
+
+- Limitation: PICO-8 can export music to WAV via `export foo.wav`; MIDI-in requires third-party tool (midi2pico). TIC-80 has no built-in MIDI-in or WAV/MP3 export. (See https://github.com/nesbox/TIC-80/issues/725 and https://itch.io/t/138491/importexport-music-for-tic-80.)
+- Why it matters: kid learned 'Twinkle Twinkle' on their keyboard, wants to play it in their game; can't get it in. Kid finishes a song, wants to share it as an MP3 with their grandma; can't get it out.
+- Fix: `(midi/import path)` yields a `(song ...)` form; `(midi/export song path)` writes a Standard MIDI File; `(wav/export song path :sample-rate 44100)` renders to WAV via offline AudioContext.
+- Emit: verbs are called at REPL / from carts, not embedded in songs. The songs remain pure Scheme.
+- Runtime: browser MIDI parse via `@tonejs/midi` shape (we implement, no vendor lock); WAV render via OfflineAudioContext.
+
+## Row 10 — No live modification during playback
+
+- Limitation: PICO-8 reloads with Ctrl+R restart the cartridge; hot audio reload is not native, requiring custom music managers or external tools. (See https://gist.github.com/t-mw/235624ac61750f69443959816958c310.)
+- Why it matters: kid wants to tweak a note WHILE the song plays and hear the change instantly — the way a musician would. Restart-to-hear is a wall between the kid and their idea.
+- Fix: (song/update! path new-value) mutates the song in-place; the playing scheduler picks up the change at the next bar boundary (or immediately if :when 'now). This is what composer/live-code was designed to enable.
+- Emit: `(song/update! '(patterns verse-a 3 :pitch) 'F4 :when 'next-bar)`.
+- Runtime: playing scheduler is a look-ahead loop reading from the song data; mutation is visible at next look-ahead tick (~50ms).
+
+## Row 11 — Song does not know about sprites / events
+
+- Limitation: PICO-8 music has no notion of 'trigger this pattern when the player enters this room' or 'this sfx when the sprite jumps.' The kid wires it in Lua by hand. TIC-80 is the same.
+- Why it matters: kid wants the boss music to start when the boss appears. That is 4-8 lines of glue code the kid does not know how to write.
+- Fix: (song/on-event 'boss-appears (play-pattern 'boss-theme)) declaratively binds a game event to a song action. Events fire from the game layer (sprite collisions, room changes, timer ticks). Songs can also emit events on beat/bar boundaries: `(song/on-beat 8 (spawn-enemy))`.
+- Emit: lives in the song record — `(song :on-events ((boss-appears (play-pattern 'boss-theme)) (level-clear (play-pattern 'victory))))`.
+- Runtime: event pub-sub; runtime already has the pattern for input events.
+
+## Row 12 — No sample playback (except in fixed slots)
+
+- Limitation: PICO-8 does not really do samples — everything is one of 8 waveforms. TIC-80 supports custom waves but not arbitrary PCM sample playback. (See https://github.com/nesbox/TIC-80/issues/953 for the PCM channel request.)
+- Why it matters: kid records their voice saying 'get ready!' and wants it as their game's title sound. Neither tool lets them.
+- Fix: (sample/load path) returns a sample record; (sample/play sample :pitch 'C4 :speed 1.0) plays it. Recording is (sample/record :seconds 3) via getUserMedia if the surface permits (permission-gated).
+- Emit: `(sample/load \"assets/get-ready.wav\")` inline or `(sample/from-recording ...)`; playback: `(sample/play 'get-ready :pitch 'C4)`.
+- Runtime: AudioBuffer + AudioBufferSourceNode; playbackRate for pitch. Standard web audio."
+
+  :new-verbs
+"# New audio composer verbs (beyond Wave 1's 15)
+
+Every verb below is one of:
+  - a NEW composer/* widget (extends Wave 1 surface),
+  - a NEW runtime primitive (synth/*, fx/*, sample/*, wave/*, midi/*, wav/*, song/*, instrument/*, sfx/* — that widgets' emit forms reference),
+  - or an EXTENSION on an existing Wave-1 widget's :emit-shape.
+
+All verbs follow the reference-manual pattern: :name :arity :perm :contract :doc :example.
+
+## Composer widgets (5 new)
+
+(composer-song
+  :name \"composer/song\"
+  :arity \"(:bind :bpm :voices . options)\"
+  :perm \"state-change\"
+  :contract \"(plist) -> song-record\"
+  :doc \"Top-level song editor. Wraps patterns + order + config + on-events. Body forms are pattern widgets (each a piano-roll / tracker / waveform view). :bpm (60-240), :voices (1-8), :key (optional key signature symbol like 'C-major).\"
+  :example
+\"(composer/song :bind '(cart/main :song) :bpm 120 :voices 6
+  (composer/pattern :bind '(cart/main :song patterns intro) :steps 16)
+  (composer/pattern :bind '(cart/main :song patterns verse-a) :steps 32)
+  (composer/pattern :bind '(cart/main :song patterns chorus) :steps 32))\"
+  :notes \"Emits (song :bpm 120 :voices 6 :patterns '((intro ...) (verse-a ...) (chorus ...)) :order '(intro verse-a chorus)).\")
+
+(composer-pattern
+  :name \"composer/pattern\"
+  :arity \"(:bind :steps :view . options)\"
+  :perm \"state-change\"
+  :contract \"(plist) -> pattern-record\"
+  :doc \"Single pattern editor with view-tab (piano-roll / waveform / tracker). :steps 8-256; :view 'piano-roll (default) | 'waveform | 'tracker; substrate is the same emitted (sequence ...) regardless of view.\"
+  :example
+\"(composer/pattern :bind '(cart/main :song patterns intro) :steps 16 :view 'piano-roll)\")
+
+(composer-instrument-lab
+  :name \"composer/instrument-lab\"
+  :arity \"(:bind . options)\"
+  :perm \"state-change\"
+  :contract \"(plist) -> lab-record\"
+  :doc \"Bench for building custom instruments. Combines wave-picker + ADSR + fx-chain in one panel. Save the result as a named instrument the song can reference.\"
+  :example
+\"(composer/instrument-lab :bind '(cart/main :instruments my-lead))\"
+  :notes \"Emits (instrument/define 'my-lead (synth :wave 'saw :env (adsr :a 0.02 :d 0.1 :s 0.6 :r 0.4) :fx (fx-chain (fx/filter :cutoff 2000)))).\")
+
+(composer-wave-draw
+  :name \"composer/wave-draw\"
+  :arity \"(:bind :samples . options)\"
+  :perm \"state-change\"
+  :contract \"(plist) -> wave-record\"
+  :doc \"Draw a custom waveform. :samples is the resolution (32 default, 64 or 128 for smoother). Drag on the canvas to shape it; buttons for common preset waves + import-from-WAV + additive-mode.\"
+  :example
+\"(composer/wave-draw :bind '(cart/main :waves warm-square) :samples 64)\"
+  :notes \"Emits (wave :name 'warm-square :samples '(0.0 0.3 0.6 ... -0.3 0.0)).\")
+
+(composer-sample-record
+  :name \"composer/sample-record\"
+  :arity \"(:bind :seconds . options)\"
+  :perm \"paint\"
+  :contract \"(plist) -> sample-record\"
+  :doc \"Record from the mic. Permission-gated. :seconds 1-10 default 3. Auto-trims silence.\"
+  :example
+\"(composer/sample-record :bind '(cart/main :samples get-ready) :seconds 3)\"
+  :notes \"Emits (sample/from-recording :data ... :sample-rate 44100 :channels 1). The kid sees a big red RECORD button.\")
+
+## Runtime primitives — synth (4 new)
+
+(synth-define
+  :name \"synth/define\"
+  :arity \"(name wave-or-shape . options)\"
+  :perm \"state-change\"
+  :contract \"(symbol wave-form options) -> instrument-record\"
+  :doc \"Define a named synth instrument. :env is an ADSR form; :fx is an fx-chain form; :detune in cents.\"
+  :example
+\"(synth/define 'lead (synth :wave 'saw :env (adsr :a 0.02 :d 0.1 :s 0.6 :r 0.4) :detune 5))\")
+
+(synth-sine
+  :name \"synth/sine\"
+  :arity \"(pitch dur . options)\"
+  :perm \"paint\"
+  :contract \"(pitch duration options) -> ok\"
+  :doc \"Play a sine tone. Shortcut for (synth/play (synth :wave 'sine) pitch dur).\"
+  :example
+\"(synth/sine 'C4 'quarter)\")
+
+(synth-square
+  :name \"synth/square\"
+  :arity \"(pitch dur . options)\"
+  :perm \"paint\"
+  :contract \"(pitch duration options) -> ok\"
+  :doc \"Play a square tone. :pulse-width 0.1-0.9 (default 0.5).\"
+  :example
+\"(synth/square 'C4 'quarter :pulse-width 0.25)\")
+
+(synth-noise
+  :name \"synth/noise\"
+  :arity \"(dur . options)\"
+  :perm \"paint\"
+  :contract \"(duration options) -> ok\"
+  :doc \"Play a noise burst. :color 'white | 'pink | 'brown (default white). Good for hi-hats + snares.\"
+  :example
+\"(synth/noise 'sixteenth :color 'pink)\")
+
+## Runtime primitives — fx (6 new)
+
+(fx-reverb
+  :name \"fx/reverb\"
+  :arity \"(:room :wet . options)\"
+  :perm \"paint\"
+  :contract \"(plist) -> fx-record\"
+  :doc \":room 0.0-1.0 (short → large), :wet 0.0-1.0 dry/wet mix, :decay optional in seconds.\"
+  :example
+\"(fx/reverb :room 0.6 :wet 0.4)\")
+
+(fx-delay
+  :name \"fx/delay\"
+  :arity \"(:time :feedback :wet . options)\"
+  :perm \"paint\"
+  :contract \"(plist) -> fx-record\"
+  :doc \":time in seconds or musical division ('eighth, 'dotted-eighth), :feedback 0.0-0.95, :wet 0.0-1.0.\"
+  :example
+\"(fx/delay :time 'dotted-eighth :feedback 0.5 :wet 0.35)\")
+
+(fx-filter
+  :name \"fx/filter\"
+  :arity \"(:type :cutoff :resonance . options)\"
+  :perm \"paint\"
+  :contract \"(plist) -> fx-record\"
+  :doc \":type 'lowpass | 'highpass | 'bandpass, :cutoff in Hz (20-20000), :resonance 0.1-30.\"
+  :example
+\"(fx/filter :type 'lowpass :cutoff 2000 :resonance 4)\")
+
+(fx-chorus
+  :name \"fx/chorus\"
+  :arity \"(:rate :depth . options)\"
+  :perm \"paint\"
+  :contract \"(plist) -> fx-record\"
+  :doc \":rate in Hz 0.1-8, :depth 0.0-1.0, :wet 0.0-1.0.\"
+  :example
+\"(fx/chorus :rate 1.5 :depth 0.4 :wet 0.5)\")
+
+(fx-distortion
+  :name \"fx/distortion\"
+  :arity \"(:drive :tone . options)\"
+  :perm \"paint\"
+  :contract \"(plist) -> fx-record\"
+  :doc \":drive 0.0-1.0 hard-clip amount, :tone 0.0-1.0 pre-filter cutoff scaler.\"
+  :example
+\"(fx/distortion :drive 0.6 :tone 0.7)\")
+
+(fx-bitcrush
+  :name \"fx/bitcrush\"
+  :arity \"(:bits :rate . options)\"
+  :perm \"paint\"
+  :contract \"(plist) -> fx-record\"
+  :doc \":bits 1-16, :rate sample-rate divider 1-32. The classic chip-crush.\"
+  :example
+\"(fx/bitcrush :bits 4 :rate 8)\")
+
+## Runtime primitives — wave (3 new)
+
+(wave-def
+  :name \"wave\"
+  :arity \"(:name :samples . options)\"
+  :perm \"state-change\"
+  :contract \"(plist) -> wave-record\"
+  :doc \"Custom waveform. :samples is a list of floats in [-1.0, 1.0]; length 16-256. Registered by :name for reuse.\"
+  :example
+\"(wave :name 'warm-square :samples '(0.0 0.3 0.6 0.85 1.0 1.0 0.85 0.6 0.3 0.0 -0.3 -0.6 -0.85 -1.0 -0.85 -0.3))\")
+
+(wave-harmonics
+  :name \"wave/harmonics\"
+  :arity \"(:name :partials . options)\"
+  :perm \"state-change\"
+  :contract \"(plist) -> wave-record\"
+  :doc \"Additive-synthesis wave. :partials is a list of amplitudes for the first N harmonics; the runtime IFFTs into a PeriodicWave.\"
+  :example
+\"(wave/harmonics :name 'organ :partials '(1.0 0.5 0.3 0.2 0.1 0.05))\")
+
+(wave-from-samples
+  :name \"wave/from-samples\"
+  :arity \"(name samples-list)\"
+  :perm \"state-change\"
+  :contract \"(symbol list-of-floats) -> wave-record\"
+  :doc \"Convert a list of floats to a registered wave.\"
+  :example
+\"(wave/from-samples 'my-wave '(0.0 0.5 1.0 0.5 0.0 -0.5 -1.0 -0.5))\")
+
+## Runtime primitives — sample (3 new)
+
+(sample-load
+  :name \"sample/load\"
+  :arity \"(path . options)\"
+  :perm \"read\"
+  :contract \"(string options) -> sample-record\"
+  :doc \"Load a WAV or OGG file. :name (symbol) registers for reuse. Returns the sample record.\"
+  :example
+\"(sample/load \\\"assets/get-ready.wav\\\" :name 'get-ready)\")
+
+(sample-play
+  :name \"sample/play\"
+  :arity \"(name . options)\"
+  :perm \"paint\"
+  :contract \"(symbol options) -> ok\"
+  :doc \":pitch (transpose from root), :speed (playback rate multiplier), :vel (velocity).\"
+  :example
+\"(sample/play 'get-ready :pitch 'C4 :vel 0.9)\")
+
+(sample-record
+  :name \"sample/record\"
+  :arity \"(:name :seconds . options)\"
+  :perm \"paint\"
+  :contract \"(plist) -> sample-record\"
+  :doc \"Record from the mic. Permission-gated by the surface — headless raises 'no-mic. :auto-trim #t strips leading/trailing silence.\"
+  :example
+\"(sample/record :name 'my-voice :seconds 3 :auto-trim #t)\")
+
+## Runtime primitives — song (5 new)
+
+(song-def
+  :name \"song\"
+  :arity \"(:bpm :voices :patterns :order . options)\"
+  :perm \"state-change\"
+  :contract \"(plist) -> song-record\"
+  :doc \"Top-level song value. :patterns is an alist of named sequences; :order is a list of pattern symbols. Optional :key, :time-signature, :on-events.\"
+  :example
+\"(song :bpm 120 :voices 6 :patterns '((intro ...) (verse ...)) :order '(intro verse verse))\")
+
+(song-play
+  :name \"song/play\"
+  :arity \"(song . options)\"
+  :perm \"paint\"
+  :contract \"(song-record options) -> ok\"
+  :doc \"Start playback. :from (pattern symbol or beat number), :loop (boolean).\"
+  :example
+\"(song/play my-song :from 'chorus :loop #t)\")
+
+(song-stop
+  :name \"song/stop\"
+  :arity \"()\"
+  :perm \"paint\"
+  :contract \"() -> ok\"
+  :doc \"Stop playback.\"
+  :example
+\"(song/stop)\")
+
+(song-update
+  :name \"song/update!\"
+  :arity \"(path new-value . options)\"
+  :perm \"state-change\"
+  :contract \"(path value options) -> ok\"
+  :doc \"Live-mutate the playing song. :when 'now | 'next-beat | 'next-bar (default 'next-bar). This is the round-trip's live edge.\"
+  :example
+\"(song/update! '(patterns verse-a 3 :pitch) 'F4 :when 'next-bar)\")
+
+(song-on-event
+  :name \"song/on-event\"
+  :arity \"(event-name action)\"
+  :perm \"state-change\"
+  :contract \"(symbol form) -> subscription\"
+  :doc \"Bind a game event to a song action. Actions can be (play-pattern ...), (song/update! ...), (sfx/play ...).\"
+  :example
+\"(song/on-event 'boss-appears (play-pattern 'boss-theme))\")
+
+## Runtime primitives — sfx (2 new — CORE already has audio/*, note/*)
+
+(sfx-define
+  :name \"sfx/define\"
+  :arity \"(name spec)\"
+  :perm \"state-change\"
+  :contract \"(symbol spec) -> sfx-record\"
+  :doc \"Register a named sound effect. Spec references synth/wave/fx primitives.\"
+  :example
+\"(sfx/define 'jump (synth :wave 'square :env (adsr :a 0.005 :d 0.05 :s 0 :r 0) :pitch-slide '(C4 . E5) :dur 0.15))\")
+
+(sfx-play
+  :name \"sfx/play\"
+  :arity \"(name . options)\"
+  :perm \"paint\"
+  :contract \"(symbol options) -> ok\"
+  :doc \":priority 0-10 (default 5), :allow-poly (default #t), :pitch (transpose from root), :vel.\"
+  :example
+\"(sfx/play 'jump :priority 6 :vel 0.8)\")
+
+## Runtime primitives — MIDI + WAV (4 new)
+
+(midi-import
+  :name \"midi/import\"
+  :arity \"(path . options)\"
+  :perm \"read\"
+  :contract \"(string options) -> song-record\"
+  :doc \"Parse a Standard MIDI File; return a song record. :quantize 'sixteenth (default) rounds note starts. Multi-track MIDI collapses to voices in order.\"
+  :example
+\"(midi/import \\\"assets/twinkle.mid\\\")\")
+
+(midi-export
+  :name \"midi/export\"
+  :arity \"(song path)\"
+  :perm \"state-change\"
+  :contract \"(song-record string) -> string\"
+  :doc \"Write a song to a Standard MIDI File. Returns the path.\"
+  :example
+\"(midi/export my-song \\\"exports/twinkle.mid\\\")\")
+
+(wav-export
+  :name \"wav/export\"
+  :arity \"(song path . options)\"
+  :perm \"state-change\"
+  :contract \"(song-record string options) -> string\"
+  :doc \"Render a song to WAV via offline audio context. :sample-rate 44100 default; :channels 1 or 2.\"
+  :example
+\"(wav/export my-song \\\"exports/my-song.wav\\\" :sample-rate 44100)\")
+
+(midi-live
+  :name \"midi/live\"
+  :arity \"(:on-note . options)\"
+  :perm \"paint\"
+  :contract \"(plist) -> subscription\"
+  :doc \"Subscribe to a connected MIDI keyboard. :on-note is a callback (lambda (pitch vel) ...). Permission-gated.\"
+  :example
+\"(midi/live :on-note (lambda (pitch vel) (synth/sine pitch 'quarter :vel vel)))\")
+
+## Runtime primitives — instrument + adsr (3 new — Wave 1 refers, Wave 2 registers)
+
+(instrument-define
+  :name \"instrument/define\"
+  :arity \"(name spec)\"
+  :perm \"state-change\"
+  :contract \"(symbol spec) -> instrument-record\"
+  :doc \"Register a named instrument. Spec is a synth form OR a sample-play form OR any composition. Referenced by (note :instrument name).\"
+  :example
+\"(instrument/define 'my-kick (synth/kit 'kick :decay 0.15))\")
+
+(adsr
+  :name \"adsr\"
+  :arity \"(:a :d :s :r)\"
+  :perm \"read\"
+  :contract \"(plist) -> envelope-record\"
+  :doc \"Envelope value. Attack + decay in seconds, sustain in 0.0-1.0 level, release in seconds.\"
+  :example
+\"(adsr :a 0.02 :d 0.1 :s 0.6 :r 0.4)\")
+
+(fx-chain
+  :name \"fx-chain\"
+  :arity \"(fx ...)\"
+  :perm \"read\"
+  :contract \"(fx-records ...) -> chain-record\"
+  :doc \"Ordered chain of fx/* primitives. Signal flows left-to-right.\"
+  :example
+\"(fx-chain (fx/reverb :room 0.6 :wet 0.4) (fx/delay :time 'eighth :feedback 0.3))\")"
+
+  :three-views
+"# Piano-roll → Waveform → Tracker: three views over ONE substrate
+
+## The substrate
+
+Every pattern is a `(sequence (note ...) ...)` form — the same shape Wave 1's `composer/piano-roll` already emits. Each note is a plist: `:pitch`, `:vel` (velocity 0.0-1.0), `:dur` (duration in beats or symbol), `:at` (start beat), `:instrument` (symbol), plus optional per-note fx params.
+
+Nothing about the on-disk file changes when the kid switches views. This is the load-bearing property. A song saved in piano-roll view opens identically in tracker view; the tracker's hex columns are a render of the same `(sequence ...)`.
+
+## View 1 — Piano roll (default for kids)
+
+- Rows are pitches (top = high, bottom = low), columns are steps.
+- A note appears as a coloured horizontal bar spanning its duration.
+- Click a cell to add; drag its right edge to lengthen; double-click to remove; drag its body to move.
+- Velocity is a small vertical strip inside each note bar (height = velocity).
+- Instrument colour-codes the bar.
+- The 11-year-old parses this in ~5 seconds because it looks like the piano roll in Scratch + Garageband + FL Studio + every browser sequencer they may have touched.
+
+## View 2 — Waveform (for the SFX designer + drum kid)
+
+- Time on the horizontal axis; the composited waveform of the pattern rendered offline.
+- Below the waveform, a lane per voice showing note starts as vertical ticks.
+- Click on the waveform to scrub; the kid HEARS what they see.
+- Useful for tuning percussion patterns where 'is the kick before or after the snare' matters more than 'what pitch is the kick.'
+- Also the view where fx/* effects reveal themselves — the kid sees reverb tail on the waveform.
+
+## View 3 — Tracker (for the kid who wants to type not click)
+
+- Classic vertical tracker: rows are steps, columns are voices.
+- Each cell is `pitch instrument vel fx` — five characters.
+- Kid presses a key on the QWERTY keyboard to insert a note (Z S X D C V G B — piano-key mapping).
+- Fast for anyone who's used LSDJ, Deflemask, or Renoise.
+- Emits IDENTICAL sequence forms as the piano-roll view.
+
+## The view switch
+
+Each `composer/pattern` widget carries `:view 'piano-roll` (or 'waveform, or 'tracker). Changing the view is a re-render, not a file change. The kid can put their preferred default in their profile; the file does not care.
+
+The three views appear as tabs at the top of the pattern editor, plus a keyboard shortcut (1/2/3). This is Wave-2 UI guidance for the Curator team — Motoi verbs themselves do not know about tabs.
+
+## Why this solves the tracker-vs-piano-roll debate
+
+Piano-roll people say trackers are 'closer to coding music.' Tracker people say piano-rolls are 'mouse-driven and slow.' Both are right. Both are wrong. The debate exists because tools have historically forced ONE view. We do not. The substrate is Scheme; the view is a render function; a kid picks the render they like today and switches tomorrow. Both views round-trip through the same `(sequence ...)`."
+
+  :instrument-model
+"# Day-one instrument box
+
+## Waveforms (built-in, no definition needed)
+
+- sine, square, triangle, saw, noise (white / pink / brown)
+- pulse (with :pulse-width parameter)
+- Six preset 'chip' waves: soft-square, bright-saw, warm-triangle, hollow-pulse, growl, glitch
+- All accessible as `(synth :wave 'sine)` etc.
+
+## Preset drum kit (via synth/kit)
+
+- kick, snare, hat (closed / open), clap, tom (low / mid / high), crash, ride, cowbell, rimshot
+- Each is a bundle of synth primitives; the kid gets a working kit without designing one.
+
+## Preset synth patches
+
+Ten patches at boot. Names + hints:
+- 'lead — bright, cutting, saw + filter sweep on note-on
+- 'bass — round, low, triangle + short release
+- 'pad — soft, sustained, detuned sine layers
+- 'pluck — short, percussive, saw + fast decay
+- 'bell — inharmonic, long release, sine + high harmonic
+- 'flute — hollow sine with slight vibrato
+- 'string — sustained saw layers with chorus
+- 'organ — additive-harmonic wave (row 6)
+- 'brass — filtered saw with attack curve
+- 'wobble — LFO on filter cutoff — dubstep-y, delights kids
+
+Emitted as `(synth/play 'lead 'C4 'quarter)` — the kid does not need to know how the preset is built until they want to build their own via `composer/instrument-lab`.
+
+## Custom instruments
+
+- `(synth/define 'name (synth :wave ... :env ... :fx ...))` — full control
+- `(instrument/define 'name (sample/play 'my-sample))` — sample instrument
+- `(instrument/define 'name (synth/kit 'kick :decay 0.2))` — variant on preset kit
+
+## Effects (fx-chain slot per instrument OR per song)
+
+Six primitives. Per-instrument keeps a synth's character; per-song for master. Both use the same `(fx-chain ...)` form.
+
+## What we DON'T ship on day one
+
+- LFOs (deferred — the kid gets vibrato via preset patches; explicit LFO waits for v1.2)
+- Modulation matrix (deferred — implicit modulation via `song/update!` covers the need)
+- FM synthesis (deferred — additive covers a lot; FM is scope creep for v1.0)
+- Granular synthesis (deferred — samples cover the need; granular is a v2 wish)
+- Sidechain compression (deferred — kids don't miss it; musicians can layer manually)
+
+Each of these is a legitimate v1.2+ target; the day-one box is small enough to master and big enough to make real songs."
+
+  :cross-file-composition
+"# Songs that live inside games
+
+## Timeline sync with sprites
+
+A game is a loop calling `frame` at 60 fps. The music scheduler is a separate look-ahead loop. Both share the `song/beat` clock — the current beat number since play started.
+
+Sprites can query `(song/beat)` and change animation on downbeats:
+```
+(when (= (mod (song/beat) 4) 0)
+  (sprite/frame! 'hero 'walk-a))
+```
+
+Songs can query game state and react to it via `song/on-event`:
+```
+(song/on-event 'level-clear (play-pattern 'victory))
+(song/on-event 'low-health (song/update! '(fx-chain 0 :cutoff) 800))
+```
+
+Neither knows about the other's internals. They speak through named events + shared clock. This is what PICO-8 does not offer.
+
+## Live-reload during a game
+
+The composer runs in a Curator panel alongside the game canvas. The kid tweaks a note; the change is written to the song record; the scheduler picks it up at the next bar. The game keeps running.
+
+This works because:
+  1. Songs are pure Scheme data, not compiled bytecode.
+  2. The scheduler reads from the song record every look-ahead tick.
+  3. `song/update!` mutates the record in place; the scheduler sees new state.
+  4. The composer's live-code widget (Wave 1) shows the change in the emitted form; the piano-roll view shows the new note position; the game keeps playing without a reload.
+
+Round-trip closes: view edit → song record → schedule → sound → widget updated to match. Every link is a Scheme value passing through a verb.
+
+## Cross-file references
+
+A cart imports another cart's song:
+```
+(load-cart \"my-other-cart\" :as 'other)
+(song/play (get 'other :song))
+```
+
+Or a cart imports just an instrument:
+```
+(instrument/define 'shared-lead (get (load-cart \"instruments\" :headless #t) :instruments 'lead))
+```
+
+Composer widgets bound to `:song` in the current cart do not need to change; the referenced content is a value like any other."
+
+  :round-trip-guarantees
+"# Round-trip doctrine — extended to Wave 2
+
+Wave 1 guarantees: `(composer/apply c (composer/emit c))` is identity for every widget. Wave 2 extends this to all new widgets and to LIVE playback.
+
+## Compile-time (file round-trip)
+
+- Save a song from any view → load it in any view → the notes are unchanged.
+- Hand-edit the `(sequence ...)` in a text editor → open in composer → widgets show your edits.
+- Save an instrument from `composer/instrument-lab` → load it in a text editor → you see `(instrument/define ...)` → hand-edit the envelope → composer widgets show new envelope.
+
+## Run-time (live round-trip)
+
+- `song/update!` mutates the record; the widget re-reads and updates its display.
+- A note added via piano-roll click appears in the tracker view instantly.
+- A `sample/record` completion drops a new `(sample :data ...)` into the song file; the sample-picker widget lists it.
+
+## What we test
+
+For every widget in Wave 1 + Wave 2, the headless test suite proves:
+
+  1. `(composer/apply c (composer/emit c))` is identity.
+  2. Hand-crafting the target form and calling `(composer/apply c form)` produces a widget state whose emit matches the hand-crafted form.
+  3. Live mutation via `song/update!` reflects in the widget's next read.
+
+Failures here are release blockers. This is the single most important test surface for the composer."
+
+  :rendered-example
+"# A full 30-second song written in emitted Scheme
+
+What an 11-year-old would produce after 20 minutes with the composer, saved to `carts/my-first-song.slat`:
+
+```
+(song :bpm 120 :voices 6 :time-signature '(4 . 4) :key 'C-major
+
+  :instruments
+  '((lead    (synth :wave 'square :env (adsr :a 0.01 :d 0.1 :s 0.5 :r 0.15)
+                    :fx (fx-chain (fx/delay :time 'dotted-eighth :feedback 0.35 :wet 0.25))))
+    (bass    (synth :wave 'triangle :env (adsr :a 0.02 :d 0.15 :s 0.7 :r 0.2)))
+    (pad     (synth :wave 'saw :env (adsr :a 0.4 :d 0.3 :s 0.6 :r 0.6)
+                    :detune 7 :fx (fx-chain (fx/filter :type 'lowpass :cutoff 1800)
+                                            (fx/reverb :room 0.7 :wet 0.35))))
+    (my-kick (synth/kit 'kick :decay 0.18))
+    (my-snap (synth/kit 'snare :decay 0.08))
+    (hihat   (synth/kit 'hat  :decay 0.05)))
+
+  :patterns
+  '((intro
+      (sequence
+        (note :pitch 'C4 :vel 0.8 :dur 'half     :at 0  :instrument 'pad)
+        (note :pitch 'E4 :vel 0.7 :dur 'half     :at 0  :instrument 'pad)
+        (note :pitch 'G4 :vel 0.7 :dur 'half     :at 0  :instrument 'pad)
+        (note :pitch 'C4 :vel 0.9 :dur 'quarter  :at 2  :instrument 'bass)
+        (note :pitch 'G3 :vel 0.9 :dur 'quarter  :at 3  :instrument 'bass)))
+
+    (verse
+      (sequence
+        ;; kick on 1 and 3
+        (note :pitch 'C2 :vel 1.0 :dur 'sixteenth :at 0  :instrument 'my-kick)
+        (note :pitch 'C2 :vel 1.0 :dur 'sixteenth :at 4  :instrument 'my-kick)
+        ;; snare on 2 and 4
+        (note :pitch 'D2 :vel 0.9 :dur 'sixteenth :at 2  :instrument 'my-snap)
+        (note :pitch 'D2 :vel 0.9 :dur 'sixteenth :at 6  :instrument 'my-snap)
+        ;; hats on eighths
+        (note :pitch 'F5 :vel 0.5 :dur 'sixteenth :at 0  :instrument 'hihat)
+        (note :pitch 'F5 :vel 0.5 :dur 'sixteenth :at 1  :instrument 'hihat)
+        (note :pitch 'F5 :vel 0.5 :dur 'sixteenth :at 2  :instrument 'hihat)
+        (note :pitch 'F5 :vel 0.5 :dur 'sixteenth :at 3  :instrument 'hihat)
+        (note :pitch 'F5 :vel 0.5 :dur 'sixteenth :at 4  :instrument 'hihat)
+        (note :pitch 'F5 :vel 0.5 :dur 'sixteenth :at 5  :instrument 'hihat)
+        (note :pitch 'F5 :vel 0.5 :dur 'sixteenth :at 6  :instrument 'hihat)
+        (note :pitch 'F5 :vel 0.5 :dur 'sixteenth :at 7  :instrument 'hihat)
+        ;; bass line
+        (note :pitch 'C3 :vel 0.85 :dur 'quarter :at 0 :instrument 'bass)
+        (note :pitch 'C3 :vel 0.85 :dur 'quarter :at 2 :instrument 'bass)
+        (note :pitch 'F3 :vel 0.85 :dur 'quarter :at 4 :instrument 'bass)
+        (note :pitch 'G3 :vel 0.85 :dur 'quarter :at 6 :instrument 'bass)
+        ;; melody
+        (note :pitch 'E5 :vel 0.9 :dur 'quarter  :at 0 :instrument 'lead)
+        (note :pitch 'G5 :vel 0.8 :dur 'quarter  :at 1 :instrument 'lead)
+        (note :pitch 'A5 :vel 0.8 :dur 'half     :at 2 :instrument 'lead)
+        (note :pitch 'F5 :vel 0.9 :dur 'quarter  :at 4 :instrument 'lead)
+        (note :pitch 'A5 :vel 0.8 :dur 'quarter  :at 5 :instrument 'lead)
+        (note :pitch 'C6 :vel 0.85 :dur 'half    :at 6 :instrument 'lead)))
+
+    (chorus
+      (sequence
+        ;; same drums as verse, plus pad layer
+        (note :pitch 'C2 :vel 1.0 :dur 'sixteenth :at 0 :instrument 'my-kick)
+        (note :pitch 'C2 :vel 1.0 :dur 'sixteenth :at 4 :instrument 'my-kick)
+        (note :pitch 'D2 :vel 0.9 :dur 'sixteenth :at 2 :instrument 'my-snap)
+        (note :pitch 'D2 :vel 0.9 :dur 'sixteenth :at 6 :instrument 'my-snap)
+        (note :pitch 'C4 :vel 0.6 :dur 'whole :at 0 :instrument 'pad)
+        (note :pitch 'E4 :vel 0.6 :dur 'whole :at 0 :instrument 'pad)
+        (note :pitch 'G4 :vel 0.6 :dur 'whole :at 0 :instrument 'pad)
+        (note :pitch 'G5 :vel 0.95 :dur 'quarter :at 0 :instrument 'lead)
+        (note :pitch 'C6 :vel 0.95 :dur 'quarter :at 1 :instrument 'lead)
+        (note :pitch 'E6 :vel 0.95 :dur 'half    :at 2 :instrument 'lead)
+        (note :pitch 'D6 :vel 0.9  :dur 'quarter :at 4 :instrument 'lead)
+        (note :pitch 'B5 :vel 0.9  :dur 'quarter :at 5 :instrument 'lead)
+        (note :pitch 'G5 :vel 0.85 :dur 'half    :at 6 :instrument 'lead))))
+
+  :order '(intro verse verse chorus verse chorus chorus)
+
+  :on-events
+  '((game-over (song/stop))
+    (level-clear (play-pattern 'chorus))))
+```
+
+Bar counts: intro=4 beats + verse=8 + verse=8 + chorus=8 + verse=8 + chorus=8 + chorus=8 = 52 beats at 120 BPM = 26 seconds of music. With a two-second tail on the final chorus's pad + reverb: ~28-30 seconds. The kid's first song.
+
+Every form here corresponds to a verb documented above. Every field is human-readable. Hand-editing the file changes what plays. Opening it in the composer shows piano-roll bars matching every note. A `(midi/export ...)` produces a `.mid` the kid's grandma can open in her phone."
+
+  :what-we-do-not-copy
+"# PICO-8 and TIC-80 mistakes we skip
+
+- **Hard 4-channel cap.** No modern reason for it; a kid on a Chromebook can push 8-16 voices.
+- **Fixed pattern count (64 for PICO-8).** Named patterns with no cap.
+- **Custom-instrument-only-in-first-8-SFX-slots restriction.** Every SFX is a valid instrument.
+- **Linear-only volume.** Log by default.
+- **Dot-by-dot custom wave design as the only path.** We ship draw + import + additive.
+- **Two-mode SFX editor with tab-toggle (pitch mode vs tracker mode) but tracker-only music editor.** We ship three views for BOTH SFX and music, uniformly.
+- **Cartridge reload for any audio change.** Live-mutate the record; scheduler picks it up.
+- **No MIDI in/out, no full WAV export in-tool.** We ship all three.
+- **No PCM sample playback.** We ship samples + recording.
+- **Sound engine coupled to game engine so 'boss music on trigger' is glue Lua.** We ship declarative `song/on-event`.
+- **Cramped 128-column pixel editor for music (PICO-8's screen). We render at whatever the surface can afford (Curator canvas is not 128×128; a phone is not a laptop).**
+- **Undocumented memory-address audio tricks (see PICO-8 forum).** Everything is a documented verb; no arcane addresses.
+- **BPM as a global per-song only.** Per-pattern BPM override for tempo changes."
+
+  :eleven-year-old-test
+"# How this reads to an 11-year-old
+
+The 11-year-old opens Motoi. There is a big 'MAKE A SONG' button. They click it. A piano roll fills the middle of the screen. They click on the grid. A blue bar appears. They hear a note. They click three more times in a row going up the grid. Do-re-mi-fa. They laugh, because the tool didn't yell at them.
+
+There is a small tab at the top of the piano roll that says '1 piano  2 wave  3 tracker'. They click '3 tracker' out of curiosity. Their four notes appear as four rows of hex-looking text. They don't understand it. They click '1 piano' and they're back where they started. Nothing was lost. They learned that this tool has more inside it than they can see yet.
+
+Below the piano roll there is a row of buttons: 'add instrument' 'add effect' 'record'. They click 'record'. A permission popup appears; the adult in the room accepts. They record themselves saying 'yeah!' into the mic. A new instrument called 'my-voice' appears in a list on the side. They click a cell in the piano roll and 'yeah!' plays. They put five 'yeah!' cells in a row. They laugh again.
+
+They save. The file is named `my-song.slat`. Their older sibling opens it in a text editor and sees `(note :pitch 'C4 :vel 0.8 ...)`. Their older sibling says 'you wrote code' and the kid says 'no I clicked stuff' and both of them are correct.
+
+## Sample dialogues
+
+**Dialogue A — first note.**
+- Kid clicks the 4th row from the top, the 1st column.
+- Composer emits: `(note :pitch 'G4 :vel 0.8 :dur 'quarter :at 0 :instrument 'lead)`
+- Runtime plays: a G4 square-wave note for 500ms with the 'lead patch's delay.
+
+**Dialogue B — recording.**
+- Kid clicks the RECORD button, says 'yeah!'
+- Composer emits: `(sample/from-recording :name 'my-voice :data #<samples ...> :sample-rate 44100)` + `(instrument/define 'my-voice (sample/play 'my-voice))`
+- Kid clicks a piano-roll cell after setting instrument to 'my-voice'
+- Composer emits: `(note :pitch 'C4 :vel 0.8 :dur 'quarter :at 4 :instrument 'my-voice)`
+- Runtime plays: their voice at the pitch they clicked, transposed by playback rate.
+
+**Dialogue C — live tweak while a game runs.**
+- Kid's game is playing. The song is playing. Kid clicks on a note in the piano roll and drags it up two rows.
+- Composer emits: `(song/update! '(patterns verse 4 :pitch) 'E4 :when 'next-bar)`
+- Scheduler picks it up at the next bar boundary. Kid hears the change. Game keeps running.
+
+## Why we think this works
+
+An 11-year-old doesn't want a manual. They want the tool to reward the first click. Wave 1 gave them the widget. Wave 2 gives them the sound that widget produces. If either half is missing, they leave. This spec exists so both halves ship together, and so the file the kid saves is the same Scheme a musician would want, is the same MIDI their grandma's phone can open, is the same WAV they can post to their friend."
+
+  :implementation-plan
+"# What ships in the Wave-2 build lane
+
+**Phase A — runtime primitives (~3-4 days)**
+  - synth/* (define, sine, square, noise + reuse existing tone)
+  - fx/* (reverb via ConvolverNode + generated IR; delay; filter; chorus; distortion; bitcrush)
+  - wave/* (wave, wave/harmonics, wave/from-samples)
+  - sample/* (load, play, record — record permission-gated)
+  - song/* (song, song/play, song/stop, song/update!, song/on-event)
+  - sfx/* (define, play — extending existing audio-verbs.js sfx path)
+  - instrument/define, adsr, fx-chain
+
+**Phase B — 5 new composer widgets (~2-3 days)**
+  - composer/song, composer/pattern (with three-view render)
+  - composer/instrument-lab, composer/wave-draw, composer/sample-record
+
+**Phase C — MIDI + WAV (~2 days)**
+  - midi/import + midi/export (SMF parser/writer in JS, no vendor)
+  - wav/export via OfflineAudioContext
+  - midi/live via Web MIDI API (permission-gated)
+
+**Phase D — starter carts + book chapters (~2 days)**
+  - carts/composer/song-editor.slat
+  - carts/composer/sfx-lab.slat
+  - carts/composer/live-jam.slat (record + play + tweak)
+  - Book of Composer: chapter on song editor + chapter on instruments/fx
+  - Book of Music: chapter on the three views + chapter on 'making your first song'
+
+**Phase E — training pairs (~1 day)**
+  - ~40 pairs across new verbs (verb-drill)
+  - ~20 pairs on view-switching + round-trip
+  - ~20 pairs on cross-file composition + live-reload
+  - Total ~80 pairs for Wave 2
+
+Total: ~10-12 days of build lane, sequenced after Wave 1 lands and its round-trip tests pass. Nothing here is speculative — every verb has a shape."
+
+  :dependencies
+    ((wave-1 :ref "COMPOSER-1.0.ENG.slat" :status "spec-frozen; build in progress")
+     (audio-core :ref "lib/audio/sound.js + lib/audio/audio-verbs.js" :status "present; extension points identified")
+     (llm-repl :ref "LLM-AUGMENTED-REPL-1.0.ENG.slat" :status "optional; (rewrite ...) can smooth emitted songs but is never required")
+     (reference-manual :ref "scheme/MOTOI-SCHEME-REFERENCE.slat" :status "must add all Wave-2 verbs before training")
+     (web-audio :ref "browser + node fallback" :status "existing WebAudioAdapter covers oscillator + gain; ConvolverNode / DelayNode / BiquadFilterNode / AudioWorklet additions land in Phase A"))
+
+  :sources-cited
+    ((pico-8-channel-mask :url "https://www.lexaloffle.com/bbs/?pid=49025")
+     (pico-8-sfx-channel-collision :url "https://www.lexaloffle.com/bbs/?tid=43890")
+     (pico-8-volume-log-and-sfx-as-instrument :url "https://www.lexaloffle.com/bbs/?tid=27997")
+     (pico-8-64-pattern-cap :url "https://pico-8.fandom.com/wiki/Music")
+     (pico-8-picochak-unrolled :url "https://medium.com/@megus/making-of-picochak-be39d383d87f")
+     (pico-8-fx-list :url "https://pico-8.fandom.com/wiki/Sfx")
+     (pico-8-audio-guide :url "https://nerdyteachers.com/PICO-8/Guide/?Audio=")
+     (pico-8-instruments-first-8 :url "https://nerdyteachers.com/pico-8/audio/?tutorial=15")
+     (pico-8-sfx-pitch-vs-tracker :url "https://www.visualnewt.com/learning/PICO/files/7fb8d5ac1f0f389157e7037ce923623f-9.html")
+     (pico-8-live-reload :url "https://gist.github.com/t-mw/235624ac61750f69443959816958c310")
+     (pico-8-manual :url "https://www.lexaloffle.com/dl/docs/pico-8_manual.html")
+     (tic-80-tracker-doc :url "https://github.com/nesbox/TIC-80/issues/2153")
+     (tic-80-sound-quality-triangle :url "https://github.com/nesbox/TIC-80/issues/2201")
+     (tic-80-import-sound-request :url "https://github.com/nesbox/TIC-80/issues/2162")
+     (tic-80-need-help-sound :url "https://github.com/nesbox/TIC-80/issues/2146")
+     (tic-80-sound-exporter :url "https://github.com/nesbox/TIC-80/issues/725")
+     (tic-80-pcm-channel-request :url "https://github.com/nesbox/TIC-80/issues/953")
+     (tic-80-import-export-community :url "https://itch.io/t/138491/importexport-music-for-tic-80")
+     (tic-80-missing-manual :url "https://hub.xpub.nl/sandbot/PrototypingTimes/tic80-manual.html")
+     (tic-80-wikipedia :url "https://en.wikipedia.org/wiki/TIC-80")
+     (piano-roll-vs-tracker-composing-gloves :url "https://www.composinggloves.com/courses/beginner-music-theory/intro/music-notation-the-piano-roll-the-tracker")
+     (tracker-appeal-hidekis :url "https://note.com/hidekis/n/na7e9d9ce66d8?hl=en")
+     (liko-12-fantasy :url "https://liko-12.github.io/")
+     (midi2pico-tool :url "https://github.com/BlueAmulet/midi2pico"))
+
+  :confidentiality "training-eligible"
+  :dialect "motoi-base"
+  :training-eligible #t
+  :status "DESIGN-DRAFT-2026-07-17; awaiting Alfred review before Wave-2 build lane fires.")

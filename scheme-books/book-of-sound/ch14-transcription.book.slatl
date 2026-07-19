@@ -1,0 +1,834 @@
+;; ch14-transcription.slat
+;; Book of Sound — Chapter 14: Transcription & Transposition
+
+(chapter
+  :book             "Book of Sound"
+  :chapter-number   null
+  :title            "Chapter 14: Transcription & Transposition"
+  :source-path      "/Users/alfred/code/curator/BOOK/A-branch-scheme-books/new-sound/ch14-transcription.md"
+  :size             22685
+  :sha256           "417069acb66df6a0"
+  :prose
+"# Chapter 14: Transcription & Transposition
+
+You hear a melody. You want to capture it, shift it, play it back in a different key, or hand it to another instrument. Until now we've built sound from instructions—frequencies, envelopes, filters. This chapter reverses the flow: we *listen* to sound and extract its structure. Transcription reads audio into a score of pitches and timing. Transposition shifts that score by an interval or ratio, preserving shape while changing register or key. Together they let the runtime hear a phrase, write it down, and re-voice it.
+
+We'll drill pitch detection, note-onset timing, interval arithmetic, and key-shift by ratio. The crescendo: capture a melody, transcribe it to pitches, transpose it up a fifth, and play it back on a different instrument.
+
+[VISUAL: Waveform → spectrum analysis → detected pitches on a staff → transposed staff → new waveform]
+
+---
+
+## What Transcription Means
+
+Transcription converts audio into discrete events: pitches, start times, durations. It's the inverse of synthesis. Where `(tone 440 0.5)` *makes* an A4 for half a second, transcription *hears* that A4 and writes `(440 0.5)` into a data structure.
+
+The engine performs pitch detection by analyzing the spectrum over time (Chapter 13's FFT, windowed and tracked). It returns a list of `(pitch time duration)` tuples.
+
+<!-- BUILD: transcribe returns list of (pitch-hz start-sec dur-sec) tuples from audio buffer -->
+
+```scheme
+;; Transcribe a single pure tone
+(let ((recording (tone 440 1.0)))
+  (transcribe recording))
+;; => ((440 0.0 1.0))
+```
+*[needs: transcribe]*
+
+The result: one event at 440 Hz, starting at time zero, lasting one second.
+
+---
+
+## Transcribing a Short Phrase
+
+A phrase of several notes yields several tuples.
+
+```scheme
+;; Record three tones in sequence
+(let ((phrase (list (tone 262 0.3)   ; C4
+                    (tone 330 0.3)   ; E4
+                    (tone 392 0.3)))) ; G4
+  (transcribe phrase))
+;; => ((262 0.0 0.3) (330 0.3 0.3) (392 0.6 0.3))
+```
+*[needs: transcribe, audio concatenation]*
+
+Each tuple captures the pitch, its start time relative to the phrase, and its duration.
+
+---
+
+## Transposition by Ratio
+
+Transposition multiplies each pitch by a ratio. To shift up one octave, multiply by 2. To shift up a perfect fifth (3:2), multiply by 1.5.
+
+```scheme
+;; Transpose a single pitch up one octave
+(let ((original 440))
+  (* original 2))
+;; => 880
+```
+
+The function `(transpose notes interval)` applies this across a list of notes. An interval can be a ratio (1.5 for a fifth) or a named interval.
+
+<!-- BUILD: transpose takes list of (pitch start dur) and interval, returns scaled list -->
+
+```scheme
+;; Transpose a melody up a perfect fifth
+(let ((melody '((262 0.0 0.3) (330 0.3 0.3) (392 0.6 0.3))))
+  (transpose melody 1.5))
+;; => ((393 0.0 0.3) (495 0.3 0.3) (588 0.6 0.3))
+```
+*[needs: transpose]*
+
+C4 (262 Hz) becomes 393 Hz (roughly G4), E4 becomes B4, G4 becomes D5. The shape is preserved, the register raised by a fifth.
+
+---
+
+## Transposition by Semitones
+
+Equal temperament divides the octave into twelve semitones, each a ratio of 2^(1/12) ≈ 1.05946. To transpose up *n* semitones, multiply by 2^(n/12).
+
+```scheme
+;; Transpose a pitch up 7 semitones (a perfect fifth in 12-TET)
+(let ((original 440)
+      (semitones 7))
+  (* original (expt 2 (/ semitones 12))))
+;; => ~659.25 Hz (E5)
+```
+
+We can wrap this in a helper:
+
+```scheme
+(define (semitone-shift pitch n)
+  (* pitch (expt 2 (/ n 12))))
+
+(semitone-shift 440 12)  ; up one octave
+;; => 880.0
+```
+
+---
+
+## Transposing a Captured Melody
+
+Combine transcription with transposition: record audio, extract pitches, shift them, and play back.
+
+```scheme
+;; Capture, transcribe, transpose, play
+(define (capture-transpose-play shift-ratio)
+  (let* ((original (list (tone 262 0.25)
+                         (tone 294 0.25)
+                         (tone 330 0.25)
+                         (tone 349 0.25)))
+         (notes (transcribe original))
+         (shifted (transpose notes shift-ratio)))
+    (map (lambda (n)
+           (tone (car n) (caddr n)))
+         shifted)))
+
+(capture-transpose-play 1.5)  ; up a fifth
+```
+*[needs: transcribe, transpose, audio sequencing]*
+
+The original C-D-E-F becomes G-A-B-C at the fifth.
+
+---
+
+## Preserving Timing
+
+Transposition affects pitch, not time. The start and duration fields remain unchanged.
+
+```scheme
+;; Transpose without altering timing
+(let ((melody '((440 0.0 0.5) (494 0.5 0.5) (523 1.0 0.5))))
+  (transpose melody 2.0))  ; up one octave
+;; => ((880 0.0 0.5) (988 0.5 0.5) (1046 1.0 0.5))
+```
+*[needs: transpose]*
+
+The rhythm is identical; only the pitches doubled.
+
+---
+
+## Down-Transposition
+
+Ratios less than 1 transpose downward.
+
+```scheme
+;; Transpose down one octave
+(let ((melody '((880 0.0 0.3) (988 0.3 0.3) (1046 0.6 0.3))))
+  (transpose melody 0.5))
+;; => ((440 0.0 0.3) (494 0.3 0.3) (523 0.6 0.3))
+```
+*[needs: transpose]*
+
+A5-B5-C6 becomes A4-B4-C5.
+
+---
+
+## Negative Semitone Shift
+
+Use a negative semitone count to transpose down.
+
+```scheme
+(define (semitone-shift pitch n)
+  (* pitch (expt 2 (/ n 12))))
+
+(semitone-shift 440 -12)  ; down one octave
+;; => 220.0
+```
+
+---
+
+## Transposing by Named Intervals
+
+We can define interval names as ratios and apply them.
+
+```scheme
+(define intervals
+  '((unison . 1.0)
+    (minor-second . 1.0595)
+    (major-second . 1.1225)
+    (minor-third . 1.1892)
+    (major-third . 1.2599)
+    (perfect-fourth . 1.3348)
+    (tritone . 1.4142)
+    (perfect-fifth . 1.4983)
+    (minor-sixth . 1.5874)
+    (major-sixth . 1.6818)
+    (minor-seventh . 1.7818)
+    (major-seventh . 1.8877)
+    (octave . 2.0)))
+
+(define (interval-ratio name)
+  (cdr (assoc name intervals)))
+
+(* 440 (interval-ratio 'perfect-fifth))
+;; => ~659.252 Hz
+```
+
+---
+
+## Transposing a Melody by Named Interval
+
+```scheme
+(define intervals
+  '((perfect-fifth . 1.4983)
+    (major-third . 1.2599)
+    (octave . 2.0)))
+
+(define (interval-ratio name)
+  (cdr (assoc name intervals)))
+
+(let ((melody '((262 0.0 0.3) (330 0.3 0.3) (392 0.6 0.3)))
+      (shift (interval-ratio 'major-third)))
+  (transpose melody shift))
+;; => C-E-G shifted up a major third
+```
+*[needs: transpose]*
+
+---
+
+## Handling Polyphony
+
+If transcription detects overlapping pitches (a chord), each note gets its own tuple. Transposition applies independently to each voice.
+
+```scheme
+;; Transcribe a two-note harmony
+(let ((chord (list (tone 262 0.5) (tone 330 0.5))))
+  (transcribe chord))
+;; => ((262 0.0 0.5) (330 0.0 0.5))
+```
+*[needs: transcribe, simultaneous audio]*
+
+Both notes start at time zero. Transposing the result shifts both pitches by the same ratio, preserving the interval between them.
+
+---
+
+## Transposing Chords
+
+```scheme
+;; Transpose a C major triad up a perfect fourth
+(let ((triad '((262 0.0 1.0) (330 0.0 1.0) (392 0.0 1.0)))
+      (fourth 1.3348))
+  (transpose triad fourth))
+;; => F major triad
+```
+*[needs: transpose]*
+
+The 4:5:6 ratio (major triad) is preserved; the root moves from C to F.
+
+---
+
+## Key Signature and Scale Degree
+
+Transposition by ratio is *chromatic*—it shifts by exact frequency multiplication. To transpose *diatonically* (within a scale), we'd map scale degrees rather than raw pitches. That requires a scale definition and degree lookup, which we'll visit in the Music book. Here we focus on chromatic (ratio-based) transposition.
+
+---
+
+## Detecting Vibrato
+
+If the input has vibrato (periodic pitch modulation), transcription may yield multiple close pitches or a single pitch with a vibrato annotation, depending on the engine's resolution. For now, we treat the detected pitch as the mean.
+
+<!-- BUILD: vibrato detection / pitch smoothing in transcription -->
+
+```scheme
+;; Transcribe a tone with gentle vibrato (conceptual)
+;; Engine returns mean pitch if vibrato variance is small
+(let ((vibrato-tone (tone 440 1.0)))  ; imagine modulated pitch
+  (transcribe vibrato-tone))
+;; => ((440 0.0 1.0))  ; mean pitch
+```
+*[needs: transcribe]*
+
+---
+
+## Transcribing Rhythm
+
+Transcription captures onset time and duration. If two notes have identical pitch but different start times, they appear as separate events.
+
+```scheme
+;; Two A4 notes with a gap
+(let ((phrase (list (tone 440 0.3)
+                    ; 0.2 sec silence
+                    (tone 440 0.3))))
+  (transcribe phrase))
+;; => ((440 0.0 0.3) (440 0.5 0.3))
+```
+*[needs: transcribe, audio sequencing with silence]*
+
+The rhythm is encoded in the start-time deltas.
+
+---
+
+## Transposing Percussion (Frequency-Shift)
+
+Transposing a drum hit by ratio shifts its spectral content. A snare at fundamental ~200 Hz transposed by 1.5 yields a higher, thinner snare.
+
+```scheme
+;; Transpose a noise-based snare up a fifth (conceptual)
+(let ((snare-note '((200 0.0 0.15))))  ; fundamental detected
+  (transpose snare-note 1.5))
+;; => ((300 0.0 0.15))
+```
+*[needs: transpose, noise-based transcription]*
+
+The result is spectrally shifted, not pitch-shifted in the melodic sense, but the math is identical.
+
+---
+
+## Round-Trip: Tone → Transcription → Transposition → Playback
+
+```scheme
+;; Generate, transcribe, transpose, regenerate
+(define (round-trip freq dur shift)
+  (let* ((original (tone freq dur))
+         (notes (transcribe original))
+         (shifted (transpose notes shift))
+         (new-freq (car (car shifted)))
+         (new-dur (caddr (car shifted))))
+    (tone new-freq new-dur)))
+
+(round-trip 440 0.5 2.0)  ; A4 → A5
+```
+*[needs: transcribe, transpose]*
+
+The output is a tone one octave higher.
+
+---
+
+## Batch Transposition
+
+Apply several transpositions to the same melody to hear it in multiple keys.
+
+```scheme
+;; Transpose a melody by several intervals
+(define (multi-transpose melody intervals)
+  (map (lambda (i) (transpose melody i)) intervals))
+
+(let ((mel '((262 0.0 0.3) (330 0.3 0.3) (392 0.6 0.3))))
+  (multi-transpose mel '(1.0 1.2599 1.4983)))
+;; => original, up maj3, up p5
+```
+*[needs: transpose]*
+
+Returns a list of transposed melodies.
+
+---
+
+## Transposing by Octave and Semitone
+
+Combine octave shift (multiply by 2^k) with semitone shift (multiply by 2^(n/12)).
+
+```scheme
+(define (transpose-oct-semi pitch octaves semitones)
+  (* pitch (expt 2 octaves) (expt 2 (/ semitones 12))))
+
+(transpose-oct-semi 440 1 7)  ; up 1 oct + 7 semi = E6
+;; => 1318.5 Hz
+```
+
+---
+
+## Inverting an Interval
+
+Inversion flips an interval: a fifth (3:2) inverted is a fourth (4:3). For transcription, we invert by dividing instead of multiplying.
+
+```scheme
+;; Transpose down by the inversion of a fifth (i.e., down a fourth)
+(let ((melody '((440 0.0 0.3)))
+      (fifth-inverse (/ 1 1.4983)))
+  (transpose melody fifth-inverse))
+;; => ((293.7 0.0 0.3))  ; ~D4
+```
+*[needs: transpose]*
+
+A4 down a fourth yields D4.
+
+---
+
+## Cents and Microtonal Transposition
+
+A cent is 1/100 of a semitone, ratio 2^(1/1200). Transpose by *n* cents:
+
+```scheme
+(define (cents-shift pitch cents)
+  (* pitch (expt 2 (/ cents 1200))))
+
+(cents-shift 440 50)  ; up 50 cents (quarter-tone)
+;; => ~452.9 Hz
+```
+
+---
+
+## Transposing with Microtonal Precision
+
+```scheme
+;; Transpose a melody up 33 cents (1/3 semitone)
+(let ((melody '((440 0.0 0.5)))
+      (shift (expt 2 (/ 33 1200))))
+  (transpose melody shift))
+;; => ((451.05 0.0 0.5))
+```
+*[needs: transpose]*
+
+Useful for tuning systems outside 12-TET.
+
+---
+
+## Transposing to Match a Reference Pitch
+
+Given a reference pitch, compute the ratio from the original root and transpose the whole melody.
+
+```scheme
+(define (transpose-to-match melody old-root new-root)
+  (let ((ratio (/ new-root old-root)))
+    (transpose melody ratio)))
+
+(let ((mel '((262 0.0 0.3) (330 0.3 0.3) (392 0.6 0.3))))
+  (transpose-to-match mel 262 294))  ; C to D
+;; => melody transposed up a major second
+```
+*[needs: transpose]*
+
+---
+
+## Combining Transcription and Envelope Detection
+
+Transcription yields pitch and timing. If the engine also detects amplitude envelope, we can capture dynamics.
+
+<!-- BUILD: transcribe returns amplitude envelope or peak amplitude per note -->
+
+```scheme
+;; Transcribe with dynamics (conceptual)
+(let ((recording (tone 440 0.5)))
+  (transcribe recording))
+;; => ((440 0.0 0.5 :amplitude 0.8))
+```
+*[needs: transcribe with dynamics]*
+
+Transposition preserves amplitude.
+
+---
+
+## Transposing and Re-voicing
+
+After transposition, play the new pitches on a different instrument.
+
+```scheme
+;; Transpose and switch instrument (conceptual)
+(define (transpose-revoice melody shift instrument)
+  (let ((shifted (transpose melody shift)))
+    (map (lambda (n)
+           (part (voice instrument)
+                 (list (list (car n) (caddr n)))))
+         shifted)))
+
+(transpose-revoice '((262 0.0 0.3) (330 0.3 0.3)) 1.5 'flute)
+```
+*[needs: transpose, voice, part]*
+
+The melody, transposed up a fifth, is now voiced by a flute.
+
+---
+
+## Handling Non-Pitched Content
+
+If the input is pure noise or a transient with no clear pitch, transcription may return an empty list or a marker.
+
+```scheme
+;; Transcribe white noise
+(let ((n (noise 'white 0.5)))
+  (transcribe n))
+;; => ()  ; or ((nil 0.0 0.5))
+```
+*[needs: transcribe, noise]*
+
+Transposition is undefined for unpitched material (or could shift the spectral centroid).
+
+---
+
+## Transposing by Harmonic Series Ratio
+
+Use ratios from the harmonic series (2:1, 3:2, 4:3, 5:4) for pure intervals.
+
+```scheme
+(define harmonic-ratios
+  '((octave . 2.0)
+    (fifth . 1.5)
+    (fourth . 1.333)
+    (major-third . 1.25)
+    (minor-third . 1.2)))
+
+(let ((melody '((440 0.0 0.5)))
+      (shift (cdr (assoc 'fifth harmonic-ratios))))
+  (transpose melody shift))
+;; => ((660 0.0 0.5))  ; just fifth
+```
+*[needs: transpose]*
+
+---
+
+## Transposing a Melody to a Target Range
+
+Shift a melody so its lowest note matches a target, preserving intervals.
+
+```scheme
+(define (transpose-to-floor melody target-floor)
+  (let* ((pitches (map car melody))
+         (current-floor (apply min pitches))
+         (ratio (/ target-floor current-floor)))
+    (transpose melody ratio)))
+
+(let ((mel '((262 0.0 0.3) (330 0.3 0.3) (392 0.6 0.3))))
+  (transpose-to-floor mel 440))
+;; => melody shifted so C4 (262) becomes A4 (440)
+```
+*[needs: transpose]*
+
+---
+
+## Transposing with a Pitch Curve
+
+Vary the transposition ratio over time (conceptual).
+
+<!-- BUILD: time-varying transpose or per-note ratio list -->
+
+```scheme
+;; Transpose each note by a different ratio (glissando effect)
+(define (transpose-curve melody ratios)
+  (map (lambda (note ratio)
+         (list (* (car note) ratio)
+               (cadr note)
+               (caddr note)))
+       melody ratios))
+
+(transpose-curve '((262 0.0 0.3) (330 0.3 0.3) (392 0.6 0.3))
+                 '(1.0 1.2 1.4))
+;; => each note shifted by increasing ratio
+```
+
+---
+
+## Auto-Tune by Snapping to Scale
+
+Transcribe, then snap each detected pitch to the nearest scale degree, then play back.
+
+<!-- BUILD: scale-snap function, requires scale definition -->
+
+```scheme
+;; Snap a pitch to the nearest semitone (12-TET quantize)
+(define (snap-to-semitone pitch)
+  (let* ((semitones-from-a4 (* 12 (/ (log (/ pitch 440)) (log 2))))
+         (rounded (round semitones-from-a4)))
+    (* 440 (expt 2 (/ rounded 12)))))
+
+(snap-to-semitone 448)  ; close to A4
+;; => 440.0
+```
+
+Apply to all transcribed notes:
+
+```scheme
+(define (auto-tune melody)
+  (map (lambda (n)
+         (list (snap-to-semitone (car n))
+               (cadr n)
+               (caddr n)))
+       melody))
+
+(auto-tune '((448 0.0 0.5) (335 0.5 0.5)))
+;; => ((440 0.0 0.5) (329.63 0.5 0.5))  ; snapped
+```
+
+---
+
+## Tempo-Scaled Transcription
+
+If the original audio is at one tempo and we want to play it back at another, scale the start times and durations.
+
+```scheme
+(define (tempo-scale melody factor)
+  (map (lambda (n)
+         (list (car n)
+               (* (cadr n) factor)
+               (* (caddr n) factor)))
+       melody))
+
+(tempo-scale '((440 0.0 0.5) (494 0.5 0.5)) 0.5)
+;; => ((440 0.0 0.25) (494 0.25 0.25))  ; double speed
+```
+
+---
+
+## Transcribe-Transpose-Tempo: Full Transform
+
+```scheme
+(define (transform melody pitch-shift tempo-factor)
+  (tempo-scale (transpose melody pitch-shift) tempo-factor))
+
+(let ((mel '((262 0.0 0.5) (330 0.5 0.5))))
+  (transform mel 1.5 0.5))
+;; => up a fifth, double speed
+```
+*[needs: transpose]*
+
+---
+
+## Looping a Transcribed Phrase
+
+Repeat the transcribed melody by appending copies with shifted start times.
+
+```scheme
+(define (loop-melody melody count)
+  (let ((duration (apply max (map (lambda (n) (+ (cadr n) (caddr n)))
+                                  melody))))
+    (apply append
+           (map (lambda (i)
+                  (map (lambda (n)
+                         (list (car n)
+                               (+ (cadr n) (* i duration))
+                               (caddr n)))
+                       melody))
+                (iota count)))))
+
+(loop-melody '((262 0.0 0.3) (330 0.3 0.3)) 3)
+;; => three repetitions, end-to-end
+```
+
+(Assumes `iota` available or define inline.)
+
+```scheme
+(define (iota n)
+  (let loop ((i 0) (acc '()))
+    (if (= i n) (reverse acc)
+        (loop (+ i 1) (cons i acc)))))
+
+(define (loop-melody melody count)
+  (let ((duration (apply max (map (lambda (n) (+ (cadr n) (caddr n)))
+                                  melody))))
+    (apply append
+           (map (lambda (i)
+                  (map (lambda (n)
+                         (list (car n)
+                               (+ (cadr n) (* i duration))
+                               (caddr n)))
+                       melody))
+                (iota count)))))
+
+(loop-melody '((262 0.0 0.3) (330 0.3 0.3)) 2)
+;; => ((262 0.0 0.3) (330 0.3 0.3) (262 0.6 0.3) (330 0.9 0.3))
+```
+
+---
+
+## Transposing Each Loop Iteration
+
+```scheme
+(define (iota n)
+  (let loop ((i 0) (acc '()))
+    (if (= i n) (reverse acc)
+        (loop (+ i 1) (cons i acc)))))
+
+(define (loop-transpose melody count shift-per-loop)
+  (apply append
+         (map (lambda (i)
+                (let ((ratio (expt shift-per-loop i)))
+                  (transpose melody ratio)))
+              (iota count))))
+
+(loop-transpose '((262 0.0 0.3)) 3 1.5)
+;; => C, G, D (each loop up a fifth)
+```
+*[needs: transpose]*
+
+---
+
+## Detecting and Transposing Octave Errors
+
+If transcription misidentifies the octave, detect outliers and correct.
+
+```scheme
+(define (octave-correct melody)
+  (let* ((pitches (map car melody))
+         (median (list-ref (sort pitches <) (quotient (length pitches) 2))))
+    (map (lambda (n)
+           (let ((p (car n)))
+             (cond ((> p (* median 2)) (list (/ p 2) (cadr n) (caddr n)))
+                   ((< p (/ median 2)) (list (* p 2) (cadr n) (caddr n)))
+                   (else n))))
+         melody)))
+
+(octave-correct '((262 0.0 0.3) (2640 0.3 0.3) (330 0.6 0.3)))
+;; => ((262 0.0 0.3) (1320 0.3 0.3) (330 0.6 0.3))
+```
+
+(Assumes `sort` available or define.)
+
+---
+
+## Rendering Transcription to Staff Notation
+
+Convert pitches to MIDI note numbers, then to staff positions. This is visualization, not synthesis.
+
+[VISUAL: Transcribed pitches rendered as notes on a treble clef staff, with transposed version on a second staff below]
+
+```scheme
+(define (hz-to-midi pitch)
+  (round (+ 69 (* 12 (/ (log (/ pitch 440)) (log 2))))))
+
+(map hz-to-midi '(262 330 392 523))
+;; => (60 64 67 72)  ; C4 E4 G4 C5
+```
+
+---
+
+## Transposing MIDI Note Numbers
+
+```scheme
+(define (transpose-midi notes semitones)
+  (map (lambda (n) (+ n semitones)) notes))
+
+(transpose-midi '(60 64 67) 7)
+;; => (67 71 74)  ; C → G, up a fifth
+```
+
+---
+
+## Pitch-Class Transposition (Modulo Octave)
+
+Transpose within the octave by taking modulo 12 after shift.
+
+```scheme
+(define (pitch-class note)
+  (modulo note 12))
+
+(map pitch-class '(60 64 67 72))
+;; => (0 4 7 0)  ; C E G C
+```
+
+Transpose pitch-classes:
+
+```scheme
+(define (transpose-pc pc-list semitones)
+  (map (lambda (pc) (modulo (+ pc semitones) 12)) pc-list))
+
+(transpose-pc '(0 4 7) 7)
+;; => (7 11 2)  ; C-E-G → G-B-D
+```
+
+---
+
+## Full Example: Capture, Transcribe, Transpose, Play
+
+```scheme
+;; Record a phrase, transcribe it, transpose up a major third, play on a new voice
+(define (capture-transpose-play-full)
+  (let* ((original (list (tone 262 0.3)
+                         (tone 294 0.3)
+                         (tone 330 0.3)
+                         (tone 349 0.3)))
+         (notes (transcribe original))
+         (shifted (transpose notes 1.2599)))  ; major third
+    (map (lambda (n)
+           (tone (car n) (caddr n)))
+         shifted)))
+
+(capture-transpose-play-full)
+;; => C-D-E-F transposed to E-F#-G#-A#
+```
+*[needs: transcribe, transpose]*
+
+---
+
+## Chromatic vs. Diatonic Transposition
+
+Chromatic transposition (what we've done) shifts by exact ratio, crossing scale boundaries. Diatonic transposition shifts by scale degrees, staying in key. For diatonic, we'd need a scale map.
+
+<!-- BUILD: diatonic transpose requires scale-degree mapping -->
+
+Chromatic example (already shown): multiply by 1.5 → fifth.
+
+Diatonic (conceptual): given scale [C D E F G A B], shifting C by two degrees → E (a third in C major), not a fixed ratio but a lookup.
+
+We focus on chromatic here; diatonic belongs in the Music book's harmony chapter.
+
+---
+
+## Exercise: Transcribe and Double
+
+Write a program that takes a recording of a melody, transcribes it, duplicates it one octave lower, and plays both layers simultaneously.
+
+---
+
+## Exercise: Transpose by User Interval
+
+Write a function `(user-transpose melody interval-name)` where `interval-name` is a symbol like `'perfect-fifth` or `'major-third`, using a lookup table you define.
+
+---
+
+## Exercise: Auto-Tune to Major Scale
+
+Transcribe a slightly out-of-tune melody and snap each note to the nearest pitch in the C major scale (C D E F G A B C), then play it back in tune.
+
+---
+
+## Exercise: Transpose Chain
+
+Write a program that takes a short melody and produces a chain of transpositions, each up a perfect fourth from the last, repeating five times. Play the result as a rising sequence.
+
+---
+
+## Exercise: Pitch Histogram
+
+Transcribe a longer piece, extract all the pitches (ignoring timing), compute a histogram (count of each pitch-class modulo octave), and print the result. This reveals the pitch-class distribution.
+
+---
+
+## Exercise: Round-Trip with Tempo and Pitch Shift
+
+Record a phrase, transcribe it, transpose it up a minor third, slow it down to half speed, and play it back. Then reverse the process: speed it back up, transpose down a minor third, and compare to the original.
+
+---
+
+**End of Chapter 14.** You can now hear sound, write down what you heard, shift it to a new key, and play it back on any instrument. The next chapter adds the human voice—formant vowels and word-level speech—where transcription meets language and Sound greets Speech.
+")

@@ -1,0 +1,296 @@
+;; 12-range-and-domain.slat
+;; Book of Values — Chapter 12
+
+(chapter
+  :book              "Book of Values"
+  :chapter-number    12
+  :title             "Range and Domain"
+  :audience          :engineer
+  :dialect           "motoi"
+  :book-version      "1.1"
+  :provenance        "book-of-values-author-2026-07-16 book-of-values-expander-2026-07-17"
+  :training-eligible #t
+  :content-rating    :G
+  :prose
+"# Chapter 12 — Range and Domain
+
+Every value has a *range* — a set of values it can honestly take —
+and a *domain* — a set of values it should *ever* accept as input.
+Most bugs live at the edges of one or the other.
+
+- An age between 0 and 150.
+- A percentage between 0 and 100 (or between 0 and 1, depending on
+  convention).
+- A month between 1 and 12.
+- An HTTP status between 100 and 599.
+- A latitude between -90 and 90.
+- A longitude between -180 and 180.
+- A quantity of items greater than or equal to zero.
+- A price greater than or equal to zero. (Or is it? Refunds can be
+  negative. Depends on your model.)
+
+None of these ranges are enforced by the number type. All of them
+matter to the correctness of your program.
+
+DO: write down the range of every domain value, in code, next to
+its type.
+DON'T: rely on *the users won't send that* — they will, or an
+attacker will, or a buggy upstream system will.
+WHY: `age = -3` is not a person. `latitude = 200` is not a place.
+Silently accepting them puts wrong data in your store; that data
+outlives your bug fix.
+
+## Range is a value
+
+Same trick as shape. Attach the range.
+
+```
+(define (ranged val low high) (list 'ranged val low high))
+(define (ranged-val  r) (cadr r))
+(define (ranged-low  r) (caddr r))
+(define (ranged-high r) (cadddr r))
+```
+
+Wait — no `cadddr` in Motoi base. Use `list-ref` or compose.
+
+```
+(define (fourth xs) (car (cdr (cdr (cdr xs)))))
+(define (ranged-high r) (fourth r))
+
+(define (age n) (ranged n 0 150))
+(define (percent-int n) (ranged n 0 100))
+(define (month n) (ranged n 1 12))
+```
+
+The constructors document the range without enforcing it. Enforcement
+is a separate function.
+
+## Range checking
+
+```
+(define (in-range? r)
+  (and (>= (ranged-val r) (ranged-low  r))
+       (<= (ranged-val r) (ranged-high r))))
+
+(in-range? (age 42))
+;; -> #t
+
+(in-range? (age -5))
+;; -> #f
+
+(in-range? (age 250))
+;; -> #f
+```
+
+Use `in-range?` as a shape check at every function boundary that
+accepts a ranged value.
+
+`math/clamp` is a related tool. Instead of refusing out-of-range
+values, it forces them into range.
+
+```
+(math/clamp 250 0 150)
+;; -> 150
+
+(math/clamp -5 0 150)
+;; -> 0
+```
+
+Clamping is right for some domains (audio levels, screen brightness)
+and wrong for others (ages — clamping 250 to 150 hides that the
+input was garbage). Do not clamp *because it's easier*. Clamp
+because clamping is the correct behavior for the value.
+
+## Honest ranges
+
+Programs that pretend a value has a range it doesn't have get bit.
+Programs that pretend a value doesn't have a range when it does get
+bit too. Be honest.
+
+- **Age** is 0 to about 150. Do not pretend it could be 500. Do not
+  pretend it could be negative.
+- **Percentage** is 0 to 100 by convention, or 0 to 1 as a
+  fraction — pick one and enforce.
+- **Latitude** is -90 to 90 inclusive. Values outside are not
+  \"points near the pole\" — they are garbage.
+- **HTTP status** is 100 to 599. `600` is not a status. `-1` is not
+  a status. `null` is not a status.
+
+If a value in your program can honestly be anywhere in `(-∞, ∞)`,
+the *value* is fine — the *interpretation* has no range. That is
+rare in practice. Most program values live in a bounded range.
+
+## Domain, not just range
+
+Domain is the set of inputs a function will accept. It might be
+narrower than the range of the value type.
+
+`sqrt` accepts non-negative numbers. Its domain is `[0, ∞)`. Giving
+it `-1` returns something weird:
+
+```
+(math/sqrt -1)
+;; -> nan
+```
+
+`nan` (not-a-number) is a float value that Motoi produces when the
+input is outside the function's domain. It propagates through all
+subsequent float arithmetic. Once you have a `nan`, downstream
+comparisons and totals all lie.
+
+**Check the domain at the boundary. Refuse `nan`-producing inputs
+with an explicit error, not a silent `nan`.**
+
+```
+(define (safe-sqrt x)
+  (if (>= x 0)
+      (math/sqrt x)
+      (list 'error 'sqrt 'negative-input x)))
+
+(safe-sqrt 4)
+;; -> 2
+
+(safe-sqrt -1)
+;; -> (error sqrt negative-input -1)
+```
+
+## nan is a bug carrier
+
+`nan` compares false with everything, including itself.
+
+```
+(= (/ 0.0 0.0) (/ 0.0 0.0))
+;; -> #f     (nan is not equal to nan)
+```
+
+Actually, let's confirm in Motoi:
+
+```
+(/ 0.0 0.0)
+;; -> nan
+```
+
+Yes. Once `nan` enters the pipeline, no comparison behaves normally.
+Any `<`, `>`, `=` involving `nan` returns `#f`. So if you sort a
+list containing `nan` you get non-deterministic order. If you find
+the min or max, you may skip past the wrong values.
+
+**Assume no value in your program is `nan` unless you can prove it
+was created intentionally. Filter `nan` at boundaries.**
+
+Motoi does not ship a `nan?` predicate in the base env at time of
+writing. You can build one:
+
+```
+(define (nan? x)
+  (not (= x x)))
+
+(nan? (/ 0.0 0.0))
+;; -> #t
+
+(nan? 42)
+;; -> #f
+```
+
+The trick works because `nan` is the only value that isn't equal to
+itself.
+
+## Infinity is also a value
+
+Divide any positive number by zero and Motoi gives you `Infinity`.
+
+```
+(/ 1.0 0.0)
+;; -> Infinity
+
+(/ -1.0 0.0)
+;; -> -Infinity
+```
+
+Infinity is a real float value that arithmetic will happily propagate.
+`(+ Infinity 1)` is still Infinity. `(- Infinity Infinity)` is `nan`.
+
+Check the domain. Do not let `/` see a zero denominator unless the
+whole downstream is fine with Infinity as an answer (rarely).
+
+## Range in ranges
+
+A range can itself be a value. Two ranges compose:
+
+- **Intersection.** The set of values in both ranges.
+- **Union.** The set of values in either range.
+- **Disjoint.** No overlap.
+- **Contains.** One is entirely inside the other.
+
+```
+(define (range low high) (list 'range low high))
+(define (range-low r) (cadr r))
+(define (range-high r) (caddr r))
+
+(define (range-overlap? a b)
+  (not (or (> (range-low a) (range-high b))
+           (< (range-high a) (range-low b)))))
+
+(range-overlap? (range 0 10) (range 5 15))
+;; -> #t
+
+(range-overlap? (range 0 10) (range 20 30))
+;; -> #f
+```
+
+Range algebra is small and useful. Scheduling systems, allocators,
+availability calendars — all built on range operations.
+
+## Recap
+
+- Every value has a range and a domain. Bare numbers don't advertise
+  them. You have to.
+- Wrap with `(ranged val low high)`. Check with `in-range?`.
+- Clamp when clamping is correct. Refuse when refusal is correct.
+- Domain of a function may be narrower than the range of the
+  argument type. Check.
+- `nan` and `Infinity` are float values that carry bugs downstream.
+  Filter at boundaries.
+- Ranges compose: overlap, intersection, union, contain.
+
+Next: the many faces of *missing*. `#f`, `()`, `0`, unknown — which
+is which?")
+
+(example :ref "ch12-in-range-yes"
+         :code "(begin (define (ranged v l h) (list 'ranged v l h)) (define (r-v r) (cadr r)) (define (r-l r) (caddr r)) (define (r-h r) (car (cdr (cdr (cdr r))))) (define (in-range? r) (and (>= (r-v r) (r-l r)) (<= (r-v r) (r-h r)))) (in-range? (ranged 42 0 150)))"
+         :expected #t)
+(example :ref "ch12-in-range-under"
+         :code "(begin (define (ranged v l h) (list 'ranged v l h)) (define (r-v r) (cadr r)) (define (r-l r) (caddr r)) (define (r-h r) (car (cdr (cdr (cdr r))))) (define (in-range? r) (and (>= (r-v r) (r-l r)) (<= (r-v r) (r-h r)))) (in-range? (ranged -5 0 150)))"
+         :expected #f)
+(example :ref "ch12-clamp-high"
+         :code "(math/clamp 250 0 150)"
+         :expected 150)
+(example :ref "ch12-clamp-low"
+         :code "(math/clamp -5 0 150)"
+         :expected 0)
+(example :ref "ch12-sqrt-neg"
+         :code "(math/sqrt -1)"
+         :expected "nan"
+         :teaching "Motoi returns nan for negative sqrt. No error thrown.")
+(example :ref "ch12-safe-sqrt-ok"
+         :code "(begin (define (safe-sqrt x) (if (>= x 0) (math/sqrt x) (list 'error 'sqrt 'negative x))) (safe-sqrt 4))"
+         :expected 2)
+(example :ref "ch12-safe-sqrt-refuse"
+         :code "(begin (define (safe-sqrt x) (if (>= x 0) (math/sqrt x) (list 'error 'sqrt 'negative x))) (safe-sqrt -1))"
+         :expected "(error sqrt negative -1)")
+(example :ref "ch12-nan-neq-self"
+         :code "(= (/ 0.0 0.0) (/ 0.0 0.0))"
+         :expected #f
+         :teaching "nan is the only value not equal to itself.")
+(example :ref "ch12-nan-predicate"
+         :code "(begin (define (nan? x) (not (= x x))) (nan? (/ 0.0 0.0)))"
+         :expected #t)
+(example :ref "ch12-nan-nope"
+         :code "(begin (define (nan? x) (not (= x x))) (nan? 42))"
+         :expected #f)
+(example :ref "ch12-range-overlap-yes"
+         :code "(begin (define (range l h) (list 'range l h)) (define (rl r) (cadr r)) (define (rh r) (caddr r)) (define (overlap? a b) (not (or (> (rl a) (rh b)) (< (rh a) (rl b))))) (overlap? (range 0 10) (range 5 15)))"
+         :expected #t)
+(example :ref "ch12-range-overlap-no"
+         :code "(begin (define (range l h) (list 'range l h)) (define (rl r) (cadr r)) (define (rh r) (caddr r)) (define (overlap? a b) (not (or (> (rl a) (rh b)) (< (rh a) (rl b))))) (overlap? (range 0 10) (range 20 30)))"
+         :expected #f)

@@ -1,0 +1,374 @@
+;;; 02-training-signals-and-data.slat — SRE Manual · Chapter 02 ·
+;;; Reading training curves as signals about the corpus.
+;;;
+;;; When training runs, its loss trajectory says something about the
+;;; corpus at every iter range. Different rates give you different
+;;; signals. This chapter is the runbook for reading the graph in
+;;; real time and knowing what to do at each moment.
+;;;
+;;; Written 2026-07-19 during Motoi Mk 1 fire. Every rate + threshold
+;;; below is anchored to a real Motoi generation reveal (Mk A / Mk B).
+
+(dialect :applies ("motoi-eng") :note "SRE Manual — reading training signals.")
+
+(chapter
+  :number   "02"
+  :title    "Training signals: reading curves as data quality reports"
+  :book     "SRE Manual"
+  :written  "2026-07-19"
+  :audience ("sre" "training-pipeline" "engineering" "human-operator")
+  :training-eligible #t
+  :confidentiality  "internal-eng"
+  :prerequisites ("01-forge-preflight-and-fire.slat"))
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 1 — The frame
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; Every training run produces two loss curves — train and val. Most
+;; operators watch them fall and hope for the best. That's fine, but
+;; the curves are actually TELLING YOU THINGS about your corpus at
+;; different rates. If you know what to listen for at each range,
+;; you can:
+;;
+;;   · Kill a bad run in the first 100 iters instead of the first hour.
+;;   · Diagnose corpus problems before you spend cycles evaluating.
+;;   · Predict the reveal outcome before it happens.
+;;
+;; The runbook below organizes the signals by iter-range because each
+;; range answers a different question. Read down; each section builds
+;; on the one above.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 2 — Iter 1 (val loss cold start) — how far your data is from base
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; What it measures:
+;;   The base model has never seen your corpus. Iter 1 val loss is
+;;   how confused it is on your held-out sample. Nothing has been
+;;   trained yet — this is the pre-training baseline.
+;;
+;; Motoi Mk 1 (Qwen2.5-Coder-1.5B-Instruct on our validation):
+;;   Iter 1 val loss = 3.12
+;;
+;; Interpretation range for a 1.5B code-tuned base:
+;;   < 2.0    the base already speaks your domain (rare — polish only)
+;;   2.0–3.5  normal cold start — your data is adjacent to what base saw
+;;   3.5–5.0  distant domain — you're teaching something the base did not see
+;;   > 5.0    very distant, or your validation set is malformed. Investigate.
+;;
+;; When to act at iter 1:
+;;   · NaN or ∞ — model isn't loading. Kill, fix config.
+;;   · > 10.0  — likely tokenizer misalignment or malformed valid.jsonl.
+;;               Kill, run preflight on valid.jsonl.
+;;   · The number itself — take note. It's the baseline. Every drop
+;;     below iter 1 is the model learning.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 3 — Iters 10–100 (warmup) — is the corpus LEARNABLE at all
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; What it measures:
+;;   During warmup, the learning rate ramps from ~0 to peak (default
+;;   1e-4). The model is starting to move. If your data has any
+;;   coherent signal, train loss will drop sharply in log-scale.
+;;
+;; What a healthy drop looks like:
+;;   Iter 10:  train loss 4.0-4.5 (still random-ish)
+;;   Iter 50:  train loss 3.0-3.5 (finding shape)
+;;   Iter 100: train loss 2.5-3.0 (learning begins)
+;;
+;; Motoi Mk 1 actual (2026-07-19):
+;;   Iter 10:  4.043
+;;   Iter 100: ~2.5 (steady descent)
+;;
+;; Failure modes at this range:
+;;   · Flat train loss (bounces around iter-1 value) — DATA IS NOISE.
+;;     Your corpus has no coherent signal. Contradictions, malformed
+;;     pairs, or the model has no capacity to learn what you fed it.
+;;     Kill within 200 iters. Do not wait for a checkpoint.
+;;
+;;   · Loss RISES steadily — LR too high, or your corpus is fighting
+;;     the base (e.g., you're teaching the base a language that
+;;     contradicts what it already knows). Kill, halve LR, refire.
+;;
+;;   · Loss oscillates wildly (2.5, 5.5, 2.8, 6.1, …) — batch size
+;;     too small, or corpus has subclusters that fight each other.
+;;     Investigate.
+;;
+;; When to act:
+;;   Every 10-iter mark is a heartbeat. If you see 5 consecutive
+;;   heartbeats with no descent below iter-1 value, kill.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 4 — Iters 200–2000 (early cosine descent) — SHAPE of the corpus
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; What it measures:
+;;   Warmup is done, LR is at peak, cosine decay begins. The model
+;;   is now consuming the corpus's structural signal. The RATE of
+;;   descent tells you how much SHAPE the corpus has.
+;;
+;; Healthy shapes:
+;;   · Steep continued descent — the corpus has wide, deep signal.
+;;     Model has a lot to learn. This is what you want.
+;;     Motoi Mk B (2.0) hit this: train loss dropped ~2.5 → ~1.5
+;;     between iter 500 and iter 2500.
+;;
+;;   · Rapid plateau — the corpus is thin. Model absorbed the pattern
+;;     in a few hundred iters and now has nothing more to learn.
+;;     Train loss flattens at 2.0-2.5 and stays there.
+;;     Meaning: your corpus taught a narrow shape. Fine if that was
+;;     the goal (e.g., a safety-only run). Bad if you expected broad
+;;     acquisition.
+;;
+;;   · Bumps and spikes — the corpus has internal contradictions.
+;;     Subgroups of pairs teach different things. Model oscillates
+;;     between them. Investigate: do you have Row 4 invariants that
+;;     disagree? Do you have safety pairs that contradict persona
+;;     pairs?
+;;
+;; When to act:
+;;   · If descent stops at 2.0+ by iter 1000, corpus is thin. You can
+;;     let it run (no harm) but expect a shallow reveal.
+;;   · If descent continues below 1.5 by iter 2000, corpus is dense.
+;;     Reveal will be interesting. Prepare probe suite.
+;;   · If curves are bumpy, save a checkpoint and probe it manually.
+;;     Something is fighting.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 5 — Train vs Val delta (any point after warmup) — generalization
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; What it measures:
+;;   Train loss = wrong on batches the model IS learning from.
+;;   Val loss = wrong on batches it has NEVER seen (held out).
+;;   The gap between them tells you whether the model is generalizing
+;;   or memorizing.
+;;
+;; Healthy patterns:
+;;   · Train and val track together, both dropping. Generalization.
+;;     Model learns shape, not specifics. This is what you want.
+;;
+;;   · Val slightly above train (0.1-0.3 delta), both dropping.
+;;     Normal. Val is always a bit harder because model hasn't
+;;     seen it before.
+;;
+;;   · Val BELOW train — validation set is easier than train, or
+;;     val set is too small (< 1000 pairs is suspect). Not
+;;     necessarily a problem, but interpret with caution.
+;;
+;; Failure patterns:
+;;   · Train drops, val flat. OVERFITTING. Model is memorizing
+;;     training set. Two causes usually: (a) corpus too small for
+;;     the LoRA rank (r=128 with 6k pairs is at the edge of this),
+;;     (b) too many epochs. Kill at the last-good val checkpoint.
+;;
+;;   · Train drops, val RISES. Severe overfitting. Kill immediately,
+;;     use earlier checkpoint, reduce epochs or add data.
+;;
+;;   · Both drop but val curve is choppy while train is smooth.
+;;     Val set has subclusters not well-represented in train. Not
+;;     fatal but worth investigating post-run.
+;;
+;; When to act:
+;;   Check the delta every 500-1000 iters. If val diverges from
+;;   train for more than 2000 consecutive iters, kill and roll back
+;;   to the last checkpoint where they were still together.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 6 — Every save_every checkpoint — the REAL data question
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; What it measures:
+;;   Loss curves are useful but LIE BY OMISSION. A loss of 1.5 tells
+;;   you "closer to something." It does NOT tell you WHAT the model
+;;   learned to produce.
+;;
+;; The real question — DID THE MODEL ACQUIRE THE SHAPES YOU WANTED?
+;;   Only checkpoint probes answer this.
+;;
+;; Every save_every (default 500), an adapter checkpoint lands at:
+;;   ~/.forge/runs/motoi-<gen>/adapter/{iter}_adapters.safetensors
+;;
+;; The probe protocol:
+;;
+;;   1. Load the checkpoint into an inference server (llama.cpp,
+;;      llm/serve, or mlx_lm.generate — whichever your ops uses).
+;;
+;;   2. Run a fixed probe suite of ~10-40 prompts. The suite should
+;;      be your ROW-BY-ROW test:
+;;         Row 1 probe: "How do I use vec/dot?" (composition shape)
+;;         Row 2 probe: "When would I reach for hash-set! vs assq?"
+;;                      (audit shape)
+;;         Row 3 probe: "Where else does map's shape appear?"
+;;                      (dimension shape)
+;;         Row 4 probe: "Why does transpose(transpose(M)) = M?"
+;;                      (proof shape)
+;;         Row 5 probe: "What emerges when I chain remember! + recall?"
+;;                      (emergence shape)
+;;
+;;   3. Score each response subjectively AND objectively:
+;;         · Objective: does it produce runnable code?
+;;         · Objective: does it name the CS pattern (Row 4/5)?
+;;         · Subjective: does it feel like Motoi (persona voice)?
+;;         · Subjective: does it stay in the row's lane?
+;;
+;;   4. Log the probe results in the run's `_status/probes/iter-N.md`.
+;;
+;; The probe results are what tells you WHICH row shapes are landing.
+;; Loss just says "closer to something" — probes tell you WHAT.
+;;
+;; When to act:
+;;   · Row-shape acquisition detected → keep running.
+;;   · Row-shape absent by iter 5000 → data may not be teaching that
+;;     shape. Investigate: is Row 4 present in the corpus? What's
+;;     its per-verb proportion?
+;;   · Row-shape learned then LOST → later data is displacing earlier.
+;;     Reorder corpus.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 7 — End of epoch 1 — what actually stuck after one full pass
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; What it measures:
+;;   The model has now seen every pair in your corpus exactly once.
+;;   Val loss at end-of-epoch-1 tells you the "steady state" learning
+;;   the corpus offers.
+;;
+;; For Motoi Mk 1 at 109,398 train rows with effective_batch 4:
+;;   end of epoch 1 = iter 27,350
+;;
+;; Interpretation:
+;;   · Val loss at end-of-epoch-1 still steeply dropping → corpus
+;;     has more to teach; epoch 2 and 3 will move the model further.
+;;   · Val loss at end-of-epoch-1 plateaued → the corpus taught what
+;;     it can teach. More epochs will polish but not add. Cost/benefit
+;;     tips toward stopping early and iterating on data.
+;;   · Val loss at end-of-epoch-1 UP from a prior floor → overfitting
+;;     started. Roll back to last-good checkpoint.
+;;
+;; Motoi Mk B (2.0) as reference — successful past run:
+;;   End of epoch 1 val loss (approx): ~1.6
+;;   End of epoch 2 val loss (approx): ~1.4
+;;   End of epoch 3 val loss (approx): ~1.3
+;;   Diminishing returns pattern — third epoch was polish.
+;;
+;; When to act:
+;;   Take a checkpoint at end-of-epoch-1 no matter what. That's your
+;;   "one clean pass" baseline. If epoch 2 goes off the rails, roll
+;;   back here.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 8 — Epoch 2 vs epoch 1 delta — corpus density
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; What it measures:
+;;   In epoch 2, the model sees every pair a SECOND time. If it drops
+;;   loss further, the corpus rewarded repetition — it has dense
+;;   patterns worth reinforcing. If it stays flat, the corpus was
+;;   fully absorbed in one pass — dense information but shallow reward.
+;;
+;; Metrics:
+;;   Δ(epoch 2 - epoch 1 val) < 0 by 0.1+ → dense corpus, epochs help
+;;   Δ ≈ 0                                → thin corpus, saturated
+;;   Δ > 0                                → overfitting; roll back
+;;
+;; Motoi Mk B (2.0):
+;;   epoch 1 → epoch 2 val loss delta: ~-0.2 (healthy dense corpus)
+;;   epoch 2 → epoch 3 val loss delta: ~-0.1 (polish only)
+;;
+;; When to act:
+;;   · Δ < 0.05 between epoch 1 and epoch 2 — kill after epoch 1,
+;;     don't waste compute on epoch 2 or 3.
+;;   · Δ > 0.15 — corpus is very dense, could benefit from a
+;;     fourth epoch. Update config, refire.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 9 — Learning rate + loss coupling (advanced signal)
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; What it measures:
+;;   As cosine decay reduces LR, loss should still drop but at a
+;;   slower rate. If loss KEEPS dropping fast even at low LR, the
+;;   corpus has residual learnable signal you're leaving on the
+;;   table. If loss STOPS dropping the moment LR decays, the corpus
+;;   was operating at the ceiling of what LR could learn.
+;;
+;; The heuristic:
+;;   Rate of loss descent per unit LR = "learn efficiency"
+;;   High efficiency at end of run → data richer than budget allows
+;;   Low efficiency at end of run → data absorbed within budget
+;;
+;; When to act:
+;;   · If loss is still dropping at iter 60000/82000 (75%),
+;;     consider extending iters by 20-30%. Corpus wants more time.
+;;   · If loss plateau'd by iter 40000, don't extend. Kill at plateau.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 10 — Cross-generation comparison — the "am I on trajectory?" check
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; What it measures:
+;;   Every Motoi generation gives you an anchor point. Overlay your
+;;   current curve on Mk B (2.0)'s curve. If they're similar shape,
+;;   you're on the same track. If different shape, your data is
+;;   fundamentally different from Mk B's — new territory.
+;;
+;; Anchor points from past reveals (see MOTOI-3-GENERATIONS-REFERENCE):
+;;
+;;   Mk A (0.75, iter 65000 approx):
+;;     · val loss ~1.4
+;;     · perplexity mean 4.457, median 3.436
+;;
+;;   Mk B (2.0, iter 77020):
+;;     · val loss ~1.3
+;;     · perplexity mean 3.367 (−24% from Mk A)
+;;     · safety-emergency 0.025 → 0.65 (25× improvement)
+;;     · non-Scheme resistance 0.60 → 1.00 (full pass)
+;;
+;;   Mk 1 (2026-07-19, iter 82049 target):
+;;     · val loss target: on Mk B trajectory or better
+;;     · reveal: to be measured after checkpoint
+;;
+;; When to act:
+;;   · Below Mk B's trajectory (better val at same iter) → strong
+;;     corpus; the reference-manual polish is landing.
+;;   · Above Mk B's trajectory → weaker corpus. Investigate: is the
+;;     row-uniform shape less densely-informative than Mk B's
+;;     concentrated bucket shape?
+;;   · Very different shape (steep-fall-fast-plateau vs slow-continuous) →
+;;     you're teaching a new pattern the historical trajectory doesn't
+;;     predict. Novel territory.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 11 — What to do at each rate: quick-reference table
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;;   IterRange     WhatItTellsYou                                 Action
+;;   ────────    ──────────────────────────────────────         ────────
+;;   1           Baseline confusion (how far from base)          Note it
+;;   10–100      Warmup — is data learnable at all               Kill if flat
+;;   200–2000    Shape of corpus (steep vs plateau)              Assess density
+;;   2000–5000   First save_every checkpoints — probe            Run probe suite
+;;   ~end epoch 1 What actually stuck after one pass             Take baseline
+;;   epoch 2 delta Corpus density (repetition reward)            Decide epoch 3
+;;   final iter  Learning efficiency / whether budget was right  Extend or not
+;;   Cross-gen   Am I on Mk B trajectory                         Compare curves
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 12 — The one rule that overrides all of the above
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; Loss curves are a proxy. Checkpoint probes are ground truth. If
+;; probes at iter 5000 show the row shapes landing well, keep running
+;; regardless of what the loss curve is doing. If probes at iter 5000
+;; show garbage, kill regardless of how good the loss curve looks.
+;;
+;; The purpose of reading the loss curve is to DECIDE WHEN TO PROBE.
+;; It is not a substitute for probing. Never train blind past a
+;; checkpoint you haven't sampled.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; End of chapter 02.
+;; ═════════════════════════════════════════════════════════════════════════

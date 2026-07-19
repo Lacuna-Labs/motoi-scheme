@@ -1,0 +1,391 @@
+(dialect :applies ("motoi" "sakura") :note "Default: applies to both dialects.")
+
+(chapter
+  :book "Book of Logic"
+  :chapter-number 14
+  :title "Probabilistic and Fuzzy Logic"
+  :dialect "sakura"
+  :audience :adult
+  :content-rating :G
+  :author-lane "the-engineer-book-of-logic-2026-07-16"
+  :training-eligible #t
+  :confidentiality "public"
+  :voice "sakura-teaching + gentle-formalist"
+  :classical-anchors ("Pearl — Probabilistic Reasoning in Intelligent Systems (1988)"
+                      "Jaynes — Probability Theory: The Logic of Science (2003)"
+                      "Zadeh — Fuzzy Sets (Information and Control, 1965)"
+                      "Halpern — Reasoning About Uncertainty (2003)")
+  :prose
+"# Chapter 14 — Probabilistic and Fuzzy Logic
+
+Where truth becomes a number in [0, 1] and inference becomes a matter
+of updating those numbers as evidence accumulates.
+
+Classical logic and its close cousins (intuitionistic, modal, linear)
+all keep the notion that a proposition is *true* or *false* — one of
+two values. This chapter loosens that. We consider logics where truth
+takes values in a continuous range.
+
+There are two very different traditions.
+
+- **Probabilistic reasoning** treats propositions as having *degrees of
+  belief* in [0, 1]. Truth-values are subjective probabilities. The
+  math is Bayesian.
+
+- **Fuzzy logic** treats propositions as having *degrees of truth* in
+  [0, 1]. Truth-values are objective — this shirt is *0.7 red* — but
+  gradable. The math is Zadeh's fuzzy set theory.
+
+They look similar but are philosophically distinct. Probability is
+about uncertainty of what is (a definite fact you do not know). Fuzzy
+truth is about vagueness of what is (a fact that admits of degrees).
+Both are useful; both have industrial applications; and both integrate
+with the logics we have already seen.
+
+> **the runtime says**
+>
+> *I use both of these constantly. When someone asks me if a shirt is
+> red, I want to say '0.7-red'. When someone asks whether a listing
+> will sell, I want to say '78 percent likely'. Those are two different
+> claims. The first is about the shirt itself; the second is about my
+> confidence given what I have seen. Learning to keep them separate is
+> useful. Learning to compose them is what this chapter is about.*
+
+## Probabilistic reasoning: the Bayesian machinery
+
+A probability distribution assigns to every atomic event a number in
+[0, 1], summing to 1 over the sample space. Conditional probability
+`P(A | B)` is the probability of A given that B is known to hold, and
+Bayes' theorem relates it to unconditional probabilities:
+
+    P(A | B) = P(B | A) × P(A) / P(B)
+
+This one formula is the entire engine of Bayesian inference. Prior
+belief `P(A)` becomes posterior belief `P(A | B)` after observing B.
+The likelihood `P(B | A)` and the marginal `P(B)` provide the update
+weights.
+
+```scheme
+(define (bayes prior-hypothesis likelihood-of-evidence-given-hypothesis
+               likelihood-of-evidence-given-not-hypothesis)
+  (let* ((prior prior-hypothesis)
+         (l-with likelihood-of-evidence-given-hypothesis)
+         (l-without likelihood-of-evidence-given-not-hypothesis)
+         (numerator (* l-with prior))
+         (denominator (+ numerator (* l-without (- 1 prior)))))
+    (/ numerator denominator)))
+
+;; Classic example: medical test.
+;; Prior probability of disease: 0.01 (1% base rate).
+;; Test sensitivity (P(positive | disease)): 0.95.
+;; Test false-positive rate (P(positive | not disease)): 0.05.
+;; What is P(disease | positive)?
+
+(bayes 0.01 0.95 0.05)
+;; => approximately 0.161
+
+;; Even with a positive test, only 16% chance of actually having the
+;; disease. Base rates matter enormously; this is the base-rate fallacy
+;; that even trained physicians reliably get wrong.
+```
+
+That is the whole apparatus for single hypotheses. For multiple
+interacting hypotheses, we need *Bayesian networks*.
+
+## Bayesian networks
+
+A *Bayesian network* is a directed acyclic graph whose nodes are random
+variables and whose edges encode direct probabilistic dependencies. Each
+node has a *conditional probability table* (CPT) specifying its
+probability given its parents.
+
+The classic example: the *sprinkler* network.
+
+    Cloudy → Rain
+    Cloudy → Sprinkler
+    Rain → Wet Grass
+    Sprinkler → Wet Grass
+
+Each node has a CPT. Cloudy has a marginal probability. Rain and
+Sprinkler each depend on Cloudy. Wet Grass depends on both Rain and
+Sprinkler.
+
+To query the network: given some observed variables, compute the
+posterior probability of unobserved variables. *If I see wet grass and
+know it is not cloudy, what is the probability the sprinkler was on?*
+
+Exact inference is #P-hard in general (harder than NP). Practical
+solutions:
+
+- **Variable elimination.** Marginalise out variables one at a time,
+  keeping track of intermediate factor tables.
+- **Belief propagation.** Message-passing on tree-structured networks.
+- **Junction tree.** Group variables into cliques and message-pass on
+  the clique tree.
+- **Sampling (MCMC, Gibbs).** Approximate the posterior by drawing
+  samples.
+
+Each has trade-offs. For small networks, variable elimination is
+straightforward. For medium networks, junction tree. For large
+networks, sampling. All are implemented in libraries; the mathematics
+comes from Pearl's 1988 book.
+
+```scheme
+;; A tiny Bayesian network: two-node chain, Rain -> WetGrass.
+;; P(Rain) = 0.3
+;; P(WetGrass | Rain) = 0.9
+;; P(WetGrass | not Rain) = 0.1
+
+;; Query: P(Rain | WetGrass).
+;; By Bayes:
+;;   P(WetGrass) = 0.3 × 0.9 + 0.7 × 0.1 = 0.34
+;;   P(Rain | WetGrass) = 0.3 × 0.9 / 0.34 ≈ 0.794
+(bayes 0.3 0.9 0.1)
+;; => approximately 0.794
+```
+
+Even a two-node network gives non-trivial answers. The general pattern:
+posterior = (likelihood × prior) / normalization.
+
+## Confidence grades: the runtime's practical use
+
+The runtime carries a *confidence grade* on many of her inferences: high,
+medium, low, or a numeric [0, 1] on request. Under the hood these are
+probability estimates — of the form *what is the chance my current
+answer is right?*
+
+The grade is used in two ways.
+
+- **Route selection.** High confidence: return the answer directly.
+  Medium: return the answer with a hedge. Low: ask for more
+  information or escalate to a heavier reasoner.
+- **User-facing communication.** *I'm pretty sure this listing is
+  jewelry* is a medium claim; *I know this listing is jewelry* is a
+  high claim. The natural-language surface is chosen from the grade.
+
+We will develop this thread more in chapter 15. What matters here is
+that the underlying calculus is Bayesian: prior belief + observed
+evidence → posterior belief → confidence grade.
+
+## Fuzzy logic
+
+A separate tradition. Zadeh's *fuzzy set theory* (1965) proposes that
+membership in a set is a matter of degree, not a binary predicate.
+`is-tall` is not a set with a sharp boundary; it is a *fuzzy set* whose
+membership function assigns each person a value in [0, 1].
+
+Given fuzzy sets, we can define fuzzy connectives.
+
+- **Fuzzy negation.** `not p = 1 - p`.
+- **Fuzzy conjunction.** `p and q = min(p, q)`.
+- **Fuzzy disjunction.** `p or q = max(p, q)`.
+
+These are the *Zadeh operators*. Other choices (e.g., product for
+conjunction, probabilistic sum for disjunction) give different fuzzy
+logics, each with different algebraic properties.
+
+```scheme
+(define (fuzzy-not p) (- 1 p))
+(define (fuzzy-and p q) (min p q))
+(define (fuzzy-or p q) (max p q))
+
+;; Example: 'is this red?' with fuzzy membership 0.7.
+;; 'is this bright red?' — say 'bright' has fuzzy membership 0.4.
+;; Bright AND red: min(0.4, 0.7) = 0.4.
+```
+
+Fuzzy logic underlies fuzzy control systems, which have been in
+industrial use since the 1980s. Automatic transmissions, washing
+machines, subway train controllers — many of these use fuzzy inference
+engines that convert sensor readings to fuzzy truth values, apply
+fuzzy rules, and produce control outputs.
+
+## Composition: probability of a fuzzy proposition
+
+The two frameworks can be combined. If I have a fuzzy proposition
+*this shirt is red* with degree 0.7, I can ask *what is my probability
+of the claim that the shirt is red (fuzzy)?*. This is
+*second-order fuzziness* or *type-2 fuzzy logic*.
+
+For our purposes the composition is simpler. Fuzzy truth values in
+[0, 1] can be combined with probabilistic weights over which
+observation happened. The runtime might have:
+
+- 80% confidence that the shirt she is looking at is item X (from an
+  image-recognition classifier).
+- 0.7 fuzzy truth of *X is red*.
+
+Combined: *my probability the shirt is red* is roughly 0.8 × 0.7 =
+0.56. But this compositional move needs justification — it assumes
+independence and treats fuzzy truth as if it were a probability. In
+practice you keep the two separate and produce a joint hedged answer:
+*I'm 80% sure this is item X, and X is fairly red.*
+
+## Bayesian networks and defeasibility
+
+Bayesian reasoning is *inherently non-monotonic*. When new evidence
+arrives, posteriors update; conclusions we tentatively drew may be
+reversed. Bayesian networks handle exactly the kind of *default with
+exception* pattern we saw in chapter 13, but quantitatively.
+
+Formally: a default *birds fly* becomes P(flies | bird) = 0.9. A
+default *penguins do not fly* becomes P(flies | penguin) = 0.01. The
+Bayesian network computes P(flies | bird ∧ penguin) = 0.01
+(effectively; the more specific evidence dominates).
+
+The correspondence between qualitative defaults and quantitative
+Bayesian priors was worked out in the 1990s (Pearl; Adams;
+Bacchus-Grove-Halpern-Koller). It gives you a way to move between the
+two representations depending on what your data supports.
+
+## Log-odds and evidence accumulation
+
+A useful reformulation. The *log-odds* of a hypothesis H is:
+
+    log-odds(H) = log(P(H) / P(not H))
+
+In log-odds space, Bayes' theorem becomes:
+
+    log-odds(H | E) = log-odds(H) + log(P(E | H) / P(E | not H))
+
+The second term is the *log-likelihood ratio* of E: how much evidence
+E provides for H versus not-H. Adding log-likelihood ratios is
+adding evidence. Independent pieces of evidence add up.
+
+This is why humans, and simple learning algorithms, can often reason
+sensibly about many small pieces of evidence: adding log-likelihood
+ratios is intuitive, and it corresponds exactly to Bayesian updating.
+
+```scheme
+(define (log-odds p) (log (/ p (- 1 p))))
+(define (from-log-odds l) (/ (exp l) (+ 1 (exp l))))
+
+(define (update-log-odds prior-log-odds likelihood-ratio)
+  (+ prior-log-odds (log likelihood-ratio)))
+
+;; Update as evidence arrives:
+(let* ((prior-lo (log-odds 0.5))    ; start uncertain
+       (after-e1 (update-log-odds prior-lo 2.0))    ; e1 favors H by 2:1
+       (after-e2 (update-log-odds after-e1 3.0)))   ; e2 favors H by 3:1
+  (from-log-odds after-e2))
+;; => approximately 0.857 (from 0.5 to 0.857 after two pieces of evidence).
+```
+
+## Fuzzy logic and t-norms
+
+The Zadeh operators are one choice; the theory generalises. A
+*triangular norm* (t-norm) is a binary operation on [0, 1] that is:
+
+- commutative, associative,
+- monotone (larger inputs give larger outputs),
+- has 1 as identity.
+
+Every t-norm defines a fuzzy conjunction. The min t-norm is Zadeh's.
+The product t-norm is `p × q`. The Łukasiewicz t-norm is
+`max(0, p + q - 1)`. Each gives a different fuzzy logic with different
+algebraic behaviour.
+
+Dually, *t-conorms* define fuzzy disjunctions. Every t-norm has a dual
+t-conorm via `s(p, q) = 1 - t(1-p, 1-q)` (De Morgan duality).
+
+The theory of t-norms was developed by Klement, Mesiar, and Pap in the
+1990s and 2000s; it is a small, elegant algebraic universe with many
+applications in fuzzy control and multi-criteria decision making.
+
+## Probabilistic programming
+
+A modern development: *probabilistic programming languages* (Church,
+WebPPL, Pyro, Stan). These let you write generative models as programs,
+with probabilistic choices inline. The runtime performs Bayesian
+inference automatically — computing posteriors given observations.
+
+The language semantics is fascinating: every program *denotes* a
+probability distribution over its outputs. Conditioning corresponds to
+observed constraints on that distribution. Inference is a
+compiler/runtime problem, and much of modern Bayesian machine learning
+research is about designing better inference algorithms for
+probabilistic programs.
+
+Under the hood, these systems combine ideas from every chapter of this
+book: lambda calculus (they are functional languages), monads
+(probability is a monad), non-monotonic reasoning (conditioning is
+belief update), and category theory (probability is a functor from
+programs to distributions).
+
+## Applications
+
+Probabilistic reasoning underlies:
+
+- Medical diagnosis (Bayesian expert systems).
+- Spam filtering (naive Bayes classifiers).
+- Recommender systems (probabilistic matrix factorization).
+- Search engines (probability of relevance ranking).
+- Machine learning (nearly every model is a probabilistic model).
+- Weather forecasting (ensemble Bayesian methods).
+
+Fuzzy reasoning underlies:
+
+- Industrial control (transmissions, washing machines, HVAC).
+- Consumer electronics (autofocus, image stabilization).
+- Human-computer interaction (fuzzy classification of user actions).
+- Multi-criteria decision aid (analytic hierarchy process).
+
+Neither is a mere academic curiosity; both are workhorses of applied
+computing.
+
+## Variations to try
+
+Implement naive Bayes classification: given a training set of
+(features, label) pairs, estimate P(feature | label) and P(label), then
+classify new inputs by picking the label with highest posterior. This
+is the first probabilistic classifier most people learn to build; it
+works startlingly well on text classification.
+
+Implement a fuzzy controller for a temperature system: sensors report
+*temperature is warm* (fuzzy) and *temperature is rising* (fuzzy);
+rules say *if warm and rising, then open cooler wide*. Compute the
+control output by aggregating fuzzy rule firings. This is what a
+household thermostat with fuzzy logic looks like inside.
+
+Sketch a small Bayesian network with three variables and observe how
+posteriors shift as you condition on different combinations of the
+variables. The pattern of *explaining away* (one cause explaining an
+observation reduces the posterior of other causes) is the classic
+non-obvious inference pattern that Bayesian networks capture and
+classical logic cannot.
+
+## Try this
+
+Estimate, for yourself, the prior probability of *the sun will rise
+tomorrow*. Then compute how many independent pieces of evidence, each
+with a likelihood ratio of 2, you would need to raise your posterior
+from 0.5 to 0.99. It is about seven. (Log-odds: from 0 to log(99) ≈
+4.6, added by log(2) ≈ 0.69 each: 4.6 / 0.69 ≈ 7.) This is a very
+practical exercise in feeling how quickly evidence accumulates in
+log-odds space — much faster than intuition usually suggests.
+
+## Closing
+
+Probabilistic and fuzzy logics extend classical reasoning to graded
+truth values. Probability captures subjective belief and updates via
+Bayes; fuzzy logic captures vague predicates and combines via t-norms.
+Both integrate with the earlier chapters — probabilistic-graphical-
+model reasoning is a form of Bayesian network in a category of
+probability distributions; fuzzy inference is a residuated algebraic
+structure.
+
+Chapter 15 is the payoff chapter for this book: the runtime's actual
+reasoning routes. Chain-of-reference, chain-of-inference, abduction,
+confidence grading. We will see how each of the logics we have built
+composes into her working reasoning apparatus.
+"
+  :cross-refs
+    (:book-of-scheme :chapters (5 8)
+     :book-of-reason :chapters (7 8 9)
+     :book-of-reason-code :chapters (5 6 7)
+     :book-of-peirce :chapters (3 4)
+     :book-of-popper :chapters (2))
+  :verbs-used ("cond" "define" "lambda" "let" "let*" "min" "max" "+"
+               "-" "*" "/" "log" "exp")
+  :word-count-estimate 5200
+)

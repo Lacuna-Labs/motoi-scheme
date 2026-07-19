@@ -1,0 +1,291 @@
+;; 06-two-file-framings.slat
+;; Book of SLAT — Chapter 6 — Two file framings
+
+(chapter
+  :book             "Book of SLAT"
+  :chapter-number   6
+  :title            "Chapter 6 — Two file framings"
+  :size             7171
+  :sha256           "dad24582bd6e3f0d"
+  :prose
+"---
+slug: book-of-slat-ch06
+title: Two file framings
+book: slat
+chapter: 6
+of: 16
+part: II
+app: scheme-repl
+palette: book-standard
+canonical: true
+owner: docs-team (Jess)
+status: draft
+last-reviewed: 2026-07-12
+---
+
+# Chapter 6 — Two file framings
+
+Same grammar. Two framings. The framing decides how records are
+separated on the wire.
+
+- `.slat` — **whole-document.** Zero or one top-level record. Newlines
+  inside records are permitted. Human-authorable.
+- `.slatl` — **line-delimited.** One record per line. Newlines inside
+  records are forbidden. Streamable, tail-able, grep-able.
+
+That's the whole distinction. The reader is the same reader. The
+grammar is the same grammar. The choice is about how you're going to
+use the file.
+
+## When to use `.slat`
+
+Hand-authored documents. Anything a human is going to write with a
+text editor and read with their eyes.
+
+- Incident narratives.
+- Spec fragments.
+- Cortex snapshots that span many keys.
+- Saved carts.
+
+Look at a real one:
+
+```motoi-scheme
+;;;slat 1.0
+
+#| slat 1.0
+   summary: Reasoning about the paddle game.
+   author:  the-kid
+   ts:      #inst \"2026-07-12T14:32:00Z\"
+|#
+
+(cart
+  :id \"cart-paddle-game-v3\"
+  :author 'the-kid
+  :extends \"cart-paddle-game-v2\"
+  :ts #inst \"2026-07-12T14:32:00Z\"
+  :body
+    ((define score 0)
+     (define ball-color 'red)
+     (define paddle-speed 8)
+
+     (define (on-collision ball paddle)
+       (set! score (+ score 1))
+       (display score))
+
+     (main-loop ball paddle))
+  :notes \"made the ball red, made the paddle faster.\")
+```
+
+That's a whole document. Newlines all through it. Structured. Legible.
+A human wrote it. Another human will read it.
+
+## When to use `.slatl`
+
+Streams. Anything the runtime writes one record at a time and
+processes one record at a time.
+
+- Mailboxes.
+- Event logs.
+- Training-corpus files.
+- Loam projections.
+
+Look at a real one:
+
+```
+;;;slat 1.0
+(event :ts #inst \"2026-07-11T18:22:00Z\" :kind \"card.opened\" :id 'welcome)
+(event :ts #inst \"2026-07-11T18:22:01Z\" :kind \"mood.changed\" :from :calm :to :curious)
+(event :ts #inst \"2026-07-11T18:22:03Z\" :kind \"cart.saved\" :id \"cart-1234\")
+(event :ts #inst \"2026-07-11T18:22:07Z\" :kind \"chat.reply\" :from 'motoi)
+```
+
+Every line is one record. You can `tail -f` it and see the events as
+they happen. You can `grep 'mood.changed'` and pull out just the mood
+records. You can pipe it through `awk` and count records per second.
+
+## Same grammar
+
+Try the same record in both framings.
+
+Whole-document (`.slat`):
+
+```motoi-scheme
+(slat-read \"
+(event
+  :ts   #inst \\\"2026-07-11T18:22:00Z\\\"
+  :kind \\\"card.opened\\\"
+  :by   'motoi)\")
+```
+
+Line-delimited (`.slatl`):
+
+```motoi-scheme
+(slat-read \"(event :ts #inst \\\"2026-07-11T18:22:00Z\\\" :kind \\\"card.opened\\\" :by 'motoi)\")
+```
+
+Same record. Different framing. The reader returns the same value.
+
+## The `;;;slat 1.0` shebang
+
+Every `.slat` and `.slatl` file MAY start with a shebang:
+
+```
+;;;slat 1.0
+```
+
+The `;` prefix keeps it a legal comment in any reader. The shebang
+tells the reader what version to use. If absent, the reader assumes
+1.0.
+
+The shebang is normative in 1.0. Writers emit it. Readers use it.
+
+## Auto-detection
+
+If you don't know the framing at open time — say, the file has no
+extension — the reader auto-detects:
+
+- If the file starts with `(` and contains a newline before the
+  matching `)`, it's `.slat`.
+- If every line ends its own balance, it's `.slatl`.
+
+Consumers may hint via the shebang. But most of the time, the
+extension is the truth.
+
+## Mixed streams are illegal
+
+A `.slatl` file with a multi-line form is a reader error. In strict
+mode, you get a `SlatSyntaxError`. In tolerant mode, you get a
+`_bad-line` sentinel — the mailbox never blocks on parse failure.
+
+```motoi-scheme
+(slat-read-line \"(event :ts 1
+                        :kind \\\"nope\\\")\")
+```
+
+That fails in `.slatl` mode. Newline in the middle of a record.
+
+If you want that shape, use `.slat`. Multi-line records are fine
+there.
+
+## Streaming a `.slatl` file
+
+The line-delimited framing is what lets you tail. Every reader binding
+ships a streaming API:
+
+```motoi-scheme
+(with-slat-stream \"/var/log/lacuna/events.slatl\"
+  (lambda (stream)
+    (for-each
+      (lambda (rec)
+        (case (car rec)
+          ((event.card.opened) (increment! opens))
+          ((event.card.closed) (increment! closes))))
+      stream)))
+```
+
+The stream reads one record at a time. Bounded memory. Constant time
+per record. You can process a hundred-gigabyte log without loading
+any of it into RAM at once.
+
+## Whole-document reader
+
+For `.slat`, you read the whole file:
+
+```motoi-scheme
+(with-slat-doc \"docs/atoms/incident-narratives/in-warmup-pike-350.slat\"
+  (lambda (rec)
+    (learn-from rec)))
+```
+
+The reader tokenizes the whole file, parses it, returns one value.
+Memory grows with file size. For files bigger than a few megabytes,
+switch to `.slatl` framing and stream.
+
+## Compression
+
+Both framings compress cleanly:
+
+- Below 1 KiB: no compression.
+- 1 KiB – 64 KiB: no compression by default; caller may enable gzip.
+- Above 64 KiB: zstd level 3 recommended.
+
+Compressed files use a nested extension: `.slatl.zst`, `.slat.gz`.
+The wire content inside the compression envelope is unchanged.
+
+## When the runtime writes to disk
+
+She uses `.slat` for the things she wants to be able to read with her
+eyes and `.slatl` for the things she wants to be able to stream.
+
+- Her cortex-slice snapshots: `.slat`.
+- Her mood-history stream: `.slatl`.
+- Her incident-narratives: `.slat`.
+- Her event log: `.slatl`.
+- Her saved carts: `.slat`.
+
+She never mixes them. She never has to guess which one she's reading —
+the extension tells her.
+
+## Migration from JSONL
+
+The mailboxes used to be `.jsonl` files. Every migration to `.slatl`
+happens the same way:
+
+1. The reader tries SLAT first.
+2. If SLAT fails, it tries JSON.
+3. If JSON succeeds, it emits a deprecation warning and rewrites the
+   line in-place.
+4. After the transition window (four weeks), the JSON fallback is
+   removed.
+
+The migration is backwards-compatible during the window. No blocked
+mailboxes.
+
+## Try this
+
+Predict, then run. Which of these is a valid `.slatl` line?
+
+```motoi-scheme
+;; A
+(slat-read-line \"(event :ts 1 :kind \\\"card.opened\\\")\")
+```
+
+Valid. Single record, single line.
+
+```motoi-scheme
+;; B
+(slat-read-line \"(event :ts 1
+:kind \\\"card.opened\\\")\")
+```
+
+Invalid. Newline in the middle. `.slatl` framing forbids it.
+
+```motoi-scheme
+;; C
+(slat-read-line \"(event :ts 1 :kind \\\"card.opened\\\") (event :ts 2 :kind \\\"card.closed\\\")\")
+```
+
+Invalid. Two records on one line. `.slatl` framing wants exactly one.
+
+## The framing choice in one line
+
+**If a human's going to author it, `.slat`. If a machine's going to
+stream it, `.slatl`.**
+
+## Where next
+
+Chapter 7 walks the reader and writer APIs. Every binding ships six
+surfaces — `loads`, `load`, `load_doc`, `dumps`, `dump`, `dump_doc`.
+Six functions. Twelve years of pain removed.
+
+## Cross-links
+
+- [[book-of-systems]] Chapter 2 — Read the log, which uses `.slatl`
+  extensively.
+- [[appendix-e]] — where slats live in Lacuna, with framing choices
+  called out.
+
+---
+
+Turn the page.
+")

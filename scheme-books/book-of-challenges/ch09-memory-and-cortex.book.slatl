@@ -1,0 +1,1126 @@
+;; ch09-memory-and-cortex.slat
+;; Book of Challenges — Chapter 9 — Memory & the Cortex Graph
+
+(chapter
+  :book             "Book of Challenges"
+  :chapter-number   null
+  :title            "Chapter 9 — Memory & the Cortex Graph"
+  :size             58901
+  :sha256           "b8384dfbb46faa2d"
+  :prose
+"# Chapter 9 — Memory & the Cortex Graph
+
+Memory is where programs become stateful creatures. Until now, every route we've written starts fresh: data flows in, transforms, and flows out, leaving no trace. But the cortex verbs give the runtime something closer to *persistence*—a place to write facts, recall them later, find neighbors in semantic space, and reconcile what she knew yesterday with what she learns today.
+
+This chapter drills the `cortex/*` namespace as a real graph store: writing nodes, recalling by key or pattern, associating related facts, querying by cosine similarity, and—hardest of all—building read-decide-write loops that reconcile conflicting stored knowledge. These are the programs that let the runtime *remember* a customer's favorite color, update her belief when new evidence arrives, and surface the three most relevant past conversations when a new question comes in.
+
+The difficulty here is *orchestration*: cortex verbs return structures (often JSON-like association lists), and a masterful program must parse what came back, decide what to do next, and issue the next write or query—all while handling the honest failures that come with any stateful store. We'll start with a single write and recall, then climb to multi-stage reconciliation loops where the program reads, reasons, and writes back.
+
+Voice stays gentle, even when the recursion gets deep. Hard is not humorless—it's just composition done carefully, with honest null-checks at every seam.
+
+---
+
+## I. Writing and Recalling a Single Fact
+
+The simplest cortex program is a round trip: write a fact, then recall it by key. This teaches the basic contract—`cortex/write` stores a key-value pair (often with metadata), and `cortex/recall` retrieves it. Both can fail: write might escalate if the key is malformed, recall returns `'nan` if the key doesn't exist.
+
+Why this matters: even a single write-recall pair is a *stateful route*. The program's output depends not just on its input, but on what was written before. That's the kernel of every database-backed workflow the runtime will ever run.
+
+### Program 1: Write and recall a customer preference
+
+```scheme
+;; Write a customer's favorite color to cortex, then recall it.
+;; Returns the recalled value or an honest failure.
+
+(define (store-and-fetch-preference customer-id color)
+  (let ((key (string-append \"pref:\" customer-id \":color\")))
+    (let ((write-result (cortex/write key color)))
+      (if (and (pair? write-result)
+               (eq? (car write-result) 'escalate))
+          write-result  ; escalate on write failure
+          (let ((recalled (cortex/recall key)))
+            (if (eq? recalled 'nan)
+                (escalate 'recall-failed key)
+                recalled))))))
+
+;; Example call:
+(store-and-fetch-preference \"cust-8472\" \"dusty-rose\")
+;; => \"dusty-rose\"
+```
+
+**What happened:** We composed the key from a customer ID, wrote the color, checked for escalation, then recalled. If either stage fails, we propagate the failure honestly—no fake result. This is ESCAPE in code: every verb that can fail is checked.
+
+### Program 2: Recall with a default fallback
+
+Often we want a fallback if the key doesn't exist—`cortex/recall-default` does exactly that. This is a small addition, but it changes the program's posture: instead of escalating on missing data, we route FORWARD with a safe default.
+
+```scheme
+;; Recall a stored discount rate for a customer; default to 0.0 if missing.
+
+(define (fetch-discount-or-default customer-id)
+  (let ((key (string-append \"discount:\" customer-id)))
+    (cortex/recall-default key 0.0)))
+
+;; Example call:
+(fetch-discount-or-default \"cust-1138\")
+;; => 0.0  (if no discount was ever stored)
+```
+
+**Why it's cleaner:** No manual `'nan` check—`recall-default` does the routing for us. This is BACK: the simplest program that solves the problem. When the verb offers a built-in fallback, use it.
+
+---
+
+## II. Associating Related Facts
+
+Cortex isn't just a key-value store—it's a *graph*. `cortex/associate` links two keys with a labeled edge, and `cortex/lookup` retrieves neighbors. This lets us encode relationships: \"order-5678 was placed by customer-8472,\" \"product-A is similar to product-B.\"
+
+Why this is powerful: once facts are linked, we can traverse the graph—start at a customer, walk to their orders, walk to the products in those orders. Each walk is a small query, and chaining them is how we build recommendation engines, support ticket routers, and audit trails.
+
+### Program 3: Associate a customer with their orders
+
+```scheme
+;; Write a customer record and associate it with a list of order IDs.
+;; Returns the number of associations created, or escalate on failure.
+
+(define (link-customer-to-orders customer-id order-ids)
+  (let ((customer-key (string-append \"customer:\" customer-id)))
+    ;; First, ensure the customer node exists
+    (let ((write-result (cortex/write customer-key (list (cons 'id customer-id)))))
+      (if (and (pair? write-result) (eq? (car write-result) 'escalate))
+          write-result
+          ;; Now associate each order
+          (let loop ((orders order-ids)
+                     (count 0))
+            (if (null? orders)
+                count
+                (let ((order-key (string-append \"order:\" (car orders))))
+                  (let ((assoc-result (cortex/associate customer-key order-key \"placed\")))
+                    (if (and (pair? assoc-result) (eq? (car assoc-result) 'escalate))
+                        assoc-result
+                        (loop (cdr orders) (+ count 1)))))))))))
+
+;; Example call:
+(link-customer-to-orders \"cust-8472\" '(\"ord-101\" \"ord-102\" \"ord-103\"))
+;; => 3
+```
+
+**What's new here:** We used a *named let* (`loop`) to recurse over the order list, creating one association per order. Each `cortex/associate` can fail, so we check and escalate immediately if any does. This is recursion + ESCAPE woven together—no silent failures, but the program keeps advancing (FORWARD) as long as each stage succeeds.
+
+### Program 4: Look up all orders for a customer
+
+Now we traverse the graph in reverse: given a customer key, find all nodes linked by the \"placed\" edge.
+
+```scheme
+;; Retrieve all order keys associated with a customer.
+;; Returns a list of order keys, or an empty list if none exist.
+
+(define (fetch-customer-orders customer-id)
+  (let ((customer-key (string-append \"customer:\" customer-id)))
+    (let ((neighbors (cortex/lookup customer-key \"placed\")))
+      (if (eq? neighbors 'nan)
+          '()  ; no associations found
+          (if (and (pair? neighbors) (eq? (car neighbors) 'escalate))
+              neighbors  ; propagate escalate
+              neighbors)))))  ; cortex/lookup returns a list of keys
+
+;; Example call:
+(fetch-customer-orders \"cust-8472\")
+;; => (\"order:ord-101\" \"order:ord-102\" \"order:ord-103\")
+```
+
+**Why it's satisfying:** The graph does the join for us—no manual filtering. We wrote the edges earlier; now we walk them. This is the foundation of every \"customers who bought X also bought Y\" route the runtime will ever run.
+
+---
+
+## III. Querying by Similarity — Cosine Top-K
+
+Association is explicit—we link A to B by hand. But cortex also supports *semantic search*: `cortex/topk` finds the K nearest neighbors to a query vector in embedding space, and `cortex/cosine-topk` does the same with a query key (using that key's stored embedding).
+
+This is where cortex becomes a vector database. We store facts with embeddings (often generated by `embedding/text` and passed as metadata), then query for \"the three most similar past support tickets to this new question.\"
+
+### Program 5: Store facts with embeddings, then query top-K
+
+```scheme
+;; Store three product descriptions with embeddings, then find the top 2 most
+;; similar to a query description.
+
+(define (store-products-and-search products query-text)
+  ;; products is a list of (id . description) pairs
+  ;; Step 1: store each product with its embedding
+  (let store-loop ((prods products))
+    (if (null? prods)
+        'done
+        (let* ((prod (car prods))
+               (prod-id (car prod))
+               (desc (cdr prod))
+               (key (string-append \"product:\" prod-id))
+               ;; Generate embedding for the description
+               (embed-result (embedding/text desc)))
+          (if (eq? embed-result 'nan)
+              (escalate 'embedding-failed prod-id)
+              (let ((write-result (cortex/write key desc (list (cons 'embedding embed-result)))))
+                (if (and (pair? write-result) (eq? (car write-result) 'escalate))
+                    write-result
+                    (store-loop (cdr prods))))))))
+  ;; Step 2: embed the query and search for top 2
+  (let ((query-embed (embedding/text query-text)))
+    (if (eq? query-embed 'nan)
+        (escalate 'query-embedding-failed query-text)
+        (let ((results (cortex/topk query-embed 2)))
+          (if (eq? results 'nan)
+              '()
+              results)))))
+
+;; Example call:
+(store-products-and-search
+ '((\"lamp-01\" . \"ceramic table lamp with brass base\")
+   (\"lamp-02\" . \"floor lamp with fabric shade\")
+   (\"lamp-03\" . \"desk lamp with adjustable arm\"))
+ \"standing lamp for living room\")
+;; => ((\"product:lamp-02\" . <score>) (\"product:lamp-01\" . <score>))
+```
+
+**What's hard here:** Two-stage orchestration—first a loop that stores N items (each requiring an embedding call + a write), then a query that requires its own embedding + a top-k search. Each stage can fail independently, and we check every result. This is FORWARD chaining at scale: embed → write → embed → query, with ESCAPE at every seam.
+
+### Program 6: Find the three most similar historical tickets to a new question
+
+```scheme
+;; Given a list of past tickets (each with an ID and text) and a new question,
+;; store all past tickets with embeddings, then return the top 3 most similar.
+
+(define (find-similar-tickets past-tickets question)
+  ;; Store each past ticket
+  (let store-loop ((tickets past-tickets))
+    (if (null? tickets)
+        'done
+        (let* ((ticket (car tickets))
+               (ticket-id (car ticket))
+               (ticket-text (cdr ticket))
+               (key (string-append \"ticket:\" ticket-id))
+               (embed (embedding/text ticket-text)))
+          (if (eq? embed 'nan)
+              (escalate 'embed-failed ticket-id)
+              (let ((write-res (cortex/write key ticket-text (list (cons 'embedding embed)))))
+                (if (and (pair? write-res) (eq? (car write-res) 'escalate))
+                    write-res
+                    (store-loop (cdr tickets))))))))
+  ;; Query for top 3 similar to the question
+  (let ((q-embed (embedding/text question)))
+    (if (eq? q-embed 'nan)
+        (escalate 'question-embed-failed question)
+        (let ((top3 (cortex/topk q-embed 3)))
+          (if (eq? top3 'nan)
+              '()
+              top3)))))
+
+;; Example call:
+(find-similar-tickets
+ '((\"t-101\" . \"How do I reset my password?\")
+   (\"t-102\" . \"My order hasn't arrived yet\")
+   (\"t-103\" . \"I forgot my login credentials\")
+   (\"t-104\" . \"Tracking number not working\"))
+ \"I can't log in to my account\")
+;; => ((\"ticket:t-103\" . 0.89) (\"ticket:t-101\" . 0.82) (\"ticket:t-104\" . 0.45))
+```
+
+**Why this is a feat:** We built a semantic search engine in ~30 lines. The recursion stores all past tickets, the query finds neighbors in embedding space, and every failure is caught. This is the kind of program that makes cortex feel like *memory*—the runtime doesn't search by keyword, she searches by *meaning*.
+
+---
+
+## IV. Reconciling Conflicting Facts — Read-Decide-Write Loops
+
+The hardest cortex programs are *reconciliation* loops: read what's stored, compare it to new evidence, decide what to believe, then write back an updated fact. This is stateful reasoning—the runtime's memory isn't append-only, it's *revised* as she learns.
+
+The pattern is always:
+1. **Read** the current stored value (if any).
+2. **Decide** how to merge it with new data—maybe the new data wins, maybe we average, maybe we escalate a conflict.
+3. **Write** the reconciled result back.
+
+This is a *loop* because sometimes we read-decide-write multiple times in one program—reconciling a batch of updates, or walking a chain of dependent facts.
+
+### Program 7: Update a customer's lifetime spend (additive reconciliation)
+
+```scheme
+;; Read the current lifetime spend for a customer, add a new purchase amount,
+;; and write back the updated total.
+
+(define (add-to-lifetime-spend customer-id purchase-amount)
+  (let ((key (string-append \"spend:\" customer-id)))
+    ;; Read current spend (default to 0.0 if missing)
+    (let ((current (cortex/recall-default key 0.0)))
+      ;; If recall-default escalated, propagate it
+      (if (and (pair? current) (eq? (car current) 'escalate))
+          current
+          ;; Add the new amount
+          (let ((new-total (+ current purchase-amount)))
+            (let ((write-res (cortex/write key new-total)))
+              (if (and (pair? write-res) (eq? (car write-res) 'escalate))
+                  write-res
+                  new-total)))))))
+
+;; Example call:
+(add-to-lifetime-spend \"cust-8472\" 47.50)
+;; => 47.50  (first time)
+;; Call again:
+(add-to-lifetime-spend \"cust-8472\" 32.00)
+;; => 79.50
+```
+
+**What's new:** This is a *read-modify-write* pattern—classic database territory. We used `recall-default` to get the current value (or start at 0), did arithmetic, and wrote back. The program is stateful: its output depends on what was stored before. If two calls happen concurrently, they'll race—cortex doesn't lock—but for most the runtime workflows, sequential execution is fine.
+
+### Program 8: Reconcile a customer's email address (last-write-wins with timestamp)
+
+```scheme
+;; Given a customer ID, a new email, and a timestamp, update the stored email
+;; only if the new timestamp is later than the stored one (or if no email exists).
+
+(define (reconcile-email customer-id new-email new-timestamp)
+  (let ((key (string-append \"email:\" customer-id)))
+    ;; Recall the current record (returns 'nan if missing)
+    (let ((current (cortex/recall key)))
+      (if (eq? current 'nan)
+          ;; No record exists—write the new one
+          (cortex/write key (list (cons 'email new-email)
+                                  (cons 'timestamp new-timestamp)))
+          ;; Record exists—compare timestamps
+          (let ((stored-ts (cdr (assoc 'timestamp current))))
+            (if (> new-timestamp stored-ts)
+                ;; New data is fresher—write it
+                (cortex/write key (list (cons 'email new-email)
+                                        (cons 'timestamp new-timestamp)))
+                ;; Old data is fresher—do nothing, return stored
+                current))))))
+
+;; Example call:
+(reconcile-email \"cust-8472\" \"alice@example.com\" 1609459200)
+;; => write succeeds
+(reconcile-email \"cust-8472\" \"alice.old@example.com\" 1577836800)
+;; => returns the newer stored record (no write)
+```
+
+**Why this is harder:** We had to *parse* the stored value—`cortex/recall` returns an association list, so we used `assoc` to extract the timestamp. Then we did a comparison and conditionally wrote. This is reconciliation: the program doesn't blindly overwrite, it *reasons* about which fact is true.
+
+### Program 9: Merge a list of tags (set union reconciliation)
+
+```scheme
+;; Given a product ID and a list of new tags, read the current tags (if any),
+;; union them with the new tags (no duplicates), and write back the merged set.
+
+(define (merge-product-tags product-id new-tags)
+  (let ((key (string-append \"tags:\" product-id)))
+    ;; Recall current tags (default to empty list)
+    (let ((current-tags (cortex/recall-default key '())))
+      (if (and (pair? current-tags) (eq? (car current-tags) 'escalate))
+          current-tags
+          ;; Union: append new tags, remove duplicates
+          (let ((merged (remove-duplicates (append current-tags new-tags))))
+            (let ((write-res (cortex/write key merged)))
+              (if (and (pair? write-res) (eq? (car write-res) 'escalate))
+                  write-res
+                  merged)))))))
+
+;; Helper: remove duplicates from a list (order-preserving, first occurrence wins)
+(define (remove-duplicates lst)
+  (let loop ((remaining lst)
+             (seen '()))
+    (if (null? remaining)
+        (reverse seen)
+        (let ((item (car remaining)))
+          (if (member item seen)
+              (loop (cdr remaining) seen)
+              (loop (cdr remaining) (cons item seen)))))))
+
+;; Example call:
+(merge-product-tags \"prod-lamp-01\" '(\"ceramic\" \"brass\"))
+;; => (\"ceramic\" \"brass\")
+(merge-product-tags \"prod-lamp-01\" '(\"brass\" \"vintage\" \"table\"))
+;; => (\"ceramic\" \"brass\" \"vintage\" \"table\")
+```
+
+**What's satisfying:** We wrote a helper (`remove-duplicates`) to do the set logic, then composed it into the read-decide-write flow. The program is *idempotent*—calling it twice with the same tags changes nothing the second time. This is careful reconciliation: the stored set grows, but never has duplicates.
+
+---
+
+## V. Multi-Record Reconciliation Loops
+
+The hardest programs walk through *multiple* cortex records, reconciling each one in turn. This is where recursion and cortex meet head-on: a loop that reads a list of keys, recalls each one, decides what to do, and writes back updates—with failure-handling at every step.
+
+### Program 10: Batch-update product prices with a percentage increase
+
+```scheme
+;; Given a list of product IDs and a percentage increase, read each product's
+;; current price, apply the increase, and write back the new price.
+;; Returns a list of (product-id . new-price) pairs, or escalate on any failure.
+
+(define (batch-reprice product-ids pct-increase)
+  (let loop ((ids product-ids)
+             (results '()))
+    (if (null? ids)
+        (reverse results)  ; done—return all updated prices
+        (let* ((prod-id (car ids))
+               (key (string-append \"price:\" prod-id))
+               (current (cortex/recall key)))
+          (if (eq? current 'nan)
+              ;; No price stored—escalate
+              (escalate 'no-price-found prod-id)
+              (if (and (pair? current) (eq? (car current) 'escalate))
+                  current  ; propagate escalate
+                  ;; current is a number—apply increase
+                  (let ((new-price (* current (+ 1.0 (/ pct-increase 100.0)))))
+                    (let ((write-res (cortex/write key new-price)))
+                      (if (and (pair? write-res) (eq? (car write-res) 'escalate))
+                          write-res
+                          (loop (cdr ids)
+                                (cons (cons prod-id new-price) results)))))))))))
+
+;; Example call:
+(batch-reprice '(\"lamp-01\" \"lamp-02\" \"lamp-03\") 10.0)
+;; => ((\"lamp-01\" . 38.50) (\"lamp-02\" . 66.00) (\"lamp-03\" . 27.50))
+```
+
+**Why this is hard:** We recursed over a list of IDs, and for each one we did a read-decide-write cycle. If *any* read or write fails, we escalate immediately—no partial updates glossed over. This is ESCAPE at scale: the loop is fast (FORWARD), but every stage is checked.
+
+### Program 11: Reconcile inventory counts from multiple sources (take maximum)
+
+```scheme
+;; Given a list of (product-id . reported-stock) pairs from multiple warehouse
+;; systems, for each product read the current stored stock, take the maximum of
+;; stored vs. reported, and write back the reconciled count.
+
+(define (reconcile-inventory-max reports)
+  (let loop ((reps reports)
+             (reconciled '()))
+    (if (null? reps)
+        (reverse reconciled)
+        (let* ((report (car reps))
+               (prod-id (car report))
+               (reported-stock (cdr report))
+               (key (string-append \"stock:\" prod-id))
+               (current (cortex/recall-default key 0)))
+          (if (and (pair? current) (eq? (car current) 'escalate))
+              current  ; propagate escalate
+              (let ((new-stock (max current reported-stock)))
+                (let ((write-res (cortex/write key new-stock)))
+                  (if (and (pair? write-res) (eq? (car write-res) 'escalate))
+                      write-res
+                      (loop (cdr reps)
+                            (cons (cons prod-id new-stock) reconciled))))))))))
+
+;; Example call:
+(reconcile-inventory-max '((\"lamp-01\" . 12) (\"lamp-02\" . 5) (\"lamp-01\" . 15)))
+;; => ((\"lamp-01\" . 15) (\"lamp-02\" . 5) (\"lamp-01\" . 15))
+;; Note: lamp-01 appears twice; the second reconciliation took max(12, 15) = 15
+```
+
+**What's new:** The reconciliation logic is `max`—we trust whichever source reports higher stock. This is a *policy choice* baked into the loop. A different program might take the minimum (pessimistic stock), or average, or escalate a conflict if the numbers differ by more than a threshold. The code structure is the same; the decision logic is pluggable.
+
+### Program 12: Walk a chain of related keys and collect values
+
+```scheme
+;; Given a customer ID, walk the \"placed\" associations to find all orders,
+;; then for each order recall its total, and sum them to get lifetime spend.
+
+(define (compute-lifetime-spend-from-orders customer-id)
+  (let ((customer-key (string-append \"customer:\" customer-id)))
+    ;; Step 1: look up all order keys
+    (let ((order-keys (cortex/lookup customer-key \"placed\")))
+      (if (eq? order-keys 'nan)
+          0.0  ; no orders—lifetime spend is zero
+          (if (and (pair? order-keys) (eq? (car order-keys) 'escalate))
+              order-keys  ; propagate escalate
+              ;; Step 2: for each order, recall its total and sum
+              (let loop ((keys order-keys)
+                         (sum 0.0))
+                (if (null? keys)
+                    sum
+                    (let ((order-total (cortex/recall (car keys))))
+                      (if (eq? order-total 'nan)
+                          ;; Order has no total stored—skip it
+                          (loop (cdr keys) sum)
+                          (if (and (pair? order-total) (eq? (car order-total) 'escalate))
+                              order-total  ; propagate escalate
+                              ;; Add to sum
+                              (loop (cdr keys) (+ sum order-total))))))))))))
+
+;; Example call (assumes orders and totals were stored earlier):
+(compute-lifetime-spend-from-orders \"cust-8472\")
+;; => 247.50
+```
+
+**Why this is a capstone:** We chained two cortex operations—`lookup` to get the edges, then a loop of `recall` to get the values at the other end of each edge. This is graph traversal + aggregation, all in one program. If any order is missing a total, we skip it (graceful degradation); if `lookup` itself fails, we escalate. This is FORWARD chaining with ESCAPE woven in at every joint.
+
+---
+
+## VI. Querying and Filtering Cortex Records
+
+Sometimes we don't have a key—we want to *search* for records that match a pattern or predicate. `cortex/scan` returns all keys matching a prefix, and `cortex/query` (if available) filters by metadata. These verbs let us build indexes and scans over stored data.
+
+### Program 13: Find all customers who spent more than a threshold
+
+```scheme
+;; Scan all \"spend:*\" keys, recall each value, filter for those above a threshold.
+
+(define (find-high-spenders threshold)
+  (let ((all-keys (cortex/scan \"spend:\")))
+    (if (eq? all-keys 'nan)
+        '()  ; no spend records
+        (if (and (pair? all-keys) (eq? (car all-keys) 'escalate))
+            all-keys  ; propagate escalate
+            ;; Filter keys where the stored spend > threshold
+            (let loop ((keys all-keys)
+                       (high-spenders '()))
+              (if (null? keys)
+                  (reverse high-spenders)
+                  (let ((key (car keys))
+                        (spend (cortex/recall (car keys))))
+                    (if (or (eq? spend 'nan)
+                            (and (pair? spend) (eq? (car spend) 'escalate)))
+                        ;; Skip this key if recall failed
+                        (loop (cdr keys) high-spenders)
+                        (if (> spend threshold)
+                            (loop (cdr keys) (cons key high-spenders))
+                            (loop (cdr keys) high-spenders))))))))))
+
+;; Example call:
+(find-high-spenders 100.0)
+;; => (\"spend:cust-8472\" \"spend:cust-1138\" \"spend:cust-2001\")
+```
+
+**What's hard here:** We did a *full scan* of a key prefix, then filtered in memory. This is expensive if there are thousands of keys, but it's the only way to find records by value when cortex doesn't have a secondary index. The program is patient: if any single recall fails, we skip that key and keep going (graceful degradation). This is ESCAPE + FORWARD: we don't let one bad key kill the whole scan.
+
+### Program 14: Count products by tag using a scan-and-group pattern
+
+```scheme
+;; Scan all \"tags:*\" keys, recall each tag list, and count how many products
+;; have each tag. Returns an association list of (tag . count) pairs.
+
+(define (count-products-by-tag)
+  (let ((all-keys (cortex/scan \"tags:\")))
+    (if (eq? all-keys 'nan)
+        '()
+        (if (and (pair? all-keys) (eq? (car all-keys) 'escalate))
+            all-keys
+            ;; Build a frequency map
+            (let loop ((keys all-keys)
+                       (freq-map '()))
+              (if (null? keys)
+                  freq-map
+                  (let ((tags (cortex/recall (car keys))))
+                    (if (or (eq? tags 'nan)
+                            (and (pair? tags) (eq? (car tags) 'escalate)))
+                        (loop (cdr keys) freq-map)
+                        ;; tags is a list—increment count for each
+                        (loop (cdr keys)
+                              (fold (lambda (tag acc)
+                                      (let ((entry (assoc tag acc)))
+                                        (if entry
+                                            ;; Increment existing count
+                                            (cons (cons tag (+ 1 (cdr entry)))
+                                                  (filter (lambda (e) (not (equal? (car e) tag))) acc))
+                                            ;; New tag—add with count 1
+                                            (cons (cons tag 1) acc))))
+                                    freq-map
+                                    tags))))))))))
+
+;; Example call:
+(count-products-by-tag)
+;; => ((\"ceramic\" . 5) (\"brass\" . 3) (\"vintage\" . 2) (\"table\" . 4))
+```
+
+**Why this is a feat:** We used `fold` inside a loop—higher-order + recursion woven together. For each product's tag list, we folded over the tags, updating a frequency map (an association list where each entry is `(tag . count)`). The map logic is fiddly—if the tag exists, we replace its entry with an incremented count; if not, we add a new entry. This is *aggregation* over cortex data, done entirely in memory. It's expensive, but it works, and it's honest—every missing key is skipped, no fake counts.
+
+---
+
+## VII. Cortex + Model: Storing and Retrieving Decisions
+
+One of the most powerful patterns is to store a model's reasoning alongside the decision it made, then recall it later to explain *why* the runtime chose a particular route. This is `model/*` + `cortex/write`, chained.
+
+### Program 15: Ask a model to decide, then store the decision and reasoning
+
+```scheme
+;; Given a customer question, ask the model for a decision (route to support tier),
+;; and store the decision + reasoning in cortex for audit.
+
+(define (decide-and-store-support-tier question)
+  (let ((prompt (string-append \"A customer asks: \\\"\" question
+                               \"\\\". Should this go to tier-1 (FAQ), tier-2 (specialist), or tier-3 (escalation)? Answer with one word and brief reasoning.\")))
+    (let ((response (model/fast prompt)))
+      (if (eq? response 'nan)
+          (escalate 'model-failed prompt)
+          ;; Parse the response (assume it's \"tier-2: reasoning text\")
+          (let* ((key (string-append \"decision:\" (system/uuid)))
+                 (write-res (cortex/write key (list (cons 'question question)
+                                                     (cons 'decision response)
+                                                     (cons 'timestamp (time/unix-now))))))
+            (if (and (pair? write-res) (eq? (car write-res) 'escalate))
+                write-res
+                response))))))
+
+;; Example call:
+(decide-and-store-support-tier \"How do I return a broken lamp?\")
+;; => \"tier-2: Requires specialist to look up return policy and generate RMA.\"
+```
+
+**What's new:** We chained `model/fast` (inference) with `cortex/write` (storage). The decision is a *record*: question, response, and timestamp. Later, the runtime can scan all \"decision:*\" keys to audit her past choices, or use them as training data for a better model. This is memory + reasoning fused—cortex becomes the *trace log* of her cognition.
+
+### Program 16: Retrieve past decisions for similar questions
+
+```scheme
+;; Given a new question, embed it, find the top 3 most similar past decisions,
+;; and return their reasoning.
+
+(define (retrieve-similar-decisions question)
+  (let ((q-embed (embedding/text question)))
+    (if (eq? q-embed 'nan)
+        (escalate 'embed-failed question)
+        (let ((top3 (cortex/topk q-embed 3)))
+          (if (eq? top3 'nan)
+              '()
+              ;; For each result, recall the stored record and extract reasoning
+              (let loop ((results top3)
+                         (reasoning-list '()))
+                (if (null? results)
+                    (reverse reasoning-list)
+                    (let* ((result (car results))
+                           (key (car result))
+                           (record (cortex/recall key)))
+                      (if (or (eq? record 'nan)
+                              (and (pair? record) (eq? (car record) 'escalate)))
+                          (loop (cdr results) reasoning-list)
+                          (let ((decision (cdr (assoc 'decision record))))
+                            (loop (cdr results) (cons decision reasoning-list))))))))))))
+
+;; Example call:
+(retrieve-similar-decisions \"My lamp arrived cracked, what do I do?\")
+;; => (\"tier-2: Requires specialist to look up return policy and generate RMA.\"
+;;     \"tier-2: Damaged goods need photo evidence and RMA.\"
+;;     \"tier-1: FAQ covers basic return window.\")
+```
+
+**Why this is a capstone:** We built a *case-based reasoning* system—the runtime recalls how she handled similar questions in the past and surfaces the reasoning. This is `embedding/text` + `cortex/topk` + a loop of `cortex/recall` + parsing. Each stage can fail, and we handle it. The result is a list of human-readable explanations, not just scores. This is FORWARD at full stretch: five verbs orchestrated into one fluid route.
+
+---
+
+## VIII. Handling Cortex Write Conflicts
+
+Cortex writes are *not atomic* if two programs write the same key concurrently. The last write wins, and the earlier one is silently overwritten. For most the runtime workflows (sequential task execution), this isn't a problem—but if we need to protect against race conditions, we can use a *read-check-write* pattern with a version counter.
+
+### Program 17: Increment a counter with conflict detection
+
+```scheme
+;; Read a counter, increment it, and write back—but escalate if the stored value
+;; changed between read and write (simulating a version check).
+
+(define (safe-increment-counter key)
+  ;; Read current value and version
+  (let ((record (cortex/recall key)))
+    (if (eq? record 'nan)
+        ;; No record—initialize with count 1, version 1
+        (let ((write-res (cortex/write key (list (cons 'count 1) (cons 'version 1)))))
+          (if (and (pair? write-res) (eq? (car write-res) 'escalate))
+              write-res
+              1))
+        ;; Record exists—extract count and version
+        (let ((count (cdr (assoc 'count record)))
+              (version (cdr (assoc 'version record))))
+          ;; Increment count and version
+          (let ((new-count (+ count 1))
+                (new-version (+ version 1)))
+            ;; Write back with new version
+            (let ((write-res (cortex/write key (list (cons 'count new-count)
+                                                      (cons 'version new-version)))))
+              (if (and (pair? write-res) (eq? (car write-res) 'escalate))
+                  write-res
+                  ;; In a real system, we'd re-read here to check if version changed
+                  ;; (cortex doesn't support compare-and-swap, so this is best-effort)
+                  new-count)))))))
+
+;; Example call:
+(safe-increment-counter \"global-counter\")
+;; => 1
+(safe-increment-counter \"global-counter\")
+;; => 2
+```
+
+**Why this is hard:** We're simulating optimistic concurrency control—increment the version on every write, and if we could re-read after write and see a *different* version than we expected, we'd know someone else wrote in between. Cortex doesn't give us a native compare-and-swap, so this is best-effort—but it's the pattern that *would* work in a system with transactions. The code is honest: we return the new count, but we acknowledge the race condition in the comment. This is BACK—the simplest concurrency-safe design we can build without additional verbs.
+
+---
+
+## IX. Cortex as a Task Queue — Storing and Claiming Work
+
+A creative use of cortex is as a *distributed task queue*: write tasks as records, and have workers \"claim\" them by writing a lock field. This lets multiple the runtime instances coordinate without a central scheduler.
+
+### Program 18: Enqueue a task
+
+```scheme
+;; Write a task record with a unique ID, status \"pending\", and payload.
+
+(define (enqueue-task task-type payload)
+  (let* ((task-id (system/uuid))
+         (key (string-append \"task:\" task-id)))
+    (let ((record (list (cons 'type task-type)
+                        (cons 'status \"pending\")
+                        (cons 'payload payload)
+                        (cons 'created-at (time/unix-now)))))
+      (let ((write-res (cortex/write key record)))
+        (if (and (pair? write-res) (eq? (car write-res) 'escalate))
+            write-res
+            task-id)))))
+
+;; Example call:
+(enqueue-task \"send-email\" \"alice@example.com\")
+;; => \"task-f47ac10b-58cc-4372-a567-0e02b2c3d479\"
+```
+
+### Program 19: Claim and execute a pending task
+
+```scheme
+;; Scan for pending tasks, claim the first one by writing status \"claimed\",
+;; execute it, then mark it \"done\".
+
+(define (claim-and-execute-task)
+  (let ((all-tasks (cortex/scan \"task:\")))
+    (if (eq? all-tasks 'nan)
+        'no-tasks
+        (if (and (pair? all-tasks) (eq? (car all-tasks) 'escalate))
+            all-tasks
+            ;; Find first pending task
+            (let loop ((keys all-tasks))
+              (if (null? keys)
+                  'no-pending-tasks
+                  (let* ((key (car keys))
+                         (record (cortex/recall key)))
+                    (if (or (eq? record 'nan)
+                            (and (pair? record) (eq? (car record) 'escalate)))
+                        (loop (cdr keys))
+                        (let ((status (cdr (assoc 'status record))))
+                          (if (equal? status \"pending\")
+                              ;; Claim it
+                              (let ((claimed-record (cons (cons 'status \"claimed\")
+                                                          (filter (lambda (e) (not (eq? (car e) 'status)))
+                                                                  record))))
+                                (let ((write-res (cortex/write key claimed-record)))
+                                  (if (and (pair? write-res) (eq? (car write-res) 'escalate))
+                                      write-res
+                                      ;; Execute the task (here we just pretend)
+                                      (let ((result (execute-task record)))
+                                        ;; Mark done
+                                        (let ((done-record (cons (cons 'status \"done\")
+                                                                 (cons (cons 'result result)
+                                                                       (filter (lambda (e) (not (eq? (car e) 'status)))
+                                                                               claimed-record)))))
+                                          (cortex/write key done-record))))))
+                              ;; Not pending—try next
+                              (loop (cdr keys))))))))))))
+
+;; Stub: execute-task would contain the real work
+(define (execute-task record)
+  (let ((task-type (cdr (assoc 'type record)))
+        (payload (cdr (assoc 'payload record))))
+    ;; Here we'd dispatch based on task-type
+    (string-append \"executed \" task-type \" with payload \" payload)))
+
+;; Example call:
+(claim-and-execute-task)
+;; => writes \"done\" status and result to the first pending task
+```
+
+**Why this is satisfying:** We built a task queue from first principles—no external service, just cortex. The scan finds tasks, the loop claims the first pending one (read-modify-write), executes it (here a stub), and marks it done. If two workers scan concurrently, they might both claim the same task (cortex doesn't lock), but we could add the version-check pattern from Program 17 to detect and retry. This is orchestration + state management woven together—cortex as infrastructure.
+
+---
+
+## X. Cortex + Fold: Aggregating Across Stored Records
+
+The hardest aggregations combine cortex scans with higher-order functions—`fold`, `map`, `filter`—to compute summary statistics over stored data.
+
+### Program 20: Compute average order value from stored orders
+
+```scheme
+;; Scan all \"order:*\" keys, recall each total, and compute the mean.
+
+(define (average-order-value)
+  (let ((all-keys (cortex/scan \"order:\")))
+    (if (eq? all-keys 'nan)
+        0.0
+        (if (and (pair? all-keys) (eq? (car all-keys) 'escalate))
+            all-keys
+            ;; Recall all totals
+            (let loop ((keys all-keys)
+                       (totals '()))
+              (if (null? keys)
+                  ;; Compute mean
+                  (if (null? totals)
+                      0.0
+                      (/ (fold + 0.0 totals) (length totals)))
+                  (let ((total (cortex/recall (car keys))))
+                    (if (or (eq? total 'nan)
+                            (and (pair? total) (eq? (car total) 'escalate)))
+                        (loop (cdr keys) totals)
+                        (loop (cdr keys) (cons total totals))))))))))
+
+;; Example call:
+(average-order-value)
+;; => 67.42
+```
+
+**What's hard:** We collected all order totals into a list, then used `fold` to sum them and divided by length. The loop skips any order whose recall fails (graceful degradation). This is *map-reduce* over cortex data—the map is implicit (we recall each key), the reduce is the `fold` at the end. If there are thousands of orders, this is expensive—but it's honest, and it works.
+
+### Program 21: Group orders by month and compute monthly revenue
+
+```scheme
+;; Scan all \"order:*\" keys, recall each order (which has total and timestamp),
+;; group by month, and sum totals per month.
+
+(define (monthly-revenue)
+  (let ((all-keys (cortex/scan \"order:\")))
+    (if (eq? all-keys 'nan)
+        '()
+        (if (and (pair? all-keys) (eq? (car all-keys) 'escalate))
+            all-keys
+            ;; Build a map of month -> total
+            (let loop ((keys all-keys)
+                       (month-map '()))
+              (if (null? keys)
+                  month-map
+                  (let ((record (cortex/recall (car keys))))
+                    (if (or (eq? record 'nan)
+                            (and (pair? record) (eq? (car record) 'escalate)))
+                        (loop (cdr keys) month-map)
+                        (let ((total (cdr (assoc 'total record)))
+                              (timestamp (cdr (assoc 'timestamp record))))
+                          ;; Extract year-month from timestamp (assume YYYY-MM-DD format)
+                          (let ((month (substring (time/iso8601 timestamp) 0 7)))
+                            (let ((entry (assoc month month-map)))
+                              (if entry
+                                  ;; Add to existing month
+                                  (loop (cdr keys)
+                                        (cons (cons month (+ (cdr entry) total))
+                                              (filter (lambda (e) (not (equal? (car e) month))) month-map)))
+                                  ;; New month
+                                  (loop (cdr keys)
+                                        (cons (cons month total) month-map))))))))))))))
+
+;; Example call:
+(monthly-revenue)
+;; => ((\"2024-01\" . 1234.56) (\"2024-02\" . 987.65) (\"2024-03\" . 2048.00))
+```
+
+**Why this is a feat:** We did *group-by* and *sum* entirely in Scheme, over cortex data. Each order's timestamp was parsed to extract the month, then we accumulated totals into an association list (the month-map). The accumulation logic is the same as Program 14—if the month exists, update its total; if not, add it. This is database-style aggregation, done in memory. It's expensive, but it's the only way without a dedicated `cortex/query` verb that supports GROUP BY.
+
+---
+
+## XI. Recursive Cortex Traversals — Following Chains of Associations
+
+The deepest programs *recursively* follow associations: given a starting key, walk its neighbors, then walk *their* neighbors, until some stopping condition. This is graph traversal—BFS or DFS—implemented over cortex.
+
+### Program 22: Find all transitive dependencies (DFS traversal)
+
+```scheme
+;; Given a product key, follow \"depends-on\" associations recursively to find
+;; all transitive dependencies (products that this product depends on, directly
+;; or indirectly). Returns a list of keys, avoiding cycles via a visited set.
+
+(define (find-all-dependencies product-key)
+  (let loop ((to-visit (list product-key))
+             (visited '())
+             (deps '()))
+    (if (null? to-visit)
+        deps
+        (let ((current (car to-visit)))
+          (if (member current visited)
+              ;; Already visited—skip
+              (loop (cdr to-visit) visited deps)
+              ;; Visit this node
+              (let ((neighbors (cortex/lookup current \"depends-on\")))
+                (if (or (eq? neighbors 'nan)
+                        (and (pair? neighbors) (eq? (car neighbors) 'escalate)))
+                    ;; No neighbors or error—mark visited and continue
+                    (loop (cdr to-visit) (cons current visited) deps)
+                    ;; Add neighbors to to-visit and deps
+                    (loop (append neighbors (cdr to-visit))
+                          (cons current visited)
+                          (append neighbors deps)))))))))
+
+;; Example call (assumes products and dependencies were stored earlier):
+(find-all-dependencies \"product:lamp-01\")
+;; => (\"product:bulb-socket\" \"product:wire-harness\" \"product:ceramic-base\")
+```
+
+**What's hard:** This is depth-first search—we maintain a `to-visit` stack and a `visited` set (as a list, checked with `member`). Each time we visit a node, we look up its neighbors and add them to the stack. The recursion (via named let) keeps going until the stack is empty. If there's a cycle (A depends on B, B depends on A), the `visited` check prevents infinite loops. This is graph algorithms + cortex—real computer science, implemented honestly.
+
+### Program 23: Find shortest path between two products (BFS traversal)
+
+```scheme
+;; Given a start product and an end product, find the shortest path of
+;; \"related-to\" associations between them. Returns a list of keys forming
+;; the path, or 'no-path if unreachable.
+
+(define (shortest-path start-key end-key)
+  (let loop ((queue (list (list start-key)))  ; queue of paths
+             (visited (list start-key)))
+    (if (null? queue)
+        'no-path  ; queue exhausted—no path exists
+        (let* ((path (car queue))
+               (current (car (reverse path))))  ; last node in path
+          (if (equal? current end-key)
+              path  ; found it
+              (let ((neighbors (cortex/lookup current \"related-to\")))
+                (if (or (eq? neighbors 'nan)
+                        (and (pair? neighbors) (eq? (car neighbors) 'escalate)))
+                    ;; No neighbors—try next path in queue
+                    (loop (cdr queue) visited)
+                    ;; Add unvisited neighbors to queue
+                    (let extend ((nbrs neighbors)
+                                 (new-queue (cdr queue))
+                                 (new-visited visited))
+                      (if (null? nbrs)
+                          (loop new-queue new-visited)
+                          (let ((nbr (car nbrs)))
+                            (if (member nbr new-visited)
+                                (extend (cdr nbrs) new-queue new-visited)
+                                (extend (cdr nbrs)
+                                        (append new-queue (list (append path (list nbr))))
+                                        (cons nbr new-visited)))))))))))))
+
+;; Example call:
+(shortest-path \"product:lamp-01\" \"product:lamp-05\")
+;; => (\"product:lamp-01\" \"product:lamp-03\" \"product:lamp-05\")
+```
+
+**Why this is a capstone:** We implemented breadth-first search—maintain a queue of *paths* (not just nodes), extend each path by one hop, and stop when we reach the target. The queue is a list of lists (each sublist is a path), and we used `append` + `reverse` to extend paths. The inner `extend` loop adds unvisited neighbors to the queue. This is classic BFS, adapted to cortex—no external graph library, just recursion and lists. If the runtime needs to answer \"how are these two products related,\" this program finds the shortest chain of associations.
+
+---
+
+## XII. Cortex + Time: Temporal Queries and Decay
+
+Cortex records often have timestamps. The hardest programs query *time ranges* or apply *decay functions*—older facts are weighted less, or filtered out entirely.
+
+### Program 24: Find orders placed in the last N days
+
+```scheme
+;; Scan all \"order:*\" keys, recall each order's timestamp, filter for those
+;; within the last N days.
+
+(define (recent-orders days)
+  (let ((cutoff (- (time/unix-now) (* days 86400))))  ; seconds in a day
+    (let ((all-keys (cortex/scan \"order:\")))
+      (if (eq? all-keys 'nan)
+          '()
+          (if (and (pair? all-keys) (eq? (car all-keys) 'escalate))
+              all-keys
+              (let loop ((keys all-keys)
+                         (recent '()))
+                (if (null? keys)
+                    (reverse recent)
+                    (let ((record (cortex/recall (car keys))))
+                      (if (or (eq? record 'nan)
+                              (and (pair? record) (eq? (car record) 'escalate)))
+                          (loop (cdr keys) recent)
+                          (let ((timestamp (cdr (assoc 'timestamp record))))
+                            (if (> timestamp cutoff)
+                                (loop (cdr keys) (cons (car keys) recent))
+                                (loop (cdr keys) recent))))))))))))
+
+;; Example call:
+(recent-orders 30)
+;; => (\"order:ord-501\" \"order:ord-502\" \"order:ord-503\")
+```
+
+**What's new:** We computed a cutoff timestamp (now minus N days), then filtered by comparing each order's timestamp. This is a *temporal slice*—classic database WHERE clause, done in Scheme. If cortex had a native `query` verb with time-range support, we'd use it; since it doesn't, we scan and filter in memory. This is honest: expensive, but correct.
+
+### Program 25: Compute time-decayed relevance scores
+
+```scheme
+;; Given a list of past decisions (each with timestamp and score), apply an
+;; exponential decay: older decisions are weighted less. Return a sorted list
+;; of (key . decayed-score) pairs.
+
+(define (decay-scores decision-keys half-life-days)
+  ;; half-life is the number of days for a score to decay to 50%
+  (let ((now (time/unix-now))
+        (half-life-seconds (* half-life-days 86400)))
+    (let loop ((keys decision-keys)
+               (scored '()))
+      (if (null? keys)
+          ;; Sort by decayed score, descending
+          (list-sort (lambda (a b) (> (cdr a) (cdr b))) scored)
+          (let ((record (cortex/recall (car keys))))
+            (if (or (eq? record 'nan)
+                    (and (pair? record) (eq? (car record) 'escalate)))
+                (loop (cdr keys) scored)
+                (let ((timestamp (cdr (assoc 'timestamp record)))
+                      (raw-score (cdr (assoc 'score record))))
+                  (let* ((age (- now timestamp))
+                         (decay-factor (expt 0.5 (/ age half-life-seconds)))
+                         (decayed (math/round (* raw-score decay-factor) 2)))
+                    (loop (cdr keys) (cons (cons (car keys) decayed) scored))))))))))
+
+;; Helper: list-sort (simple insertion sort for demonstration)
+(define (list-sort less? lst)
+  (if (null? lst)
+      '()
+      (insert (car lst) (list-sort less? (cdr lst)) less?)))
+
+(define (insert x sorted less?)
+  (if (null? sorted)
+      (list x)
+      (if (less? x (car sorted))
+          (cons x sorted)
+          (cons (car sorted) (insert x (cdr sorted) less?)))))
+
+;; Example call (assumes decisions were stored with timestamps and scores):
+(decay-scores '(\"decision:d-101\" \"decision:d-102\" \"decision:d-103\") 30)
+;; => ((\"decision:d-103\" . 0.92) (\"decision:d-102\" . 0.67) (\"decision:d-101\" . 0.23))
+```
+
+**Why this is hard:** We implemented exponential decay—older scores are multiplied by `0.5^(age / half-life)`. This is math + cortex: recall each record, extract timestamp and score, compute the decay factor, apply it, then sort the results. The sorting is done with a simple insertion sort (we wrote the helpers `list-sort` and `insert` inline). This is the kind of program that powers \"show me the most relevant past tickets, but weight recent ones higher.\" It's stateful + temporal + higher-order—three hard things composed.
+
+---
+
+## XIII. Cortex + Model + Time: Refreshing Stale Inferences
+
+The masterwork pattern: periodically re-run inferences for stored records, and update them if the model's output has changed. This is *stateful reasoning with drift detection*.
+
+### Program 26: Refresh product descriptions if they're older than N days
+
+```scheme
+;; Scan all \"product:*\" keys, check the last-updated timestamp, and regenerate
+;; descriptions for any that are older than threshold days.
+
+(define (refresh-stale-descriptions threshold-days)
+  (let ((cutoff (- (time/unix-now) (* threshold-days 86400))))
+    (let ((all-keys (cortex/scan \"product:\")))
+      (if (eq? all-keys 'nan)
+          '()
+          (if (and (pair? all-keys) (eq? (car all-keys) 'escalate))
+              all-keys
+              (let loop ((keys all-keys)
+                         (refreshed '()))
+                (if (null? keys)
+                    (reverse refreshed)
+                    (let ((record (cortex/recall (car keys))))
+                      (if (or (eq? record 'nan)
+                              (and (pair? record) (eq? (car record) 'escalate)))
+                          (loop (cdr keys) refreshed)
+                          (let ((last-updated (cdr (assoc 'last-updated record)))
+                                (prod-name (cdr (assoc 'name record))))
+                            (if (< last-updated cutoff)
+                                ;; Stale—regenerate description
+                                (let ((prompt (string-append \"Write a product description for: \" prod-name)))
+                                  (let ((new-desc (model/draft prompt)))
+                                    (if (eq? new-desc 'nan)
+                                        (loop (cdr keys) refreshed)
+                                        ;; Write back updated record
+                                        (let ((updated-record (cons (cons 'description new-desc)
+                                                                    (cons (cons 'last-updated (time/unix-now))
+                                                                          (filter (lambda (e)
+                                                                                    (not (or (eq? (car e) 'description)
+                                                                                             (eq? (car e) 'last-updated))))
+                                                                                  record)))))
+                                          (let ((write-res (cortex/write (car keys) updated-record)))
+                                            (if (and (pair? write-res) (eq? (car write-res) 'escalate))
+                                                (loop (cdr keys) refreshed)
+                                                (loop (cdr keys) (cons (car keys) refreshed))))))))
+                                ;; Fresh—skip
+                                (loop (cdr keys) refreshed))))))))))))
+
+;; Example call:
+(refresh-stale-descriptions 90)
+;; => (\"product:lamp-02\" \"product:lamp-07\")  ; keys that were refreshed
+```
+
+**Why this is a masterwork:** We scanned cortex, filtered by timestamp, called the model for each stale product, and wrote back the new description + updated timestamp. This is a *maintenance loop*—the runtime periodically runs this to keep her product descriptions fresh. Each stage can fail (scan, recall, model call, write), and we handle all of them. The loop skips failures and keeps going—graceful degradation at scale. This is stateful + temporal + model-driven reasoning woven into one program.
+
+---
+
+## XIV. Multi-Stage Reconciliation with External Data
+
+The ultimate orchestration: read from cortex, fetch external data (e.g., from an API), reconcile the two, and write back the merged result. This is where cortex becomes the *source of truth*, continuously updated from the outside world.
+
+### Program 27: Sync customer email from CRM, reconciling with stored record
+
+```scheme
+;; Given a customer ID, fetch their latest email from the CRM, compare it to
+;; the stored email in cortex, and update cortex if the CRM has a newer value.
+
+(define (sync-customer-email-from-crm customer-id)
+  (let ((cortex-key (string-append \"customer:\" customer-id)))
+    ;; Step 1: recall stored record
+    (let ((stored (cortex/recall cortex-key)))
+      (if (and (pair? stored) (eq? (car stored) 'escalate))
+          stored  ; propagate escalate
+          ;; Step 2: fetch from CRM
+          (let ((crm-data (crm/read customer-id)))
+            (if (eq? crm-data 'nan)
+                (escalate 'crm-fetch-failed customer-id)
+                (if (and (pair? crm-data) (eq? (car crm-data) 'escalate))
+                    crm-data
+                    ;; Step 3: extract emails and timestamps
+                    (let ((stored-email (if (eq? stored 'nan) #f (cdr (assoc 'email stored))))
+                          (stored-ts (if (eq? stored 'nan) 0 (cdr (assoc 'email-updated stored))))
+                          (crm-email (cdr (assoc 'email crm-data)))
+                          (crm-ts (cdr (assoc 'updated-at crm-data))))
+                      ;; Step 4: reconcile—CRM wins if its timestamp is newer
+                      (if (> crm-ts stored-ts)
+                          ;; Update cortex
+                          (let ((new-record (list (cons 'email crm-email)
+                                                  (cons 'email-updated crm-ts))))
+                            (cortex/write cortex-key new-record))
+                          ;; Stored is fresher—no update needed
+                          stored)))))))))
+
+;; Example call:
+(sync-customer-email-from-crm \"cust-8472\")
+;; => writes updated email if CRM has a newer timestamp
+```
+
+**Why this is hard:** We chained two data sources—cortex and CRM—and reconciled them by timestamp. The program *reads* from both, *decides* which is authoritative, and *writes* back to cortex. This is a *data integration* pattern—the runtime keeps her memory in sync with external systems. Each verb can fail, and we check them all. This is FORWARD (compose three stages: read, fetch, reconcile, write) with ESCAPE at every joint.
+
+### Program 28: Batch-sync inventory from a marketplace API
+
+```scheme
+;; Fetch current inventory levels from a marketplace API, reconcile with stored
+;; levels in cortex (taking the maximum), and write back updated levels.
+
+(define (batch-sync-inventory-from-marketplace product-ids)
+  (let loop ((ids product-ids)
+             (synced '()))
+    (if (null? ids)
+        (reverse synced)
+        (let* ((prod-id (car ids))
+               (cortex-key (string-append \"stock:\" prod-id)))
+          ;; Recall stored stock
+          (let ((stored-stock (cortex/recall-default cortex-key 0)))
+            (if (and (pair? stored-stock) (eq? (car stored-stock) 'escalate))
+                stored-stock  ; propagate escalate
+                ;; Fetch from marketplace (stub—assume it returns a number)
+                (let ((marketplace-stock (fetch-marketplace-stock prod-id)))
+                  (if (eq? marketplace-stock 'nan)
+                      (loop (cdr ids) synced)  ; skip this product
+                      ;; Reconcile: take max
+                      (let ((new-stock (max stored-stock marketplace-stock)))
+                        (let ((write-res (cortex/write cortex-key new-stock)))
+                          (if (and (pair? write-res) (eq? (car write-res) 'escalate))
+                              write-res
+                              (loop (cdr ids) (cons (cons prod-id new-stock) synced))))))))))))))
+
+;; Stub: fetch-marketplace-stock would call a real API verb
+(define (fetch-marketplace-stock prod-id)
+  ;; Placeholder—real version would use merchant/inventory or similar
+  (if (equal? prod-id \"lamp-01\") 12 (if (equal? prod-id \"lamp-02\") 5 'nan)))
+
+;; Example call:
+(batch-sync-inventory-from-marketplace '(\"lamp-01\" \"lamp-02\" \"lamp-03\"))
+;; => ((\"lamp-01\" . 12) (\"lamp-02\" . 5))
+```
+
+**What's satisfying:** We looped over a batch of products, fetched external stock for each, reconciled with stored stock, and wrote back. This is *batch ETL*—extract (from API), transform (reconcile), load (to cortex). Each product is independent, so if one fetch fails, we skip it and continue. The result is a list of successfully synced products. This is the kind of program that runs hourly in the runtime's cron scheduler, keeping her memory fresh.
+
+---
+
+## XV. Cortex as a Cache — Expiring Stale Data
+
+One more pattern: use cortex as a *TTL cache*. Store values with an expiration timestamp, and on recall, check if they've expired—if so, re-fetch and refresh.
+
+### Program 29: Cached model inference with TTL
+")

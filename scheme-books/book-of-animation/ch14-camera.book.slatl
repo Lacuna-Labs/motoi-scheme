@@ -1,0 +1,692 @@
+;; ch14-camera.slat
+;; Book of Animation — Chapter 14: The Camera
+
+(chapter
+  :book             "Book of Animation"
+  :chapter-number   null
+  :title            "Chapter 14: The Camera"
+  :source-path      "/Users/alfred/code/curator/BOOK/A-branch-scheme-books/new-anim/ch14-camera.md"
+  :size             34198
+  :sha256           "92dbd20abef255f8"
+  :prose
+"# Chapter 14: The Camera
+
+Until now, we've been gods with infinite sight — the entire world visible in a single frame, every sprite and particle always on-screen. That works for a fountain or a flock, but not for a journey. Not for a chase. Not for a story that unfolds across space.
+
+In Chapter 13 we built **scenes** — multi-part composed worlds with spawning rules and game loops. But every scene lived inside the fixed viewport of the surface grid. When your sprite walked off the right edge, it vanished. When your flock scattered wide, you saw only the center.
+
+A **camera** is the invisible narrator. It decides what the viewer sees, where attention goes, what stays in frame and what slips away. It can lock onto a hero, frame an ensemble, shake with impact, or glide ahead to show what's coming. It transforms a static canvas into a **window onto a living world** — a world that exists beyond the edges, that remembers what you can't see, that rewards exploration.
+
+This chapter teaches you to **move the camera** — to follow, to frame, to anticipate, to tell the story through sight itself. We'll start with simple tracking (follow one sprite), then framing constraints (keep the pack visible), then cinematography (lead the eye, shake on impact, snap to revelation). By the end you'll author a camera that **decides** what matters, that composes the frame like a director composes a shot.
+
+We build on:
+- **Vectors** (Ch4) — camera position/velocity as `(x . y)` pairs.
+- **Forces** (Ch5) — smooth acceleration toward a target, damping.
+- **Steering** (Ch10) — `ai/arrive` applies to cameras too.
+- **Scenes** (Ch13) — `big-bang` + `on-tick` + `to-draw`, the game loop that steps the world.
+- **Entities** (Ch8–Ch13) — the sprites we'll follow, the pack we'll frame.
+
+The camera lives in `world/camera` and family. Let's teach it to see.
+
+---
+
+## 14.1 The Camera as Entity
+
+The camera is a **point in world-space** with a **position**. The surface grid (our 160×144 canvas, say) is a **viewport** onto that point. When the camera moves, the viewport slides — sprites stay where they are in world-space, but their screen positions shift.
+
+The camera API:
+
+```scheme
+(world/camera)          ;; => (cx . cy), the camera's center in world-space
+(world/camera-snap! x y) ;; instantly move camera to (x, y)
+(world/camera-follow! id damping) ;; smoothly track entity id
+(world/camera-bounds! left top right bottom) ;; clamp camera to region
+(world/camera-shake! intensity duration) ;; screen-shake for impact
+```
+
+Let's start simple: **spawn a sprite, snap the camera to it, draw**.
+
+```scheme
+;; Example 14.1: Camera Snap — instant cut
+(define (example-14-1)
+  (world/reset!)
+  (let ((hero (world/spawn 400 300))) ;; spawn far from origin
+    (entity/sprite! hero 'blossom-plum)
+    (entity/set-vel! hero 2 0) ;; drift right
+    (world/camera-snap! 400 300) ;; cut camera to hero's start pos
+    (big-bang
+      (on-tick (lambda (s)
+                 (world/step)
+                 s))
+      (to-draw (lambda (s)
+                 (world/frame))))))
+
+;; (example-14-1)
+```
+
+<!-- BUILD: wire example-14-1 as runnable cart \"Camera Snap\" -->
+
+[VISUAL: A plum blossom sprite centered in frame, drifting right. The camera is locked at (400, 300) so the sprite exits right after ~40 frames (80 cells of drift ÷ 2px/frame).]
+
+**What happened:**
+- We spawned the hero at `(400, 300)` — far outside the default `(0, 0)`-centered viewport.
+- `world/camera-snap!` instantly moved the camera's center to `(400, 300)`.
+- The viewport (160×144) now shows world-space `[320..480, 228..372]` (camera center ± half-viewport).
+- The hero starts centered, drifts right, exits. The camera **doesn't follow** — it's pinned.
+
+This is a **static camera**. Useful for a fixed-screen platformer level, but not a journey.
+
+---
+
+## 14.2 Following One Entity
+
+To make the camera **track** a sprite, use `world/camera-follow!`:
+
+```scheme
+(world/camera-follow! entity-id damping)
+;; damping ∈ [0..1]: 0 = instant snap, 1 = no movement, 0.1 = smooth lag
+```
+
+The camera will **accelerate toward the entity's position** every frame, with exponential smoothing. Think of it as the camera attached to the sprite by a spring.
+
+```scheme
+;; Example 14.2: Camera Follow — smooth tracking
+(define (example-14-2)
+  (world/reset!)
+  (let ((hero (world/spawn 400 300)))
+    (entity/sprite! hero 'blossom-plum)
+    (entity/set-vel! hero 2 0) ;; drift right
+    (world/camera-snap! 400 300) ;; start centered on hero
+    (world/camera-follow! hero 0.1) ;; track with lag
+    (big-bang
+      (on-tick (lambda (s)
+                 (world/step)
+                 s))
+      (to-draw (lambda (s)
+                 (world/frame))))))
+
+;; (example-14-2)
+```
+
+<!-- BUILD: wire example-14-2 as runnable cart \"Camera Follow\" -->
+
+[VISUAL: The plum blossom drifts right, and the camera follows smoothly, keeping it near-center. The sprite never exits the frame — the camera moves with it, showing new world-space to the right as the sprite advances.]
+
+**What happened:**
+- `world/camera-follow! hero 0.1` told the camera to track `hero` with 10% damping.
+- Every `world/step`, the camera accelerates toward the hero's current position.
+- The hero drifts at constant velocity; the camera **lags slightly** (the spring effect), then catches up.
+- The viewport slides smoothly — the background (if any) would parallax.
+
+**Try different damping:**
+- `0.0` → instant snap, no lag (same as `camera-snap!` every frame).
+- `0.05` → tight follow, minimal lag.
+- `0.2` → loose follow, the hero can drift toward the edge before the camera catches up.
+- `0.5` → very loose, the camera barely moves.
+
+Damping is **feel**. A tight camera (0.05) feels responsive, locked. A loose camera (0.2) feels floaty, lazy, exploratory.
+
+---
+
+## 14.3 Bounded Worlds
+
+An unbounded camera will follow the hero into the void. But most worlds have **edges** — a garden, a room, a map. We don't want the camera to show empty space beyond the world boundary.
+
+Use `world/camera-bounds!` to **clamp** the camera:
+
+```scheme
+(world/camera-bounds! left top right bottom)
+;; The camera's center will never move outside [left, right] × [top, bottom].
+```
+
+Typically you set bounds to *world-size minus half-viewport*, so the camera stops when the viewport edge reaches the world edge.
+
+```scheme
+;; Example 14.3: Camera Bounds — a walled garden
+(define (example-14-3)
+  (world/reset!)
+  (let ((hero (world/spawn 80 72))) ;; start near world-center
+    (entity/sprite! hero 'blossom-cherry)
+    (entity/set! hero 'controllable #t)
+    ;; World: 0..320 wide, 0..240 tall
+    ;; Viewport: 160×144
+    ;; Bounds: camera center ∈ [80, 240] × [72, 168]
+    ;;   so viewport never shows x<0, x>320, y<0, y>240
+    (world/camera-bounds! 80 72 240 168)
+    (world/camera-follow! hero 0.1)
+    (big-bang
+      (on-tick (lambda (s)
+                 (when (entity/get hero 'controllable)
+                   ;; simple 4-dir control
+                   (let ((vx 0) (vy 0))
+                     (when (input/down? 'left)  (set! vx -2))
+                     (when (input/down? 'right) (set! vx 2))
+                     (when (input/down? 'up)    (set! vy -2))
+                     (when (input/down? 'down)  (set! vy 2))
+                     (entity/set-vel! hero vx vy)))
+                 (world/step)
+                 s))
+      (to-draw (lambda (s)
+                 (world/frame))))))
+
+;; (example-14-3)
+```
+
+<!-- BUILD: wire example-14-3 as runnable cart \"Camera Bounds\" (input/down? live-app-only, scripted in harness) -->
+*[needs: input/down? live-app OR scripted harness input]*
+
+[VISUAL: A cherry blossom sprite in a 320×240 world. As the sprite moves toward the edges, the camera follows until it hits the boundary, then stops — the sprite can move closer to the viewport edge, but the camera won't show the void beyond the world.]
+
+**What happened:**
+- The world is `320×240` cells (2× viewport).
+- Camera bounds `[80, 240] × [72, 168]` ensure the viewport never shows `x < 0`, `x > 320`, `y < 0`, `y > 240`.
+- When the sprite is near the center, the camera follows smoothly.
+- When the sprite approaches the world edge, the camera **stops** at the bound, and the sprite drifts toward the viewport edge.
+
+This is the **classic 2D adventure camera** — follow until you hit the world boundary, then let the hero explore the edge.
+
+---
+
+## 14.4 Framing an Ensemble
+
+Following one sprite is easy. But what if you have a **pack** — a flock, a party, a team — and you want to **keep them all visible**?
+
+The camera should center on the **bounding box** of the group, and zoom (or just frame) to fit them all. The runtime doesn't have dynamic zoom yet (the viewport is fixed-size), so we'll **center on the centroid** and trust that our viewport is large enough (or mark sprites that drift too far out-of-frame as \"offscreen\").
+
+**Algorithm:**
+1. Find all entities in the group (by tag or team).
+2. Compute their **centroid** (average position).
+3. Move the camera toward the centroid.
+
+```scheme
+;; Example 14.4: Camera Framing — follow the flock's center
+(define (example-14-4)
+  (world/reset!)
+  ;; spawn 5 wandering sprites
+  (let ((flock (map (lambda (i)
+                      (let ((e (world/spawn (+ 80 (* i 20)) 72)))
+                        (entity/sprite! e 'blossom-cherry)
+                        (entity/tag! e 'flock)
+                        (entity/set-vel! e (* (- i 2) 0.5) (* (- 2 i) 0.3)) ;; varied drift
+                        (ai/wander e 1.0 0.3) ;; gentle wander
+                        e))
+                    '(0 1 2 3 4))))
+    (world/camera-snap! 80 72)
+    (big-bang
+      (on-tick (lambda (s)
+                 (world/step)
+                 ;; compute flock centroid
+                 (let ((sum-x 0) (sum-y 0) (count 0))
+                   (group/each 'flock (lambda (e)
+                                        (let ((p (entity/pos e)))
+                                          (set! sum-x (+ sum-x (car p)))
+                                          (set! sum-y (+ sum-y (cdr p)))
+                                          (set! count (+ count 1)))))
+                   (when (> count 0)
+                     (let ((cx (/ sum-x count))
+                           (cy (/ sum-y count)))
+                       ;; smoothly move camera toward centroid
+                       (let* ((cam (world/camera))
+                              (cam-x (car cam))
+                              (cam-y (cdr cam))
+                              (dx (- cx cam-x))
+                              (dy (- cy cam-y)))
+                         (world/camera-snap! (+ cam-x (* dx 0.1))
+                                             (+ cam-y (* dy 0.1)))))))
+                 s))
+      (to-draw (lambda (s)
+                 (world/frame))))))
+
+;; (example-14-4)
+```
+
+<!-- BUILD: wire example-14-4 as runnable cart \"Camera Framing Flock\" -->
+
+[VISUAL: Five cherry blossoms wandering in loose formation. The camera smoothly centers on their average position, so even as individuals drift apart, the group stays roughly centered in frame.]
+
+**What happened:**
+- We spawned 5 sprites, tagged them `'flock`, gave them initial velocity + `ai/wander`.
+- Every tick, we compute the centroid: sum all `x` and `y`, divide by count.
+- We move the camera 10% toward the centroid (exponential smoothing, same as `camera-follow!` but manual).
+- The camera **frames the ensemble** — if they spread wide, the camera stays centered on their middle; if they cluster, the camera tightens.
+
+**Limitation:** If the flock spreads wider than the viewport, some sprites will go offscreen. A real solution would compute the bounding box **and** adjust zoom (or mark offscreen sprites with arrows). The runtime doesn't have dynamic zoom yet, so we accept that wide flocks may partially exit frame. The camera still does its job: **keep the center of attention visible**.
+
+---
+
+## 14.5 Lead the Eye — Predictive Framing
+
+A camera that follows the hero's **current position** is always a step behind. When the hero runs right, the camera lags, and the viewport shows more space *behind* than *ahead* — the opposite of what a player needs.
+
+A **predictive camera** looks at the hero's **velocity** and frames **ahead** of them, giving the viewer space to see what's coming.
+
+**Algorithm:**
+1. Follow the hero's position (as before).
+2. Add a **lead offset** proportional to the hero's velocity: `offset = velocity × lead-factor`.
+3. Move the camera toward `hero-pos + offset`.
+
+```scheme
+;; Example 14.5: Predictive Camera — lead the runner
+(define (example-14-5)
+  (world/reset!)
+  (let ((hero (world/spawn 80 72)))
+    (entity/sprite! hero 'blossom-plum)
+    (entity/set! hero 'controllable #t)
+    (world/camera-snap! 80 72)
+    (big-bang
+      (on-tick (lambda (s)
+                 (when (entity/get hero 'controllable)
+                   (let ((vx 0) (vy 0))
+                     (when (input/down? 'left)  (set! vx -3))
+                     (when (input/down? 'right) (set! vx 3))
+                     (when (input/down? 'up)    (set! vy -3))
+                     (when (input/down? 'down)  (set! vy 3))
+                     (entity/set-vel! hero vx vy)))
+                 (world/step)
+                 ;; predictive framing
+                 (let* ((pos (entity/pos hero))
+                        (vel (entity/vel hero))
+                        (lead-x (* (car vel) 10)) ;; 10 frames ahead
+                        (lead-y (* (cdr vel) 10))
+                        (target-x (+ (car pos) lead-x))
+                        (target-y (+ (cdr pos) lead-y))
+                        (cam (world/camera))
+                        (dx (- target-x (car cam)))
+                        (dy (- target-y (cdr cam))))
+                   (world/camera-snap! (+ (car cam) (* dx 0.1))
+                                       (+ (cdr cam) (* dy 0.1))))
+                 s))
+      (to-draw (lambda (s)
+                 (world/frame))))))
+
+;; (example-14-5)
+```
+
+<!-- BUILD: wire example-14-5 as runnable cart \"Predictive Camera\" (input/down? live-app-only, scripted in harness) -->
+*[needs: input/down? live-app OR scripted harness input]*
+
+[VISUAL: A plum blossom sprite controlled by arrow keys. When the sprite moves right, the camera frames *ahead* — the sprite sits left-of-center, with more viewport space to the right. When the sprite stops, the camera drifts back to center it. The framing feels **anticipatory**, like a cinematographer panning ahead of a runner.]
+
+**What happened:**
+- `lead-x` and `lead-y` are the hero's velocity × 10 (10 frames of lookahead).
+- The camera targets `hero-pos + (lead-x, lead-y)` instead of just `hero-pos`.
+- When the hero runs right at `vx = 3`, the camera shifts right by `3×10 = 30` cells, framing 30 cells ahead.
+- When the hero stops (`vx = 0`), the lead vanishes, and the camera drifts back to center.
+
+**Tuning:**
+- **Lead factor** (here `10`): higher → more lookahead, feels faster but can be disorienting. Lower → tighter framing, less anticipation.
+- **Damping** (here `0.1`): higher → slower camera, more lag. Lower → snappier.
+
+This is the **platformer camera** — Mario, Celeste, Hollow Knight all use variants of predictive framing.
+
+---
+
+## 14.6 Screen Shake — Impact and Weight
+
+When something **heavy happens** — a boss lands, a bomb explodes, a collision — the camera should **shake**. Screen shake is **haptic feedback** delivered visually. It makes impacts feel **real**.
+
+`world/camera-shake!` applies a random offset to the camera every frame for a duration, then decays back to the follow target.
+
+```scheme
+(world/camera-shake! intensity duration)
+;; intensity: max offset in cells (e.g. 3 = ±3 cell jitter)
+;; duration: frames (e.g. 20 = shake for 20 ticks)
+```
+
+```scheme
+;; Example 14.6: Screen Shake on Collision
+(define (example-14-6)
+  (world/reset!)
+  (world/gravity! 0 0.2) ;; mild gravity
+  (world/floor! 120) ;; ground at y=120
+  (let ((ball (world/spawn 80 10)))
+    (entity/sprite! ball 'blossom-sakura)
+    (entity/bounce! ball 0.6) ;; bouncy
+    (entity/set-vel! ball 0 0)
+    (world/camera-snap! 80 72)
+    (world/camera-follow! ball 0.1)
+    (big-bang
+      (on-tick (lambda (s)
+                 (let ((old-y (cdr (entity/pos ball))))
+                   (world/step)
+                   (let ((new-y (cdr (entity/pos ball))))
+                     ;; detect bounce (velocity sign flip at floor)
+                     (when (and (> old-y 115) (<= new-y 120) (> (cdr (entity/vel ball)) 0))
+                       (world/camera-shake! 3 12)))) ;; shake for 12 frames
+                 s))
+      (to-draw (lambda (s)
+                 (world/frame))))))
+
+;; (example-14-6)
+```
+
+<!-- BUILD: wire example-14-6 as runnable cart \"Screen Shake Bounce\" -->
+
+[VISUAL: A sakura sprite falls under gravity, bounces on the floor at y=120. On each bounce, the entire viewport **jitters violently** for ~12 frames (±3 cells random offset), then settles. The shake intensity matches the impact.]
+
+**What happened:**
+- We detect the bounce by checking if `y` crossed the floor threshold and velocity flipped positive (upward after impact).
+- On detection, we call `world/camera-shake! 3 12` — shake ±3 cells for 12 frames.
+- The camera applies a random `(dx, dy) ∈ [-3, 3]²` offset every frame, decaying exponentially over 12 frames.
+- The shake **adds** to the follow/snap target — it doesn't cancel smooth following, just jitters on top.
+
+**Tuning shake:**
+- **Intensity**: 1–2 = subtle rumble, 3–5 = strong impact, 10+ = earthquake (disorienting, use sparingly).
+- **Duration**: 6–10 frames = quick punch, 20–30 = sustained rumble, 60+ = nausea (avoid).
+
+Shake is **emphasis**. Use it when the world **reacts** — explosions, stomps, crashes. Don't shake on every tiny event or it loses meaning.
+
+---
+
+## 14.7 Cinematic Cuts — Snap for Revelation
+
+Sometimes you want the camera to **instantly jump** — a cut, not a pan. Revelations. Scene transitions. A character teleports and the camera snaps to follow.
+
+`world/camera-snap!` is the instant cut. Combine it with `world/camera-follow!` to **cut, then resume smooth follow**.
+
+```scheme
+;; Example 14.7: Cut on Teleport
+(define (example-14-7)
+  (world/reset!)
+  (let ((hero (world/spawn 80 72))
+        (teleport-timer 0))
+    (entity/sprite! hero 'blossom-cherry)
+    (entity/set-vel! hero 1 0) ;; drift right
+    (world/camera-snap! 80 72)
+    (world/camera-follow! hero 0.1)
+    (big-bang
+      (on-tick (lambda (s)
+                 (set! teleport-timer (+ teleport-timer 1))
+                 (when (= teleport-timer 120) ;; teleport after 2 seconds
+                   (entity/set-pos! hero 300 200) ;; jump to far corner
+                   (world/camera-snap! 300 200) ;; instant cut
+                   (world/camera-shake! 2 10)) ;; small shake for \"pop\"
+                 (world/step)
+                 s))
+      (to-draw (lambda (s)
+                 (world/frame))))))
+
+;; (example-14-7)
+```
+
+<!-- BUILD: wire example-14-7 as runnable cart \"Camera Cut Teleport\" -->
+
+[VISUAL: A cherry blossom drifts right smoothly for 2 seconds. At frame 120, it **instantly vanishes** and reappears at (300, 200) — a far corner. The camera **cuts** (no pan, instant jump) to the new position, with a brief shake. Then smooth following resumes.]
+
+**What happened:**
+- At frame 120, we `set-pos!` the hero to a distant location.
+- We **immediately** `camera-snap!` to that location — no smooth interpolation, just a cut.
+- We add a small shake (2 cells, 10 frames) to **punctuate** the teleport (optional, but feels good).
+- `camera-follow!` was never disabled, so after the cut, it resumes smooth tracking from the new position.
+
+**Cuts vs. Pans:**
+- **Cut** (`snap!`) = instant reveal, surprise, teleport, scene transition. No spatial continuity.
+- **Pan** (`follow!` with low damping) = smooth, continuous, the viewer tracks motion through space.
+
+Use cuts **sparingly** — they break spatial flow. But when you want **shock** or **transition**, a cut is the right tool.
+
+---
+
+## 14.8 The Cinematographer — Intelligent Framing
+
+A **cinematographer** is a camera that **decides** what to show based on **context**. It's not just following the hero — it's composing the shot.
+
+Examples of cinematic intent:
+- **Dialogue**: frame both speakers, centered.
+- **Chase**: lead the pursuer, keep pursued in frame.
+- **Exploration**: wide framing, show the environment.
+- **Combat**: tight framing, focus on the action.
+- **Revelation**: cut to the discovered object, hold, then return.
+
+We can build a **rule-based cinematographer** using `entity/get` state + conditional framing logic. The camera becomes an **AI** — it reads the scene and **decides** where to look.
+
+```scheme
+;; Example 14.8: Cinematographer — context-aware framing
+(define (example-14-8)
+  (world/reset!)
+  (let ((hero (world/spawn 80 72))
+        (npc (world/spawn 160 72))
+        (mode 'follow)) ;; 'follow | 'dialogue | 'reveal
+    (entity/sprite! hero 'blossom-cherry)
+    (entity/sprite! npc 'blossom-plum)
+    (entity/tag! hero 'hero)
+    (entity/tag! npc 'npc)
+    (entity/set-vel! hero 1 0) ;; hero drifts right
+    (world/camera-snap! 80 72)
+    (big-bang
+      (on-tick (lambda (s)
+                 (world/step)
+                 ;; simple event logic: after 60 frames, enter dialogue
+                 (when (= (world/frame) 60)
+                   (set! mode 'dialogue)
+                   (entity/set-vel! hero 0 0)) ;; stop hero
+                 ;; after 120 frames, reveal NPC
+                 (when (= (world/frame) 120)
+                   (set! mode 'reveal))
+                 ;; after 180 frames, return to follow
+                 (when (= (world/frame) 180)
+                   (set! mode 'follow)
+                   (entity/set-vel! hero 1 0)) ;; resume drift
+
+                 ;; CINEMATOGRAPHER: decide framing based on mode
+                 (cond
+                   ((eq? mode 'follow)
+                    ;; standard follow with lead
+                    (let* ((pos (entity/pos hero))
+                           (vel (entity/vel hero))
+                           (lead-x (* (car vel) 8))
+                           (target-x (+ (car pos) lead-x))
+                           (target-y (cdr pos))
+                           (cam (world/camera))
+                           (dx (- target-x (car cam)))
+                           (dy (- target-y (cdr cam))))
+                      (world/camera-snap! (+ (car cam) (* dx 0.1))
+                                          (+ (cdr cam) (* dy 0.1)))))
+                   ((eq? mode 'dialogue)
+                    ;; frame both hero and NPC (centroid)
+                    (let* ((h-pos (entity/pos hero))
+                           (n-pos (entity/pos npc))
+                           (mid-x (/ (+ (car h-pos) (car n-pos)) 2))
+                           (mid-y (/ (+ (cdr h-pos) (cdr n-pos)) 2))
+                           (cam (world/camera))
+                           (dx (- mid-x (car cam)))
+                           (dy (- mid-y (cdr cam))))
+                      (world/camera-snap! (+ (car cam) (* dx 0.05))
+                                          (+ (cdr cam) (* dy 0.05))))) ;; slower pan
+                   ((eq? mode 'reveal)
+                    ;; cut to NPC, hold
+                    (let* ((n-pos (entity/pos npc))
+                           (cam (world/camera))
+                           (dx (- (car n-pos) (car cam)))
+                           (dy (- (cdr n-pos) (cdr cam))))
+                      (world/camera-snap! (+ (car cam) (* dx 0.2))
+                                          (+ (cdr cam) (* dy 0.2)))))) ;; quick pan to NPC
+                 s))
+      (to-draw (lambda (s)
+                 (world/frame))))))
+
+;; (example-14-8)
+```
+
+<!-- BUILD: wire example-14-8 as runnable cart \"Cinematographer Context\" -->
+
+[VISUAL: 
+- Frames 0–60: Camera follows the cherry blossom (hero) as it drifts right, with slight lead. The plum (NPC) is off-screen to the right.
+- Frame 60: Hero stops. Camera slowly pans to center both hero and NPC in frame (dialogue mode).
+- Frame 120: Camera pans quickly toward the NPC, centering on it (reveal mode).
+- Frame 180: Camera pans back to hero and resumes following as hero resumes drift.]
+
+**What happened:**
+- We tracked a `mode` variable and switched framing logic every 60 frames.
+- **'follow**: predictive framing on hero (as in 14.5).
+- **'dialogue**: center on the midpoint between hero and NPC, slower damping (0.05 = very smooth pan).
+- **'reveal**: pan toward NPC quickly (0.2 damping).
+- The camera **tells the story** — it decides what to show based on narrative intent, not just hero position.
+
+**Building a real cinematographer:**
+- Replace the hardcoded frame-counts with **event triggers**: proximity, collision, dialogue start, quest state.
+- Add more modes: 'chase' (lead the chaser), 'combat' (tight framing), 'vista' (wide framing on a landmark).
+- Use `ai/decide` (Ch15, behavior trees) to **decide the mode** — the camera becomes an autonomous agent.
+
+This is **cinematic AI** — the camera as **co-author** of the experience.
+
+---
+
+## 14.9 Finale: A Camera That Tells the Story
+
+Let's build a **two-act journey** with intelligent framing:
+
+**Act 1 (Exploration):** Hero wanders a world. Camera follows with lead, bounded to the world edges. The hero discovers a landmark (a distant blossom).
+
+**Act 2 (Revelation):** Camera cuts to the landmark, holds for 2 seconds (shake for emphasis), then pans back to hero and resumes following. The hero walks toward the landmark, and the camera frames the approach (both in view).
+
+This is a **narrative camera** — it knows when to follow, when to reveal, when to hold, when to return. It's telling the story **through sight**.
+
+```scheme
+;; Example 14.9: A Camera That Tells the Story (finale)
+(define (example-14-9)
+  (world/reset!)
+  (let ((hero (world/spawn 80 72))
+        (landmark (world/spawn 280 72))
+        (mode 'explore)
+        (hold-timer 0))
+    (entity/sprite! hero 'blossom-cherry)
+    (entity/sprite! landmark 'blossom-wisteria)
+    (entity/set! hero 'controllable #t)
+    (entity/tag! landmark 'landmark)
+
+    ;; world bounds: 0..320 × 0..240, viewport 160×144
+    (world/camera-bounds! 80 72 240 168)
+    (world/camera-snap! 80 72)
+
+    (big-bang
+      (on-tick (lambda (s)
+                 ;; simple 4-dir control
+                 (when (and (entity/get hero 'controllable) (eq? mode 'explore))
+                   (let ((vx 0) (vy 0))
+                     (when (input/down? 'left)  (set! vx -2))
+                     (when (input/down? 'right) (set! vx 2))
+                     (when (input/down? 'up)    (set! vy -2))
+                     (when (input/down? 'down)  (set! vy 2))
+                     (entity/set-vel! hero vx vy)))
+
+                 (world/step)
+
+                 ;; EVENT: if hero gets within 50 cells of landmark, trigger reveal
+                 (when (and (eq? mode 'explore)
+                            (< (entity/distance hero landmark) 50))
+                   (set! mode 'reveal)
+                   (set! hold-timer 0)
+                   (entity/set-vel! hero 0 0)) ;; stop hero
+
+                 ;; CINEMATOGRAPHER
+                 (cond
+                   ((eq? mode 'explore)
+                    ;; predictive follow with bounds
+                    (let* ((pos (entity/pos hero))
+                           (vel (entity/vel hero))
+                           (lead-x (* (car vel) 10))
+                           (lead-y (* (cdr vel) 10))
+                           (target-x (+ (car pos) lead-x))
+                           (target-y (+ (cdr pos) lead-y))
+                           (cam (world/camera))
+                           (dx (- target-x (car cam)))
+                           (dy (- target-y (cdr cam))))
+                      (world/camera-snap! (+ (car cam) (* dx 0.1))
+                                          (+ (cdr cam) (* dy 0.1)))))
+
+                   ((eq? mode 'reveal)
+                    ;; cut to landmark, hold for 60 frames, then approach
+                    (when (= hold-timer 0)
+                      (world/camera-snap! (car (entity/pos landmark))
+                                          (cdr (entity/pos landmark)))
+                      (world/camera-shake! 4 15)) ;; dramatic reveal shake
+                    (set! hold-timer (+ hold-timer 1))
+                    (when (= hold-timer 60)
+                      (set! mode 'approach)
+                      (entity/set! hero 'controllable #t))) ;; return control
+
+                   ((eq? mode 'approach)
+                    ;; frame both hero and landmark (centroid)
+                    (let* ((h-pos (entity/pos hero))
+                           (l-pos (entity/pos landmark))
+                           (mid-x (/ (+ (car h-pos) (car l-pos)) 2))
+                           (mid-y (/ (+ (cdr h-pos) (cdr l-pos)) 2))
+                           (cam (world/camera))
+                           (dx (- mid-x (car cam)))
+                           (dy (- mid-y (cdr cam))))
+                      (world/camera-snap! (+ (car cam) (* dx 0.08))
+                                          (+ (cdr cam) (* dy 0.08))))))
+                 s))
+
+      (to-draw (lambda (s)
+                 (world/frame))))))
+
+;; (example-14-9)
+```
+
+<!-- BUILD: wire example-14-9 as runnable cart \"Camera Story (Finale)\" (input/down? live-app-only, scripted in harness) -->
+<!-- This is the chapter finale artifact per spine row: \"A camera that tells the story\" -->
+*[needs: input/down? live-app OR scripted harness input]*
+
+[VISUAL:
+**Act 1 (0–60s):** A cherry blossom (hero) wanders a bounded 320×240 world under player control. Camera follows with predictive lead. A distant wisteria (landmark) is barely visible at the world's right edge.
+
+**Trigger:** Hero moves within 50 cells of the landmark.
+
+**Act 2 (Reveal):** Camera **cuts instantly** to the wisteria, centers it in frame, and **shakes** (4 cells, 15 frames) — a dramatic reveal. Hero is offscreen. Camera **holds** on the wisteria for 60 frames (2 seconds).
+
+**Act 3 (Approach):** Camera pans back, framing **both** hero and landmark in a wide shot (centroid framing, slow damping). Control returns to the player. As the hero walks toward the landmark, the camera keeps both visible, tightening as they converge.]
+
+**What happened:**
+- **Mode state machine**: `'explore` → `'reveal` → `'approach`.
+- **Event-driven cinematography**: proximity to landmark triggers the mode shift.
+- **Three framing strategies**:
+  - *Explore*: predictive follow (the player is the camera's subject).
+  - *Reveal*: snap + hold (the landmark is the camera's subject).
+  - *Approach*: centroid framing (both are the camera's subjects).
+- **Shake for emphasis**: the reveal shake makes the landmark feel **important**.
+- **Control gating**: we disable player input during the reveal (cinematic moment), then restore it.
+
+This is **interactive cinematography** — the camera is **part of the narrative**, not just a viewport. It **decides when to look away** from the player, when to reveal, when to return. It's **telling the story** through framing, timing, and emphasis.
+
+**Extensions you could build:**
+- Add more landmarks; the camera cuts to each on first discovery.
+- Use `ai/decide` (Ch15) to make the camera an autonomous agent with a behavior tree: \"if hero idle for 10s, pan to nearest point-of-interest.\"
+- Add a **director mode** where the camera ignores player input entirely and plays a scripted sequence (opening shot, credits roll).
+- Track **dramatic tension** (distance to enemy, HP, quest state) and adjust framing: tighter in combat, wider in calm.
+
+---
+
+## What You've Learned
+
+You can now:
+
+1. **Move the camera** — `world/camera-snap!` for instant cuts, `world/camera-follow!` for smooth tracking.
+2. **Bound the world** — `world/camera-bounds!` to prevent showing void beyond the map.
+3. **Frame an ensemble** — center on the centroid of a group, keep the pack visible.
+4. **Lead the eye** — predictive framing by targeting `position + velocity × lead-factor`.
+5. **Shake for impact** — `world/camera-shake!` to emphasize collisions, explosions, drama.
+6. **Cut for revelation** — instant snaps to reveal offscreen objects, then resume smooth follow.
+7. **Build a cinematographer** — mode-based framing logic (follow, dialogue, reveal, approach) that **tells the story** through sight.
+
+The camera is **not passive**. It's a **storyteller**, a **guide**, a **co-author** of the experience. In Chapter 15, we'll give it a **brain** — behavior trees, utility AI, policy — so it can **decide** what to show without hardcoded timers. The camera will become an **autonomous agent**, composing the shot frame-by-frame based on what's **interesting** in the scene.
+
+But first, practice. Build cameras that follow, frame, reveal, shake. Make the viewer **see** what matters. Make the viewport **mean something**.
+
+---
+
+## Questions
+
+1. **Concept recall:** What's the difference between `world/camera-snap!` and `world/camera-follow!`? When would you use each?
+
+2. **Tuning:** In predictive framing (Example 14.5), we used `lead-factor = 10` (10 frames ahead). What happens if you set it to `2`? To `30`? Which feels better for a fast-paced platformer? For a slow exploration game?
+
+3. **Bounded worlds:** A world is 400 cells wide, 300 tall. The viewport is 160×144. What should `world/camera-bounds!` arguments be so the camera never shows empty space beyond the world edges?
+
+4. **Ensemble framing:** Example 14.4 computes the flock centroid manually. Could you use `ai/arrive` (from Ch10) to make the camera *itself* an entity that \"seeks\" the centroid? What would the camera's mass/damping need to be?
+
+5. **Build it:** Create a two-hero game where the camera frames **both** heroes at all times (centroid framing, as in 14.4), but **snaps to Hero 1** when Hero 2 is offscreen. What's the logic for detecting \"Hero 2 offscreen\"?
+
+6. **Cinematography:** In Example 14.9, the camera holds on the landmark for 60 frames (2 seconds). Change it to **hold until the player presses a button** (any key), then return control and resume framing. What state do you need to track?
+")

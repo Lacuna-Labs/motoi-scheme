@@ -1,0 +1,419 @@
+(dialect :applies ("motoi") :note "Motoi Book of Code.")
+
+(chapter
+  :book             "Book of Code"
+  :chapter-number   12
+  :title            "Chapter 12 — The CPU: fetch, decode, execute — and loop forever"
+  :audience         :any
+  :dialect          "motoi"
+  :book-version     "1.0"
+  :content-rating   :G
+  :training-eligible #t
+  :confidentiality  :public
+  :provenance       ((:authored-by "book-of-code-author-agent")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Central_processing_unit")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Instruction_cycle")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/MOS_Technology_6502")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Von_Neumann_architecture"))
+  :prose
+"# Chapter 12 — The CPU: fetch, decode, execute — and loop forever
+
+You have everything. Gates (chapter 5). Adders (chapter 6, 7). Memory
+(chapter 8, 9). State machines (chapter 10). ALU (chapter 11). All that
+is left is to wire them together and tell the machine what to do.
+
+That is a CPU. This chapter builds a tiny one.
+
+## The Von Neumann architecture
+
+In 1945, John von Neumann wrote a report called *First Draft of a
+Report on the EDVAC* while consulting on the EDVAC computer at the
+University of Pennsylvania. In it he described what everybody now calls
+the **Von Neumann architecture**:
+
+- A single memory that stores both instructions and data.
+- A CPU that reads instructions from that memory, one after another.
+- The CPU has a program counter, a small register file, and an ALU.
+- The CPU executes each instruction by decoding it and performing the
+  operation it names.
+
+Almost every computer since 1945 has been Von Neumann. The main
+alternative is called the **Harvard architecture**, which uses
+separate memories for instructions and data — that shows up in
+embedded processors, digital signal processors, and some CPU cache
+designs. But mostly, Von Neumann won.
+
+## The instruction cycle — the big loop
+
+Every CPU repeats this loop forever, from the moment it is powered on
+to the moment it is switched off:
+
+```
+   FOREVER:
+     1. Fetch the next instruction from memory (address = PC).
+     2. Increment PC (so it points at the instruction after this one).
+     3. Decode the instruction — figure out what it means.
+     4. Execute — do what the instruction says.
+     5. Write back — save the result to a register or memory.
+     6. Go to step 1.
+```
+
+That is the fetch-decode-execute cycle. Alfred asked me to point at
+this specifically. **This is the biggest, most fundamental loop in
+this book.** Every action your computer takes is one turn of this
+loop, on some CPU somewhere, right now.
+
+**ASCII diagram of the instruction cycle:**
+
+```
+         +-------------------------+
+         |                         |
+         v                         |
+   +-----------+                   |
+   |  Fetch    |                   |
+   |  (mem@PC) |                   |
+   +-----------+                   |
+         |                         |
+         v                         |
+   +-----------+                   |
+   |  PC += 1  |                   |
+   +-----------+                   |
+         |                         |
+         v                         |
+   +-----------+                   |
+   |  Decode   |                   |
+   +-----------+                   |
+         |                         |
+         v                         |
+   +-----------+                   |
+   |  Execute  |                   |
+   |  (ALU op) |                   |
+   +-----------+                   |
+         |                         |
+         v                         |
+   +-----------+                   |
+   |  Writeback|                   |
+   +-----------+-------------------+
+```
+
+Follow the arrow at the end back to the top. That is the whole game.
+
+## A tiny CPU — the plan
+
+We are going to build a tiny CPU in Motoi Scheme. It has:
+
+- Four 8-bit registers, named 0, 1, 2, 3.
+- An 8-bit program counter (PC).
+- 256 bytes of memory (both program and data live here).
+- An 8-instruction ISA (instruction set).
+- Zero, negative, and carry flags.
+
+The instructions:
+
+```
+  0  NOP                 do nothing
+  1  LDI r, imm          load immediate: r = imm
+  2  MOV rD, rS          rD = rS
+  3  ADD rD, rS          rD = rD + rS  (with flags)
+  4  SUB rD, rS          rD = rD - rS  (with flags)
+  5  JMP addr            PC = addr
+  6  JZ  addr            if Z flag, PC = addr
+  7  HALT                stop the machine
+```
+
+Each instruction is one byte for the opcode plus one or two bytes for
+operands. We will encode as lists of symbols for readability; a real
+CPU packs them tightly in binary.
+
+## The CPU in Motoi Scheme
+
+Let us build it. First, memory:
+
+```
+(define (make-memory size)
+  (let ((cells (make-vector size 0)))
+    (lambda (msg . args)
+      (cond
+        ((eq? msg 'read)
+         (vector-ref cells (car args)))
+        ((eq? msg 'write)
+         (vector-set! cells (car args) (cadr args))
+         'wrote)))))
+
+(define mem (make-memory 256))
+```
+
+Now a register file (simpler than chapter 9's — just a vector):
+
+```
+(define (make-regs count)
+  (let ((r (make-vector count 0)))
+    (lambda (msg . args)
+      (cond
+        ((eq? msg 'read)
+         (vector-ref r (car args)))
+        ((eq? msg 'write)
+         (vector-set! r (car args) (cadr args))
+         'wrote)))))
+
+(define regs (make-regs 4))
+```
+
+Now the CPU itself. State: PC, flags, plus the memory and regs:
+
+```
+(define (make-cpu mem regs)
+  (let ((pc     0)
+        (z-flag #f)
+        (n-flag #f)
+        (halted #f))
+
+    (define (fetch-byte)
+      (let ((b (mem 'read pc)))
+        (set! pc (+ pc 1))
+        b))
+
+    (define (set-flags result)
+      ;; treat result as 8-bit; wrap into 0..255
+      (let ((w (modulo result 256)))
+        (set! z-flag (= w 0))
+        (set! n-flag (>= w 128))
+        w))
+
+    (define (step)
+      (if halted
+          'halted
+          (let ((op (fetch-byte)))
+            (case op
+              ((0)   'nop)                                          ;; NOP
+              ((1)                                                  ;; LDI r, imm
+               (let ((r (fetch-byte)) (v (fetch-byte)))
+                 (regs 'write r v)))
+              ((2)                                                  ;; MOV rD, rS
+               (let ((rd (fetch-byte)) (rs (fetch-byte)))
+                 (regs 'write rd (regs 'read rs))))
+              ((3)                                                  ;; ADD rD, rS
+               (let* ((rd (fetch-byte)) (rs (fetch-byte))
+                      (sum (+ (regs 'read rd) (regs 'read rs)))
+                      (w (set-flags sum)))
+                 (regs 'write rd w)))
+              ((4)                                                  ;; SUB rD, rS
+               (let* ((rd (fetch-byte)) (rs (fetch-byte))
+                      (diff (- (regs 'read rd) (regs 'read rs)))
+                      (w (set-flags diff)))
+                 (regs 'write rd w)))
+              ((5)                                                  ;; JMP addr
+               (let ((a (fetch-byte)))
+                 (set! pc a)))
+              ((6)                                                  ;; JZ addr
+               (let ((a (fetch-byte)))
+                 (if z-flag (set! pc a))))
+              ((7)                                                  ;; HALT
+               (set! halted #t))
+              (else (error 'unknown-opcode op))))))
+
+    (define (run max-steps)
+      (let loop ((n 0))
+        (cond
+          (halted 'halted)
+          ((>= n max-steps) 'out-of-steps)
+          (else
+            (step)
+            (loop (+ n 1))))))
+
+    (lambda (msg . args)
+      (cond
+        ((eq? msg 'step)  (step))
+        ((eq? msg 'run)   (run (car args)))
+        ((eq? msg 'pc)    pc)
+        ((eq? msg 'z)     z-flag)
+        ((eq? msg 'n)     n-flag)
+        ((eq? msg 'halted?) halted)
+        ((eq? msg 'reset) (set! pc 0) (set! halted #f) 'reset)))))
+
+(define cpu (make-cpu mem regs))
+```
+
+That is a CPU. Reads instructions from memory. Executes them. Increments
+PC. Sets flags. Can jump. Can halt.
+
+## Running a program
+
+Let us write a program that adds 5 and 3 and stores the result in
+register 0. In our encoding, the byte sequence is:
+
+```
+   LDI 0, 5       ->   [1  0  5]
+   LDI 1, 3       ->   [1  1  3]
+   ADD 0, 1       ->   [3  0  1]
+   HALT           ->   [7]
+```
+
+Total: eight bytes. Let us load them into memory and run:
+
+```
+;; program bytes at address 0
+(mem 'write 0 1) (mem 'write 1 0) (mem 'write 2 5)   ;; LDI 0, 5
+(mem 'write 3 1) (mem 'write 4 1) (mem 'write 5 3)   ;; LDI 1, 3
+(mem 'write 6 3) (mem 'write 7 0) (mem 'write 8 1)   ;; ADD 0, 1
+(mem 'write 9 7)                                     ;; HALT
+
+(cpu 'reset)
+(cpu 'run 100)   ;; => halted
+(regs 'read 0)   ;; => 8
+```
+
+Register 0 holds 8. That is 5 + 3, computed by our CPU, by walking
+through fetch-decode-execute four times (three instructions plus the
+HALT).
+
+## A loop in machine code
+
+Now let us do something loopier. Count down from 5 to 0 and stop when
+we hit zero.
+
+Program:
+
+```
+   LDI 0, 5           ; register 0 = 5
+   LDI 1, 1           ; register 1 = 1
+   ; loop:
+   SUB 0, 1           ; r0 = r0 - 1, sets Z if result 0
+   JZ  0x0B           ; if Z, jump to HALT at address 11
+   JMP 0x06           ; otherwise, jump back to SUB
+   ; halt:
+   HALT
+```
+
+Let us encode. LDI takes 3 bytes. SUB takes 3. JZ and JMP take 2 each.
+HALT is 1.
+
+```
+   addr  0: LDI 0, 5   ->  [1 0 5]
+   addr  3: LDI 1, 1   ->  [1 1 1]
+   addr  6: SUB 0, 1   ->  [4 0 1]
+   addr  9: JZ  0x0D   ->  [6 13]
+   addr 11: JMP 0x06   ->  [5 6]
+   addr 13: HALT       ->  [7]
+```
+
+Load and run:
+
+```
+(let ((bytes '(1 0 5   1 1 1   4 0 1   6 13   5 6   7)))
+  (let loop ((i 0) (bs bytes))
+    (if (null? bs) 'loaded
+        (begin (mem 'write i (car bs))
+               (loop (+ i 1) (cdr bs))))))
+
+(cpu 'reset)
+(cpu 'run 100)      ;; => halted
+(regs 'read 0)      ;; => 0
+(cpu 'pc)           ;; => 14
+```
+
+The program looped five times, subtracting 1 each pass. On the sixth
+pass, register 0 became 0, which set the Z flag, which triggered the
+JZ, which jumped to the HALT.
+
+**That is a loop written in machine code, executed by a CPU we built.**
+
+Every `while` loop, every `for` loop, every recursion in every language
+you know eventually compiles down to something that looks essentially
+like this: a comparison, a conditional branch, and an unconditional
+branch back to the start.
+
+## The clock and the loop, from all sides
+
+The CPU as a whole is a state machine with three main states:
+
+- **fetch:** read a byte from memory@PC.
+- **decode-and-execute:** figure out what the byte means and do it.
+- **writeback:** update the register or memory or PC.
+
+Each clock cycle, the state advances. When the state machine returns
+to `fetch`, we call that an **instruction cycle** or **instruction
+retirement.** Modern CPUs retire multiple instructions per clock cycle
+through pipelining and superscalar tricks; but the basic idea is the
+loop we just wrote.
+
+Our CPU runs at whatever speed Motoi's REPL runs at — maybe millions
+of instructions per second. A real CPU runs at billions of instructions
+per second. Twenty-thousand-year jump from Ishango: same primitive
+counting operation, executed a hundred billion times a second, on
+sixty-four bits at a time.
+
+## What real CPUs add on top
+
+Our CPU is deliberately tiny. Real CPUs add:
+
+- **Pipelining:** overlap fetch, decode, execute of consecutive
+  instructions.
+- **Superscalar:** multiple ALUs, so two instructions can execute at
+  once if they don't depend on each other.
+- **Out-of-order execution:** decode a batch of instructions, execute
+  them in whatever order dependencies allow, then commit results in
+  order.
+- **Branch prediction:** guess whether a branch will be taken so you
+  can start fetching the target early.
+- **Cache:** small fast memory close to the CPU, so you don't wait for
+  main RAM (chapter 13).
+- **Interrupts:** external signals that can pause the current program,
+  jump to a handler, then resume.
+- **Virtual memory:** page tables so each program sees its own memory
+  space.
+- **Privilege levels:** kernel mode vs. user mode.
+
+All of these are polish on the fetch-decode-execute loop. The loop is
+still there. It is still what makes the whole thing go.
+
+## The 6502
+
+I want to name one specific CPU because Motoi loves it: the **MOS 6502**,
+released by MOS Technology in 1975. It was designed by Chuck Peddle
+and a small team. It cost $25 in a marketplace where similar chips
+cost $150.
+
+The 6502 had:
+
+- Three 8-bit registers: A (accumulator), X, Y (indexes).
+- An 8-bit stack pointer.
+- A 16-bit program counter.
+- Status flags: N, V, B, D, I, Z, C.
+- 56 official instructions.
+- About 3,510 transistors.
+
+It ran at 1 to 2 MHz. It fits in a 40-pin dual in-line package that
+sits comfortably on a hobbyist's breadboard.
+
+The 6502 shipped in the Apple II, the Commodore 64, the Atari 800, the
+BBC Micro, and the Nintendo Entertainment System, among many others.
+Every one of those machines executed the fetch-decode-execute loop
+about a million times a second, and out of that came *Super Mario Bros*
+and *Elite* and *Karateka* and *SICP-in-BASIC*. The Book of Computing
+in this repo goes into more depth on the 6502; see chapter 4 of that
+book for context.
+
+## The loop appears — this is where it lives
+
+Everything else in this book is subordinate to the CPU loop. The clock
+ticks. The PC increments. The instruction retires. Repeat.
+
+Appendix E of this book is dedicated to the fact that this loop
+underlies everything. Read it.
+
+## What Motoi wants you to take from this
+
+- A CPU is a state machine that fetches, decodes, executes, and
+  loops forever.
+- Every program you have ever run is a sequence of bytes that this
+  state machine walks through.
+- Loops in your programs correspond to branches in the machine code
+  that send the PC back to an earlier address.
+- We built one. In Scheme. It runs. Now go build a bigger one.
+
+## Next
+
+Chapter 13: not all memory is equal. Cache, DRAM, disk. Why the same
+program can run 1000× slower depending on where its data sits.
+")

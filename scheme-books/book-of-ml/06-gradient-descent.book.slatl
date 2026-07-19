@@ -1,0 +1,307 @@
+(chapter
+  :book "Book of ML"
+  :chapter-number 6
+  :title "Gradient descent by hand"
+  :audience "kid-and-adult operators"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-19"
+     :sources ((:reference "MOTOI-SCHEME-REFERENCE.slat" :section "math/, core")
+               (:concept "Cauchy 1847 — Méthode générale pour la résolution des systèmes d'équations simultanées, first gradient method")))
+  :prose
+"# Chapter 6 — Gradient descent by hand
+
+Imagine standing on a hill in fog. You cannot see the bottom of the
+valley. You want to get there. What do you do? You look at the
+ground under your feet, notice which way it slopes down, and step
+that way. Then again. Then again. You stop when the ground is flat
+under you.
+
+That is gradient descent. The ground is the loss function. The hill
+is the loss landscape. The direction 'downhill' is the negative
+gradient. The size of your step is the learning rate. You do this
+in a loop until the loss stops going down.
+
+Every neural network in the world is trained by some version of
+gradient descent. Adam, SGD, RMSProp — those are variants. The core
+idea is the same as the fog-and-hill picture.
+
+## The slope of a function at a point
+
+Suppose you have a function `f(x)`. The slope at a point `x` is how
+much `f` changes when you nudge `x` a little.
+
+For any function you can approximate the slope by finite difference:
+
+```
+slope ≈ (f(x + h) - f(x)) / h    for small h
+```
+
+Try h = 0.001 and it works well for most functions.
+
+```
+(define (slope-at f x)
+  (define h 0.001)
+  (/ (- (f (+ x h)) (f x)) h))
+
+(define (f x) (* x x))
+
+(display (slope-at f 3))
+;; => 6.001    (true slope of x^2 at 3 is 6; finite difference is close)
+```
+
+The true derivative of `x^2` is `2x`, so at `x=3` the slope is `6`.
+Our approximation gave `6.001`. Close. The extra `0.001` is the error
+introduced by using a finite `h` — the smaller `h`, the closer to the
+true slope, until `h` gets so small that floating-point rounding
+takes over and the answer gets worse. There is a sweet spot.
+
+## Problem 1 — Walk down a parabola
+
+The parabola `f(x) = x^2` has its minimum at `x = 0`. Let's start at
+`x = 5` and walk downhill until we get near zero.
+
+```
+(define (f x) (* x x))
+
+(define (slope-at f x)
+  (define h 0.001)
+  (/ (- (f (+ x h)) (f x)) h))
+
+(define (descent-step x lr)
+  (- x (* lr (slope-at f x))))
+
+(define lr 0.1)
+
+(define x-final
+  (let loop ((x 5.0) (steps 0))
+    (if (> steps 50)
+        x
+        (loop (descent-step x lr) (+ steps 1)))))
+
+(display x-final)
+;; => 0.00025... (near zero — the algorithm converged)
+```
+
+Read the code. `descent-step` takes the current position and the
+learning rate, computes the slope at that position, and returns a
+new position that is the old position minus `lr * slope`. If the
+slope is positive, we subtract, so we move left. If the slope is
+negative, we subtract a negative, so we move right. Either way, we
+move toward the minimum.
+
+The learning rate `lr = 0.1` means we take a step 10% as big as the
+slope. Big enough to make progress, small enough that we do not
+overshoot.
+
+## Problem 2 — Watch the loss decrease
+
+Let's actually log the descent and see the numbers fall.
+
+```
+(define (f x) (* x x))
+(define (slope-at f x)
+  (define h 0.001)
+  (/ (- (f (+ x h)) (f x)) h))
+
+(define (descent-log x lr n)
+  (if (= n 0)
+      '()
+      (cons (cons x (f x))
+            (descent-log (- x (* lr (slope-at f x)))
+                         lr
+                         (- n 1)))))
+
+(for-each (lambda (p)
+            (display (car p)) (display \" -> \") (display (cdr p))
+            (newline))
+          (descent-log 5.0 0.1 10))
+;; step 0:  x = 5.0,   loss = 25.0
+;; step 1:  x = 4.0,   loss = 16.0
+;; step 2:  x = 3.2,   loss = 10.24
+;; step 3:  x = 2.56,  loss = 6.55...
+;; step 4:  x = 2.05,  loss = 4.19...
+;; ...
+;; step 9:  x = 0.67,  loss = 0.45
+```
+
+Each step the loss drops by roughly a factor of 0.64 = (1 - 2*0.1)^2.
+Ten steps in and the loss is under 1. Twenty steps and it is
+essentially zero.
+
+## Problem 3 — What if the learning rate is too big?
+
+If you take a step bigger than the width of the bowl, you overshoot
+and end up on the other wall — even higher than where you started.
+Do that repeatedly and the loss explodes.
+
+```
+(define (f x) (* x x))
+(define (slope-at f x) (/ (- (f (+ x 0.001)) (f x)) 0.001))
+
+(define lr-big 1.5)
+
+(define x-blown
+  (let loop ((x 1.0) (steps 0))
+    (if (> steps 10)
+        x
+        (loop (- x (* lr-big (slope-at f x))) (+ steps 1)))))
+
+(display x-blown)
+;; => a very large number (roughly ±1000 or more)
+```
+
+The blowup is a real failure mode. In neural network training it
+looks like the loss suddenly jumping to NaN (not-a-number, the
+floating-point way of saying 'this got out of hand'). The fix is to
+turn the learning rate down. Modern optimizers like Adam adjust the
+learning rate automatically per parameter, but the core lesson is:
+step too big, model dies.
+
+## Problem 4 — Two-parameter descent
+
+Real models have many parameters. The gradient becomes a vector: one
+slope per parameter. To descend, you subtract a scaled version of
+the gradient vector from the parameter vector.
+
+Let's minimize `f(a, b) = a^2 + b^2`. Its minimum is at `(0, 0)`.
+
+```
+(define (f a b) (+ (* a a) (* b b)))
+
+(define h 0.001)
+
+(define (partial-a a b)
+  (/ (- (f (+ a h) b) (f a b)) h))
+
+(define (partial-b a b)
+  (/ (- (f a (+ b h)) (f a b)) h))
+
+(define lr 0.1)
+
+(define result
+  (let loop ((a 3.0) (b 4.0) (n 0))
+    (if (> n 30)
+        (list a b (f a b))
+        (loop (- a (* lr (partial-a a b)))
+              (- b (* lr (partial-b a b)))
+              (+ n 1)))))
+
+(display result)
+;; => (approx. (0.001 0.001 0.000002))
+```
+
+Two partial derivatives, one per parameter. Update each parameter
+independently by subtracting `lr * partial`. This is exactly what
+happens inside a neural network — with a million partial derivatives
+computed per step (chapter 9 shows how to compute them efficiently).
+
+## Problem 5 — Fit the line from chapter 5 with gradient descent
+
+Remember the data `(0, 1), (1, 3), (2, 5)` and the target `y = 2x + 1`.
+We knew the answer by inspection. Now let's find it by descent from
+a random starting point.
+
+```
+(define data
+  (list (cons 0 1) (cons 1 3) (cons 2 5)))
+
+(define (loss m b)
+  (define (sqerr p)
+    (let ((y-pred (+ (* m (car p)) b))
+          (y-true (cdr p)))
+      (* (- y-pred y-true) (- y-pred y-true))))
+  (/ (reduce + 0 (map sqerr data)) (length data)))
+
+(define h 0.001)
+
+(define (dLdm m b) (/ (- (loss (+ m h) b) (loss m b)) h))
+(define (dLdb m b) (/ (- (loss m (+ b h)) (loss m b)) h))
+
+(define lr 0.1)
+
+(define result
+  (let loop ((m 0.0) (b 0.0) (n 0))
+    (if (> n 200)
+        (list m b (loss m b))
+        (loop (- m (* lr (dLdm m b)))
+              (- b (* lr (dLdb m b)))
+              (+ n 1)))))
+
+(display result)
+;; => (approximately (2.0 1.0 ~0))
+```
+
+Starting from `m=0, b=0` (a horizontal line at zero), after 200 steps
+we arrive very close to the true `m=2, b=1`. The loss reaches near
+zero. The knobs found themselves.
+
+This is training. This is the whole idea. Everything else is
+mechanics: computing the gradient efficiently for millions of
+parameters (backpropagation, chapter 9), organizing the data
+(mini-batches, chapter 10), and picking the architecture (chapters
+11-15).
+
+## Capstone — Descent with logging on the line-fit
+
+Add logging so you can watch the parameters and loss converge.
+
+```
+(define data
+  (list (cons 0 1) (cons 1 3) (cons 2 5)))
+
+(define (loss m b)
+  (define (sqerr p)
+    (let ((y-pred (+ (* m (car p)) b))
+          (y-true (cdr p)))
+      (* (- y-pred y-true) (- y-pred y-true))))
+  (/ (reduce + 0 (map sqerr data)) (length data)))
+
+(define h 0.001)
+(define (dLdm m b) (/ (- (loss (+ m h) b) (loss m b)) h))
+(define (dLdb m b) (/ (- (loss m (+ b h)) (loss m b)) h))
+
+(define lr 0.1)
+
+(let loop ((m 0.0) (b 0.0) (n 0))
+  (when (or (= n 0) (= (modulo n 20) 0))
+    (display \"step \") (display n)
+    (display \" m=\") (display m)
+    (display \" b=\") (display b)
+    (display \" loss=\") (display (loss m b))
+    (newline))
+  (if (> n 200)
+      'done
+      (loop (- m (* lr (dLdm m b)))
+            (- b (* lr (dLdb m b)))
+            (+ n 1))))
+
+;; step 0 m=0.0 b=0.0 loss=11.66...
+;; step 20 m=1.5... b=0.7... loss=~0.11
+;; step 40 m=1.85... b=0.9... loss=~0.007
+;; ...
+;; step 200 m=~2.0 b=~1.0 loss=~0.000001
+```
+
+Watch the loss fall by orders of magnitude. That is what training
+'looks like' in real ML too — the loss curve dropping from something
+big to something small, faster at first, slower near the end.
+
+## Why this matters
+
+Every learned parameter in every language model got there by gradient
+descent, or a variant of it. The knob-turning is automatic, driven
+by the slope of the loss. You never manually adjust weights in a
+trained model. You define the loss, define the model, run the loop.
+The optimizer does the rest.
+
+## What's next
+
+Chapter 7 introduces the atomic unit of a neural network: the
+neuron. Inputs weighted and summed, plus a bias, through a
+nonlinearity. One tiny function. Layer up enough of them and you
+get a language model.
+")

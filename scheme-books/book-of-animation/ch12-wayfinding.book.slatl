@@ -1,0 +1,622 @@
+;; ch12-wayfinding.slat
+;; Book of Animation — Chapter 12: Wayfinding
+
+(chapter
+  :book             "Book of Animation"
+  :chapter-number   null
+  :title            "Chapter 12: Wayfinding"
+  :source-path      "/Users/alfred/code/curator/BOOK/A-branch-scheme-books/new-anim/ch12-wayfinding.md"
+  :size             24014
+  :sha256           "9aef288e3f61eae8"
+  :prose
+"# Chapter 12: Wayfinding
+
+In Chapter 10 you taught sprites to steer—to chase, flee, and arrive at points with momentum and weight. In Chapter 11 they learned to flock, moving as a coordinated group through emergent rules. But both of those chapters assume open space: a creature can move *toward* its goal in a straight line, adjusting only for speed and neighbors.
+
+The world is rarely that kind.
+
+A garden has walls, hedges, ponds. A sprite that seeks a distant flower must navigate *around* obstacles, choosing a route intelligently—not bouncing off barriers in a helpless loop. This is **wayfinding**: the ability to find and follow a path through a constrained space.
+
+This chapter teaches two approaches, both deterministic, both composable with the steering you already know:
+
+1. **A\\* pathfinding** — a discrete graph search that finds the optimal route from start to goal through a grid, accounting for walls.
+2. **Flow fields** — a continuous vector field that guides many entities smoothly toward a destination, pre-computing directions once and letting hundreds of sprites follow the flow.
+
+Both methods use the `ai/path` and `ai/flow-field` verbs from the `marionettePath` library. By the end of this chapter you will route a sprite around walls, marshal a crowd through a maze, and build a living scene where dozens of creatures navigate intelligently without collision or redundant computation.
+
+The finale artifact: **Sprites routing around obstacles**—not dumbly, not randomly, but with purpose and economy.
+
+---
+
+## The Grid
+
+Pathfinding works on a **spatial discretization**: you divide the world into a grid of cells, each either passable or blocked. The AI reasons in this coarse space (grid cells), then entities move smoothly through the continuous world following the discrete plan.
+
+The `ai/grid` verb creates this structure. You pass it width and height (in grid cells), and optionally a cell size in world units (default 1).
+
+```scheme
+(define maze (ai/grid 16 16 8))
+```
+
+This creates a 16×16 grid where each cell is 8 world-units on a side—a 128×128 world region. All cells start passable.
+
+You mark walls with `ai/wall!`:
+
+```scheme
+(ai/wall! maze 4 5 #t)  ;; block cell (4, 5)
+(ai/wall! maze 4 6 #t)
+(ai/wall! maze 4 7 #t)
+```
+
+Or in a loop:
+
+```scheme
+;; vertical wall from (4,5) to (4,10)
+(let loop ((y 5))
+  (when (<= y 10)
+    (ai/wall! maze 4 y #t)
+    (loop (+ y 1))))
+```
+
+You can query passability:
+
+```scheme
+(ai/passable? maze 4 5)  ;; => #f (blocked)
+(ai/passable? maze 3 5)  ;; => #t (open)
+```
+
+You can clear the grid to all-passable:
+
+```scheme
+(ai/clear! maze)
+```
+
+The grid is a **spatial index**—it does not render itself. You paint walls however you like (as obstacles, sprites, or just invisible barriers). The grid is the pathfinding substrate.
+
+---
+
+## A\\*: Finding the Optimal Path
+
+**A\\*** (pronounced \"A-star\") is a graph-search algorithm that finds the shortest path from a start cell to a goal cell, given a grid with walls. It explores intelligently, prioritizing cells that are close to the goal and cheaply reachable from the start.
+
+The verb is `ai/path`:
+
+```scheme
+(ai/path maze start-pos goal-pos)
+```
+
+`start-pos` and `goal-pos` are `(x y)` pairs in **world coordinates** (not grid indices). The function converts them to grid cells, runs A\\*, and returns a **list of waypoint positions** in world coordinates, or `#f` if no path exists.
+
+### Example: A Single Sprite Routes Around a Wall
+
+We'll place a wall down the middle of a grid, spawn a sprite on the left, and have it path to the right.
+
+```scheme
+(define (setup-maze)
+  (let ((g (ai/grid 16 12 10)))
+    ;; vertical wall at x=8, from y=2 to y=10
+    (let loop ((y 2))
+      (when (<= y 10)
+        (ai/wall! g 8 y #t)
+        (loop (+ y 1))))
+    g))
+
+(define (path-around-wall)
+  (world/reset!)
+  (let* ((maze (setup-maze))
+         (start '(20 60))   ;; left side
+         (goal  '(140 60))  ;; right side
+         (route (ai/path maze start goal)))
+    
+    (if route
+        (let ((bot (world/spawn start)))
+          (entity/sprite! bot 'blossom_pink)
+          (entity/set! bot 'waypoints route)
+          (entity/set! bot 'waypoint-index 0)
+          (entity/max-speed! bot 2))
+        (error \"No path found\"))
+    
+    ;; draw the wall for reference
+    (let loop ((y 2))
+      (when (<= y 10)
+        (let ((wall (world/spawn (list (* 8 10) (* y 10)))))
+          (entity/sprite! wall 'obstacle)
+          (entity/solid! wall #t)
+          (loop (+ y 1)))))
+    
+    (big-bang
+      (on-tick (lambda (w)
+                 (world/step)
+                 (let ((bot (car (world/find (lambda (e) (entity/get e 'waypoints))))))
+                   (when bot
+                     (let* ((wp-list (entity/get bot 'waypoints))
+                            (idx (entity/get bot 'waypoint-index))
+                            (target (list-ref wp-list idx))
+                            (dist (entity/distance bot target)))
+                       (ai/seek bot target)
+                       (when (< dist 5)
+                         (let ((next-idx (+ idx 1)))
+                           (if (< next-idx (length wp-list))
+                               (entity/set! bot 'waypoint-index next-idx)
+                               (entity/set! bot 'arrived #t)))))))
+                 w))
+      (to-draw (lambda (w)
+                 (world/frame))))))
+
+;; (path-around-wall)
+```
+
+[VISUAL: A 160×120 canvas. A vertical gray wall runs down the center from y=20 to y=100. A pink blossom sprite starts at (20,60) on the left, routes up and around the top of the wall, then down to (140,60) on the right. The path is not a straight line—it bends around the obstacle.]
+
+<!-- BUILD: wire path-around-wall as runnable example ch12-ex1; render the grid + wall + sprite + path trace as overlay. -->
+
+**What happens:**
+
+- `ai/path` computes waypoints that skirt the wall (likely going north around the top gap, since we left y=0..1 and y=11 open).
+- Each tick, the sprite seeks the current waypoint.
+- When it arrives (distance < 5), it advances to the next waypoint.
+- The route is optimal (shortest in grid-cell hops), and the sprite follows it smoothly with steering from Chapter 10.
+
+---
+
+## Following a Path: The Waypoint Pattern
+
+The pattern above—store a waypoint list, track an index, seek the current waypoint, advance on arrival—is so common that the library offers `ai/follow-path`:
+
+```scheme
+(ai/follow-path entity waypoint-list arrival-radius)
+```
+
+Returns a steering force (like `ai/seek`) that automatically advances through the waypoints as the entity reaches each one.
+
+Here's the same example, simplified:
+
+```scheme
+(define (path-follow-helper)
+  (world/reset!)
+  (let* ((maze (setup-maze))
+         (start '(20 60))
+         (goal  '(140 60))
+         (route (ai/path maze start goal)))
+    
+    (when route
+      (let ((bot (world/spawn start)))
+        (entity/sprite! bot 'blossom_blue)
+        (entity/max-speed! bot 2)
+        (entity/set! bot 'path route)))
+    
+    (big-bang
+      (on-tick (lambda (w)
+                 (world/step)
+                 (world/each
+                   (lambda (e)
+                     (let ((p (entity/get e 'path)))
+                       (when p
+                         (ai/follow-path e p 5)))))
+                 w))
+      (to-draw (lambda (w) (world/frame))))))
+
+;; (path-follow-helper)
+```
+
+[VISUAL: Same layout, blue blossom smoothly following the computed path around the wall.]
+
+<!-- BUILD: wire path-follow-helper as runnable example ch12-ex2. -->
+
+`ai/follow-path` internally manages the waypoint index and completed flag. You can reuse it for any entity with a `'path` property.
+
+---
+
+## Dynamic Replanning
+
+Paths are computed once. If the goal or walls change, you must recompute.
+
+### Example: Moving Goal
+
+The sprite re-paths every 60 frames to chase a wandering target:
+
+```scheme
+(define (replan-demo)
+  (world/reset!)
+  (let ((maze (setup-maze))
+        (bot (world/spawn '(20 60)))
+        (target-pos (list 140 60)))
+    
+    (entity/sprite! bot 'blossom_yellow)
+    (entity/max-speed! bot 2.5)
+    
+    (big-bang
+      (on-tick (lambda (w)
+                 ;; replan every 60 frames
+                 (when (= (modulo (world/frame) 60) 0)
+                   (set! target-pos
+                     (list (+ 100 (* 30 (dsin (* (world/frame) 0.05))))
+                           (+ 60 (* 20 (dcos (* (world/frame) 0.03))))))
+                   (let ((new-route (ai/path maze (entity/pos bot) target-pos)))
+                     (when new-route
+                       (entity/set! bot 'path new-route))))
+                 
+                 (world/step)
+                 (let ((p (entity/get bot 'path)))
+                   (when p
+                     (ai/follow-path bot p 5)))
+                 w))
+      (to-draw (lambda (w)
+                 (world/frame)
+                 ;; draw target marker
+                 (paint-cell (car target-pos) (cadr target-pos) 'red)))))
+
+;; (replan-demo)
+```
+
+[VISUAL: Yellow blossom continuously chasing a red dot that drifts in a slow oscillating pattern. The blossom's path updates every 60 frames, bending around the wall as the target moves.]
+
+<!-- BUILD: wire replan-demo as runnable example ch12-ex3. -->
+
+The sprite adapts to the moving target, replanning its route as needed. A\\* is fast enough (on small grids) to run every few frames.
+
+---
+
+## Flow Fields: Pathfinding for Crowds
+
+A\\* works well for one or a few entities, but it's inefficient if you have *hundreds* of sprites all heading to the same goal—you'd recompute the same path 100 times.
+
+**Flow fields** solve this: you compute a **vector field** once for a given goal, storing a direction at every grid cell. Then every entity simply looks up its cell and follows the flow. One computation guides an entire crowd.
+
+The verb is `ai/flow-field`:
+
+```scheme
+(ai/flow-field maze goal-pos)
+```
+
+Returns an opaque flow-field object. You query it with:
+
+```scheme
+(ai/flow-at field pos)
+```
+
+Returns a unit vector `(dx dy)` pointing toward the goal from that position, accounting for walls. If the cell is unreachable, returns `#f`.
+
+You apply the flow with:
+
+```scheme
+(ai/follow-flow entity field max-force)
+```
+
+Returns a steering force (like `ai/seek`) that moves the entity along the flow.
+
+### Example: A Crowd Converges on a Goal
+
+We'll spawn 50 sprites at random positions and have them all flow toward the center, navigating around a U-shaped wall.
+
+```scheme
+(define (flow-crowd)
+  (world/reset!)
+  (let* ((maze (ai/grid 20 15 8))
+         (goal '(80 60)))
+    
+    ;; U-shaped wall
+    (let loop ((x 6))
+      (when (<= x 14)
+        (ai/wall! maze x 4 #t)
+        (ai/wall! maze x 11 #t)
+        (loop (+ x 1))))
+    (let loop ((y 4))
+      (when (<= y 11)
+        (ai/wall! maze 6 y #t)
+        (ai/wall! maze 14 y #t)
+        (loop (+ y 1))))
+    
+    ;; compute flow field once
+    (let ((field (ai/flow-field maze goal)))
+      
+      ;; spawn 50 sprites at random positions
+      (let loop ((i 0))
+        (when (< i 50)
+          (let* ((x (+ 10 (* 140 (/ (dsin (* i 13)) 2))))
+                 (y (+ 10 (* 100 (/ (dcos (* i 17)) 2))))
+                 (bot (world/spawn (list x y))))
+            (entity/sprite! bot 'blossom_pink)
+            (entity/max-speed! bot 1.5)
+            (entity/set! bot 'flow field)
+            (loop (+ i 1)))))
+      
+      (big-bang
+        (on-tick (lambda (w)
+                   (world/step)
+                   (world/each
+                     (lambda (e)
+                       (let ((f (entity/get e 'flow)))
+                         (when f
+                           (ai/follow-flow e f 0.3)))))
+                   w))
+        (to-draw (lambda (w)
+                   (world/frame)))))))
+
+;; (flow-crowd)
+```
+
+[VISUAL: A 160×120 canvas with a gray U-shaped wall (open at the top). 50 pink blossoms scattered across the space all glide smoothly toward the center goal, flowing around the wall in coordinated streams. No collisions, no jitter—just graceful convergence.]
+
+<!-- BUILD: wire flow-crowd as runnable example ch12-ex4; render sprites + wall + optional flow-field overlay (arrows at grid cells). -->
+
+**What happens:**
+
+- The flow field is computed *once* for the goal at (80, 60).
+- All 50 sprites query the same field each frame.
+- They steer along the flow vectors, which bend around the U-wall automatically.
+- The crowd moves like water pouring toward a drain—deterministic, smooth, emergent.
+
+**Performance:** One flow-field computation (a breadth-first search on the grid) costs roughly the same as one A\\* path. But it guides *N* entities at the cost of *N* cheap lookups, not *N* pathfinding calls.
+
+---
+
+## Combining Flow with Flocking
+
+Flow fields provide *direction*. Flocking (Chapter 11) provides *coordination*. You can layer them:
+
+```scheme
+(define (flow-and-flock)
+  (world/reset!)
+  (let* ((maze (ai/grid 20 15 8))
+         (goal '(80 60)))
+    
+    ;; same U-wall
+    (let loop ((x 6))
+      (when (<= x 14)
+        (ai/wall! maze x 4 #t)
+        (ai/wall! maze x 11 #t)
+        (loop (+ x 1))))
+    (let loop ((y 4))
+      (when (<= y 11)
+        (ai/wall! maze 6 y #t)
+        (ai/wall! maze 14 y #t)
+        (loop (+ y 1))))
+    
+    (let ((field (ai/flow-field maze goal)))
+      
+      (let loop ((i 0))
+        (when (< i 50)
+          (let* ((x (+ 10 (* 140 (/ (dsin (* i 13)) 2))))
+                 (y (+ 10 (* 100 (/ (dcos (* i 17)) 2))))
+                 (bot (world/spawn (list x y))))
+            (entity/sprite! bot 'blossom_blue)
+            (entity/max-speed! bot 1.5)
+            (entity/set! bot 'flow field)
+            (entity/tag! bot 'flock)
+            (loop (+ i 1)))))
+      
+      (big-bang
+        (on-tick (lambda (w)
+                   (world/step)
+                   (world/each
+                     (lambda (e)
+                       (when (entity/get e 'flow)
+                         ;; flow + flock
+                         (ai/follow-flow e (entity/get e 'flow) 0.2)
+                         (ai/separate e 'flock 10 0.3)
+                         (ai/align e 'flock 20 0.1)
+                         (ai/cohere e 'flock 20 0.05))))
+                   w))
+        (to-draw (lambda (w) (world/frame)))))))
+
+;; (flow-and-flock)
+```
+
+[VISUAL: Same scene, but the 50 blue blossoms now maintain spacing as they flow. They don't overlap; they move as coordinated ribbons threading through the U-wall. The flock rules (separation/alignment/cohesion) layer atop the flow-field direction.]
+
+<!-- BUILD: wire flow-and-flock as runnable example ch12-ex5. -->
+
+The forces compose additively. Flow says \"go this way toward the goal,\" flock says \"don't collide, match neighbors' speed, stay together.\" The result is a crowd that navigates intelligently *and* beautifully.
+
+---
+
+## Obstacles in the World vs. the Grid
+
+So far, walls are abstract—marked in the grid but not rendered as world entities. You can marry the two by spawning solid sprites at wall cells:
+
+```scheme
+(define (grid-with-sprites)
+  (world/reset!)
+  (let ((maze (ai/grid 20 15 8)))
+    
+    ;; U-wall in grid + spawn solid sprites
+    (let loop ((x 6))
+      (when (<= x 14)
+        (ai/wall! maze x 4 #t)
+        (ai/wall! maze x 11 #t)
+        (let ((w1 (world/spawn (list (* x 8) (* 4 8))))
+              (w2 (world/spawn (list (* x 8) (* 11 8)))))
+          (entity/sprite! w1 'obstacle)
+          (entity/solid! w1 #t)
+          (entity/sprite! w2 'obstacle)
+          (entity/solid! w2 #t))
+        (loop (+ x 1))))
+    
+    (let loop ((y 4))
+      (when (<= y 11)
+        (ai/wall! maze 6 y #t)
+        (ai/wall! maze 14 y #t)
+        (let ((w1 (world/spawn (list (* 6 8) (* y 8))))
+              (w2 (world/spawn (list (* 14 8) (* y 8)))))
+          (entity/sprite! w1 'obstacle)
+          (entity/solid! w1 #t)
+          (entity/sprite! w2 'obstacle)
+          (entity/solid! w2 #t))
+        (loop (+ y 1))))
+    
+    ;; now the walls are both pathfinding barriers AND physics obstacles
+    maze))
+
+;; (grid-with-sprites)
+```
+
+Now entities not only *avoid* the walls in their pathfinding—they also *collide* with them physically (if collision layers are set). The grid is the planning space; the sprites are the runtime reality. Keep them synchronized.
+
+---
+
+## When to Use A\\* vs. Flow Fields
+
+| Method       | Best for                          | Cost per entity | Global cost |
+|--------------|-----------------------------------|-----------------|-------------|
+| **A\\***      | Few entities, dynamic goals       | Medium          | N × (path)  |
+| **Flow**     | Many entities, shared goal        | Cheap (lookup)  | 1 × (flood) |
+
+**A\\*** is *local*—each entity gets its own path, can have a different goal, can replan independently.
+
+**Flow** is *global*—everyone shares the same destination, you compute once, lookups are fast, perfect for crowds.
+
+For a mixed scenario (e.g., 100 entities with 3 different goals), compute 3 flow fields (one per goal group) and assign entities accordingly.
+
+---
+
+## The Finale: Sprites Routing Around Obstacles
+
+We bring it together: a scene with a complex maze, multiple goals, and entities that path intelligently using A\\* for single-target seekers and flow fields for crowd goals.
+
+```scheme
+(define (finale-wayfinding)
+  (world/reset!)
+  
+  (let* ((maze (ai/grid 24 18 8))
+         (goal-a '(180 130))  ;; bottom-right
+         (goal-b '(20 20)))   ;; top-left
+    
+    ;; complex maze: outer border + internal walls
+    ;; outer walls
+    (let loop ((x 0))
+      (when (< x 24)
+        (ai/wall! maze x 0 #t)
+        (ai/wall! maze x 17 #t)
+        (loop (+ x 1))))
+    (let loop ((y 0))
+      (when (< y 18)
+        (ai/wall! maze 0 y #t)
+        (ai/wall! maze 23 y #t)
+        (loop (+ y 1))))
+    
+    ;; internal wall pattern (zigzag corridors)
+    (let loop ((y 3))
+      (when (< y 15)
+        (let ((x-start (if (even? (quotient y 3)) 3 10)))
+          (let inner ((x x-start))
+            (when (< x (+ x-start 7))
+              (ai/wall! maze x y #t)
+              (inner (+ x 1)))))
+        (loop (+ y 3))))
+    
+    ;; render walls
+    (let loop-x ((x 0))
+      (when (< x 24)
+        (let loop-y ((y 0))
+          (when (< y 18)
+            (when (not (ai/passable? maze x y))
+              (let ((w (world/spawn (list (* x 8) (* y 8)))))
+                (entity/sprite! w 'obstacle)
+                (entity/solid! w #t)))
+            (loop-y (+ y 1))))
+        (loop-x (+ x 1))))
+    
+    ;; flow field for goal-a (crowd destination)
+    (let ((flow-a (ai/flow-field maze goal-a)))
+      
+      ;; spawn 30 \"commuter\" sprites (use flow to goal-a)
+      (let loop ((i 0))
+        (when (< i 30)
+          (let* ((x (+ 30 (* 100 (/ (dsin (* i 7)) 2))))
+                 (y (+ 30 (* 80 (/ (dcos (* i 11)) 2))))
+                 (bot (world/spawn (list x y))))
+            (entity/sprite! bot 'blossom_pink)
+            (entity/max-speed! bot 1.2)
+            (entity/set! bot 'flow flow-a)
+            (entity/tag! bot 'commuter)
+            (loop (+ i 1)))))
+      
+      ;; spawn 3 \"explorer\" sprites (use A* to goal-b, replan every 90 frames)
+      (let loop ((i 0))
+        (when (< i 3)
+          (let* ((x (+ 150 (* 20 i)))
+                 (y (+ 100 (* 15 i)))
+                 (bot (world/spawn (list x y))))
+            (entity/sprite! bot 'blossom_yellow)
+            (entity/max-speed! bot 1.5)
+            (entity/set! bot 'goal goal-b)
+            (entity/tag! bot 'explorer)
+            ;; initial path
+            (let ((route (ai/path maze (entity/pos bot) goal-b)))
+              (when route
+                (entity/set! bot 'path route)))
+            (loop (+ i 1)))))
+      
+      (big-bang
+        (on-tick (lambda (w)
+                   (world/step)
+                   
+                   ;; explorers: replan every 90 frames
+                   (when (= (modulo (world/frame) 90) 0)
+                     (world/each
+                       (lambda (e)
+                         (when (entity/get e 'goal)
+                           (let ((route (ai/path maze (entity/pos e) (entity/get e 'goal))))
+                             (when route
+                               (entity/set! e 'path route)))))))
+                   
+                   ;; commuters: follow flow + flock
+                   (world/each
+                     (lambda (e)
+                       (when (entity/get e 'flow)
+                         (ai/follow-flow e (entity/get e 'flow) 0.2)
+                         (ai/separate e 'commuter 12 0.3)
+                         (ai/align e 'commuter 20 0.1))))
+                   
+                   ;; explorers: follow path
+                   (world/each
+                     (lambda (e)
+                       (let ((p (entity/get e 'path)))
+                         (when p
+                           (ai/follow-path e p 5)))))
+                   
+                   w))
+        (to-draw (lambda (w)
+                   (world/frame)
+                   ;; draw goal markers
+                   (paint-cell (car goal-a) (cadr goal-a) 'cyan)
+                   (paint-cell (car goal-b) (cadr goal-b) 'magenta))))))
+
+;; (finale-wayfinding)
+```
+
+[VISUAL: A 192×144 canvas with a complex gray maze (outer walls + zigzag internal corridors). 30 pink blossoms flow smoothly in coordinated streams toward a cyan goal marker at bottom-right, threading through the narrow passages. 3 yellow blossoms independently path toward a magenta marker at top-left, replanning their routes every few seconds as they navigate. The pink crowd moves like a river; the yellow explorers move like thoughtful travelers. Both groups avoid walls perfectly. The scene is alive, purposeful, deterministic.]
+
+<!-- BUILD: wire finale-wayfinding as runnable example ch12-finale; this is the chapter's spine artifact \"Sprites routing around obstacles\". Render maze + flow overlay (optional) + goal markers + sprite trails. -->
+
+**What this demonstrates:**
+
+- **A\\*** for dynamic individual goals (the yellow explorers path independently, replan as needed).
+- **Flow fields** for shared crowd goals (the pink commuters all flow to the same destination, computed once).
+- **Composition** with steering (flow) and flocking (separation/alignment for the commuters).
+- **Grid + world sync**: walls exist as both pathfinding barriers and solid sprites.
+- **Determinism**: same seed, same entity IDs, same frame timings → same traffic patterns every run.
+
+This is wayfinding at scale. You can now build RTS games, crowd simulations, AI-directed garden creatures that navigate mazes—all with clean, composable, deterministic logic.
+
+---
+
+## End-of-Chapter Questions
+
+1. **Concept recall:** What is the difference between A\\* pathfinding and a flow field? When would you choose one over the other?
+
+2. **Grid setup:** Write a function `make-corridor-maze` that creates a 20×20 grid with a long horizontal wall at y=10 (blocking x=5 to x=15), leaving gaps at x=4 and x=16. Return the grid.
+
+3. **Path follower:** Spawn a sprite at (10, 10) and have it path to (150, 100) using A\\* on a grid with a diagonal wall. Use `ai/follow-path` to follow the route. How would you visualize the waypoints as dots?
+
+4. **Flow + separation:** Modify the `flow-crowd` example to give each sprite a random max-speed between 1.0 and 2.0. What happens to the crowd's cohesion? Does the flow field still guide them all to the goal?
+
+5. **Dynamic obstacles:** How would you rebuild a flow field if a wall is added or removed mid-scene? (Hint: call `ai/flow-field` again with the updated grid—what frame budget does this cost?)
+
+6. **Multi-goal routing:** You have 100 sprites and 4 different goal positions. Describe (in words or pseudocode) how you would assign 25 sprites to each goal and compute 4 flow fields to guide them efficiently.
+
+---
+
+*Next: Chapter 13 — Scenes. You will compose wayfinding, flocking, steering, particles, and forces into multi-part prefabs and game-loop-driven scenes with state machines. The pieces are all here. Now you learn to orchestrate them.*
+")

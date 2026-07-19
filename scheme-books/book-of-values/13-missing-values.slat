@@ -1,0 +1,266 @@
+;; 13-missing-values.slat
+;; Book of Values — Chapter 13
+
+(chapter
+  :book              "Book of Values"
+  :chapter-number    13
+  :title             "Missing Values"
+  :audience          :engineer
+  :dialect           "motoi"
+  :book-version      "1.1"
+  :provenance        "book-of-values-author-2026-07-16 book-of-values-expander-2026-07-17"
+  :training-eligible #t
+  :content-rating    :G
+  :prose
+"# Chapter 13 — Missing Values
+
+*Nothing* is many things.
+
+- `0` — the number zero. A value.
+- `#f` — Boolean false. A value.
+- `()` — the empty list. A value.
+- `\"\"` — the empty string. A value.
+- \"the user didn't type anything\" — a state.
+- \"the database column is NULL\" — a state.
+- \"we haven't measured it yet\" — a state.
+- \"the sensor is broken\" — a state.
+- \"the value is not applicable to this record\" — a state.
+
+Programs that collapse these get wrong answers. A field that means
+\"no measurement yet\" cannot be stored as `0`, because `0` is a
+legal measurement. A field that means \"broken sensor\" cannot be
+stored as `#f`, because you may later store `#t` there and lose the
+distinction. A field that means \"declined to answer\" is not the
+same as \"not asked\".
+
+## What Motoi keeps distinct
+
+Motoi does not collapse these. They compare distinct.
+
+```
+(equal? 0 #f)
+;; -> #f
+
+(eq? #f '())
+;; -> #f
+
+(equal? '() \"\")
+;; -> #f
+
+(equal? #f \"\")
+;; -> #f
+```
+
+That is *correct behavior* and other languages get it wrong.
+JavaScript treats `0`, `\"\"`, `null`, `undefined`, and `false` as all
+falsy, and coerces silently. In Motoi you have to say what you mean.
+
+DO: use `equal?` when you actually want structural equality.
+DON'T: rely on truthiness. Ask the specific question you mean.
+WHY: the empty list is not false. Zero is not false. A false value
+is false. Silently collapsing them is the JavaScript bug family.
+
+## The three meanings of missing
+
+Three flavors worth distinguishing.
+
+**1. Not yet.** The value is expected. We just don't have it yet.
+The customer hasn't answered the survey. The sensor hasn't been
+read. The batch job hasn't run.
+
+**2. Not applicable.** The value can't exist for this record. A
+customer's business tax ID for a personal account. A minor's
+driver's license expiry. The value isn't there because the concept
+doesn't apply.
+
+**3. Refused.** The value could exist but was withheld. The user
+declined. Access was denied. The upstream system returned an error.
+
+Same underlying nothing. Three different reasons. Three different
+downstream decisions.
+
+## Encoding the three
+
+Same trick. Tag the value.
+
+```
+(define (present v) (list 'present v))
+(define (missing reason) (list 'missing reason))
+
+(present 42)
+;; -> (present 42)
+
+(missing 'not-yet)
+;; -> (missing not-yet)
+
+(missing 'not-applicable)
+;; -> (missing not-applicable)
+
+(missing 'refused)
+;; -> (missing refused)
+```
+
+Predicates:
+
+```
+(define (present? x) (and (pair? x) (eq? (car x) 'present)))
+(define (missing? x) (and (pair? x) (eq? (car x) 'missing)))
+(define (present-value p) (cadr p))
+(define (missing-reason m) (cadr m))
+```
+
+Now a function that consumes such a value can branch on the reason.
+
+```
+(define (display-price p)
+  (cond
+    ((present? p) (present-value p))
+    ((missing? p)
+       (case (missing-reason p)
+         ((not-yet)        \"Price pending\")
+         ((not-applicable) \"—\")
+         ((refused)        \"Contact us\")
+         (else             \"Unknown\")))
+    (else \"Unknown\")))
+```
+
+`case` on a symbol dispatches cleanly. The three flavors produce
+three different display strings. If the concept is *not applicable*
+(a personal account has no business tax field) you show an em-dash.
+If it is *pending*, you say so. If it is *refused*, you invite the
+customer to reach out. Same underlying \"nothing\" — three different
+user experiences.
+
+## The Optional / Maybe / Result pattern
+
+Other languages call this Optional, Maybe, or Result. The idea is the
+same. Wrap the *presence* of a value in a shape, so functions that
+consume it must handle both cases.
+
+Motoi doesn't ship a built-in Option type. You build one as needed.
+
+```
+(define (opt-map f opt)
+  (cond
+    ((present? opt) (present (f (present-value opt))))
+    ((missing? opt) opt)
+    (else (list 'error 'opt-map 'not-opt opt))))
+
+(opt-map (lambda (x) (* x 2)) (present 21))
+;; -> (present 42)
+
+(opt-map (lambda (x) (* x 2)) (missing 'not-yet))
+;; -> (missing not-yet)
+```
+
+`opt-map` transforms the value if it's present and passes the
+missing through unchanged. This is the *bind* pattern. It lets you
+chain transformations without checking for missing at every step.
+
+## Zero is a value
+
+Do not use zero as \"missing\". This bites over and over.
+
+- Sales revenue: `0` legitimately means *made zero sales that day*.
+  If you use `0` to mean *haven't computed yet*, you cannot tell a
+  zero-sales day from an unprocessed day.
+- Temperature: `0 C` is a legitimate reading (water freezes).
+  Storing `0` as \"no sensor\" makes the pipeline think it's ice on
+  a summer day.
+- Count of retries: `0` means *never retried*, which is a real
+  state.
+
+**Zero is a number. Missing is not.** Different shapes.
+
+## Empty is a value
+
+Same rule for empty list and empty string.
+
+- `()` legitimately means *empty result set*. If you use `()` to
+  mean *query hasn't run*, you conflate them.
+- `\"\"` legitimately means *empty search string*. If you use `\"\"`
+  to mean *no search*, ditto.
+
+If you must use empty as missing in some context (because a
+downstream system does), do it *only at the boundary* and reconstruct
+the shape at the other side.
+
+## NULL from a database
+
+If you read a value from a database column that allows NULL, that
+NULL is a specific missing. Represent it as a `(missing 'null-from-
+db)` or similar, then let downstream code decide what it means.
+
+Same for JSON `null`, YAML nulls, CSV empty cells. Each of these
+sources means \"absence\" in its own way. Don't flatten them all to
+one representation before you know what the downstream needs.
+
+## Aggregation with missing
+
+Sum a list of integers where some are missing.
+
+Naive:
+
+```
+(math/sum (list 100 0 200))
+;; -> 300
+```
+
+If the `0` was actually a missing that got flattened, the sum lies
+by 100 or however much the true value would have been.
+
+Better: separate out the missings first.
+
+```
+(define (sum-present lst)
+  (let loop ((in lst) (out 0) (miss 0))
+    (cond
+      ((null? in) (list ':sum out ':missing miss))
+      ((present? (car in))
+         (loop (cdr in) (+ out (present-value (car in))) miss))
+      ((missing? (car in))
+         (loop (cdr in) out (+ miss 1)))
+      (else
+         (loop (cdr in) (+ out (car in)) miss)))))
+
+(sum-present (list (present 100) (missing 'not-yet) (present 200)))
+;; -> (:sum 300 :missing 1)
+```
+
+The aggregate now carries both the total *and* the count of missing
+inputs. The caller decides whether to trust the total (2 of 3
+present is 67% coverage), extrapolate, or refuse.
+
+## Recap
+
+- `0`, `#f`, `()`, `\"\"` are all distinct in Motoi. Do not collapse.
+- Missing has at least three flavors: not-yet, not-applicable,
+  refused.
+- Wrap presence: `(present v)` vs `(missing reason)`.
+- Build small helpers like `opt-map` to chain transformations
+  without missing-check clutter.
+- Aggregations should surface how many inputs were missing, not
+  hide them.
+- Zero is a value. Empty is a value. Missing is a shape.
+
+Next: displaying a value is not the same as storing it.")
+
+(example :ref "ch13-zero-not-false"    :code "(equal? 0 #f)"           :expected #f)
+(example :ref "ch13-false-not-nil"     :code "(eq? #f '())"            :expected #f)
+(example :ref "ch13-nil-not-empty"     :code "(equal? '() \"\")"       :expected #f)
+(example :ref "ch13-false-not-empty"   :code "(equal? #f \"\")"        :expected #f)
+(example :ref "ch13-present-ctor"
+         :code "(begin (define (present v) (list 'present v)) (present 42))"
+         :expected "(present 42)")
+(example :ref "ch13-missing-reason"
+         :code "(begin (define (missing r) (list 'missing r)) (missing 'not-yet))"
+         :expected "(missing not-yet)")
+(example :ref "ch13-opt-map-present"
+         :code "(begin (define (present v) (list 'present v)) (define (missing r) (list 'missing r)) (define (present? x) (and (pair? x) (eq? (car x) 'present))) (define (missing? x) (and (pair? x) (eq? (car x) 'missing))) (define (pv p) (cadr p)) (define (opt-map f opt) (cond ((present? opt) (present (f (pv opt)))) ((missing? opt) opt))) (opt-map (lambda (x) (* x 2)) (present 21)))"
+         :expected "(present 42)")
+(example :ref "ch13-opt-map-missing"
+         :code "(begin (define (present v) (list 'present v)) (define (missing r) (list 'missing r)) (define (present? x) (and (pair? x) (eq? (car x) 'present))) (define (missing? x) (and (pair? x) (eq? (car x) 'missing))) (define (pv p) (cadr p)) (define (opt-map f opt) (cond ((present? opt) (present (f (pv opt)))) ((missing? opt) opt))) (opt-map (lambda (x) (* x 2)) (missing 'not-yet)))"
+         :expected "(missing not-yet)")
+(example :ref "ch13-sum-present"
+         :code "(begin (define (present v) (list 'present v)) (define (missing r) (list 'missing r)) (define (present? x) (and (pair? x) (eq? (car x) 'present))) (define (missing? x) (and (pair? x) (eq? (car x) 'missing))) (define (pv p) (cadr p)) (define (sum-present lst) (let loop ((in lst) (out 0) (miss 0)) (cond ((null? in) (list ':sum out ':missing miss)) ((present? (car in)) (loop (cdr in) (+ out (pv (car in))) miss)) ((missing? (car in)) (loop (cdr in) out (+ miss 1))) (else (loop (cdr in) (+ out (car in)) miss))))) (sum-present (list (present 100) (missing 'not-yet) (present 200))))"
+         :expected "(:sum 300 :missing 1)")

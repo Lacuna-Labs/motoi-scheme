@@ -1,0 +1,262 @@
+(dialect :applies ("motoi" "sakura") :note "Default: applies to both dialects.")
+
+(chapter
+  :book "Book of Logic"
+  :chapter-number 20
+  :appendix-letter "D"
+  :title "SAT and SMT Lite — DPLL by Hand"
+  :dialect "sakura"
+  :audience :adult
+  :content-rating :G
+  :author-lane "the-engineer-book-of-logic-2026-07-16"
+  :training-eligible #t
+  :confidentiality "public"
+  :voice "sakura-teaching + gentle-formalist"
+  :classical-anchors ("Davis-Putnam — A Computing Procedure for Quantification Theory (JACM 1960)"
+                      "Davis-Logemann-Loveland — A Machine Program for Theorem Proving (CACM 1962)"
+                      "Marques-Silva-Lynce-Malik — Conflict-Driven Clause Learning SAT Solvers"
+                      "Barrett-Sebastiani-Seshia-Tinelli — SMT (Handbook 2009)")
+  :prose
+"# Appendix D — SAT and SMT Lite: DPLL by Hand
+
+Where we write a small SAT solver — the algorithm behind the industrial
+tools that verify hardware, schedule flights, and check millions of
+lines of code — and sketch the extension to SMT.
+
+The *satisfiability problem* (SAT) is: given a propositional formula
+in CNF, is there an assignment of truth values to variables that
+makes the formula true?
+
+SAT was the first problem proved *NP-complete* (Cook 1971). In the
+worst case it is exponentially hard. In practice, modern SAT solvers
+routinely handle instances with millions of variables. The gap between
+the theoretical worst case and the practical performance is one of the
+great algorithmic success stories of computer science.
+
+## DPLL
+
+The classical algorithm, Davis-Putnam-Logemann-Loveland (1962). Three
+moves:
+
+1. **Unit propagation.** If a clause has exactly one unassigned
+   literal, that literal must be true. Assign it and propagate.
+2. **Pure literal elimination.** If a variable appears only positively
+   (or only negatively) across all clauses, assign it accordingly.
+3. **Branch.** Pick an unassigned variable. Try it true; recur. If
+   that fails, try it false; recur.
+
+If all clauses are satisfied, the assignment is a model. If any
+clause is empty (all literals falsified), the current assignment fails
+and we backtrack.
+
+```scheme
+;; A CNF formula is a list of clauses.
+;; A clause is a list of literals.
+;; A literal is a symbol (positive) or (list 'not sym) (negative).
+;; An assignment is a list of (var . boolean) pairs.
+
+(define (literal-var lit)
+  (cond ((symbol? lit) lit)
+        (else (cadr lit))))
+
+(define (literal-sign lit)
+  (cond ((symbol? lit) #t)
+        (else #f)))
+
+(define (literal-value lit assignment)
+  (let ((pair (assq (literal-var lit) assignment)))
+    (cond
+      ((not pair) 'unassigned)
+      (else (eq? (cdr pair) (literal-sign lit))))))
+
+(define (clause-status clause assignment)
+  ;; 'sat if any literal is true
+  ;; 'conflict if all literals are false
+  ;; 'unit (last-unassigned literal) if all but one are false, one unassigned
+  ;; 'undecided otherwise
+  (let loop ((c clause) (unassigned '()) (any-true #f))
+    (cond
+      ((null? c)
+       (cond
+         (any-true 'sat)
+         ((null? unassigned) 'conflict)
+         ((null? (cdr unassigned)) (list 'unit (car unassigned)))
+         (else 'undecided)))
+      (else
+       (let ((v (literal-value (car c) assignment)))
+         (cond
+           ((eq? v 'unassigned)
+            (loop (cdr c) (cons (car c) unassigned) any-true))
+           (v (loop (cdr c) unassigned #t))
+           (else (loop (cdr c) unassigned any-true))))))))
+```
+
+The core solver:
+
+```scheme
+(define (dpll clauses assignment)
+  ;; Returns an assignment (a model) or 'unsat.
+  (let ((prop-result (unit-propagate clauses assignment)))
+    (cond
+      ((eq? prop-result 'conflict) 'unsat)
+      (else
+       (let* ((new-assignment prop-result)
+              (statuses (map (lambda (c) (clause-status c new-assignment))
+                             clauses)))
+         (cond
+           ((every (lambda (s) (eq? s 'sat)) statuses)
+            new-assignment)               ; all satisfied; done
+           ((any (lambda (s) (eq? s 'conflict)) statuses)
+            'unsat)
+           (else
+            ;; branch on an unassigned variable
+            (let ((var (pick-unassigned clauses new-assignment)))
+              (or (dpll clauses (cons (cons var #t) new-assignment))
+                  (dpll clauses (cons (cons var #f) new-assignment)))))))))))
+
+(define (unit-propagate clauses assignment)
+  ;; Repeat: find a unit clause, extend assignment. Stop at conflict or fixed point.
+  (let loop ((assignment assignment))
+    (let ((unit (find-unit-clause clauses assignment)))
+      (cond
+        ((eq? unit 'none) assignment)
+        ((eq? unit 'conflict) 'conflict)
+        (else
+         (loop (cons (cons (literal-var unit) (literal-sign unit))
+                     assignment)))))))
+```
+
+Run it:
+
+```scheme
+(dpll '((P Q) ((not P) R) ((not Q) (not R))) '())
+;; => some satisfying assignment, e.g. ((P . #t) (Q . #f) (R . #t))
+```
+
+## Modern SAT: CDCL
+
+DPLL is elegant but the modern industrial algorithm is *Conflict-Driven
+Clause Learning* (CDCL, Marques-Silva-Sakallah 1996). CDCL extends DPLL
+with:
+
+- **Non-chronological backtracking.** When a conflict is found, jump
+  back many levels at once, not just to the most recent decision.
+- **Clause learning.** When a conflict arises, analyze the reason and
+  add a *learned clause* that blocks similar conflicts in the future.
+- **Watched literals.** An indexing scheme that makes unit propagation
+  much faster.
+- **Variable heuristics.** VSIDS (Variable State Independent Decaying
+  Sum) picks which variable to branch on based on recent activity.
+- **Restarts.** Periodically restart the search from scratch to escape
+  bad regions.
+
+CDCL solvers (MiniSAT, Glucose, CaDiCaL, Kissat) are what verify
+hardware designs at Intel and Nvidia, plan schedules at airlines, and
+check formal proofs at industrial scale. The gap between naive DPLL
+and CDCL is enormous — a factor of thousands or more on hard
+instances.
+
+## From SAT to SMT
+
+*Satisfiability Modulo Theories* (SMT) extends SAT to include
+first-order terms with theory constraints. Instead of just boolean
+variables, SMT lets you reason about:
+
+- Integers with arithmetic (`x + 3 = y`, `x < 5`)
+- Real numbers with linear arithmetic
+- Bit-vectors of fixed length (essential for hardware verification)
+- Arrays (`store` and `select` operations)
+- Uninterpreted functions (`f(x) = f(y)` implies `x = y` only if `f` is
+  known injective; SMT reasons abstractly about `f`)
+- Combinations of these theories
+
+The architecture: a SAT solver at the core, with *theory solvers* that
+check whether the boolean-level assignment is consistent with the
+theory constraints. When they are not, the theory solver returns a
+learned clause that the SAT layer adds and continues.
+
+```scheme
+;; SMT-lite sketch: DPLL + linear arithmetic theory check.
+;;
+;; The boolean atoms of the input are linear-arithmetic constraints:
+;;   B1 = (x + y <= 10)
+;;   B2 = (x - y >= 3)
+;;   B3 = (x = 5)
+;;
+;; DPLL treats B1, B2, B3 as opaque booleans and finds a boolean assignment.
+;; When it commits to (B1=#t, B2=#t, B3=#t), the theory layer solves
+;; the linear system to check feasibility.
+;; If infeasible, theory layer returns a conflict clause explaining why.
+```
+
+Real SMT solvers: Z3 (Microsoft Research), CVC5 (Stanford), Yices2
+(SRI). They power verification of C/C++ programs, cryptographic
+protocols, and much of the recent progress in software model checking.
+
+## Applications
+
+**Hardware verification.** Every major chip design is checked with SAT
+and SMT solvers. Intel, AMD, and Nvidia's design flows include SAT-based
+equivalence checking and SMT-based property verification. The 1994
+Pentium FDIV bug — a hardware division error — motivated the widespread
+adoption of formal methods and SAT/SMT tools.
+
+**Cryptographic proofs.** SAT solvers have found weaknesses in
+cryptographic hash functions. In 2005 a SAT-based analysis contributed
+to the collisions found in MD5 and SHA-1.
+
+**Planning and scheduling.** Airline crew scheduling, factory
+production planning, and cloud resource allocation all involve
+combinatorial optimization solvable by SAT with objective functions
+(MaxSAT).
+
+**Software verification.** Model checkers use SMT to check whether
+assertions can fail on any execution path.
+
+**Constraint programming.** SMT is the modern general-purpose
+constraint solver for many problem domains.
+
+**Automated theorem proving.** SMT solvers are combined with other
+techniques in proof assistants to discharge routine reasoning.
+
+## What to try
+
+Extend the DPLL solver with *pure literal elimination*: check each
+variable to see whether it appears only positively or only negatively
+across unresolved clauses, and if so, assign it accordingly.
+
+Implement *clause learning*: when unit propagation reaches a conflict,
+trace back through the propagations that caused it and produce a new
+clause that would have prevented the sequence.
+
+Try encoding a *Sudoku puzzle* as SAT and solving it with your solver.
+Each cell is 9 boolean variables (one per possible digit); constraints
+say each cell has exactly one value, each row/column/box has each
+digit exactly once. The encoding produces about 700 variables and
+9000 clauses for a standard 9x9 puzzle. Your solver should handle it
+in seconds.
+
+Sketch a small SMT solver over linear arithmetic: DPLL at the boolean
+level, with a simple Fourier-Motzkin elimination as the theory decision
+procedure. This is the essential architecture of every SMT solver.
+
+## Closing
+
+SAT solvers make the impossible routine. DPLL is the starting point;
+CDCL is the modern industrial workhorse. SMT extends the framework to
+theories, opening SAT-power to arithmetic and beyond.
+
+This appendix's implementation is enough to solve small puzzles.
+Production solvers are thousands of lines with careful indexing,
+heuristics, and restart strategies. But the shape — decide, propagate,
+conflict, learn, backtrack — is the same at every scale.
+"
+  :cross-refs
+    (:book-of-scheme :chapters (5 8)
+     :book-of-reason :chapters (5 6)
+     :book-of-reason-code :chapters (5 6))
+  :verbs-used ("cond" "eq?" "cons" "car" "cdr" "cadr" "list" "map" "filter"
+               "every" "any" "member" "assq" "null?" "not" "and" "or"
+               "define" "lambda" "let" "let*")
+  :word-count-estimate 2500
+)

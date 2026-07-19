@@ -1,0 +1,404 @@
+;; ch15-long-story.book.slatl
+;; Book of Narrative Games — Chapter 15: The Long Story
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Narrative Games"
+  :chapter-number      15
+  :title               "The Long Story"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "narrative-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + narrative-craft"
+  :book-version        "1.0.0"
+  :prose
+"A short narrative game is a walk. A long one is a journey. The player
+picks it up in 30-minute pieces over weeks. The kid opens the game on
+the bus to school; her sister plays it after dinner; the kid picks it
+up again Sunday morning in her pajamas.
+
+For that to work, the game must remember EVERYTHING between sessions
+— not just what scene we were on, but the full world-state, every
+Cortex flag, every reputation, every choice. Save slots. Recap
+screens. Chapter markers. All the mechanics of persistence.
+
+This chapter builds them. Cortex handles most of the work; we mostly
+wire the UI and the interruption points.
+
+---
+
+## 15.1 The save concept
+
+The runtime supports two persistence layers.
+
+`cortex/write` — writes a single key. Persistent across sessions
+automatically. Everything we have been using is already saved.
+
+`world/snapshot` — captures the FULL runtime state (all entities,
+positions, timers, camera, cortex) as a bundle. `world/restore!`
+loads a bundle back. Use this when you need to save more than just
+Cortex — animation state, entity positions, ongoing timers.
+
+For most narrative games, Cortex alone is enough. Every meaningful
+state is a Cortex key. Every scene reads Cortex on entry.
+
+For narrative games that use ambient animation heavily — a scene where
+a cat has been walking for two minutes and its exact position matters
+— use `world/snapshot`. Saving a snapshot preserves the cat's
+position.
+
+---
+
+## 15.2 Save slots
+
+Kids like multiple save slots. Playthrough A, playthrough B,
+maybe-I'll-come-back-to-this-one.
+
+```scheme
+;; Save the current game to slot N.
+(define (save-to-slot n)
+  (let ((snapshot (world/snapshot)))
+    (cortex/write (slot-key n) snapshot)
+    (cortex/write (slot-timestamp-key n) (current-timestamp))
+    (cortex/write (slot-name-key n) (default-slot-name n))))
+
+(define (load-from-slot n)
+  (let ((snapshot (cortex/read (slot-key n))))
+    (when snapshot
+      (world/restore! snapshot))))
+
+(define (slot-key n)
+  (string->symbol (string-append \"save/slot/\" (number->string n))))
+
+(define (slot-timestamp-key n)
+  (string->symbol (string-append \"save/slot/\" (number->string n) \"/timestamp\")))
+
+(define (slot-name-key n)
+  (string->symbol (string-append \"save/slot/\" (number->string n) \"/name\")))
+
+(define (default-slot-name n)
+  (string-append \"Save \" (number->string n)))
+```
+
+Three keys per slot: the snapshot, the timestamp, an optional name.
+The kid can save to slot 1, 2, or 3 (or however many you support).
+Each has its own name and timestamp so the kid can see what's what.
+
+Do not offer 999 slots. Three or four is plenty. More becomes a
+management chore.
+
+---
+
+## 15.3 The save menu
+
+```scheme
+(define (save-menu)
+  (scene/imagine)
+  (surface/paper)
+  (paint-text 20 40 \"~ save ~\")
+
+  (let loop ((n 1))
+    (when (<= n 4)
+      (let* ((exists? (cortex/read (slot-key n)))
+             (name (or (cortex/read (slot-name-key n)) (default-slot-name n)))
+             (ts   (cortex/read (slot-timestamp-key n))))
+        (paint-text 20 (+ 60 (* n 40))
+          (string-append \"[\" (number->string n) \"] \"
+                         name
+                         (if exists?
+                             (string-append \"  (\" (timestamp->prose ts) \")\")
+                             \"  (empty)\"))))
+      (loop (+ n 1))))
+
+  (paint-text 20 300 \"[press 1-4 to save; ESC to cancel]\")
+
+  (on-key
+    (lambda (k)
+      (case k
+        ((k1 k2 k3 k4)
+         (let ((n (- (char->integer k) (char->integer 'k0))))
+           (save-to-slot n)
+           (paint-text 20 380 (string-append \"Saved to slot \" (number->string n) \".\"))
+           (world/after 90 (lambda () (resume-game)))))
+        ((escape) (resume-game))))))
+```
+
+Four slots. Each shows name and timestamp if occupied. Kid presses
+1-4 to save into that slot. Overwrites without warning — because we
+want save to be casual, not ceremonial.
+
+For load menu, same structure but 'load' instead of 'save.'
+
+---
+
+## 15.4 Auto-save at chapter markers
+
+Kids forget to save. Auto-save at chapter boundaries.
+
+```scheme
+(define (chapter-transition new-chapter)
+  ;; Save the auto slot.
+  (save-to-slot 0)                 ;; slot 0 = auto-save; treat as reserved
+  (cortex/write 'current-chapter new-chapter)
+
+  ;; Show the chapter marker.
+  (scene/imagine)
+  (surface/paper)
+  (paint-text 20 100 (string-append \"~ chapter \" (number->string new-chapter) \" ~\"))
+  (world/after 180 (lambda () (start-chapter new-chapter))))
+```
+
+Slot 0 is reserved for auto-save. Every chapter transition writes
+it. If the kid quits mid-chapter and opens the game a week later,
+we can offer 'resume from auto-save' as the default option.
+
+Never auto-save mid-scene. The kid could be halfway through typing an
+answer to a puzzle; saving now captures a weird state. Save at scene
+BOUNDARIES — the moment we exit one scene and enter another.
+
+---
+
+## 15.5 The 'previously on…' recap
+
+When the kid resumes after being away, show a recap.
+
+```scheme
+(define (resume-with-recap)
+  (let* ((last-play (cortex/read 'system/last-play-timestamp))
+         (now (current-timestamp))
+         (days-away (days-between last-play now)))
+    (cond
+      ((< days-away 1) (skip-recap))       ;; came back today; no recap needed
+      ((< days-away 7) (short-recap))
+      (else (long-recap)))
+    (cortex/write 'system/last-play-timestamp now)))
+
+(define (short-recap)
+  ;; Show the last 3 major events.
+  (scene/imagine)
+  (surface/paper)
+  (paint-text 20 40 \"~ previously ~\")
+  (let ((recent (major-events-since-last-play)))
+    (let loop ((es recent) (i 0))
+      (when (and (not (null? es)) (< i 3))
+        (paint-text 20 (+ 100 (* i 40)) (event->prose (car es)))
+        (loop (cdr es) (+ i 1)))))
+  (world/after 240 (lambda () (resume-game))))
+
+(define (long-recap)
+  ;; It's been a while — use AI to summarize.
+  (scene/imagine)
+  (surface/paper)
+  (paint-text 20 40 \"~ where you left off ~\")
+  (let* ((all-events (or (cortex/read 'log/major-events) '()))
+         (summary (ai/summarize all-events
+                                :style 'narrative-recap
+                                :max-sentences 4)))
+    (paint-text 20 100 summary)
+    (paint-text 20 400 \"[press any key to continue]\")))
+```
+
+The kid comes back after 30 days. She has forgotten who Mira is,
+what the villain did, why she took the red door. `long-recap` runs
+`ai/summarize` on all major events and paints a four-sentence prose
+recap. The kid reads it, remembers, presses a key, and is back in
+the story.
+
+For 1-7 days away, we skip the AI call and just show the last three
+event prose lines. Fast, cheap, sufficient.
+
+For same-day resumes, no recap at all. Just drop the kid straight
+back in.
+
+---
+
+## 15.6 Chapter markers
+
+A visible signal that a chapter is beginning helps kids track their
+progress in a long game.
+
+```scheme
+(define (chapter-marker n title)
+  (scene/imagine)
+  (surface/paper)
+  (audio/halt)
+
+  ;; The chapter number, big.
+  (paint-text 300 200 (string-append \"~ \" (number->string n) \" ~\"))
+  (paint-text 300 260 title)
+
+  ;; Fade in.
+  (surface/dim 1.0 30)   ;; from black to full
+  (world/after 120
+    (lambda ()
+      (surface/dim 0.0 30)      ;; fade back to black
+      (world/after 30 (lambda () (start-chapter-content n))))))
+```
+
+Silence. Chapter number and title on a fading page. Two seconds.
+Then into the chapter content.
+
+The kid feels progress. She has finished chapter 3; she is starting
+chapter 4. She might tell her sister 'I got to chapter 4.' That is
+what chapter markers exist for.
+
+Under the hood we also record the auto-save (15.4) so if she quits
+here she can pick up from the chapter start next time.
+
+---
+
+## 15.7 Tape record and replay
+
+For very long games where players want to REWATCH a scene later,
+`world/tape-record!` captures a scene as a replayable tape.
+
+```scheme
+;; Record the final battle so the kid can rewatch it later.
+(define (record-scene name)
+  (world/tape-record! name)
+  ;; ... run the scene ...
+  (world/tape-save name))
+
+;; Later, from the main menu:
+(define (replay-scene name)
+  (world/tape-replay name))
+```
+
+The tape is a byte-blob stored with the save. The kid clicks
+'rewatch the villain reveal' and the runtime plays back the exact
+sequence — every text arrival, every camera move, every audio cue.
+
+Do not record every scene. Records are large. Reserve for the two
+or three sequences the player might actually want to rewatch:
+introductions, big reveals, endings.
+
+---
+
+## 15.8 A worked scene: opening the game after 3 weeks away
+
+Here is the complete resume sequence for a long-story game.
+
+```scheme
+(define (game-open)
+  (scene/imagine)
+  (surface/paper)
+
+  ;; Detect if there is an auto-save.
+  (let ((auto (cortex/read (slot-key 0)))
+        (last-play (cortex/read 'system/last-play-timestamp)))
+    (cond
+      ((not auto)
+       (main-menu-first-time))
+      (else
+       (main-menu-returning last-play))))
+  )
+
+(define (main-menu-returning last-play)
+  (let ((days-away (days-since last-play)))
+    (paint-text 20 40 \"~ your story ~\")
+    (paint-text 20 100
+      (cond
+        ((< days-away 1) \"You were just here.\")
+        ((< days-away 3) (string-append \"You were here \" (number->string days-away) \" days ago.\"))
+        (else (string-append \"You were away for \" (number->string days-away) \" days.\"))))
+
+    (paint-text 20 200 \"[A] continue\")
+    (paint-text 20 230 \"[B] load a different save\")
+    (paint-text 20 260 \"[C] start over\")
+
+    (on-key
+      (lambda (k)
+        (case k
+          ((a) (continue-with-recap days-away))
+          ((b) (load-menu))
+          ((c) (confirm-start-over)))))))
+
+(define (continue-with-recap days-away)
+  (cond
+    ((< days-away 1) (resume-directly))
+    ((< days-away 7) (short-recap))
+    (else (long-recap))))
+```
+
+The kid opens after three weeks. The menu says 'You were away for
+21 days.' She presses A. `long-recap` runs an AI summary of what she
+did before, paints it. She reads it. She remembers. She presses a
+key. She is back in her story.
+
+That is a well-behaved long-story game. It respects the kid's time,
+respects her memory, respects her freedom to start over.
+
+---
+
+## 15.9 Common desktop tasks — an operator's ongoing customer journey
+
+A customer has been buying from an operator for a year. Each purchase
+has been logged to Cortex. The operator wants a card that shows the
+customer her own journey — what she bought, what she liked, what she
+came back for.
+
+```scheme
+(define-card 'my-story-with-this-shop
+  :init
+  (lambda ()
+    (scene/imagine)
+    (surface/paper)
+    (paint-text 20 40 \"Here is what we remember about your visits.\")
+
+    (let* ((purchases (or (cortex/read 'customer/purchases) '()))
+           (visits    (or (cortex/read 'customer/visits) 0))
+           (favorite  (cortex/read 'customer/favorite-piece)))
+
+      (paint-text 20 100
+        (string-append \"You have been in \" (number->string visits) \" times.\"))
+
+      (paint-text 20 140
+        (string-append \"You have bought: \"
+                       (number->string (length purchases)) \" pieces.\"))
+
+      (when favorite
+        (paint-text 20 180
+          (string-append \"You told me once that the \" favorite
+                         \" was your favorite.\")))
+
+      ;; If we have detailed purchase history, offer a two-line summary.
+      (when (> (length purchases) 5)
+        (world/after 120
+          (lambda ()
+            (paint-text 20 240
+              (ai/summarize (purchases->prose purchases)
+                            :style 'shopkeeper-friendly-recap
+                            :max-sentences 2))))))))
+```
+
+The customer opens her personal card. It shows her visits, her
+purchases, her stated favorite. If she has been buying for over a
+year, it also offers an AI-generated two-line summary — 'you have a
+taste for the older pieces; the cast iron and the copper both call
+to you.' She reads it. She has been seen.
+
+This is what a long relationship with a shop looks like when the
+shop takes it seriously. The customer will come back. She will
+remember that HER story mattered to this shopkeeper.
+
+---
+
+## 15.10 Closing
+
+Long stories are libraries. Cortex is the librarian. Save slots are
+the shelves. Chapter markers are the spines. Recaps are the little
+summary cards that let a reader pick up a book they haven't opened
+in months.
+
+Build this scaffolding early, before your game grows past a few
+hours. Retrofitting save systems is painful. Wiring them into the
+first draft is easy.
+
+Chapter 16 is the summit. You write a real short narrative game —
+twenty scenes, three endings, five characters, one villain. Every
+technique in the book. And you ship it.")

@@ -1,0 +1,321 @@
+;; ch09-particle-systems.book.slatl
+;; Book of Simulation Games — Chapter 9: Particle Systems
+;; Authored 2026-07-16 by simulation-games-engineer-lane.
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Simulation Games"
+  :chapter-number      9
+  :title               "Particle Systems"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "simulation-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + physics-simulation-emergent"
+  :book-version        "1.0.0"
+  :provenance          ((:authored-by "Engineer") (:date "2026-07-16"))
+  :prose
+"Fireworks, smoke, sparks, water, fire, dust, blood, snow, mist,
+confetti, exhaust, magic sparkles, breath in cold air. All of these
+are particle systems. All of them are the same idea underneath:
+spawn many small entities, give each a lifetime and a few forces,
+let them run.
+
+The magic of particle systems is that they're the cheapest possible
+visual effect that reads as physically real. A single particle is a
+dot with a velocity, a color, and a countdown. Two hundred of them,
+tuned right, look like water spray. Change gravity's sign and the
+color and you have smoke rising. Change to short lifetime and hot
+colors and you have sparks. The system's identity is entirely in the
+tuning.
+
+This chapter builds five particle systems that share 90% of their
+code and 100% of their physics: sparks, fire, smoke, water, and
+confetti.
+
+---
+
+## 9.1 One spark
+
+```scheme
+(define (spawn-spark x y)
+  (let ((p (world/spawn 'spark x y))
+        (angle (* 2 3.14159 (random))))
+    (entity/mass!          p 0.1)
+    (entity/set-vel!       p (* 3 (cos angle)) (* 3 (sin angle)))
+    (entity/gravity-scale! p 0.5)     ;; gravity affects sparks less
+    (entity/drag!          p 0.03)    ;; air slows them
+    (ai/bb-set!            p 'life 60);; 60-frame lifetime
+    (ai/bb-set!            p 'color-hot orange)
+    p))
+```
+
+`ai/bb-set!` writes to the entity's little scratchpad. We use it for
+lifetime and color. Each frame we decrement 'life; when it hits zero
+we despawn.
+
+```scheme
+(on-frame
+  (lambda (t)
+    (world/step)
+    (world/each 'spark
+      (lambda (p)
+        (let ((life (ai/bb-get p 'life)))
+          (ai/bb-set! p 'life (- life 1))
+          (when (<= (- life 1) 0)
+            (entity/despawn! p))
+          (let ((pos (entity/pos p)))
+            (paint-circle (car pos) (cdr pos) 1
+              (ai/bb-get p 'color-hot))))))))
+```
+
+Every 30 frames or so, spawn a spark burst:
+
+```scheme
+(on-frame
+  (lambda (t)
+    (when (= 0 (modulo t 30))
+      (repeat 20 (lambda () (spawn-spark 240 180))))))
+```
+
+A twenty-spark burst every half-second. Watch the sparks fan out,
+fall, fade, disappear.
+
+## 9.2 Fire — the same pattern, tuned
+
+Fire is sparks that fade from orange to red to black over their
+lifetime, drift upward instead of falling, and are spawned
+continuously from a source.
+
+```scheme
+(define (spawn-flame x y)
+  (let ((p (world/spawn 'flame
+             (+ x (- (* 4 (random)) 2))
+             y))
+        (up-vel (- 0.5 (random))))
+    (entity/mass!          p 0.05)
+    (entity/set-vel!       p (- (* 0.6 (random)) 0.3) up-vel)
+    (entity/gravity-scale! p -0.3)     ;; negative gravity: buoyancy
+    (entity/drag!          p 0.04)
+    (ai/bb-set!            p 'life 40)
+    (ai/bb-set!            p 'life-max 40)
+    p))
+
+;; Age-dependent color: hot at start, cool at end.
+(define (flame-color life-frac)
+  (cond ((> life-frac 0.7) yellow)
+        ((> life-frac 0.4) orange)
+        ((> life-frac 0.1) red)
+        (else              black)))
+
+(on-frame
+  (lambda (t)
+    (world/step)
+    (repeat 3 (lambda () (spawn-flame 240 240)))
+    (world/each 'flame
+      (lambda (p)
+        (let ((life (ai/bb-get p 'life))
+              (life-max (ai/bb-get p 'life-max)))
+          (ai/bb-set! p 'life (- life 1))
+          (when (<= (- life 1) 0) (entity/despawn! p))
+          (let ((pos (entity/pos p)))
+            (paint-circle (car pos) (cdr pos) 3
+              (flame-color (/ life life-max)))))))))
+```
+
+Three new flames per frame at (240, 240). They rise, drift, cool,
+disappear. The color transition from yellow to black-red is what
+sells the effect. It also composes: put three or five of these
+emitters at different x-positions and it's a campfire; put one on
+each corner of a rectangle and it's a burning building.
+
+## 9.3 Smoke — like fire but grayer, slower, longer-lived
+
+```scheme
+(define (spawn-smoke x y)
+  (let ((p (world/spawn 'smoke x y))
+        (life (+ 80 (random-int 40))))
+    (entity/mass!          p 0.02)
+    (entity/set-vel!       p (- (* 0.4 (random)) 0.2)
+                             (- (* 0.3 (random)) 0.1))
+    (entity/gravity-scale! p -0.2)
+    (entity/drag!          p 0.06)
+    (ai/bb-set!            p 'life life)
+    (ai/bb-set!            p 'life-max life)
+    (ai/bb-set!            p 'size (+ 2 (* 4 (random))))
+    p))
+```
+
+Longer life, slower rise, more drag, larger size that grows over time,
+and gray colors that fade to transparent. Smoke.
+
+## 9.4 Water — many particles + separation force + gravity
+
+Water is more particles, gravity pulling down, and short-range
+separation so they don't overlap. Real fluid sim (SPH) is next
+chapter; this is the fake-fluid particle version.
+
+```scheme
+(define (spawn-drop x y)
+  (let ((p (world/spawn 'drop x y)))
+    (entity/mass!    p 0.3)
+    (entity/set-vel! p (- (* 3 (random)) 1.5) 2)
+    (entity/drag!    p 0.02)
+    (ai/separate     p 'drop 6 1.2)     ;; short-range repulsion
+    (ai/bb-set!      p 'life 200)
+    p))
+
+(world/gravity! 0 0.4)
+(world/floor!   380)                    ;; puddle at y=380
+
+(on-frame
+  (lambda (t)
+    (world/step)
+    (when (= 0 (modulo t 4))
+      (spawn-drop 240 40))
+    (world/each 'drop
+      (lambda (p)
+        (let ((pos (entity/pos p)))
+          (paint-circle (car pos) (cdr pos) 2 blue))))))
+```
+
+Drops fall from a tap, splash on the puddle, spread out on the
+'floor.' The separation keeps them from stacking into a single point.
+It looks like water because it BEHAVES like water — falls, splashes,
+piles.
+
+## 9.5 Confetti — small quads, gravity, no repulsion, rotating
+
+Confetti is not spherical, so it rotates. Give each particle a
+random angular velocity.
+
+```scheme
+(define (spawn-confetti x y)
+  (let ((p (world/spawn 'confetti x y)))
+    (entity/mass!          p 0.05)
+    (entity/set-vel!       p (- (* 8 (random)) 4) (- (* 4 (random)) 2))
+    (entity/gravity-scale! p 1.0)
+    (entity/drag!          p 0.05)
+    (entity/angular-vel!   p (- (* 12 (random)) 6))
+    (ai/bb-set!            p 'life 180)
+    (ai/bb-set!            p 'color (random-color))
+    p))
+```
+
+Then paint each confetto as a rotated rectangle:
+
+```scheme
+(world/each 'confetti
+  (lambda (p)
+    (let ((pos (entity/pos p))
+          (a   (entity/angle p))
+          (c   (ai/bb-get p 'color)))
+      (paint-rect-rotated (car pos) (cdr pos) 4 8 a c))))
+```
+
+Two hundred confetti drop from the top on a click. Watch them tumble.
+
+## 9.6 A general particle-system record
+
+You can capture the pattern in a record and re-use it.
+
+```scheme
+(define spark-preset
+  '((tag . spark)
+    (count-per-burst . 20)
+    (life . (40 . 80))
+    (vel . (radial 2 4))
+    (gravity-scale . 0.5)
+    (drag . 0.03)
+    (color . (fade orange red black))
+    (paint . dot)
+    (size . 1)))
+
+(define fire-preset
+  '((tag . flame)
+    (rate . 3)
+    (life . (30 . 50))
+    (vel . ((random -0.3 0.3) (random -0.5 0)))
+    (gravity-scale . -0.3)
+    (drag . 0.04)
+    (color . (age yellow orange red black))
+    (paint . dot)
+    (size . 3)))
+
+(particle-emitter spark-preset 240 180 :on 'click)
+(particle-emitter fire-preset  400 240 :on 'always)
+```
+
+`particle-emitter` reads the preset and installs an emitter at the
+given position. All the boilerplate above (spawn, tune, life-count,
+color, paint) is expressed as data. Now you have a system that lets
+you build particle effects without writing new code — just tweak the
+preset.
+
+---
+
+## 9.7 The four routing patterns in particle systems
+
+**Composition.** Each preset is a composition of tuning parameters.
+Each particle's per-frame behavior is a composition of update-life,
+update-vel, update-pos, paint. `particle-emitter` composes 'read
+preset,' 'spawn N per frame,' 'wire per-particle updates.'
+
+**Orchestration.** A firework sequence is orchestration in time:
+launch shell (rocket rising) → detonate (spark burst) → fade (short
+sparks + long smoke trail). A campfire that grows into a bonfire is
+an orchestration that increases spawn rate over time.
+
+**In-routing.** Click events route to a burst spawner. Physics
+collisions (a spark hits a wall) route to a bounce handler or a
+despawn. When a particle's life reaches zero, that event routes to
+despawn — an internal in-router.
+
+**Routing.** Particles route to the framebuffer as circles, dots, or
+rotated quads. Audio ('spark hit') routes to `audio/play`. Particle
+metrics ('300 active particles') route to a performance overlay.
+
+---
+
+## 9.8 Common desktop tasks
+
+An operator running an online candy shop asked: 'when a customer
+finishes a purchase, can we do a celebration animation?' A one-line
+`(particle-emitter confetti-preset middle-of-screen :on 'purchase)`
+gives them a two-second confetti burst that reads as celebration.
+Cheap, fast, universally understood.
+
+## 9.9 Try this
+
+1. Make a rain preset. Which parameters differ from water?
+2. Make an explosion preset. Radial vel, short life, orange to black,
+   plus a shockwave (single expanding ring, not a particle).
+3. Chain: spawn a rocket. When it explodes, spawn a burst of sparks.
+   Each spark, on despawn, spawns a smaller burst of dust.
+4. Draw with your mouse: each frame, spawn a particle at the mouse
+   position with velocity in the mouse-motion direction. You've made
+   a particle brush.
+5. Make a preset that looks like snow. Gravity low, drag high, size
+   ~2, color white, life long.
+
+## 9.10 Pitfalls
+
+**Too many particles.** Each particle is O(1) but there are many.
+2000 particles at 60fps is fine on modern hardware; 20000 is not.
+Cap with `particle-cap`.
+
+**Never despawning.** If you forget the life countdown, particles
+accumulate forever. Watch performance decay.
+
+**Uniform is boring.** Random per-particle parameters (velocity,
+life, color hue) look much more natural than perfectly-identical
+particles.
+
+---
+
+Next: fluid sketches. Not real Navier-Stokes, but a fake fluid that
+LOOKS real, built from the same particle primitives.")

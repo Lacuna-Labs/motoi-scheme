@@ -1,0 +1,172 @@
+(dialect :applies ("motoi" "sakura") :note "Default: applies to both dialects. When a split exists between Motoi and Sakura, add sibling records in the same doc, each tagged with a per-record :dialect override.")
+(chapter
+  :book "Book of Scheme"
+  :chapter-number 111
+  :title "Chapter 10 — Macros"
+  :arc "ramp-up"
+  :provenance
+    (:source-path "/Users/alfred/code/scheme-lang/docs/BOOK-OF-SCHEME.md"
+     :source-sha "0ab125ac8207ddace7c3de81b4b4cb6be9fe737d0c538dfd51792216d078bfeb"
+     :recovered-at "2026-07-14"
+     :recovery-item "recovery-009")
+  :prose
+"## Chapter 10 — Macros
+
+This is the chapter Scheme is famous for.
+
+A macro is a piece of code that transforms other code. In Scheme, macros run at *expansion time* — before the interpreter evaluates anything. You write a rule that says \"wherever you see this shape, rewrite it into that shape,\" and the compiler does the rewriting once, up front.
+
+Because Scheme code *is* Scheme data (parenthesized lists of symbols and other atoms), a macro is just a function from lists to lists. That's the whole idea. The details are in how you write the rules cleanly and how the compiler keeps names from getting tangled up.
+
+### The problem macros solve
+
+Suppose you find yourself writing this over and over:
+
+```scheme
+(if (some-test)
+    (begin
+      (log \"check passed\")
+      (do-thing))
+    (log \"check failed\"))
+```
+
+You'd like a shorthand like `(check some-test do-thing)`. In a language without macros you can't have it — the test has to be evaluated only when the check runs, so a function won't work; a function evaluates its arguments before the body runs.
+
+A macro can:
+
+```scheme
+(define-syntax check
+  (syntax-rules ()
+    ((_ test body)
+     (if test
+         (begin (log \"check passed\") body)
+         (log \"check failed\")))))
+
+(check (> 3 2) (do-thing))
+```
+
+The macro rewrites `(check (> 3 2) (do-thing))` into the `if` shape at expansion time. By the time the interpreter sees it, it's ordinary Scheme.
+
+### `syntax-rules` — pattern-based macros
+
+The most common macro form. You give a set of patterns and templates; the compiler matches your call against the patterns and rewrites according to the template.
+
+```scheme
+(define-syntax name
+  (syntax-rules (literal-keywords...)
+    ((pattern1) template1)
+    ((pattern2) template2)
+    ...))
+```
+
+The simplest useful macro — a `when` for languages that don't have one built in:
+
+```scheme
+(define-syntax my-when
+  (syntax-rules ()
+    ((_ test body ...)
+     (if test (begin body ...) #f))))
+
+(my-when (> 3 2)
+  (display \"yes\")
+  (newline))
+```
+
+Read the pattern `(_ test body ...)`:
+- `_` is a placeholder for the macro's own name (we don't need it in the template)
+- `test` is any single expression
+- `body ...` is any number of expressions
+
+The template `(if test (begin body ...) #f)` uses those pattern variables to build the rewrite.
+
+The trailing `...` — three dots — is called an *ellipsis*. It matches zero or more of whatever precedes it, and inside the template it expands them all.
+
+### A more useful example: `swap!`
+
+Swap the values of two variables — you can't write this as a function (a function receives values, not variable names):
+
+```scheme
+(define-syntax swap!
+  (syntax-rules ()
+    ((_ a b)
+     (let ((tmp a))
+       (set! a b)
+       (set! b tmp)))))
+
+(define x 1)
+(define y 2)
+(swap! x y)
+x                                           ;; ⇒ 2
+y                                           ;; ⇒ 1
+```
+
+The macro expands `(swap! x y)` at compile time into the `let`/`set!`/`set!` sequence. `x` and `y` become the actual variable names inside the rewrite.
+
+### A control-structure macro: `while`
+
+Scheme doesn't have `while` as a special form. Add one:
+
+```scheme
+(define-syntax while
+  (syntax-rules ()
+    ((_ test body ...)
+     (let loop ()
+       (when test
+         body ...
+         (loop))))))
+
+(define i 0)
+(while (< i 5)
+  (display i)
+  (set! i (+ i 1)))
+;; prints 01234
+```
+
+You just extended the language. Not a library. Not a function that pretends to look like a keyword. An actual new syntactic form that participates in Scheme's evaluation rules.
+
+### Hygiene
+
+Notice `swap!` used a helper variable called `tmp` inside the template. What if you called `(swap! tmp foo)`? In a naive macro system, the `tmp` inside the template would collide with your `tmp` and things would break.
+
+Scheme's `syntax-rules` is *hygienic*: it renames temporary bindings automatically so they can't collide with names in the calling code. You don't have to think about it. Write the template as if you named the variables freely; the compiler adjusts.
+
+This is a big deal historically. Lisp macros before Scheme (and macros in many other languages today) require you to manually generate unique names to avoid capture. Hygienic macros make the safe path the default one.
+
+### `define-macro` — the classic style
+
+scheme-lang also supports the older, non-hygienic `define-macro` style — you get more power (arbitrary Scheme code, not just a pattern-and-template) at the cost of thinking about name capture yourself. Most macros should be `syntax-rules`. Reach for `define-macro` when you need to compute the rewrite in a way patterns can't express.
+
+### When to write a macro
+
+Not often. When you find yourself writing the same *shape* over and over — with actual expressions in a couple of holes — a macro is the tool. When you find yourself passing arguments to a function, a function is the tool.
+
+Some good macro use cases:
+- New control structures (`when`, `unless`, `while`, `do-times`, `each`)
+- Binding forms with special evaluation rules (`with-open-file`, `with-time`)
+- Domain-specific mini-languages inside your program (a route definition, a state-machine transition table, a testing DSL)
+- Compile-time optimization (partial evaluation, dead-code removal)
+
+Some bad macro use cases:
+- Anything a function can do — always prefer a function
+- \"Save a couple of keystrokes\" — a function is cheaper
+- Redefining core forms — leave `if` and `let` alone
+
+### Reading `,expand`
+
+The REPL will show you what a macro expands to:
+
+```
+sakura> (define-syntax square-first
+  (syntax-rules ()
+    ((_ xs) (car (map (lambda (x) (* x x)) xs)))))
+
+sakura> ,expand (square-first '(3 4 5))
+(car (map (lambda (x) (* x x)) '(3 4 5)))
+```
+
+That's exactly what the interpreter will see. Any time you're unsure what a macro does, `,expand` is the answer.
+
+Macros are Scheme's superpower. Even if you don't reach for them often, they're what makes big Scheme programs feel small. When a library adds a `define-record` or a `for-each-line` or a `with-mutex`, that's a macro. You don't have to be a language designer to write them — you just have to know the language you already have.
+
+---
+")

@@ -1,0 +1,453 @@
+;; ch08-inventory-and-world-state.book.slatl
+;; Book of Narrative Games — Chapter 8: Inventory and World-State
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Narrative Games"
+  :chapter-number      8
+  :title               "Inventory and World-State"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "narrative-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + narrative-craft"
+  :book-version        "1.0.0"
+  :prose
+"An adventure game is a state machine. The player is in a room. The
+door is locked. The player picks up a key. The state changes. Now the
+door is unlocked, or at least can be. Everything the player does is a
+state transition; every scene reads the state to decide what to
+render.
+
+Inventory is a subset of world-state — specifically the items the
+player is carrying. World-state is the bigger set: what's true about
+the world right now. Is the well poisoned? Has the sister come home?
+Did the villain die in scene 12? All of that is world-state.
+
+Cortex is our state store. Inventory is one Cortex key holding a list.
+World-state is many Cortex keys holding flags. Simple. What's hard is
+the discipline of writing scenes that always read state before
+rendering, and always update state after significant actions.
+
+---
+
+## 8.1 Inventory as a list
+
+```scheme
+;; Add an item to inventory.
+(define (pick-up item)
+  (let ((inv (or (cortex/read 'inventory) '())))
+    (cortex/write 'inventory (cons item inv))
+    (paint-text 20 400
+      (string-append \"You picked up \" (item->prose item) \".\"))))
+
+;; Drop an item.
+(define (drop item)
+  (let ((inv (or (cortex/read 'inventory) '())))
+    (cortex/write 'inventory (filter (lambda (i) (not (eq? i item))) inv))
+    (paint-text 20 400
+      (string-append \"You dropped \" (item->prose item) \".\"))))
+
+;; Check if you have something.
+(define (have? item)
+  (member item (or (cortex/read 'inventory) '())))
+
+;; Item to prose (English article + name).
+(define (item->prose item)
+  (case item
+    ((lantern) \"the lantern\")
+    ((key)     \"a small brass key\")
+    ((rope)    \"a coil of rope\")
+    ((letter)  \"a folded letter\")
+    ((feather) \"a white feather\")
+    (else      (string-append \"a \" (symbol->string item)))))
+```
+
+Four verbs — pick up, drop, have?, item->prose — and you have a
+working inventory. Every scene can consult `(have? 'lantern)` before
+deciding whether to offer the enter-the-cave option.
+
+The `filter` in `drop` returns a new list with all elements except the
+dropped one. This is standard list-processing. If you have multiple
+copies of the same item and only want to drop one, use a more careful
+`remove-first` — but for narrative games, one copy of each item is
+usually plenty.
+
+Notice we do NOT delete an item when it is used. We might read
+'you have the lantern' in scene 8 and light the darkness. In scene 15
+we still have the lantern. Real inventory only drops when the player
+explicitly drops it OR when a scene explicitly consumes it (like
+handing over the letter).
+
+---
+
+## 8.2 Consuming items
+
+Sometimes handing over an item removes it from inventory.
+
+```scheme
+;; Give an item to someone.
+(define (give item npc)
+  (drop item)
+  (cortex/write (npc-received-key npc item) #t)
+  (paint-text 20 400
+    (string-append (npc-name npc) \" takes \" (item->prose item)
+                   \" from your hand.\")))
+
+(define (npc-received-key npc item)
+  (string->symbol
+    (string-append \"gift/\" (symbol->string npc)
+                   \"/\" (symbol->string item))))
+
+;; Later, Mira can react:
+(define (mira-check-gift)
+  (cond
+    ((cortex/read 'gift/mira/letter)
+     \"MIRA: 'The letter — you brought it? Thank you.'\")
+    ((cortex/read 'gift/mira/feather)
+     \"MIRA: 'The feather. From the hawk on the ridge?'\")
+    (else
+     \"MIRA: 'You have empty hands. That is fine too.'\")))
+```
+
+`give` drops the item from your inventory AND records a Cortex flag
+saying you gave THIS item to THIS npc. That flag survives forever.
+Ten scenes later, another NPC can say 'Mira told me about the
+letter.' The economy of the world tracks itself.
+
+The compound key trick — `gift/mira/letter` — lets you have any
+number of gift-relationships without a giant hardcoded flag list.
+Every gift is its own flag. Reading them later is a matter of building
+the key.
+
+---
+
+## 8.3 World-state flags
+
+Beyond inventory, the world has state that is not carried by anyone.
+
+```scheme
+;; Common world-state keys.
+;;
+;;   'state/door-unlocked?
+;;   'state/well-poisoned?
+;;   'state/village-burned?
+;;   'state/sister-home?
+;;   'state/villain-killed?
+;;
+;; Read them:
+(if (cortex/read 'state/sister-home?)
+    (paint-text 20 40 \"Your sister is in the kitchen, humming.\")
+    (paint-text 20 40 \"The kitchen is empty. She is not back yet.\"))
+
+;; Write them:
+(cortex/write 'state/sister-home? #t)
+```
+
+Prefer `?`-suffixed boolean keys. They read naturally in code:
+`(if (cortex/read 'state/sister-home?) ...)` reads like English.
+
+Prefer flat namespaces. `state/well-poisoned?` is better than
+`village/well/water/poisoned?`. Deep hierarchies feel organized but
+make the code longer. The narrative game usually has 30-100 flags —
+that fits in a flat namespace fine.
+
+---
+
+## 8.4 The inventory bar
+
+Players want to see what they are carrying. Paint a bar at the bottom
+of the screen showing current inventory.
+
+```scheme
+;; Paint an inventory bar along the bottom.
+(define (paint-inventory-bar)
+  (let ((inv (or (cortex/read 'inventory) '())))
+    (paint-text 20 550 \"CARRYING:\")
+    (let loop ((items inv) (i 0))
+      (when (not (null? items))
+        (paint-text (+ 110 (* i 80)) 550
+          (item-icon-or-name (car items)))
+        (loop (cdr items) (+ i 1))))))
+
+(define (item-icon-or-name item)
+  (case item
+    ((lantern) \"[lantern]\")
+    ((key)     \"[key]\")
+    ((rope)    \"[rope]\")
+    ((letter)  \"[letter]\")
+    (else      (string-append \"[\" (symbol->string item) \"]\"))))
+```
+
+Call `paint-inventory-bar` at the end of every scene's render pass.
+The player sees, at all times, what they are carrying. This is a
+small courtesy that saves hours of frustration — 'do I have the key?
+Where does it show up?'
+
+For a fancier bar, replace the bracketed text with sprite icons via
+`entity/sprite!` on a dedicated inventory-bar entity per item. But
+text works fine; do not over-engineer.
+
+---
+
+## 8.5 Gating scenes on state
+
+A scene checks state before rendering. If the state does not allow
+the scene, redirect or offer a partial version.
+
+```scheme
+(define (enter-the-cave)
+  (cond
+    ((have? 'lantern)
+     (scene-cave-lit))
+    (else
+     (scene/imagine)
+     (surface/paper)
+     (paint-text 20 40 \"The cave is pitch dark. You cannot see three\")
+     (paint-text 20 70 \"feet in front of you.\")
+     (paint-text 20 100 \"You back out. You would need a light.\")
+     (world/after 90 (lambda () (previous-scene))))))
+```
+
+The player can enter the cave with a lantern (full scene) or without
+(short warning-and-back). Never let the player walk into a state the
+game cannot handle — always give a graceful bounce back.
+
+For multi-item gates:
+
+```scheme
+(define (enter-the-tower)
+  (cond
+    ((and (have? 'key) (have? 'letter))
+     (scene-tower-full))
+    ((have? 'key)
+     (scene-tower-locked-inside))
+    (else
+     (scene-tower-locked-outside))))
+```
+
+Three different scenes based on inventory. Each is fully written; each
+reads differently for the player who arrives in that state.
+
+---
+
+## 8.6 A worked scene: five rooms, seven items
+
+Here is a small puzzle-adventure. Five rooms. Seven items to find.
+One exit. The player must assemble a specific combination to leave.
+
+```scheme
+;; The five rooms.
+(define (kitchen)
+  (scene/imagine)
+  (surface/paper)
+  (paint-text 20 40 \"KITCHEN. A pot on the stove. A window over a garden.\")
+  (paint-text 20 100 (if (have? 'pot) \"\" \"[A] take the pot\"))
+  (paint-text 20 130 \"[B] to the garden   [C] to the hall\")
+  (on-key
+    (lambda (k)
+      (case k
+        ((a) (unless (have? 'pot) (pick-up 'pot)) (kitchen))
+        ((b) (garden))
+        ((c) (hall))))))
+
+(define (garden)
+  (scene/imagine)
+  (surface/paper)
+  (paint-text 20 40 \"GARDEN. Tomatoes. A well. A shed.\")
+  (paint-text 20 100 (if (have? 'tomato) \"\" \"[A] pick a tomato\"))
+  (paint-text 20 130 (if (have? 'water)  \"\" \"[B] fill a container from the well\"))
+  (paint-text 20 160 \"[C] enter the shed   [D] back to kitchen\")
+  (on-key
+    (lambda (k)
+      (case k
+        ((a) (unless (have? 'tomato) (pick-up 'tomato)) (garden))
+        ((b) (if (have? 'pot)
+                 (begin (pick-up 'water) (garden))
+                 (begin (paint-text 20 220
+                          \"You have no container.\") (garden))))
+        ((c) (shed))
+        ((d) (kitchen))))))
+
+(define (shed)
+  (scene/imagine)
+  (surface/paper)
+  (paint-text 20 40 \"SHED. A hoe. A coil of rope. Dust.\")
+  (paint-text 20 100 (if (have? 'hoe)  \"\" \"[A] take the hoe\"))
+  (paint-text 20 130 (if (have? 'rope) \"\" \"[B] take the rope\"))
+  (paint-text 20 160 \"[C] back to garden\")
+  (on-key
+    (lambda (k)
+      (case k
+        ((a) (unless (have? 'hoe) (pick-up 'hoe)) (shed))
+        ((b) (unless (have? 'rope) (pick-up 'rope)) (shed))
+        ((c) (garden))))))
+
+(define (hall)
+  (scene/imagine)
+  (surface/paper)
+  (paint-text 20 40 \"HALL. Stairs up. A door out (locked).\")
+  (paint-text 20 100 (if (have? 'lantern) \"\" \"[A] take the lantern from the hook\"))
+  (paint-text 20 130 \"[B] upstairs   [C] to kitchen\")
+  (paint-text 20 160
+    (if (and (have? 'key) (have? 'lantern) (have? 'rope))
+        \"[D] open the door and leave\"
+        \"\"))
+  (on-key
+    (lambda (k)
+      (case k
+        ((a) (unless (have? 'lantern) (pick-up 'lantern)) (hall))
+        ((b) (upstairs))
+        ((c) (kitchen))
+        ((d) (when (and (have? 'key) (have? 'lantern) (have? 'rope))
+               (leave)))))))
+
+(define (upstairs)
+  (scene/imagine)
+  (surface/paper)
+  (paint-text 20 40 \"UPSTAIRS. A bedroom. A key on the dresser.\")
+  (paint-text 20 100 (if (have? 'key) \"\" \"[A] take the key\"))
+  (paint-text 20 130 \"[B] back down\")
+  (on-key
+    (lambda (k)
+      (case k
+        ((a) (unless (have? 'key) (pick-up 'key)) (upstairs))
+        ((b) (hall))))))
+
+(define (leave)
+  (scene/imagine)
+  (surface/paper)
+  (paint-text 20 40 \"You unlock the door. Rope tied to the doorframe,\")
+  (paint-text 20 70 \"lantern in one hand, key in the other. You step\")
+  (paint-text 20 100 \"out into the yard. You made it.\"))
+```
+
+Five rooms, seven items (pot, tomato, water, hoe, rope, lantern, key),
+one exit. The exit needs key + lantern + rope. Water is a red herring
+— it makes the world feel real without being required. Tomato is
+another red herring — some players will try to bring it, and nothing
+bad will happen either way.
+
+Red herrings are important. If every item is required, the puzzle is a
+fetch quest. If some items are optional, the player has to think about
+which are which. Better yet, some optional items unlock BONUS scenes
+— take the tomato home, hand it to the neighbor, get a small
+sub-story.
+
+---
+
+## 8.7 The chair — an example of world-state that isn't inventory
+
+There is a chair in the corner. If you sit in it, you fall asleep and
+dream of your sister. But you can only sit in it once. This is
+world-state, not inventory.
+
+```scheme
+(define (the-chair)
+  (cond
+    ((cortex/read 'state/slept-in-chair?)
+     (paint-text 20 200 \"The chair is empty. You have already slept.\"))
+    (else
+     (paint-text 20 200 \"[A] sit in the chair\")
+     (on-key
+       (lambda (k)
+         (when (eq? k 'a)
+           (cortex/write 'state/slept-in-chair? #t)
+           (dream-of-sister)))))))
+```
+
+The `state/slept-in-chair?` flag survives forever. The player who
+comes back tomorrow cannot sit in the chair a second time. The
+one-shot dream becomes a one-shot memory.
+
+This is important design: some scenes should not repeat. Dreams,
+confessions, deaths, farewells. Gate them with a `state/*` flag and
+respect it forever.
+
+---
+
+## 8.8 Common desktop tasks — an operator's virtual bookshelf
+
+An operator sells vintage books. She wants a page where the customer
+can 'browse a bookshelf' — pick up a book, read its jacket, put it
+back or add to cart. State-tracked so returning customers see which
+books they have already read summaries of.
+
+```scheme
+(define-card 'browse-bookshelf
+  :init
+  (lambda ()
+    (scene/imagine)
+    (surface/paper)
+    (paint-text 20 40 \"A shelf of six books. Which one interests you?\")
+
+    (let* ((books '(the-riverside-cook the-copper-tea rustic-tables
+                    a-year-in-glass the-quiet-hours night-thoughts))
+           (read-titles (or (cortex/read 'browse/read-jackets) '())))
+      (let loop ((bs books) (i 0))
+        (when (not (null? bs))
+          (paint-text 20 (+ 100 (* i 30))
+            (string-append \"[\" (number->letter (+ i 1)) \"] \"
+                           (book->title (car bs))
+                           (if (member (car bs) read-titles)
+                               \"  (jacket read)\"
+                               \"\")))
+          (loop (cdr bs) (+ i 1))))
+
+      (on-key
+        (lambda (k)
+          (let ((idx (letter->index k)))
+            (when (and (>= idx 0) (< idx 6))
+              (let ((chosen (list-ref books idx)))
+                (cortex/write 'browse/read-jackets
+                  (cons chosen (or (cortex/read 'browse/read-jackets) '())))
+                (show-jacket chosen)))))))))
+```
+
+Six books. The customer picks one. The card records that she read
+that jacket. Next time she comes, that book is marked (jacket read).
+She can browse jackets she hasn't seen. When she is ready to buy, a
+sub-scene lets her add to cart.
+
+The operator did what a bookseller does: made a shelf, let the
+customer touch things. State keeps track so the customer doesn't feel
+like she is starting from zero on each visit.
+
+---
+
+## 8.9 Routing patterns
+
+**Consumable vs persistent items.** Some items — letters, gifts —
+are consumed on use. Others — lanterns, keys — persist. Decide up
+front for each item; do not surprise the player mid-game.
+
+**One-shot vs repeatable scenes.** Some scenes happen once ever. Some
+repeat. Mark one-shots with `state/*-done?` flags and check them at
+scene entry. If a player has already seen the dream, do not offer it
+again.
+
+**Explicit vs implicit gates.** Explicit gate: 'you need the key to
+open this door — you can see the lock.' Implicit gate: 'the door
+looks weird, you cannot figure out how to open it.' Explicit is
+kinder for kids. Implicit is more rewarding for puzzle-focused
+players. Choose based on your audience.
+
+---
+
+## 8.10 Closing
+
+You have inventory. You have world-state flags. You can gate scenes on
+state. You have written a five-room puzzle that a friend could play
+in ten minutes.
+
+The state store is the skeleton of your game. Every scene reads it;
+every action writes to it. Get this discipline right and everything
+downstream — dialogue, camera, sound — has a solid foundation.
+
+Chapter 9 is the sound layer. A soundscape can carry state as well:
+music changes as the player approaches the villain, silence lands
+when a beat needs weight.")

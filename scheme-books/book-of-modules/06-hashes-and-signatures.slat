@@ -1,0 +1,160 @@
+(chapter
+  :book "Book of Modules"
+  :chapter-number 6
+  :title "Hashes and signatures"
+  :audience "programmer-fluent-in-other-languages"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-completion-orchestrator")
+  :prose
+"# Chapter 6 — Hashes and signatures
+
+Versions are how modules describe themselves. Hashes and signatures are how modules *prove* what they are.
+
+A version is a promise the author made. A hash is a fact about the content. A signature is a proof about the author. Together, they let a program say *I want this exact module, from this specific author, unmodified,* and Motoi can verify all three claims without any trust in the middle.
+
+## 6.1 The content hash
+
+Every module has a content hash. It is computed from the module's source text — a stable, deterministic function of the bytes.
+
+```scheme
+(module-hash 'manners)
+;; ⇒ \"abc123def456...\"  (64 hex chars, a SHA-256 by default)
+```
+
+Two modules with the same source produce the same hash. Two modules with any difference in source — even a comment change — produce different hashes. This is the property that makes hashes useful.
+
+## 6.2 Why hashes matter
+
+Names lie. Versions get bumped. Only hashes tell the truth about *what code is actually running*.
+
+Consider: your program imports `manners :version \"^1.0.0\"`. Today the resolver picks 1.5.3. Tomorrow someone publishes 1.5.4 and your resolver picks that. Both are 'compatible', both meet your pin. But they are different code. The hash is the difference.
+
+Cortex records the hash of every module that loads. This means you can go back and ask: *what was the exact code that ran the day the bug appeared?* The hash names it precisely.
+
+## 6.3 Hash pins in import
+
+You can pin an import to a specific hash:
+
+```scheme
+(import manners :hash \"abc123def456...\")
+```
+
+Motoi will find a module named `manners` whose content hash is exactly that. If none exists on disk or in the registry, the import fails. There is no fuzzy match, no compatibility check.
+
+Hash pins are what get baked into signed carts. When a cart ships with pinned hashes, running it on any machine anywhere produces the same module choices. Reproducibility is guaranteed.
+
+## 6.4 The author signature
+
+A signature is a cryptographic proof that the person who published the module is who they say they are. The author signs the module's hash with their private key; the signature is stored alongside the module; anyone with the author's public key can verify.
+
+```scheme
+(module-signature 'manners)
+;; ⇒ (:author \"a-friend\"
+;;    :public-key \"pk-abc123...\"
+;;    :signature \"sig-def456...\"
+;;    :hash-signed \"abc123def456...\")
+```
+
+The signature answers a different question than the hash. The hash says: *this is the content*. The signature says: *this content was blessed by this author*.
+
+## 6.5 Why signatures matter
+
+Two reasons.
+
+**First**, signatures prevent tampering during transit. If a module travels from the author's machine, through a registry, over the network, to your machine, and every stop signs its own copy, someone in the chain could substitute a modified version and re-sign. But if the *author's* signature is verified against the module's *content hash*, no intermediate can lie without breaking the signature.
+
+**Second**, signatures create a chain of accountability. If a module misbehaves, you can look at the signature and know who signed it. The signature is a name you can point to.
+
+Signatures do not create *trust*. They create *provenance*. Trust is a separate decision — you decide whether you trust an author. Signatures let that decision stick.
+
+## 6.6 Verifying a module
+
+Motoi verifies signatures automatically when a module loads from the registry. If verification fails, the load fails. You do not have to do anything to get this behavior; it is on by default.
+
+You can verify manually:
+
+```scheme
+(module-verify 'manners)
+;; ⇒ (:hash-ok #t :signature-ok #t :author \"a-friend\")
+
+(module-verify 'manners :author \"a-friend\")
+;; ⇒ #t
+
+(module-verify 'manners :author \"someone-else\")
+;; ⇒ #f  (module was signed by a-friend, not someone-else)
+```
+
+Verification is cheap; verify freely. Tools that audit a program's dependencies often verify every module before proceeding.
+
+## 6.7 The chain: hash then signature then trust
+
+Three layers, in order.
+
+1. **Hash check.** Does the module's content match the claimed hash? This is math; no trust required.
+2. **Signature check.** Is the signature valid for that hash under the claimed author's public key? Also math; requires trust in the public-key system but not the author.
+3. **Author trust.** Do *you* trust this author to write modules you run? This is a human decision, made once per author.
+
+Motoi does the first two for you automatically. The third is up to you. There is a config file where you list authors you trust; modules signed by trusted authors load quietly, modules signed by unknown authors emit a warning, modules signed by *distrusted* authors refuse to load.
+
+```scheme
+(trust-add! \"a-friend\")
+(trust-remove! \"a-scammer\")
+(trust-list)
+;; ⇒ (a-friend the-library-collective ...)
+```
+
+The trust list is per-user. Your teammate has their own. This is right — trust is personal.
+
+## 6.8 Unsigned modules
+
+Not every module has to be signed. A module you write for yourself, and never publish, does not need a signature. Local development is easy.
+
+But when you publish to a registry, most registries will refuse an unsigned module. And when you import a signed module, Motoi will verify by default. Signing is a publishing habit, not a development obstacle.
+
+If you *want* to import an unsigned module, you have to opt in explicitly:
+
+```scheme
+(import experimental :trust :unsigned)
+```
+
+The `:trust :unsigned` marker says *I know this module is unsigned; load it anyway*. Motoi will not silently do this. You have to tell it.
+
+## 6.9 Rotating a key
+
+If an author's private key is compromised, they rotate to a new key and republish. Old signatures under the compromised key are marked *revoked* in the registry. Modules that were signed by the revoked key refuse to load thereafter, unless you explicitly override.
+
+This is why hash pinning matters even more than usual for security-sensitive code: a hash pin does not care about signatures. As long as the content is what you asked for, the pin holds.
+
+## 6.10 What Cortex records
+
+Every hash and signature check that happens is logged to Cortex.
+
+```scheme
+(cortex/query :predicate 'module-verified)
+;; ⇒ ((program-a module-verified
+;;      (:module manners :hash abc123 :author a-friend :ok #t)
+;;      1720000000))
+```
+
+An auditor can go through this log and produce a bill of materials: every module every program loaded, every author, every hash, every verification result. This is the honest answer to *what was in this program*.
+
+## 6.11 Try it
+
+At a REPL, run `(module-hash 'motoi/base)`. Note the hash. Restart your REPL and run it again — same hash. That is the deterministic property.
+
+Run `(module-signature 'motoi/base)`. Read the fields. If you know how to inspect a signature file, look at the public key on disk.
+
+Try to import an unsigned module without the `:trust :unsigned` marker. Note the refusal. Add the marker, verify it loads.
+
+## 6.12 The point
+
+Hashes and signatures sound like ceremony until you need them. Then they are the only tools that answer the questions that matter — *what code ran; who wrote it; can I prove it hasn't been tampered with.*
+
+Motoi bakes them in from day one because retrofitting them later is expensive and imperfect. Every module, every load, every verification is logged and reproducible. This is not paranoia; it is the shape of a language that expects to run in situations where the answer matters.
+
+Turn the page. Chapter 7 covers the module fold — how many small modules compose into one working program.")

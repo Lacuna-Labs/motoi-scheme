@@ -1,0 +1,271 @@
+;; appendix-b-dimensional-analysis.book.slatl
+;; Book of Simulation Games — Appendix B: Dimensional Analysis with phys/q*
+;; Authored 2026-07-16 by simulation-games-engineer-lane.
+
+(dialect :applies ("motoi" "sakura"))
+
+(appendix
+  :book                "Book of Simulation Games"
+  :letter              "B"
+  :title               "Dimensional Analysis with phys/q*"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "simulation-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + physics-simulation-emergent"
+  :book-version        "1.0.0"
+  :provenance          ((:authored-by "Engineer") (:date "2026-07-16"))
+  :prose
+"A number by itself lies. '5' could be 5 meters, 5 seconds, 5 kilograms,
+5 dollars, or 5 anythings. In physics simulation this ambiguity is
+where most bugs live. You multiply a mass by a velocity thinking
+you're getting momentum, but you actually multiplied by a distance
+and got momentum-times-time — off by a factor. The sim behaves
+weirdly and you don't know why.
+
+Dimensional analysis is the technique of tagging numbers with their
+units and letting the computer check that operations are consistent.
+Motoi Scheme's `phys/quantity` and family do this. This appendix
+walks through ten worked bugs — real errors dimensional analysis
+would have caught before you ran the sim.
+
+---
+
+## B.1 phys/quantity and friends
+
+```scheme
+(define distance (phys/quantity 5 :unit 'meter))
+(define time     (phys/quantity 2 :unit 'second))
+(define velocity (phys/q/ distance time))
+(phys/dimension velocity)
+;; => (:length 1 :time -1)      -> meters per second, correct
+
+(phys/same-dimension? velocity (phys/quantity 3 :unit 'm/s))
+;; => #t
+```
+
+`phys/q+`, `phys/q-`, `phys/q*`, `phys/q/` all propagate units and
+check compatibility. Adding meters to seconds is an error caught
+before evaluation.
+
+```scheme
+(phys/q+ distance time)
+;; => ERROR: incompatible dimensions (:length 1) and (:time 1)
+```
+
+## B.2 Ten worked bugs
+
+### Bug 1: The 3600 factor.
+
+```scheme
+;; WRONG:
+(define speed 60)                       ;; kilometers per hour
+(define distance-covered (* speed 30))  ;; 30 seconds later
+;; => 1800 ??? "the car went 1800 kilometers in 30 seconds"
+
+;; RIGHT:
+(define speed (phys/quantity 60 :unit 'km/hr))
+(define time  (phys/quantity 30 :unit 'second))
+(define distance-covered (phys/q* speed time))
+;; => 0.5 km    (correct!)
+```
+
+The units force the conversion: 60 km/hr * 30 s = 60/3600 km/s * 30 s
+= 0.5 km. Without units the '60' was interpreted as km/frame or
+whatever your sim used, and the answer was wildly wrong.
+
+### Bug 2: Radians vs degrees.
+
+```scheme
+;; WRONG:
+(sin 30)   ;; the sine of 30 RADIANS = -0.988
+;; when you meant the sine of 30 DEGREES = 0.5
+
+;; RIGHT:
+(sin (phys/degrees->radians 30))
+;; => 0.5
+```
+
+The `sin` function takes radians. Passing degrees gives absurd
+answers.
+
+### Bug 3: Mass vs weight.
+
+```scheme
+;; WRONG:
+(entity/mass! b 150)   ;; setting weight of 150 pounds as mass
+;; -> the sim treats a person as 150 kg (mass), not 150 lbs (weight)
+
+;; RIGHT:
+(define weight (phys/quantity 150 :unit 'lb-force))
+(define mass   (phys/q/ weight (phys/quantity 9.81 :unit 'm/s^2)))
+(entity/mass! b (phys/value-in-unit mass 'kg))
+;; => ~68 kg  (correct!)
+```
+
+Weight is a force; mass is a mass. Conflating them is a factor-of-g
+error, which for Earth is about 10.
+
+### Bug 4: Energy vs power.
+
+```scheme
+;; WRONG:
+(define bulb-consumption 60)                ;; watts
+(define hours-on         8)
+(define bill              (* bulb-consumption hours-on))
+;; => 480 ... watts? watt-hours? kilowatt-hours?
+
+;; RIGHT:
+(define bulb (phys/quantity 60 :unit 'watt))
+(define time (phys/quantity 8 :unit 'hour))
+(define usage (phys/q* bulb time))
+(phys/value-in-unit usage 'kwh)
+;; => 0.48 kilowatt-hours
+```
+
+Watts are joules per second. Watt-hours are joules. Kilowatt-hours
+are 3.6 million joules. Bills are in kilowatt-hours. Confusing them
+costs money.
+
+### Bug 5: Spring constant units.
+
+```scheme
+;; k = 100 N/m in physics land. If your sim uses pixels for length
+;; and 1/60-second for time, 1 sim-second = 60 sim-frames, and
+;; k needs to be rescaled.
+
+;; WRONG:
+(world/link-stiffness! spring 100)     ;; treated as sim-units, absurdly stiff
+
+;; RIGHT: pre-convert.
+(define k-physical (phys/quantity 100 :unit 'N/m))
+(define scale     (phys/quantity 100 :unit 'px/m))  ;; 100 pixels per meter
+(define k-sim     (phys/value-in-sim-units k-physical scale))
+(world/link-stiffness! spring k-sim)
+```
+
+Whenever your sim uses non-SI units (pixels, frames), you need a
+consistent conversion. Do it once at the boundary, not scattered
+through your code.
+
+### Bug 6: Angular velocity.
+
+```scheme
+;; WRONG:
+(entity/angular-vel! b 360)     ;; 360 ... degrees per second? rotations?
+;; -> 360 rad/s is very fast; 360 deg/s is one revolution/s
+
+;; RIGHT:
+(entity/angular-vel! b (phys/quantity 360 :unit 'deg/s))
+```
+
+### Bug 7: Gravitational constant.
+
+```scheme
+;; The gravitational constant G = 6.674e-11 N*m^2/kg^2 (SI).
+;; But your sim uses pixels for length, sim-frames for time...
+;; The 'G' you pass to world/attract! is EFFECTIVE G in sim units.
+
+;; If you want realistic orbits at solar-system scale, you need to
+;; work out the conversion:
+;;    G_sim = G * (pixels/meter)^-3 * (frames/second)^2 * kg-scale
+;; A mess. Better: use realistic physical units end-to-end (Appendix I).
+```
+
+### Bug 8: Torque vs energy.
+
+```scheme
+;; Both have units of N*m. But they are NOT the same physical quantity.
+;; Torque is a rotational force. Energy is joules.
+;; Motoi's phys/dimension will report the same for both, so you must
+;; label at the semantic level:
+(define torque (phys/quantity 5 :unit 'Nm-torque))
+(define energy (phys/quantity 5 :unit 'joule))
+;; The unit system treats them as compatible dimensionally but the
+;; :unit tag preserves the semantic distinction.
+```
+
+### Bug 9: Off by 2*pi in Fourier.
+
+```scheme
+;; When you compute a frequency f = omega / (2 pi), and you drop
+;; the 2 pi, your natural frequency is off by 6.28. If you tune
+;; a resonance chart, you're at the wrong pole.
+
+;; RIGHT: label explicitly.
+(define omega (phys/quantity 6.28 :unit 'rad/s))
+(define f     (phys/q/ omega (phys/quantity (* 2 3.14159) :unit 'rad/cycle)))
+(phys/value-in-unit f 'hz)   ;; => 1
+```
+
+### Bug 10: Newtons in a screen-pixel-per-frame world.
+
+```scheme
+;; You want a force of 10 N applied to a 1 kg mass at 60 fps.
+;; a = F/m = 10 m/s^2.
+;; In sim frames: a = 10 (m/s^2) / (60 frames/s)^2 * (100 px/m)
+;;              = 10 / 3600 * 100 = 0.278 px/frame^2
+
+;; WRONG:
+(world/impulse! b 10 0)   ;; treated as 10 px/frame velocity impulse. WAY too much.
+
+;; RIGHT:
+(define F (phys/quantity 10 :unit 'N))
+(define m (phys/quantity  1 :unit 'kg))
+(define dt (phys/quantity 1 :unit 'frame))
+(define impulse (phys/q* F dt))
+(entity/apply-impulse! b (phys/value-in-sim impulse))
+```
+
+---
+
+## B.3 A checked pipeline
+
+Set units at the boundaries; let the middle be dimensionless. Or
+carry units through everywhere. Both are fine; MIXING them is
+dangerous.
+
+Alfred's discipline: at the top of every simulation file, declare
+your unit system.
+
+```scheme
+;;; Units: length = pixel; time = frame (60 fps); mass = kg;
+;;;        force = kg*px/frame^2; energy = kg*px^2/frame^2
+;;; Conversions: 100 px = 1 m; 60 frames = 1 s.
+```
+
+Every entering quantity gets converted at the entry point:
+
+```scheme
+(define (m->px m) (* m 100))
+(define (s->frame s) (* s 60))
+```
+
+Every exiting quantity gets converted at the exit point:
+
+```scheme
+(define (px->m p) (/ p 100))
+(define (frame->s f) (/ f 60))
+```
+
+Inside the sim, everything is in the sim's native units. This is
+what Motoi Scheme uses internally, and it makes the sim code shorter
+and faster while keeping the boundary conversions honest.
+
+---
+
+## B.4 The takeaway
+
+Half the physics bugs in games are unit-mismatch bugs, and the
+programmer never sees the mismatch — the sim just behaves oddly.
+`phys/dimension` and `phys/same-dimension?` catch these BEFORE you
+run. Ten seconds of dimensional check saves an hour of 'why does my
+pendulum swing so fast.'
+
+Related:
+- Chapter 1: raw sim units, no dimensional checking
+- Chapter 11: uncertainty propagation through RLC formulas
+- Appendix I: SI units for solar-system-scale physics")

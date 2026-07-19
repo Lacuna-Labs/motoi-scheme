@@ -1,0 +1,291 @@
+;; ch03-pendulum-and-lagrangian.book.slatl
+;; Book of Simulation Games — Chapter 3: The Pendulum and the Lagrangian
+;; Authored 2026-07-16 by simulation-games-engineer-lane.
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Simulation Games"
+  :chapter-number      3
+  :title               "The Pendulum and the Lagrangian"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "simulation-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + physics-simulation-emergent"
+  :book-version        "1.0.0"
+  :provenance          ((:authored-by "Engineer") (:date "2026-07-16"))
+  :prose
+"A pendulum is a mass on a rod, swinging under gravity. That is one
+sentence and completely correct. Around that one sentence is built
+about a third of classical mechanics. This chapter builds a pendulum
+two ways — the concrete way, using a stiff spring, and the abstract
+way, using the Lagrangian — and shows that both agree with the third
+thing they should agree with, which is a real physical pendulum on a
+string in your kitchen.
+
+Then we build a double pendulum (a pendulum on the end of another
+pendulum) and discover that the answer is no longer predictable. Not
+because we did anything wrong — the equations are exact — but because
+the system is chaotic. Small differences in starting position grow
+exponentially. Two double pendulums released from what LOOKS like the
+same starting position will be in wildly different configurations two
+seconds later. This chapter is where you meet deterministic chaos.
+
+---
+
+## 3.1 The pendulum as a stiff spring
+
+The cheap way to simulate a pendulum: use last chapter's `world/link!`
+between a pin and a bob, with a very stiff spring. The stiffness
+approximates the inextensibility of the rod.
+
+```scheme
+(define (spring-pendulum)
+  (world/reset!)
+  (world/gravity! 0 0.5)
+  (let ((pivot (world/spawn 'pivot 240 40))
+        (bob   (world/spawn 'bob   340 40)))
+    (entity/pin!    pivot)
+    (entity/mass!   bob 1.0)
+    (entity/drag!   bob 0.005)
+    (let ((rod (world/link! pivot bob)))
+      (world/link-rest!      rod 100)
+      (world/link-stiffness! rod 0.95)   ;; very stiff — near-rigid
+      (world/link-damping!   rod 0.10)
+      (list pivot bob))))
+
+(spring-pendulum)
+(let loop ((n 500)) (world/step) (when (> n 0) (loop (- n 1))))
+```
+
+The bob swings. It's a pendulum. But the rod stretches a little on
+every swing because it's a spring, not a rod, and if you crank
+stiffness up to 1.0 you start seeing numerical wobble at the timestep
+you're using. The stiff-spring pendulum is fine for games and for
+first drafts. For science, we go the other way.
+
+## 3.2 The pendulum from a Lagrangian
+
+The Lagrangian `L` of a system is the kinetic energy minus the
+potential energy — that's it. For a pendulum of length `L`, mass `m`,
+in gravity `g`, at angle `theta` from vertical:
+
+```
+T  = 0.5 * m * L^2 * theta_dot^2       (kinetic energy)
+V  = -m * g * L * cos(theta)           (potential energy)
+Lag = T - V
+```
+
+The equations of motion pop out of the Euler-Lagrange equation.
+Motoi Scheme's `phys/lagrange-residual` will tell us HOW WRONG our
+current trajectory is at a given moment — a residual of zero means
+our numerical solution obeys the equations of motion; a nonzero
+residual means we've drifted.
+
+```scheme
+;; Simulate the pendulum by direct integration of the equations,
+;; then check with phys/lagrange-residual each frame.
+(define (lag-pendulum L m g theta0 tdot0)
+  (world/reset!)
+  ;; State: (theta, theta-dot). We evolve it in place.
+  (define theta theta0)
+  (define tdot  tdot0)
+  (define dt    (/ 1.0 60))
+  (define (step!)
+    (let* ((theta-ddot (/ (- (* m g (* L (sin theta)))) (* m L L)))
+           (tdot* (+ tdot (* theta-ddot dt)))
+           (theta* (+ theta (* tdot* dt))))
+      (set! tdot  tdot*)
+      (set! theta theta*)))
+  ;; The Lagrangian, callable.
+  (define (Lag q qdot)
+    (- (* 0.5 m L L qdot qdot)
+       (- 0 (* m g L (cos q)))))
+  ;; Check the residual each frame.
+  (let loop ((n 300) (worst 0.0))
+    (if (<= n 0)
+        (list 'final-theta theta 'worst-residual worst)
+        (let ((r (phys/lagrange-residual Lag theta tdot (- 300 n))))
+          (step!)
+          (loop (- n 1) (max worst (abs r)))))))
+
+(lag-pendulum 100 1.0 9.8 (* 0.4 3.14159) 0.0)
+;; => (final-theta ~0.6 worst-residual ~0.02)
+```
+
+The residual is tiny, which means our numerical integration is
+faithfully solving the equations of motion. If we had made an error in
+the equations, the residual would grow with time. This is why
+Lagrangian mechanics is worth learning even for game physics — the
+residual is a truth oracle. It tells you if your sim's motion is
+consistent with the physics you asked for.
+
+## 3.3 Two paths, one truth
+
+The two simulations above — spring-pendulum and lag-pendulum — should
+produce the same swinging motion, to within their respective
+approximations. Let's overlay them.
+
+```scheme
+;; Run both, compare the angle time series.
+(define (compare-pendula T)
+  (let ((spring-angles '())
+        (lag-angles    '()))
+    ;; ...run each pendulum for T frames, capturing theta each frame...
+    ;; The spring pendulum's angle is atan2 of bob's offset from pivot.
+    ;; The lagrangian pendulum's angle is the theta state variable.
+    ;; They should agree within the spring's stiffness error.
+    (list 'spring spring-angles 'lag lag-angles)))
+```
+
+They agree closely at small angles. At large angles (near horizontal)
+the stiff-spring version diverges because the spring stretches under
+centripetal load, while the Lagrangian version stays exact. That
+divergence is the signature of the spring's non-rigidness. It is a
+useful signal — 'my spring is not stiff enough for large-angle
+oscillation.'
+
+## 3.4 The double pendulum — chaos arrives
+
+A pendulum on the end of a pendulum. The math is doable — two coupled
+second-order ODEs — but the behavior is not. Small initial-condition
+differences grow exponentially. This is the hallmark of chaos.
+
+```scheme
+;; Double pendulum via stiff-spring construction. Real physics.
+(define (double-pendulum)
+  (world/reset!)
+  (world/gravity! 0 0.5)
+  (let ((pivot (world/spawn 'pivot 240 40))
+        (bob1  (world/spawn 'bob1  240 140))
+        (bob2  (world/spawn 'bob2  240 240)))
+    (entity/pin!    pivot)
+    (entity/mass!   bob1 1.0)
+    (entity/mass!   bob2 1.0)
+    (entity/drag!   bob1 0.001)
+    (entity/drag!   bob2 0.001)
+    (let ((rod1 (world/link! pivot bob1))
+          (rod2 (world/link! bob1  bob2)))
+      (world/link-rest!      rod1 100)
+      (world/link-stiffness! rod1 0.95)
+      (world/link-damping!   rod1 0.02)
+      (world/link-rest!      rod2 100)
+      (world/link-stiffness! rod2 0.95)
+      (world/link-damping!   rod2 0.02)
+      ;; Give it a small kick.
+      (entity/set-vel! bob2 3 0)
+      (list pivot bob1 bob2))))
+
+(double-pendulum)
+(on-frame
+  (lambda (t)
+    (world/step)
+    (let ((p1 (entity/pos (world/find 'bob1)))
+          (p2 (entity/pos (world/find 'bob2))))
+      (paint-line 240 40 (car p1) (cdr p1) white)
+      (paint-line (car p1) (cdr p1) (car p2) (cdr p2) white)
+      (paint-circle (car p2) (cdr p2) 4 red))))
+```
+
+Watch it swing. It does not settle into a periodic motion. It swings,
+flips, tangles, occasionally goes momentarily still, then flips again.
+There is no long-term pattern. The point of `bob2` traces a shape that
+never quite repeats. If you took a video and played it back to
+yourself, you would not be able to predict what happens next after
+about the fifth or sixth swing.
+
+## 3.5 Determinism vs predictability
+
+Here's the trick. The double pendulum is DETERMINISTIC. Same initial
+state, same evolution, always. Let's prove it with the tape.
+
+```scheme
+(define (chaos-tape-demo)
+  (world/reset!)
+  (double-pendulum)
+  (world/tape-record!)
+  (let loop ((n 900)) (world/step) (when (> n 0) (loop (- n 1))))
+  (let ((tape (world/tape-save 'double-pendulum-run-1)))
+    ;; Now replay it — get the exact same evolution.
+    (world/reset!)
+    (double-pendulum)
+    (let ((replay (world/tape-replay 'double-pendulum-run-1)))
+      (list 'original tape 'replay replay 'match? (equal? tape replay)))))
+
+(chaos-tape-demo)
+;; => (original ... replay ... match? #t)
+```
+
+Same tape. Every time. Chaos is not randomness; chaos is exquisite
+sensitivity to initial conditions. Change the starting angle by 0.001
+radians and by frame 400 the two pendulums are in completely
+different configurations. But run the SAME initial conditions twice
+and you get the same tape twice.
+
+Cortex loves this. You can record 'this initial configuration produced
+this behavior at frame 500,' and next time someone asks 'what happens
+if I set bob2's initial x-velocity to 3.14?' the runtime can replay from
+the tape rather than re-simulate, if the tape is on file.
+
+## 3.6 The four routing patterns in the pendulum chapter
+
+**Composition.** The double pendulum is composed: `spring-pendulum`
+extended by one more spawn and one more link. The Lagrangian check is
+composed from the pendulum's `L` function plus `phys/lagrange-residual`.
+
+**Orchestration.** The tape workflow IS an orchestration:
+`record! → simulate → save → reset → replay → compare`. Time-ordered
+verbs that persist state between steps.
+
+**In-routing.** When the bob swings past a paint region (say, we drop
+a dye trail every time it enters a certain zone), the collision
+handler routes to the dye emitter.
+
+**Routing.** The pendulum's angle each frame routes to a plot; the
+Lagrangian residual routes to a debug log; the tape routes to disk
+(and can route back into the sim later). This is a place where
+`chain-of-inference` shows up: 'high residual → probably my rod is
+too soft → increase stiffness → re-run → residual improves.' the runtime
+runs this chain silently and only surfaces the conclusion.
+
+---
+
+## 3.7 Common desktop tasks
+
+An operator asked: 'if we hang a wind chime from the porch with three
+pipes of decreasing length, how will they sound in a light breeze?'
+Each pipe is a pendulum. The three-pendulum sim (independent, not
+coupled) gives you the natural frequencies. Feed those to
+`sound/synth-pitched` in the audio chapter and you have the chime's
+melody, predictable, before you build it.
+
+## 3.8 Try this
+
+1. Change bob2's initial x-velocity from 3 to 3.001. Does the pendulum
+   behave the same at frame 100? At frame 500?
+2. Add a third bob for a triple pendulum. Chaotic sooner?
+3. Overlay two double pendulums with slightly different initial angles,
+   painted in different colors. Watch them diverge.
+4. Reduce gravity to 0.05. Does chaos still arrive? When?
+5. Reduce the rod's stiffness. At what stiffness does the sim start
+   drifting from the Lagrangian?
+
+## 3.9 Pitfalls
+
+**The rod is a spring.** Very-stiff springs demand small timesteps.
+If your bob starts drifting outward on each swing, your stiffness is
+too high for your timestep.
+
+**Determinism-and-floats.** Deterministic replay is only exact if you
+have deterministic randomness (`(seed-random! N)`) and deterministic
+float operations. Motoi Scheme's default is deterministic; if you use
+`(random)` without seeding, replays may drift.
+
+---
+
+Next: two-body orbits, then three-body chaos on cosmic scale, plus
+topology tools that tell you which orbits are stable.")

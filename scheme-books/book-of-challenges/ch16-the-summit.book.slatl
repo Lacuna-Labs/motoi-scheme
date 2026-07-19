@@ -1,0 +1,1161 @@
+;; ch16-the-summit.slat
+;; Book of Challenges — Chapter 16 — The Summit
+
+(chapter
+  :book             "Book of Challenges"
+  :chapter-number   null
+  :title            "Chapter 16 — The Summit"
+  :size             59343
+  :sha256           "bb43001500943a59"
+  :prose
+"# Chapter 16 — The Summit
+
+We've climbed through recursion, folds, closures, and multi-verb orchestration—each technique a handhold, each program a step higher. Now we stand at the summit: programs that combine everything at once, honestly and clean. Deep recursion interleaves with higher-order composition; data transforms in stages, each stage a verb or a fold; failure is checked at every boundary; and the whole thing runs top-to-bottom, alone, producing something real.
+
+This is not harder *syntax*—it's harder *orchestration*. The surface remains wired verbs and core Scheme forms, but the programs ask you to hold more in your head: a recursive descent that closes over state, a pipeline where each stage can fail, a fold that builds a structure another fold consumes. The reward is fluency—the ability to look at a messy problem and see a clean route through it, verb by verb, check by check, no faking.
+
+We'll start with programs a confident intermediate could follow, then ramp to genuinely hard compositions—mutual recursion coordinating verb calls, multi-stage pipelines with guarded escalation, closures that capture and transform across nested maps. Each one runs alone. Each one handles failure honestly. And each one does something the runtime needs: scan a catalog and build a cross-reference, reconcile inventory across channels, route a message based on history, decide what to restock and when.
+
+Let's go.
+
+---
+
+## Warm-Up: Deep Recursion with a Verb at the Leaf
+
+We'll open with a recursive descent that calls a verb at each leaf—simple in shape, but it teaches the pattern: recurse through structure, hit the verb, check the result, and only then continue. No assumptions.
+
+This program walks a nested list of product IDs, fetches inventory for each via `stock/on-hand`, and collects the results in a flat list. If any fetch fails, it records `'nan` honestly.
+
+```scheme
+;; Fetch stock levels for a nested list of product IDs, recursively.
+;; Returns a flat list of (id . quantity) pairs, 'nan for any failure.
+
+(define (fetch-stock-tree tree)
+  (cond
+    ((null? tree) '())
+    ((pair? (car tree))
+     (append (fetch-stock-tree (car tree))
+             (fetch-stock-tree (cdr tree))))
+    (else
+     (let ((id (car tree))
+           (rest-results (fetch-stock-tree (cdr tree))))
+       (let ((stock-result (stock/on-hand id)))
+         (if (eq? stock-result 'nan)
+             (cons (cons id 'nan) rest-results)
+             (cons (cons id stock-result) rest-results)))))))
+
+(define nested-ids
+  '((101 102) (103 (104 105)) 106))
+
+(fetch-stock-tree nested-ids)
+;; => ((101 . 15) (102 . 0) (103 . 22) (104 . 8) (105 . 'nan) (106 . 5))
+;; Recursion flattens the tree; verb is checked at every leaf.
+```
+
+**What's hard here:** The recursion is not just cons-walking—it has to recognize nested pairs and flatten them, *and* call a verb at each scalar, *and* check the result before threading it into the output. A beginner would flatten first, then map—this does it in one pass.
+
+---
+
+## Recursive Accumulator + Verb Guard
+
+Now we add an accumulator to carry state down the recursion, and we guard every verb call with a check that can short-circuit the whole descent. This program scans a list of listing IDs, fetches metadata for each via `etsy/listing`, and accumulates only those that are active and not sold out. If any fetch returns an escalation, the whole program escalates immediately—no partial results.
+
+```scheme
+;; Collect active, in-stock listings from a list of IDs.
+;; Short-circuits on any fetch failure with an escalation.
+
+(define (collect-active-listings ids)
+  (letrec ((loop (lambda (remaining acc)
+                   (if (null? remaining)
+                       acc
+                       (let ((id (car remaining)))
+                         (let ((meta (etsy/listing id)))
+                           (cond
+                             ((and (pair? meta)
+                                   (eq? (car meta) 'escalate))
+                              meta) ; escalate immediately
+                             ((eq? meta 'nan)
+                              (loop (cdr remaining) acc)) ; skip 'nan
+                             (else
+                              (let ((state (cdr (assoc \"state\" meta)))
+                                    (qty (cdr (assoc \"quantity\" meta))))
+                                (if (and (equal? state \"active\")
+                                         (> qty 0))
+                                    (loop (cdr remaining)
+                                          (cons (cons id meta) acc))
+                                    (loop (cdr remaining) acc)))))))))))
+    (loop ids '())))
+
+(define test-ids '(12345 67890 11223))
+
+(collect-active-listings test-ids)
+;; => ((11223 . <metadata>) (12345 . <metadata>))
+;; or (escalate \"fetch failed\" <detail>) if any call fails structurally.
+```
+
+**What's hard here:** The accumulator pattern is standard, but the guard logic is woven in—every verb result is pattern-matched (escalate / 'nan / success), and the recursion only continues if success. A beginner would let the errors pile up; this stops cleanly.
+
+---
+
+## Higher-Order: A Fold that Calls a Verb Inside Its Reducer
+
+Folds abstract iteration, but they get hard when the reducer itself orchestrates verbs. This program folds over a list of order IDs, fetching order details for each via `shopify/orders`, and accumulates total revenue—but only for fulfilled orders. The verb call lives *inside* the fold's lambda, and every result is checked before contributing to the accumulator.
+
+```scheme
+;; Sum revenue from fulfilled orders by folding over order IDs and calling a verb per step.
+
+(define (sum-fulfilled-revenue order-ids)
+  (foldl (lambda (id acc)
+           (let ((order (shopify/orders id)))
+             (cond
+               ((eq? order 'nan) acc) ; skip failures
+               ((and (pair? order)
+                     (eq? (car order) 'escalate)) acc) ; skip escalations
+               (else
+                (let ((status (cdr (assoc \"fulfillment_status\" order)))
+                      (total (cdr (assoc \"total_price\" order))))
+                  (if (equal? status \"fulfilled\")
+                      (+ acc (string->number total))
+                      acc))))))
+         0
+         order-ids))
+
+(define test-orders '(9001 9002 9003 9004))
+
+(sum-fulfilled-revenue test-orders)
+;; => 487.50  (sum of fulfilled orders, skipping 'nan and non-fulfilled)
+```
+
+**What's hard here:** The fold is not just summing—it's calling a verb, parsing JSON-like alists, checking two conditions, and converting strings to numbers, all inside the reducer. A beginner would map-then-fold; this does both in one pass, and handles failure mid-stream without breaking.
+
+---
+
+## Multi-Verb Pipeline: Fetch, Transform, Fetch Again
+
+Real orchestration often chains verbs: the output of one becomes the input of the next, and each stage can fail. This program fetches a product's metadata via `printify/product`, extracts its blueprint ID, fetches the blueprint's provider list via `printify/blueprint-providers`, and returns the names of all providers. If any stage fails, it escalates cleanly.
+
+```scheme
+;; Fetch a product's blueprint providers by chaining two verb calls with failure checks.
+
+(define (get-product-providers product-id)
+  (let ((product (printify/product product-id)))
+    (cond
+      ((eq? product 'nan)
+       (escalate \"product fetch failed\" product-id))
+      ((and (pair? product) (eq? (car product) 'escalate))
+       product)
+      (else
+       (let ((blueprint-id (cdr (assoc \"blueprint_id\" product))))
+         (let ((providers (printify/blueprint-providers blueprint-id)))
+           (cond
+             ((eq? providers 'nan)
+              (escalate \"providers fetch failed\" blueprint-id))
+             ((and (pair? providers) (eq? (car providers) 'escalate))
+              providers)
+             (else
+              (map (lambda (p) (cdr (assoc \"title\" p)))
+                   providers)))))))))
+
+(get-product-providers 56789)
+;; => (\"PrintProviderA\" \"PrintProviderB\" \"PrintProviderC\")
+;; or (escalate \"product fetch failed\" 56789) if the first call fails.
+```
+
+**What's hard here:** Two verbs, each dependent on the last; three cond branches per verb (escalate / 'nan / success); and a final map over the successful result. This is the *shape* of real routes—close-data-close-paren—and it requires you to hold the whole chain in your head while writing it.
+
+---
+
+## Deep Recursion with Closure Capture
+
+Closures let you carry state through recursion without explicit accumulators. This program walks a tree of categories (nested alists), calling `cortex/recall` at each node to check if there's a cached note, and collects all notes found. The search term is captured in the closure, so it doesn't need to be passed down.
+
+```scheme
+;; Walk a category tree, recall notes for each category using a captured search term, collect results.
+
+(define (gather-category-notes tree search-term)
+  (letrec ((walk (lambda (node)
+                   (if (null? node)
+                       '()
+                       (let ((cat-name (car node))
+                             (children (cdr node)))
+                         (let ((note (cortex/recall search-term cat-name)))
+                           (let ((note-result (if (eq? note 'nan)
+                                                  '()
+                                                  (list (cons cat-name note)))))
+                             (if (and (pair? children) (not (string? (car children))))
+                                 (append note-result
+                                         (apply append (map walk children)))
+                                 note-result))))))))
+    (walk tree)))
+
+(define category-tree
+  '(\"Home\" 
+    (\"Kitchen\" (\"Utensils\") (\"Appliances\"))
+    (\"Garden\" (\"Tools\"))))
+
+(gather-category-notes category-tree \"seasonal\")
+;; => ((\"Kitchen\" . \"Spring promotion ideas\") (\"Garden\" . \"Summer mulch notes\"))
+;; Closure captures \"seasonal\", recursion walks the tree, verb called per node.
+```
+
+**What's hard here:** The closure captures `search-term` so `walk` stays clean; the recursion has to distinguish leaf strings from nested lists; `map` over children requires `apply append` to flatten; and every `cortex/recall` is checked before cons-ing. This is higher-order + recursion + closure + verb + guard, all at once.
+
+---
+
+## Mutual Recursion Coordinating Verbs
+
+Sometimes a problem is best split into two functions that call each other. This program processes a list of customer IDs: `process-customer` fetches CRM data for one customer, and if they have a \"needs follow-up\" tag, it delegates to `process-followups`, which fetches their order history and recursively processes each order's customer (in case of gift orders). The two functions call each other, and each calls verbs.
+
+```scheme
+;; Mutually recursive functions: process customers, delegate to follow-up handler, which recurses back.
+
+(define (process-customers customer-ids)
+  (letrec ((process-customer
+            (lambda (id)
+              (let ((crm-data (crm/read id)))
+                (cond
+                  ((eq? crm-data 'nan) '())
+                  ((and (pair? crm-data) (eq? (car crm-data) 'escalate)) '())
+                  (else
+                   (let ((tags (cdr (assoc \"tags\" crm-data))))
+                     (if (member \"needs-followup\" tags)
+                         (process-followups id)
+                         (list (cons id \"processed\")))))))))
+           (process-followups
+            (lambda (id)
+              (let ((orders (shopify/orders id)))
+                (cond
+                  ((eq? orders 'nan) '())
+                  ((and (pair? orders) (eq? (car orders) 'escalate)) '())
+                  (else
+                   (let ((gift-orders (filter (lambda (o) 
+                                                (equal? (cdr (assoc \"note\" o)) \"gift\"))
+                                              orders)))
+                     (let ((gift-customer-ids (map (lambda (o) 
+                                                     (cdr (assoc \"customer_id\" o)))
+                                                   gift-orders)))
+                       (append (list (cons id \"followup-done\"))
+                               (apply append (map process-customer gift-customer-ids)))))))))))
+    (apply append (map process-customer customer-ids))))
+
+(process-customers '(101 102 103))
+;; => ((101 . \"processed\") (102 . \"followup-done\") (105 . \"processed\") (103 . \"processed\"))
+;; Mutual recursion: process-customer calls process-followups, which maps process-customer over gift recipients.
+```
+
+**What's hard here:** Two functions defined in the same `letrec` so they see each other; each calls a verb; `process-followups` filters, maps, and recurses; every verb is guarded; and the final result is flattened via `apply append`. This is coordination at the edge of what fits in your head.
+
+---
+
+## Pipeline: Fetch, Map-Transform, Filter, Fold, Fetch Again
+
+A five-stage pipeline: fetch a list of products, transform each into a candidate record, filter by a condition, fold to compute a summary, then fetch detail for the top candidate. Each stage can fail; the program checks at every boundary.
+
+```scheme
+;; Five-stage pipeline: fetch products, transform, filter, fold to find top, fetch detail.
+
+(define (find-top-restockable shop-id)
+  ;; Stage 1: Fetch products
+  (let ((products (printify/products shop-id)))
+    (cond
+      ((eq? products 'nan)
+       (escalate \"fetch products failed\" shop-id))
+      ((and (pair? products) (eq? (car products) 'escalate))
+       products)
+      (else
+       ;; Stage 2: Map-transform to candidates
+       (let ((candidates (map (lambda (p)
+                                (let ((id (cdr (assoc \"id\" p)))
+                                      (stock (cdr (assoc \"stock\" p)))
+                                      (sales (cdr (assoc \"sales_30d\" p))))
+                                  (list id stock sales (/ sales (max stock 1)))))
+                              products)))
+         ;; Stage 3: Filter for low stock, high velocity
+         (let ((filtered (filter (lambda (c)
+                                   (let ((stock (cadr c))
+                                         (velocity (cadddr c)))
+                                     (and (< stock 10) (> velocity 2))))
+                                 candidates)))
+           (if (null? filtered)
+               'nan
+               ;; Stage 4: Fold to find highest velocity
+               (let ((top (foldl (lambda (c best)
+                                   (if (> (cadddr c) (cadddr best))
+                                       c
+                                       best))
+                                 (car filtered)
+                                 (cdr filtered))))
+                 (let ((top-id (car top)))
+                   ;; Stage 5: Fetch detail for top candidate
+                   (let ((detail (printify/product top-id)))
+                     (cond
+                       ((eq? detail 'nan)
+                        (escalate \"fetch detail failed\" top-id))
+                       ((and (pair? detail) (eq? (car detail) 'escalate))
+                        detail)
+                       (else
+                        (cons 'restock-candidate detail)))))))))))))
+
+(find-top-restockable 42)
+;; => (restock-candidate (id . 9988) (title . \"Mug\") (stock . 7) ...)
+;; Five stages, each checked, one clean flow.
+```
+
+**What's hard here:** Five nested `let`s, each dependent on the last; map, filter, fold all in sequence; three separate verb calls, each guarded; and the final result tagged. This is the shape of real data routes—and it runs alone, top to bottom.
+
+---
+
+## Recursive Descent with Verb-Driven Routing
+
+This program walks a nested decision tree (represented as an alist of conditions and outcomes), calling `analytics/ga4-report` at each decision point to fetch metrics, then recursing based on the result. It's a recursive interpreter that drives routing with verb data.
+
+```scheme
+;; Walk a decision tree, calling a verb at each node to determine which branch to take.
+
+(define (route-decision tree context)
+  (cond
+    ((null? tree) 'no-decision)
+    ((string? tree) tree) ; leaf node: return the decision
+    (else
+     (let ((condition (cdr (assoc \"condition\" tree)))
+           (metric (cdr (assoc \"metric\" tree)))
+           (threshold (cdr (assoc \"threshold\" tree)))
+           (on-true (cdr (assoc \"on-true\" tree)))
+           (on-false (cdr (assoc \"on-false\" tree))))
+       (let ((report (analytics/ga4-report metric context)))
+         (cond
+           ((eq? report 'nan)
+            (escalate \"metric fetch failed\" metric))
+           ((and (pair? report) (eq? (car report) 'escalate))
+            report)
+           (else
+            (let ((value (cdr (assoc \"value\" report))))
+              (if (> value threshold)
+                  (route-decision on-true context)
+                  (route-decision on-false context))))))))))
+
+(define decision-tree
+  '((\"condition\" . \"conversion-rate\")
+    (\"metric\" . \"conversion\")
+    (\"threshold\" . 0.02)
+    (\"on-true\" . \"scale-ads\")
+    (\"on-false\" . ((\"condition\" . \"bounce-rate\")
+                   (\"metric\" . \"bounce\")
+                   (\"threshold\" . 0.5)
+                   (\"on-true\" . \"fix-landing\")
+                   (\"on-false\" . \"hold-steady\")))))
+
+(route-decision decision-tree '((\"property\" . \"GA-12345\")))
+;; => \"scale-ads\"  or \"fix-landing\" or \"hold-steady\", depending on live metrics.
+```
+
+**What's hard here:** The tree is a nested alist, so you have to parse it while recursing; every node calls a verb, and the result determines which branch to take; the recursion can go deep; and every verb is checked. This is a recursive interpreter—hard to write, satisfying to run.
+
+---
+
+## Fold Inside a Map Inside a Filter, All Calling Verbs
+
+Composition gets dense when you nest higher-order functions, each with verb calls inside. This program filters a list of campaigns by checking their metrics via `email/campaign-metrics`, then maps over the survivors to fetch detailed subscriber engagement via `email/subscriber-engagement`, then folds each engagement list to compute an average, returning campaign IDs with their avg engagement.
+
+```scheme
+;; Filter campaigns by open rate, map to fetch subscriber engagement, fold each to compute average.
+
+(define (campaign-engagement-summary campaign-ids)
+  ;; Stage 1: Filter by open rate > 0.2
+  (let ((qualified (filter (lambda (id)
+                             (let ((metrics (email/campaign-metrics id)))
+                               (cond
+                                 ((eq? metrics 'nan) #f)
+                                 ((and (pair? metrics) (eq? (car metrics) 'escalate)) #f)
+                                 (else
+                                  (let ((open-rate (cdr (assoc \"open_rate\" metrics))))
+                                    (> open-rate 0.2))))))
+                           campaign-ids)))
+    ;; Stage 2: Map to fetch engagement, fold each to compute average
+    (map (lambda (id)
+           (let ((engagement (email/subscriber-engagement id)))
+             (cond
+               ((eq? engagement 'nan)
+                (cons id 'nan))
+               ((and (pair? engagement) (eq? (car engagement) 'escalate))
+                (cons id 'escalate))
+               (else
+                (let ((scores (map (lambda (e) (cdr (assoc \"score\" e)))
+                                   engagement)))
+                  (let ((avg (if (null? scores)
+                                 0
+                                 (/ (foldl + 0 scores) (length scores)))))
+                    (cons id avg)))))))
+         qualified)))
+
+(campaign-engagement-summary '(501 502 503 504))
+;; => ((501 . 0.78) (503 . 0.65))
+;; Filter keeps two, map fetches for each, fold computes avg, result is (id . avg).
+```
+
+**What's hard here:** Filter calls a verb and checks it; map calls another verb and checks it; inside the map is a nested map to extract scores, then a fold to sum them; and every check guards against 'nan and escalate. This is composition stacked three deep—hard to write without losing track.
+
+---
+
+## Recursive Tree Accumulation with Multi-Verb Coordination
+
+This program walks a tree of product categories, calling `cortex/topk` at each node to find related products, then calling `printify/product` for each to check stock, and accumulating only in-stock products. The recursion carries an accumulator, and each leaf does two verb calls in sequence.
+
+```scheme
+;; Walk a category tree, call topk to find related products, fetch stock for each, accumulate in-stock.
+
+(define (collect-in-stock-related tree embedding)
+  (letrec ((walk (lambda (node acc)
+                   (cond
+                     ((null? node) acc)
+                     ((string? node)
+                      (let ((related (cortex/topk embedding node 5)))
+                        (cond
+                          ((eq? related 'nan) acc)
+                          ((and (pair? related) (eq? (car related) 'escalate)) acc)
+                          (else
+                           (let ((product-ids (map (lambda (r) (cdr (assoc \"id\" r)))
+                                                   related)))
+                             (foldl (lambda (id a)
+                                      (let ((product (printify/product id)))
+                                        (cond
+                                          ((eq? product 'nan) a)
+                                          ((and (pair? product) (eq? (car product) 'escalate)) a)
+                                          (else
+                                           (let ((stock (cdr (assoc \"stock\" product))))
+                                             (if (> stock 0)
+                                                 (cons (cons id stock) a)
+                                                 a))))))
+                                    acc
+                                    product-ids))))))
+                     ((pair? node)
+                      (walk (cdr node) (walk (car node) acc)))
+                     (else acc)))))
+    (walk tree '())))
+
+(define cat-tree '(\"Apparel\" (\"Accessories\" \"Hats\")))
+
+(collect-in-stock-related cat-tree \"seasonal-products-v2\")
+;; => ((1234 . 15) (5678 . 3) (9101 . 22))
+;; Recursion walks tree, topk at each leaf, product fetch per result, accumulate stock > 0.
+```
+
+**What's hard here:** Recursive tree walk; verb call at each leaf; fold over the verb's results, calling *another* verb inside the fold; accumulator threaded through the recursion; and every verb guarded. This is multi-verb coordination inside recursion—genuinely hard, and it runs.
+
+---
+
+## Closure Factory: Higher-Order Function Returning Configured Closures
+
+This program returns a function that itself returns a function—a closure factory. The outer function configures a threshold and a metric name, and returns a lambda that fetches analytics for a given property, checks the metric, and returns a decision. This is higher-order composition with verb calls inside closures.
+
+```scheme
+;; Closure factory: return a decision function configured with a metric and threshold.
+
+(define (make-metric-decision metric threshold decision-true decision-false)
+  (lambda (property-id)
+    (let ((report (analytics/ga4-report metric (list (cons \"property\" property-id)))))
+      (cond
+        ((eq? report 'nan)
+         (escalate \"metric fetch failed\" metric))
+        ((and (pair? report) (eq? (car report) 'escalate))
+         report)
+        (else
+         (let ((value (cdr (assoc \"value\" report))))
+           (if (> value threshold)
+               decision-true
+               decision-false)))))))
+
+(define check-conversion (make-metric-decision \"conversion\" 0.03 \"invest\" \"hold\"))
+
+(check-conversion \"GA-98765\")
+;; => \"invest\"  or \"hold\", depending on live conversion rate.
+
+(define check-bounce (make-metric-decision \"bounce\" 0.6 \"fix-ux\" \"ok\"))
+
+(check-bounce \"GA-11111\")
+;; => \"fix-ux\"  or \"ok\"
+```
+
+**What's hard here:** Three levels of lambda—`make-metric-decision` returns a closure that captures four parameters; the closure calls a verb and checks it; and you can call `make-metric-decision` multiple times to create different decision functions. This is the power of closures + verbs: reusable, configurable, and clean.
+
+---
+
+## Pipeline with Guarded Fold and Final Escalation
+
+This program chains three stages: fetch all listings via `etsy/list-listings`, fold over them to compute total value (qty × price), then fetch shop stats via `etsy/shop-stats` to compare. If the fold produces zero (indicating all listings were 'nan), the program escalates rather than returning a fake result.
+
+```scheme
+;; Fetch listings, fold to compute total inventory value, fetch shop stats for comparison, escalate if fold fails.
+
+(define (inventory-value-vs-stats shop-id)
+  ;; Stage 1: Fetch listings
+  (let ((listings (etsy/list-listings shop-id)))
+    (cond
+      ((eq? listings 'nan)
+       (escalate \"listings fetch failed\" shop-id))
+      ((and (pair? listings) (eq? (car listings) 'escalate))
+       listings)
+      (else
+       ;; Stage 2: Fold to compute total value
+       (let ((total-value (foldl (lambda (listing acc)
+                                   (let ((qty (cdr (assoc \"quantity\" listing)))
+                                         (price (cdr (assoc \"price\" listing))))
+                                     (+ acc (* qty (string->number price)))))
+                                 0
+                                 listings)))
+         (if (= total-value 0)
+             (escalate \"no valid listings\" shop-id)
+             ;; Stage 3: Fetch stats for comparison
+             (let ((stats (etsy/shop-stats shop-id)))
+               (cond
+                 ((eq? stats 'nan)
+                  (escalate \"stats fetch failed\" shop-id))
+                 ((and (pair? stats) (eq? (car stats) 'escalate))
+                  stats)
+                 (else
+                  (let ((revenue-30d (cdr (assoc \"revenue_30d\" stats))))
+                    (list (cons \"inventory_value\" total-value)
+                          (cons \"revenue_30d\" revenue-30d)
+                          (cons \"turns_per_month\" (/ revenue-30d total-value)))))))))))))
+
+(inventory-value-vs-stats 77777)
+;; => ((inventory_value . 12500) (revenue_30d . 8300) (turns_per_month . 0.664))
+;; Three stages, fold in the middle, escalate if fold is empty, final comparison returned.
+```
+
+**What's hard here:** The fold calls `string->number` and does arithmetic inside the reducer; if the fold yields zero, the program escalates *before* the third stage; and the final result is a computed ratio. This is guarded fold + escalate-on-empty + multi-stage—every piece matters.
+
+---
+
+## Recursive Alist Walk with Verb-Driven Transformation
+
+This program recursively walks a nested alist (representing a product catalog), calling `seo/gsc-query` at each product node to fetch search impressions, and replaces the product's \"visibility\" field with the fetched value. If any fetch fails, it leaves the field as 'nan—but keeps walking. The recursion has to recognize alist structure and transform in place.
+
+```scheme
+;; Walk a nested product alist, fetch SEO impressions for each product, update \"visibility\" in place.
+
+(define (enrich-catalog-with-seo catalog property-id)
+  (cond
+    ((null? catalog) '())
+    ((not (pair? catalog)) catalog)
+    ((and (pair? (car catalog)) (string? (caar catalog)))
+     ;; It's an alist entry
+     (let ((key (caar catalog))
+           (value (cdar catalog)))
+       (if (equal? key \"product_id\")
+           ;; Fetch SEO for this product
+           (let ((impressions (seo/gsc-query (list (cons \"property\" property-id)
+                                                   (cons \"page\" value)))))
+             (cons (car catalog)
+                   (cons (cons \"visibility\" (if (eq? impressions 'nan)
+                                                'nan
+                                                (cdr (assoc \"impressions\" impressions))))
+                         (enrich-catalog-with-seo (cdr catalog) property-id))))
+           (cons (cons key (enrich-catalog-with-seo value property-id))
+                 (enrich-catalog-with-seo (cdr catalog) property-id)))))
+    (else
+     (cons (enrich-catalog-with-seo (car catalog) property-id)
+           (enrich-catalog-with-seo (cdr catalog) property-id)))))
+
+(define sample-catalog
+  '((\"category\" . \"Home\")
+    (\"products\" . (((\"product_id\" . \"prod-101\") (\"name\" . \"Mug\"))
+                   ((\"product_id\" . \"prod-102\") (\"name\" . \"Plate\"))))))
+
+(enrich-catalog-with-seo sample-catalog \"sc-domain:example.com\")
+;; => ((\"category\" . \"Home\")
+;;     (\"products\" . (((\"product_id\" . \"prod-101\") (\"visibility\" . 1523) (\"name\" . \"Mug\"))
+;;                    ((\"product_id\" . \"prod-102\") (\"visibility\" . 892) (\"name\" . \"Plate\")))))
+;; Recursion walks the alist structure, verb called per product, result inserted.
+```
+
+**What's hard here:** The recursion has to distinguish alist entries from nested lists; it has to recognize the \"product_id\" key and trigger a verb call; the result is inserted *into* the structure, not accumulated separately; and the whole thing reconstructs the alist as it goes. This is recursive transform + verb + structure-preserving—hard to get right without careful thought.
+
+---
+
+## Fold with Stateful Closure: Accumulate and Decide
+
+This program folds over a list of events, but the reducer is a closure that captures a threshold and makes stateful decisions. For each event, it calls `analytics/anomaly-detect` to check if the event is anomalous, and accumulates only those that cross the threshold. The closure captures both the threshold and the anomaly context.
+
+```scheme
+;; Fold over events with a stateful closure that calls a verb and decides per event.
+
+(define (detect-anomalous-events events threshold context)
+  (let ((reducer (lambda (event acc)
+                   (let ((anomaly (analytics/anomaly-detect event context)))
+                     (cond
+                       ((eq? anomaly 'nan) acc)
+                       ((and (pair? anomaly) (eq? (car anomaly) 'escalate)) acc)
+                       (else
+                        (let ((score (cdr (assoc \"anomaly_score\" anomaly))))
+                          (if (> score threshold)
+                              (cons (cons event score) acc)
+                              acc))))))))
+    (foldl reducer '() events)))
+
+(define test-events
+  '((\"timestamp\" . \"2025-01-15T10:00:00Z\") (\"value\" . 120))
+   ((\"timestamp\" . \"2025-01-15T11:00:00Z\") (\"value\" . 340))
+   ((\"timestamp\" . \"2025-01-15T12:00:00Z\") (\"value\" . 125)))
+
+(detect-anomalous-events test-events 0.8 '((\"metric\" . \"revenue_per_hour\")))
+;; => ((((\"timestamp\" . \"2025-01-15T11:00:00Z\") (\"value\" . 340)) . 0.92))
+;; Fold with closure: verb inside reducer, threshold captured, decision per event.
+```
+
+**What's hard here:** The reducer is a lambda defined with `let`, capturing `threshold` and `context`; inside it, a verb is called and checked; the result is compared to the threshold; and only matches are cons-ed. This is stateful fold + closure + verb—clean, reusable, and hard to hold in your head the first time.
+
+---
+
+## Multi-Stage Orchestration: Fetch, Transform, Re-Fetch, Aggregate
+
+This program orchestrates four verbs in sequence, each stage dependent on the last: fetch inventory via `stock/on-hand`, transform to compute reorder quantities, fetch product details via `printify/product` for each item needing reorder, and aggregate by supplier. Each stage can fail; the program checks at every boundary.
+
+```scheme
+;; Four-stage orchestration: fetch stock, compute reorders, fetch product details, aggregate by supplier.
+
+(define (reorder-plan-by-supplier product-ids)
+  ;; Stage 1: Fetch stock for each product
+  (let ((stock-data (map (lambda (id)
+                           (let ((qty (stock/on-hand id)))
+                             (if (eq? qty 'nan)
+                                 (cons id 0)
+                                 (cons id qty))))
+                         product-ids)))
+    ;; Stage 2: Transform to reorder candidates (stock < 5 → reorder 20)
+    (let ((reorders (filter (lambda (entry)
+                              (< (cdr entry) 5))
+                            stock-data)))
+      (if (null? reorders)
+          '()
+          ;; Stage 3: Fetch product details for each reorder candidate
+          (let ((details (map (lambda (entry)
+                                (let ((id (car entry)))
+                                  (let ((product (printify/product id)))
+                                    (if (or (eq? product 'nan)
+                                            (and (pair? product) (eq? (car product) 'escalate)))
+                                        (cons id '((\"supplier\" . \"unknown\")))
+                                        (cons id product)))))
+                              reorders)))
+            ;; Stage 4: Aggregate by supplier
+            (let ((by-supplier (foldl (lambda (entry acc)
+                                        (let ((id (car entry))
+                                              (prod (cdr entry))
+                                              (supplier (cdr (assoc \"supplier\" prod))))
+                                          (let ((existing (assoc supplier acc)))
+                                            (if existing
+                                                (map (lambda (e)
+                                                       (if (equal? (car e) supplier)
+                                                           (cons supplier (cons id (cdr e)))
+                                                           e))
+                                                     acc)
+                                                (cons (cons supplier (list id)) acc)))))
+                                      '()
+                                      details)))
+              by-supplier))))))
+
+(reorder-plan-by-supplier '(201 202 203 204 205))
+;; => ((\"SupplierA\" 201 203) (\"SupplierB\" 204))
+;; Four stages: fetch, filter-transform, fetch again, aggregate by key.
+```
+
+**What's hard here:** Four nested `let`s, each stage doing real work; two separate verb calls (stock/on-hand and printify/product), each guarded; fold at the end that builds an alist and updates it in place; and the whole thing runs top-to-bottom. This is orchestration at summit difficulty—every stage matters, and it's all wired verbs + core Scheme.
+
+---
+
+## Recursive Generator with Verb-Driven Continuation
+
+This program recursively generates a sequence of recommendations by calling `cortex/topk` at each step, taking the top result, fetching its detail via `printify/product`, and recursing with the next embedding. It stops when it hits a depth limit or when a verb fails. This is a recursive generator—each step produces one item and continues.
+
+```scheme
+;; Recursively generate a recommendation chain: topk, fetch detail, recurse with next embedding.
+
+(define (generate-recommendation-chain start-embedding depth limit)
+  (if (>= depth limit)
+      '()
+      (let ((candidates (cortex/topk start-embedding \"products\" 3)))
+        (cond
+          ((eq? candidates 'nan) '())
+          ((and (pair? candidates) (eq? (car candidates) 'escalate)) '())
+          ((null? candidates) '())
+          (else
+           (let ((top (car candidates)))
+             (let ((id (cdr (assoc \"id\" top)))
+                   (next-emb (cdr (assoc \"embedding\" top))))
+               (let ((detail (printify/product id)))
+                 (cond
+                   ((eq? detail 'nan)
+                    (generate-recommendation-chain next-emb (+ depth 1) limit))
+                   ((and (pair? detail) (eq? (car detail) 'escalate))
+                    (generate-recommendation-chain next-emb (+ depth 1) limit))
+                   (else
+                    (cons (cons id detail)
+                          (generate-recommendation-chain next-emb (+ depth 1) limit))))))))))))
+
+(generate-recommendation-chain \"seasonal-spring-2025\" 0 5)
+;; => ((1234 . <detail>) (5678 . <detail>) (9101 . <detail>) ...)
+;; Recursive generator: verb at each step, recurse with next, stop at limit.
+```
+
+**What's hard here:** The recursion is generative—it doesn't walk existing data, it *creates* data by calling verbs at each step; it has to check the topk result, extract an embedding, fetch detail, check again, then recurse; and it stops cleanly when it hits the limit or when verbs fail. This is verb-driven recursion—genuinely hard, and satisfying when it runs.
+
+---
+
+## Fold with Nested Map and Verb Coordination
+
+This program folds over a list of shop IDs, but inside each fold step it maps over product IDs (fetched via a verb), calling another verb for each, then summing the results before adding to the accumulator. It's fold-map-verb-verb, all nested.
+
+```scheme
+;; Fold over shops, map over products per shop (fetched via verb), call another verb per product, sum, accumulate.
+
+(define (total-inventory-value-across-shops shop-ids)
+  (foldl (lambda (shop-id acc)
+           (let ((products (printify/products shop-id)))
+             (cond
+               ((eq? products 'nan) acc)
+               ((and (pair? products) (eq? (car products) 'escalate)) acc)
+               (else
+                (let ((shop-value (foldl (lambda (prod inner-acc)
+                                           (let ((id (cdr (assoc \"id\" prod))))
+                                             (let ((detail (printify/product id)))
+                                               (cond
+                                                 ((eq? detail 'nan) inner-acc)
+                                                 ((and (pair? detail) (eq? (car detail) 'escalate)) inner-acc)
+                                                 (else
+                                                  (let ((stock (cdr (assoc \"stock\" detail)))
+                                                        (price (cdr (assoc \"price\" detail))))
+                                                    (+ inner-acc (* stock price))))))))
+                                         0
+                                         products)))
+                  (+ acc shop-value))))))
+         0
+         shop-ids))
+
+(total-inventory-value-across-shops '(10 20 30))
+;; => 47832.50
+;; Fold over shops, inner fold over products (fetched via verb), verb per product, arithmetic, sum.
+```
+
+**What's hard here:** Two folds, one nested inside the other; two verb calls, one per fold level; guards at both levels; arithmetic inside the inner reducer; and the outer fold sums the inner results. This is nested higher-order + multi-verb + accumulation—hard to parse, harder to write, satisfying when it works.
+
+---
+
+## Recursive Descent with Dynamic Dispatch
+
+This program walks a command tree where each node specifies a verb to call and arguments to pass. The recursion dynamically dispatches the verb call based on the node's \"action\" field, checks the result, and recurses based on success or failure. This is a recursive interpreter with verb dispatch.
+
+```scheme
+;; Walk a command tree, dispatch verbs dynamically per node, recurse based on result.
+
+(define (execute-command-tree tree context)
+  (cond
+    ((null? tree) '())
+    ((string? tree) tree) ; leaf: return the string
+    (else
+     (let ((action (cdr (assoc \"action\" tree)))
+           (args (cdr (assoc \"args\" tree)))
+           (on-success (cdr (assoc \"on-success\" tree)))
+           (on-failure (cdr (assoc \"on-failure\" tree))))
+       (let ((result (cond
+                       ((equal? action \"fetch-product\")
+                        (printify/product (cdr (assoc \"id\" args))))
+                       ((equal? action \"check-stock\")
+                        (stock/on-hand (cdr (assoc \"id\" args))))
+                       ((equal? action \"fetch-stats\")
+                        (etsy/shop-stats (cdr (assoc \"shop\" args))))
+                       (else 'nan))))
+         (cond
+           ((eq? result 'nan)
+            (execute-command-tree on-failure context))
+           ((and (pair? result) (eq? (car result) 'escalate))
+            (execute-command-tree on-failure context))
+           (else
+            (execute-command-tree on-success context))))))))
+
+(define command-tree
+  '((\"action\" . \"check-stock\")
+    (\"args\" . ((\"id\" . 501)))
+    (\"on-success\" . \"proceed-to-restock\")
+    (\"on-failure\" . ((\"action\" . \"fetch-stats\")
+                     (\"args\" . ((\"shop\" . 999)))
+                     (\"on-success\" . \"alert-low-stock\")
+                     (\"on-failure\" . \"escalate-to-human\")))))
+
+(execute-command-tree command-tree '())
+;; => \"proceed-to-restock\"  or \"alert-low-stock\" or \"escalate-to-human\", depending on verb results.
+```
+
+**What's hard here:** The tree specifies verbs to call dynamically, so the program has to parse the action and dispatch to the right verb; the recursion depends on the verb's result; and the tree can go several levels deep. This is a command interpreter—hard to write, powerful to use.
+
+---
+
+## Map with Nested Fold and Closure
+
+This program maps over a list of campaigns, and for each campaign it folds over a list of metrics (fetched via verb), accumulating a summary. The fold is defined as a closure inside the map's lambda, and it calls a verb per metric.
+
+```scheme
+;; Map over campaigns, fold over metrics per campaign (fetched via verb), closure inside map.
+
+(define (campaign-metric-summaries campaign-ids metric-names)
+  (map (lambda (id)
+         (let ((metrics (email/campaign-metrics id)))
+           (cond
+             ((eq? metrics 'nan)
+              (cons id 'nan))
+             ((and (pair? metrics) (eq? (car metrics) 'escalate))
+              (cons id 'escalate))
+             (else
+              (let ((summary (foldl (lambda (metric-name acc)
+                                      (let ((value (cdr (assoc metric-name metrics))))
+                                        (cons (cons metric-name value) acc)))
+                                    '()
+                                    metric-names)))
+                (cons id summary))))))
+       campaign-ids))
+
+(campaign-metric-summaries '(601 602 603) '(\"open_rate\" \"click_rate\" \"unsubscribe_rate\"))
+;; => ((601 . ((\"open_rate\" . 0.25) (\"click_rate\" . 0.05) (\"unsubscribe_rate\" . 0.01)))
+;;     (602 . ((\"open_rate\" . 0.30) (\"click_rate\" . 0.08) (\"unsubscribe_rate\" . 0.02)))
+;;     (603 . nan))
+;; Map calls verb, fold extracts metrics, result is (id . summary).
+```
+
+**What's hard here:** Map calls a verb; inside it, fold iterates over metric names and builds an alist; the fold is a closure inside the map's lambda; and every verb is guarded. This is nested higher-order + verb + closure—hard to follow, clean once you see it.
+
+---
+
+## Pipeline with Retry Logic via Recursion
+
+This program wraps a multi-stage pipeline in a recursive retry: if any stage fails, it retries up to a limit. Each retry re-runs the whole pipeline, and the recursion tracks attempts. This is guarded pipeline + recursive retry.
+
+```scheme
+;; Multi-stage pipeline with recursive retry logic: if any stage fails, retry up to limit.
+
+(define (fetch-and-aggregate-with-retry shop-id attempts max-attempts)
+  (if (>= attempts max-attempts)
+      (escalate \"max retries exceeded\" shop-id)
+      (let ((products (printify/products shop-id)))
+        (cond
+          ((eq? products 'nan)
+           (fetch-and-aggregate-with-retry shop-id (+ attempts 1) max-attempts))
+          ((and (pair? products) (eq? (car products) 'escalate))
+           (fetch-and-aggregate-with-retry shop-id (+ attempts 1) max-attempts))
+          (else
+           (let ((total (foldl (lambda (p acc)
+                                 (let ((stock (cdr (assoc \"stock\" p))))
+                                   (+ acc stock)))
+                               0
+                               products)))
+             (let ((stats (etsy/shop-stats shop-id)))
+               (cond
+                 ((eq? stats 'nan)
+                  (fetch-and-aggregate-with-retry shop-id (+ attempts 1) max-attempts))
+                 ((and (pair? stats) (eq? (car stats) 'escalate))
+                  (fetch-and-aggregate-with-retry shop-id (+ attempts 1) max-attempts))
+                 (else
+                  (list (cons \"total_stock\" total)
+                        (cons \"revenue_30d\" (cdr (assoc \"revenue_30d\" stats)))))))))))))
+
+(fetch-and-aggregate-with-retry 88888 0 3)
+;; => ((total_stock . 450) (revenue_30d . 12300))
+;; Retries up to 3 times if any verb fails, then escalates.
+```
+
+**What's hard here:** The whole pipeline is inside a recursive function; if any verb fails, the function calls itself with incremented attempts; the recursion has a base case that escalates; and the pipeline itself has two stages, each guarded. This is pipeline + retry via recursion—hard to structure, robust in practice.
+
+---
+
+## Fold with Stateful Accumulator and Conditional Verb Calls
+
+This program folds over a list of order IDs, but the accumulator is a record (an alist) that tracks both total and count. The reducer calls a verb only if a condition is met, and updates the accumulator conditionally.
+
+```scheme
+;; Fold with stateful accumulator: track count and total, call verb conditionally, update record.
+
+(define (conditional-order-aggregate order-ids condition-fn)
+  (foldl (lambda (id acc)
+           (let ((order (shopify/orders id)))
+             (cond
+               ((eq? order 'nan) acc)
+               ((and (pair? order) (eq? (car order) 'escalate)) acc)
+               (else
+                (if (condition-fn order)
+                    (let ((total (cdr (assoc \"total\" acc)))
+                          (count (cdr (assoc \"count\" acc)))
+                          (amount (string->number (cdr (assoc \"total_price\" order)))))
+                      (list (cons \"total\" (+ total amount))
+                            (cons \"count\" (+ count 1))))
+                    acc)))))
+         '((\"total\" . 0) (\"count\" . 0))
+         order-ids))
+
+(define high-value? (lambda (order)
+                      (> (string->number (cdr (assoc \"total_price\" order))) 100)))
+
+(conditional-order-aggregate '(701 702 703 704) high-value?)
+;; => ((\"total\" . 487.50) (\"count\" . 2))
+;; Fold with record accumulator, verb per step, conditional update.
+```
+
+**What's hard here:** The accumulator is an alist representing a record; the reducer extracts fields, calls a verb, checks a condition via a passed-in lambda, then updates the record by rebuilding the alist. This is stateful fold + higher-order + verb + conditional—four techniques in one.
+
+---
+
+## Recursive Alist Transform with Multi-Verb Coordination per Node
+
+This program recursively walks a nested alist (a product catalog with categories and products), calling `cortex/recall` for each category and `printify/product` for each product, and enriching the alist in place with the fetched data. This is recursive transform + two verbs + structure-preserving.
+
+```scheme
+;; Walk a nested catalog alist, call cortex/recall per category, printify/product per product, enrich in place.
+
+(define (enrich-catalog catalog context)
+  (cond
+    ((null? catalog) '())
+    ((not (pair? catalog)) catalog)
+    ((and (pair? (car catalog)) (string? (caar catalog)))
+     (let ((key (caar catalog))
+           (value (cdar catalog)))
+       (cond
+         ((equal? key \"category\")
+          (let ((note (cortex/recall context value)))
+            (cons (car catalog)
+                  (cons (cons \"category_note\" (if (eq? note 'nan) \"\" note))
+                        (enrich-catalog (cdr catalog) context)))))
+         ((equal? key \"product_id\")
+          (let ((detail (printify/product value)))
+            (cons (car catalog)
+                  (cons (cons \"product_detail\" (if (or (eq? detail 'nan)
+                                                       (and (pair? detail) (eq? (car detail) 'escalate)))
+                                                   '()
+                                                   detail))
+                        (enrich-catalog (cdr catalog) context)))))
+         (else
+          (cons (cons key (enrich-catalog value context))
+                (enrich-catalog (cdr catalog) context))))))
+    (else
+     (cons (enrich-catalog (car catalog) context)
+           (enrich-catalog (cdr catalog) context)))))
+
+(define sample-catalog
+  '((\"category\" . \"Outdoor\")
+    (\"products\" . (((\"product_id\" . \"prod-501\") (\"name\" . \"Tent\"))
+                   ((\"product_id\" . \"prod-502\") (\"name\" . \"Backpack\"))))))
+
+(enrich-catalog sample-catalog \"product-notes-v3\")
+;; => ((\"category\" . \"Outdoor\")
+;;     (\"category_note\" . \"Check seasonal demand\")
+;;     (\"products\" . (((\"product_id\" . \"prod-501\")
+;;                     (\"product_detail\" . <fetched-detail>)
+;;                     (\"name\" . \"Tent\"))
+;;                    ((\"product_id\" . \"prod-502\")
+;;                     (\"product_detail\" . <fetched-detail>)
+;;                     (\"name\" . \"Backpack\")))))
+;; Recursive walk, two verbs, structure rebuilt with enrichment.
+```
+
+**What's hard here:** The recursion has to recognize two different keys and call two different verbs; the result is inserted *into* the structure; and the whole alist is reconstructed as it's walked. This is multi-verb + recursive transform + structure-preserving—hard, and genuinely useful.
+
+---
+
+## Fold with Nested Filter and Verb Inside Filter Predicate
+
+This program folds over a list of campaigns, but inside each fold step it filters a list of subscribers (fetched via verb), and the filter predicate itself calls *another* verb to check engagement. It's fold-verb-filter-verb, all nested.
+
+```scheme
+;; Fold over campaigns, fetch subscribers per campaign, filter by engagement (verb inside predicate), sum count.
+
+(define (engaged-subscriber-count-across-campaigns campaign-ids engagement-threshold)
+  (foldl (lambda (id acc)
+           (let ((subscribers (email/fetch-subscribers id)))
+             (cond
+               ((eq? subscribers 'nan) acc)
+               ((and (pair? subscribers) (eq? (car subscribers) 'escalate)) acc)
+               (else
+                (let ((engaged (filter (lambda (sub)
+                                         (let ((email (cdr (assoc \"email\" sub))))
+                                           (let ((engagement (email/subscriber-engagement email)))
+                                             (cond
+                                               ((eq? engagement 'nan) #f)
+                                               ((and (pair? engagement) (eq? (car engagement) 'escalate)) #f)
+                                               (else
+                                                (let ((score (cdr (assoc \"score\" engagement))))
+                                                  (> score engagement-threshold)))))))
+                                       subscribers)))
+                  (+ acc (length engaged)))))))
+         0
+         campaign-ids))
+
+(engaged-subscriber-count-across-campaigns '(801 802 803) 0.7)
+;; => 142
+;; Fold over campaigns, verb to fetch subscribers, filter with verb inside predicate, sum length.
+```
+
+**What's hard here:** Outer fold calls a verb; filter inside the fold; filter predicate calls *another* verb and checks it; and the fold accumulates the count. This is four-level nesting—fold, verb, filter, verb—and every check matters. Hard to write, clean to read once you see it.
+
+---
+
+## Recursive Zipper: Walk and Transform with Position Tracking
+
+This program uses a zipper pattern to walk a nested list, tracking position (depth and path), calling a verb at each leaf, and inserting the result along with position metadata. This is recursive zipper + verb + metadata.
+
+```scheme
+;; Recursive zipper: walk nested list, track depth and path, call verb at each leaf, insert with metadata.
+
+(define (enrich-with-position tree verb-fn depth path)
+  (cond
+    ((null? tree) '())
+    ((not (pair? tree))
+     (let ((result (verb-fn tree)))
+       (list 'leaf tree result depth path)))
+    (else
+     (cons (enrich-with-position (car tree) verb-fn (+ depth 1) (append path '(car)))
+           (enrich-with-position (cdr tree) verb-fn depth (append path '(cdr)))))))
+
+(define (fetch-note-for-id id)
+  (cortex/recall \"product-notes\" id))
+
+(define sample-tree '(101 (102 103) 104))
+
+(enrich-with-position sample-tree fetch-note-for-id 0 '())
+;; => ((leaf 101 \"Note for 101\" 1 (car))
+;;     ((leaf 102 \"Note for 102\" 2 (car car)) (leaf 103 \"Note for 103\" 2 (car cdr)))
+;;     (leaf 104 \"Note for 104\" 1 (cdr cdr)))
+;; Zipper walks tree, tracks position, calls verb at each leaf, inserts metadata.
+```
+
+**What's hard here:** The recursion tracks both depth and path (a list of car/cdr steps); at each leaf it calls a verb; and the result is a new structure that includes the original value, the verb result, and the position. This is zipper + verb + metadata—hard to structure, powerful for debugging or audit trails.
+
+---
+
+## Multi-Stage with Partial Escalation and Recovery
+
+This program runs a three-stage pipeline where if the second stage fails, it attempts a fallback verb, and if *that* fails, it escalates—but the first stage's result is preserved. This is partial escalation + recovery.
+
+```scheme
+;; Three-stage pipeline with fallback: if stage 2 fails, try alternate verb; preserve stage 1 result either way.
+
+(define (fetch-with-fallback product-id)
+  ;; Stage 1: Fetch product
+  (let ((product (printify/product product-id)))
+    (cond
+      ((eq? product 'nan)
+       (escalate \"product fetch failed\" product-id))
+      ((and (pair? product) (eq? (car product) 'escalate))
+       product)
+      (else
+       (let ((stage1-result (cons \"product\" product)))
+         ;; Stage 2: Fetch inventory (with fallback)
+         (let ((inventory (stock/on-hand product-id)))
+           (cond
+             ((eq? inventory 'nan)
+              ;; Fallback: try alternate verb
+              (let ((alt-inventory (printify/product product-id))) ; pretend this is an alternate source
+                (cond
+                  ((eq? alt-inventory 'nan)
+                   (list stage1-result (cons \"inventory\" 'fallback-failed)))
+                  ((and (pair? alt-inventory) (eq? (car alt-inventory) 'escalate))
+                   (list stage1-result (cons \"inventory\" 'fallback-failed)))
+                  (else
+                   (list stage1-result (cons \"inventory\" (cdr (assoc \"stock\" alt-inventory))))))))
+             ((and (pair? inventory) (eq? (car inventory) 'escalate))
+              (list stage1-result (cons \"inventory\" 'escalate)))
+             (else
+              ;; Stage 3: Combine results
+              (list stage1-result (cons \"inventory\" inventory))))))))))
+
+(fetch-with-fallback 999)
+;; => ((product . <data>) (inventory . 15))
+;; or ((product . <data>) (inventory . fallback-failed))
+;; Stage 1 always succeeds or escalates; stage 2 tries fallback if primary fails; result preserved either way.
+```
+
+**What's hard here:** Three stages, but stage 2 has a fallback branch; if the fallback also fails, the program *doesn't* escalate—it returns a partial result; and the final output is a list combining both stages. This is guarded pipeline + fallback + partial escalation—messy in practice, clean with careful structure.
+
+---
+
+## Fold with Lookahead: Access Next Element in Reducer
+
+This program folds over a list of events, but the reducer needs to look at the *next* event to make a decision. We pass the whole list and manually car/cdr to look ahead. This is fold with lookahead.
+
+```scheme
+;; Fold with lookahead: reducer accesses current and next element to decide.
+
+(define (detect-transitions events)
+  (let loop ((remaining events) (acc '()))
+    (if (null? remaining)
+        (reverse acc)
+        (let ((current (car remaining))
+              (next (if (null? (cdr remaining))
+                        '()
+                        (cadr remaining))))
+          (let ((current-status (cdr (assoc \"status\" current)))
+                (next-status (if (null? next)
+                                 \"\"
+                                 (cdr (assoc \"status\" next)))))
+            (if (and (equal? current-status \"pending\")
+                     (equal? next-status \"fulfilled\"))
+                (loop (cdr remaining) (cons (cons \"transition\" current) acc))
+                (loop (cdr remaining) acc)))))))
+
+(define test-events
+  '(((\"id\" . 1) (\"status\" . \"pending\"))
+    ((\"id\" . 2) (\"status\" . \"fulfilled\"))
+    ((\"id\" . 3) (\"status\" . \"fulfilled\"))
+    ((\"id\" . 4) (\"status\" . \"pending\"))
+    ((\"id\" . 5) (\"status\" . \"fulfilled\"))))
+
+(detect-transitions test-events)
+;; => ((transition (\"id\" . 1) (\"status\" . \"pending\"))
+;;     (transition (\"id\" . 4) (\"status\" . \"pending\")))
+;; Fold looks ahead to next element, detects transitions, accumulates matches.
+```
+
+**What's hard here:** We're not using `foldl`—we're using named-let recursion to walk the list, because we need to access both `car` and `cadr`; the reducer checks current and next; and the result is accumulated in reverse, then reversed at the end. This is manual fold + lookahead—hard to structure, useful for state-machine patterns.
+
+---
+
+## Recursive Memoization with Verb Caching
+
+This program recursively fetches data via a verb, but caches results in an alist so repeated calls with the same ID don't re-fetch. The cache is passed down the recursion and updated at each step. This is recursive memoization + verb.
+
+```scheme
+;; Recursive fetch with memoization: cache verb results in an alist, avoid re-fetching.
+
+(define (fetch-with-cache id cache)
+  (let ((cached (assoc id cache)))
+    (if cached
+        (values (cdr cached) cache)
+        (let ((result (printify/product id)))
+          (cond
+            ((eq? result 'nan)
+             (values 'nan cache))
+            ((and (pair? result) (eq? (car result) 'escalate))
+             (values result cache))
+            (else
+             (values result (cons (cons id result) cache))))))))
+
+(define (fetch-tree-with-cache tree cache)
+  (cond
+    ((null? tree) (values '() cache))
+    ((not (pair? tree))
+     (fetch-with-cache tree cache))
+    (else
+     (let-values (((left-result new-cache1) (fetch-tree-with-cache (car tree) cache)))
+       (let-values (((right-result new-cache2) (fetch-tree-with-cache (cdr tree) new-cache1)))
+         (values (cons left-result right-result) new-cache2))))))
+
+(define sample-tree '(101 (102 101) 103))
+
+(fetch-tree-with-cache sample-tree '())
+;; => (<results>, <final-cache>)
+;; Recursion threads cache, fetches only once per ID, returns both results and updated cache.
+```
+
+**What's hard here:** The cache is an alist threaded through the recursion; `let-values` is used to receive both the result and the updated cache; the recursion has to pass the cache forward at each step; and the verb is called only if the ID is not in the cache. This is memoization + recursion + verb—hard to thread state through recursion, but clean once you see it.
+
+---
+
+## Pipeline with Conditional Branch and Rejoin
+
+This program runs a pipeline where the second stage branches based on a condition: if true, it calls one verb; if false, it calls another. Both branches rejoin at stage three. This is conditional pipeline.
+")

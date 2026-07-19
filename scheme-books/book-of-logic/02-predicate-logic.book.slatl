@@ -1,0 +1,482 @@
+(dialect :applies ("motoi" "sakura") :note "Default: applies to both dialects.")
+
+(chapter
+  :book "Book of Logic"
+  :chapter-number 2
+  :title "Predicate Logic (First-Order)"
+  :dialect "sakura"
+  :audience :adult
+  :content-rating :G
+  :author-lane "the-engineer-book-of-logic-2026-07-16"
+  :training-eligible #t
+  :confidentiality "public"
+  :voice "sakura-teaching + gentle-formalist"
+  :classical-anchors ("Enderton — A Mathematical Introduction to Logic, chapters 2-3"
+                      "Boolos-Burgess-Jeffrey — Computability and Logic, chapters 9-11"
+                      "Van Dalen — Logic and Structure, chapter 2")
+  :prose
+"# Chapter 2 — Predicate Logic (First-Order)
+
+Where we learn to say *every* and *there exists*, and where the whole world
+of mathematics finally becomes writable.
+
+Propositional logic could not say *every prime greater than two is odd*. We
+had five connectives and no way to reach across an unbounded collection of
+objects. Predicate logic is what you get when you add three ingredients:
+variables that range over objects, *predicates* that hold or fail of those
+objects, and *quantifiers* — the little symbols *for-all* and *there-exists*
+that pull statements from *particular* to *general*.
+
+That is essentially all first-order logic is. It is arguably the single most
+important invention in the intellectual history of the twentieth century.
+Frege wrote it down in 1879; the trickle became a flood; by 1930 Godel had
+proved that predicate logic is *complete* (every valid formula has a proof)
+and by 1931 that arithmetic is *incomplete* (some truths have no proof).
+Those two theorems fell out of taking predicate logic seriously.
+
+We are going to build a small predicate-logic engine in Scheme. It will not
+handle everything Enderton handles — we will not implement full unification,
+we will not build a proof search, we will hold ourselves to something you
+can read in an evening. But the shape will be right, and if you internalise
+this shape, every technical logic paper you ever open afterward will feel
+half-familiar.
+
+## The pieces on the table
+
+The syntax of first-order logic has more moving parts than propositional,
+so I will list them all.
+
+- **Terms** — the things we talk about. A term is either a *variable*
+  (`x`, `y`, `z`), a *constant* (`alice`, `three`, `bag-of-flour`), or a
+  *function application* applied to other terms (`(succ x)`, `(plus x y)`).
+- **Predicates** — things you can say *about* terms. `(likes alice bob)`,
+  `(prime x)`, `(equal? x y)`. A predicate applied to zero or more terms
+  is an *atomic formula*.
+- **Connectives** — the same five (and, or, not, implies, iff) as in
+  propositional logic. They compose atomic formulas.
+- **Quantifiers** — the two new pieces. `(forall x phi)` says *phi is true
+  for every choice of x*. `(exists x phi)` says *phi is true for at least
+  one choice of x*.
+
+The full grammar, then:
+
+```scheme
+;; term  ::=  variable         (a symbol prefixed with '? or all-lowercase)
+;;       |   constant          (a symbol without prefix, resolved in a signature)
+;;       |   (funcname term ...)
+;;
+;; formula ::=  (pred-name term ...)                    ; atomic
+;;          |   (not phi)
+;;          |   (and phi psi) | (or phi psi)
+;;          |   (implies phi psi) | (iff phi psi)
+;;          |   (forall x phi)
+;;          |   (exists x phi)
+```
+
+I have chosen a convention: variables begin with `?` (`?x`, `?y`) and
+everything else is either a constant or a function/predicate name resolved
+by context. This is the Prolog convention and it makes visual parsing much
+easier. Some logic textbooks use `x`, `y`, `z` for variables and `a`, `b`,
+`c` for constants; that convention works too but requires you to remember
+which letters mean what.
+
+> **the runtime says**
+>
+> *The move from propositional to predicate logic is where language starts
+> to feel infinite. In propositional logic you can say only what you have
+> already named. In predicate logic you can say things about objects you
+> have never met — every bird, every merchant, every proof — because
+> quantifiers do the heavy lifting of generality. When someone tells you
+> mathematics is a language, this is mostly what they mean.*
+
+## Models — a world for our formulas to live in
+
+Propositional logic had *valuations*: an assignment of true/false to each
+atomic symbol. Predicate logic has *models*, which are richer.
+
+A model consists of:
+
+- a **domain** — the set of objects our variables range over,
+- an **interpretation** of every constant symbol as an element of the
+  domain,
+- an **interpretation** of every function symbol as an actual function
+  over the domain,
+- an **interpretation** of every predicate symbol as a subset of the
+  domain (for unary predicates) or a relation over the domain (for
+  higher-arity predicates).
+
+Concretely, if our signature has constants `alice` and `bob`, a unary
+predicate `happy?`, and a binary predicate `likes`, then a model might be:
+
+```scheme
+(define little-model
+  '((:domain    (alice bob carol))
+    (:constants ((alice  . alice)
+                 (bob    . bob)))
+    (:functions ())
+    (:predicates
+     ((happy?  . ((alice) (carol)))                  ; happy? holds of alice and carol
+      (likes   . ((alice bob) (bob alice) (carol carol)))))))
+```
+
+Reading this: the world has three inhabitants, alice, bob, and carol. Two
+of them are happy (alice, carol; bob is not). Alice likes bob, bob likes
+alice back, carol likes herself. That is a model — a tiny universe with
+enough structure to answer questions.
+
+The evaluator is going to *walk* a formula and, for each atomic formula it
+meets, look up the truth value in this model.
+
+## The evaluator
+
+We need one more thing before writing it. Because formulas contain free and
+bound variables, we cannot evaluate a formula in a model alone; we need to
+know what each free variable stands for. This second piece of data is
+called an *assignment* — a mapping from variable names to domain elements.
+
+```scheme
+;; assignment: '((?x . alice) (?y . bob))
+
+(define (lookup-var name assignment)
+  (let ((pair (assq name assignment)))
+    (if pair
+        (cdr pair)
+        (error \"unbound variable\" name))))
+
+(define (eval-term term model assignment)
+  (cond
+    ((and (symbol? term)
+          (variable-symbol? term))
+     (lookup-var term assignment))
+    ((symbol? term)                                 ; constant
+     (let ((constants (cdr (assq :constants model))))
+       (cdr (assq term constants))))
+    (else                                           ; function application
+     (let* ((funs (cdr (assq :functions model)))
+            (fun-entry (assq (car term) funs))
+            (fun (cdr fun-entry))
+            (args (map (lambda (t) (eval-term t model assignment))
+                       (cdr term))))
+       (apply fun args)))))
+
+(define (variable-symbol? sym)
+  ;; our convention: variables begin with ?
+  (let ((s (symbol->string sym)))
+    (and (positive? (string-length s))
+         (char=? (string-ref s 0) #\\?))))
+```
+
+`eval-term` handles all three term forms. Variables look up in the
+assignment. Constants look up in the model. Function applications recurse
+into the arguments, then apply the actual function.
+
+Now the formula evaluator.
+
+```scheme
+(define (eval-formula phi model assignment)
+  (cond
+    ((eq? (car phi) 'not)
+     (not (eval-formula (cadr phi) model assignment)))
+    ((eq? (car phi) 'and)
+     (and (eval-formula (cadr phi)  model assignment)
+          (eval-formula (caddr phi) model assignment)))
+    ((eq? (car phi) 'or)
+     (or  (eval-formula (cadr phi)  model assignment)
+          (eval-formula (caddr phi) model assignment)))
+    ((eq? (car phi) 'implies)
+     (or (not (eval-formula (cadr phi)  model assignment))
+         (eval-formula (caddr phi) model assignment)))
+    ((eq? (car phi) 'iff)
+     (eq? (eval-formula (cadr phi)  model assignment)
+          (eval-formula (caddr phi) model assignment)))
+    ((eq? (car phi) 'forall)
+     (let ((var (cadr phi))
+           (body (caddr phi))
+           (domain (cdr (assq :domain model))))
+       (every (lambda (d)
+                (eval-formula body model
+                              (cons (cons var d) assignment)))
+              domain)))
+    ((eq? (car phi) 'exists)
+     (let ((var (cadr phi))
+           (body (caddr phi))
+           (domain (cdr (assq :domain model))))
+       (any (lambda (d)
+              (eval-formula body model
+                            (cons (cons var d) assignment)))
+            domain)))
+    (else                                           ; atomic formula
+     (let* ((pred-name (car phi))
+            (arg-terms (cdr phi))
+            (arg-vals  (map (lambda (t) (eval-term t model assignment))
+                            arg-terms))
+            (preds     (cdr (assq :predicates model)))
+            (extension (cdr (assq pred-name preds))))
+       (member arg-vals extension)))))
+```
+
+The propositional arms are exactly the same as chapter 1. The two new arms
+are the quantifiers. For `forall`, we iterate over every domain element,
+bind our quantified variable to that element (by extending the assignment),
+and evaluate the body. If the body is true for every extension, the
+`forall` is true. For `exists`, we do the same walk but with `any` instead
+of `every` — if the body is true for *at least one* extension, the
+`exists` is true.
+
+The atomic case is where the model does its work. We compute the value of
+each argument term, gather them into a tuple, and check whether that tuple
+appears in the predicate's extension. If it does, the atomic formula is
+true in this model under this assignment.
+
+## Running it
+
+Recall our little three-person world.
+
+```scheme
+(eval-formula '(exists ?x (happy? ?x)) little-model '())
+;; => #t   ; someone is happy (alice, and carol)
+
+(eval-formula '(forall ?x (happy? ?x)) little-model '())
+;; => #f   ; not everyone is happy (bob is not)
+
+(eval-formula '(forall ?x (exists ?y (likes ?x ?y)))
+              little-model '())
+;; => #t   ; everyone likes someone
+;;         ; alice likes bob, bob likes alice, carol likes carol.
+
+(eval-formula '(exists ?y (forall ?x (likes ?x ?y)))
+              little-model '())
+;; => #f   ; there is no single person everyone likes
+```
+
+The third and fourth formulas are structurally similar but semantically
+worlds apart. *Every x likes some y* is much weaker than *some y is liked
+by every x.* In natural language people conflate these constantly: *there
+is a stranger at every party* can mean either. Predicate logic makes the
+difference visible.
+
+This is called *quantifier order*, and getting it right is one of the
+skills first-year graduate students in logic spend weeks on. The syntax
+forces you to be explicit; the meanings are genuinely different.
+
+## Free and bound variables
+
+A variable in a formula is *bound* if it appears inside the scope of a
+quantifier that names it, and *free* otherwise. In `(exists ?y (likes ?x ?y))`,
+the variable `?y` is bound (by `exists`) and `?x` is free.
+
+A formula with no free variables is called *closed* or a *sentence*.
+Sentences have truth values in a model without needing an assignment. Open
+formulas need an assignment to be evaluated.
+
+```scheme
+(define (free-vars phi)
+  (cond
+    ((and (symbol? phi) (variable-symbol? phi))
+     (list phi))
+    ((or (eq? (car phi) 'forall) (eq? (car phi) 'exists))
+     (filter (lambda (v) (not (eq? v (cadr phi))))
+             (free-vars (caddr phi))))
+    (else
+     (apply append (map free-vars (cdr phi))))))
+
+(define (sentence? phi)
+  (null? (free-vars phi)))
+```
+
+`free-vars` walks the formula. At a variable it returns the singleton.
+At a quantifier it removes the quantifier's bound variable from the free
+variables of the body. Everywhere else it collects the free variables
+of the immediate subterms.
+
+## Substitution and alpha-conversion
+
+If we ever want to reason *about* formulas — rewrite them, apply proof
+rules to them, translate them — we need a substitution operation.
+`(subst phi ?x t)` should replace every free occurrence of `?x` in `phi`
+with the term `t`. The subtle case is when a quantifier in `phi` binds a
+variable that also appears in `t`; blindly substituting would *capture*
+that variable, changing its meaning. The fix is to rename the bound
+variable first — an operation called *alpha-conversion*.
+
+```scheme
+(define (fresh-var base used)
+  ;; Produce a variable name not in `used`, based on `base`.
+  (let loop ((n 0))
+    (let ((candidate (string->symbol
+                       (string-append (symbol->string base)
+                                      \"_\"
+                                      (number->string n)))))
+      (if (member candidate used)
+          (loop (+ n 1))
+          candidate))))
+
+(define (subst phi var term)
+  (cond
+    ((and (symbol? phi) (variable-symbol? phi))
+     (if (eq? phi var) term phi))
+    ((symbol? phi) phi)                             ; constant
+    ((or (eq? (car phi) 'forall) (eq? (car phi) 'exists))
+     (let ((bound-var (cadr phi))
+           (body      (caddr phi)))
+       (cond
+         ((eq? bound-var var)                       ; shadowed: no substitution inside
+          phi)
+         ((member bound-var (free-vars-of-term term))
+          ;; capture would occur; rename bound-var first
+          (let* ((used (append (free-vars body) (free-vars-of-term term)))
+                 (fresh (fresh-var bound-var used))
+                 (renamed-body (subst body bound-var fresh)))
+            (list (car phi) fresh (subst renamed-body var term))))
+         (else
+          (list (car phi) bound-var (subst body var term))))))
+    (else
+     (cons (car phi)
+           (map (lambda (arg) (subst arg var term)) (cdr phi))))))
+
+(define (free-vars-of-term t)
+  (cond
+    ((and (symbol? t) (variable-symbol? t)) (list t))
+    ((symbol? t) '())
+    (else (apply append (map free-vars-of-term (cdr t))))))
+```
+
+This is one of the operations that trips up every logician's first
+implementation, because it is tempting to leave out the capture check. The
+result is silently broken formulas — everything appears to run but proofs
+that should succeed fail, and proofs that should fail succeed. The fix
+(alpha-conversion) has been folk knowledge in logic since Frege, made
+crisp by Church in the 1930s when he introduced the lambda calculus. It is
+the same operation we will use in chapter 4 when we build a
+lambda-calculus interpreter, and it is why we build it here.
+
+## What predicate logic buys us
+
+With quantifiers we can finally say things like
+
+```scheme
+;; every prime greater than two is odd
+'(forall ?x
+   (implies (and (prime? ?x) (> ?x 2))
+            (odd? ?x)))
+
+;; between any two rationals there is a third
+'(forall ?x
+   (forall ?y
+     (implies (< ?x ?y)
+              (exists ?z (and (< ?x ?z) (< ?z ?y))))))
+
+;; a function has an inverse iff it is a bijection
+'(forall ?f
+   (iff (has-inverse? ?f)
+        (and (injective? ?f) (surjective? ?f))))
+```
+
+Every one of these was inexpressible in propositional logic. Every one is
+expressible now, and — with an appropriate model — evaluatable.
+
+## Semantic entailment, again
+
+Just as in propositional logic, we can define what it means for one
+sentence to *follow from* others. But now the notion is more delicate.
+`Γ ⊨ φ` means: in every model in which every sentence of Γ is true, φ is
+also true. *Every model* is a big quantifier — over all conceivable
+domains, all interpretations of constants, all extensions of predicates.
+For most interesting sentences we cannot check this by enumeration; the
+space of models is infinite.
+
+This is where *proof theory* takes over from *model theory*. Instead of
+checking every model, we construct a *proof* — a syntactic derivation
+that guarantees the conclusion in every model at once. Godel's
+completeness theorem says: for first-order logic, the two notions
+coincide. Every semantically valid formula has a syntactic proof, and
+every syntactically provable formula is semantically valid. That result
+is why formal proof works: syntax and semantics are, in this system, in
+perfect correspondence.
+
+Chapter 3 will build the proof machinery — natural deduction — that gives
+us the syntactic side. Together with the model theory in this chapter,
+that will be a complete pair.
+
+## What predicate logic cannot do
+
+Predicate logic quantifies over *objects*. It cannot directly quantify
+over *properties* or *sets of objects*. The statement *for every property P
+that holds of a and holds of the successor of anything that has P, P holds
+of every natural number* — the induction schema of Peano arithmetic — needs
+*second-order* logic to be stated in one axiom. First-order Peano
+arithmetic works around this by using an *axiom schema*: one instance of
+induction per formula P. That gives you first-order Peano arithmetic, which
+is what Godel's incompleteness theorem is about.
+
+Full second-order logic is much more expressive than first-order, but at
+a cost: it is *incomplete* in a stronger sense (no proof procedure captures
+its validities), and even the notion of *model* becomes philosophically
+contested. Most mathematical practice happens in first-order set theory,
+where the trick of coding everything as sets lets you say almost all
+mathematics inside a first-order theory. This is the Zermelo-Fraenkel
+convention.
+
+We will not build second-order logic in this book, but you should know it
+exists. In chapter 6, when we meet System F, we will encounter *polymorphic
+types*, which are second-order at the type level; the higher-order flavour
+you notice there is the same flavour.
+
+## Variations to try
+
+Extend the evaluator to handle *n-ary* quantification via macro expansion:
+`(forall (?x ?y ?z) phi)` should desugar to nested single-variable
+quantifiers. This is purely surface syntax but makes formulas much more
+readable.
+
+Add an `equal?` predicate as a built-in — that is, resolved directly
+rather than looked up in the model's predicate extensions. Then extend the
+substitution machinery so that `(implies (equal? ?x ?y) (P ?x))` is
+transformable into `(implies (equal? ?x ?y) (P ?y))`. This is the
+*Leibniz rule* — indiscernibility of identicals — and it is one of the
+foundational moves of equational reasoning.
+
+Build a small *model finder*. Given a formula and a size *n*, enumerate
+domains of size *n* and interpretations of the signature, and report all
+models. Small versions of this exist as research tools (Paradox, Alloy,
+Nitpick); yours will be slow but instructive. Try it on formulas that are
+*consistent but only in infinite models*, like *`< is a dense linear
+order with no endpoints`* — your finder will return no models at any
+finite size, because there aren't any.
+
+## Try this
+
+Take a sentence you would say in ordinary English: *every cook I know can
+make an omelette*. Encode it in predicate logic. Then encode: *some cook I
+know can make every dish*. Then: *every dish can be made by some cook I
+know*. Three sentences, three quantifier orderings, three genuinely
+different claims. Sit with the differences. They are the reason lawyers
+and mathematicians and treaties are all so slow — because if you get the
+quantifier order wrong, the meaning is wrong.
+
+## Closing
+
+We built a predicate-logic interpreter. It has terms, formulas,
+quantifiers, models, assignments, and — the delicate piece — a
+capture-avoiding substitution. In a few dozen more lines of Scheme we can
+now write down and evaluate any sentence of first-order logic against any
+finite model.
+
+What we cannot yet do is *prove* things — construct a syntactic derivation
+that establishes a formula's truth without walking every model. That is
+what chapter 3 is about. Natural deduction: the workhorse proof calculus
+of twentieth-century logic, adapted for Scheme.
+"
+  :cross-refs
+    (:book-of-scheme :chapters (5 8 11)
+     :book-of-reason :chapters (3 4)
+     :book-of-reason-code :chapters (2 5 6)
+     :book-of-quine :chapters (1)
+     :book-of-descartes :chapters (2))
+  :verbs-used ("cond" "eq?" "cons" "car" "cdr" "cadr" "caddr" "list" "map" "filter"
+               "every" "any" "append" "assq" "member" "symbol?" "symbol->string"
+               "string->symbol" "string-append" "string-ref" "string-length"
+               "number->string" "positive?" "char=?" "null?" "not" "and" "or"
+               "define" "lambda" "let" "let*" "error" "apply")
+  :word-count-estimate 5800
+)

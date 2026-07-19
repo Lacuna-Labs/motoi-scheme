@@ -1,0 +1,226 @@
+;; appendix-i-reading-world-collisions.book.slatl
+
+(dialect :applies ("motoi" "sakura"))
+
+(appendix
+  :book "Book of Arcade Games"
+  :letter "I"
+  :title "Reading world/collisions Efficiently"
+  :dialect "motoi"
+  :audience :kid
+  :also-for :adult
+  :content-rating :G
+  :author-lane "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible #t
+  :confidentiality "public"
+  :book-version "1.0.0"
+  :prose
+"`world/collisions` returns a list of colliding entity pairs each
+frame. Reading it well is 90% of your collision-handling code. Reading
+it badly = crashes, double-hits, missed events, and performance
+cliffs.
+
+This appendix teaches the patterns that scale.
+
+## The naive walk
+
+```scheme
+(for-each
+ (lambda (pair)
+   (let ((a (car pair)) (b (cadr pair)))
+     ;; handle a and b
+     ))
+ (world/collisions))
+```
+
+Works. Two problems:
+
+1. The pair may appear in either order — sometimes (a=player, b=coin),
+   sometimes (a=coin, b=player). You need to handle both.
+2. If a and b are the same entity across multiple pairs in one frame
+   (e.g. player collided with 3 coins), you handle three times.
+   Usually fine, sometimes not.
+
+## Pattern 1 — normalize order
+
+Ensure a is always the 'lower-kind' or 'lower-id' partner.
+
+```scheme
+(define (normalize-pair pair)
+  (let ((a (car pair)) (b (cadr pair)))
+    (if (symbol<? (entity/kind a) (entity/kind b))
+        (list a b)
+        (list b a))))
+```
+
+Or by ID:
+```scheme
+(define (normalize-pair-by-id pair)
+  (let ((a (car pair)) (b (cadr pair)))
+    (if (< (entity/id a) (entity/id b))
+        (list a b)
+        (list b a))))
+```
+
+Then normalize each pair before dispatching. Simplifies the handler
+code — you only handle one order.
+
+## Pattern 2 — dispatch by kind
+
+Group handlers by (kind-a, kind-b) pair.
+
+```scheme
+(define collision-handlers
+  '((player   coin)  handle-player-coin
+    (player   enemy) handle-player-enemy
+    (bullet   enemy) handle-bullet-enemy))
+
+(define (dispatch pair)
+  (let ((k1 (entity/kind (car pair)))
+        (k2 (entity/kind (cadr pair))))
+    (let loop ((table collision-handlers))
+      (cond
+        ((null? table) #f)
+        ((and (eq? (caar table) k1) (eq? (cadar table) k2))
+         ((cadr table) (car pair) (cadr pair)))
+        (else (loop (cddr table)))))))
+```
+
+Cleaner than nested `cond`. Every pair-kind gets exactly one handler.
+Order-normalize the pair first.
+
+## Pattern 3 — dedupe by frame
+
+Only handle each (a-id, b-id) once per frame.
+
+```scheme
+(define handled-this-frame '())
+
+(define (once-per-frame-handler pair)
+  (let* ((a (car pair)) (b (cadr pair))
+         (key (list (entity/id a) (entity/id b))))
+    (unless (member key handled-this-frame)
+      (set! handled-this-frame (cons key handled-this-frame))
+      (dispatch pair))))
+
+;; At end of frame:
+(set! handled-this-frame '())
+```
+
+Prevents double-firing for the same collision pair (which can happen
+when the runtime returns both orders).
+
+## Pattern 4 — alive guard
+
+Check entities are still alive before handling.
+
+```scheme
+(for-each
+ (lambda (pair)
+   (let ((a (car pair)) (b (cadr pair)))
+     (when (and (entity/alive? a) (entity/alive? b))
+       (dispatch pair))))
+ (world/collisions))
+```
+
+A collision may have despawned one partner in an earlier pair this
+frame. Trying to process it again = null-pointer.
+
+## Pattern 5 — early-exit on player death
+
+Player died; skip the rest of the frame's collisions.
+
+```scheme
+(let ((player-alive? #t))
+  (for-each
+   (lambda (pair)
+     (when player-alive?
+       (when (kind-in-pair pair 'player)
+         (dispatch-player-collision pair))
+       (unless (entity/alive? (find-player))
+         (set! player-alive? #f))))
+   (world/collisions)))
+```
+
+Prevents 'player died 5 times in one frame' bugs.
+
+## Pattern 6 — sort by team
+
+For many-vs-many, group collisions by team.
+
+```scheme
+(let ((team-a-hits 0) (team-b-hits 0))
+  (for-each
+   (lambda (pair)
+     (let ((a (car pair)) (b (cadr pair)))
+       (cond
+         ((and (eq? (entity/team a) 'a) (eq? (entity/team b) 'b))
+          (set! team-a-hits (+ team-a-hits 1)))
+         ((and (eq? (entity/team a) 'b) (eq? (entity/team b) 'a))
+          (set! team-b-hits (+ team-b-hits 1))))))
+   (world/collisions))
+  ...)
+```
+
+Tally, then apply. Prevents ordering bias.
+
+## Pattern 7 — cost accounting
+
+Count how many pairs your frame handles.
+
+```scheme
+(let ((count (length (world/collisions))))
+  (when (> count 100)
+    (display \"Warning: high collision count \")
+    (display count) (newline)))
+```
+
+If count grows into the thousands, you have a layer problem — too
+many entities share too permissive a layer. Split layers, or use
+sensors instead of solids for pass-through cases.
+
+## Big-O in kid terms
+
+The runtime uses spatial hashing to keep collision cost near O(n)
+in the number of ACTUAL collisions, not O(n^2) in entity count. So:
+
+- 100 entities that don't overlap: ~100 hash lookups per frame.
+  Trivial.
+- 100 entities all overlapping: 100 * 100 / 2 = 5000 collision
+  pairs. Might drop from 60 to 55 FPS at kid-scale hardware.
+- 1000 entities with normal spread: still O(1000-ish). Fine.
+- 1000 entities all overlapping: catastrophic.
+
+The lesson: layers + sensors + smart level design (entities spread
+out) matter more than iterating 'efficiently.'
+
+## Common desktop tasks
+
+**Duplicate-order detection.** A shop's checkout flow needs to know
+if a customer clicked 'submit' twice in one second (accidental
+double-buy). Same dedupe pattern as collision de-double-hit.
+
+## Debugging with world/collisions
+
+Print every pair for one frame to see what's actually colliding.
+
+```scheme
+(define (debug-print-collisions)
+  (for-each
+   (lambda (pair)
+     (display (entity/kind (car pair)))
+     (display \" hit \")
+     (display (entity/kind (cadr pair)))
+     (newline))
+   (world/collisions)))
+```
+
+Call once from `on-frame` (guarded by a debug flag). See what your
+world is doing. Usually reveals a layer bug or a shape-oversize bug.
+
+## The final rule
+
+If your collision code is more than 30 lines, it's probably wrong.
+Layers + normalized dispatch + alive-guard should cover 95% of
+arcade games. If you have branching per-kind with 20 arms and
+nested conditionals, split it into small handlers by kind-pair.")

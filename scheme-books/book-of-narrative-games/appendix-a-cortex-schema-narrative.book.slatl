@@ -1,0 +1,389 @@
+;; appendix-a-cortex-schema-narrative.book.slatl
+
+(dialect :applies ("motoi" "sakura"))
+
+(appendix
+  :book                "Book of Narrative Games"
+  :letter              "A"
+  :title               "Cortex Schema for a Narrative Game"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :training-eligible   #t
+  :confidentiality     "public"
+  :book-version        "1.0.0"
+  :prose
+"The whole game runs on Cortex. Choices go into Cortex. Inventory goes
+into Cortex. NPC reputation goes into Cortex. If you design your key
+namespace early, everything downstream is easier — you can debug by
+reading a single log, you can migrate to new engines, you can share
+save files.
+
+This appendix is the recommended key namespace. Copy it into your game.
+Modify it. Extend it. Whatever you do, do NOT scatter keys named
+`x`, `flag1`, `stuff`. Give your keys homes.
+
+---
+
+## The recommended top-level namespaces
+
+```
+state/*       — world flags, boolean or symbol
+inventory     — a list of item symbols
+past-choices  — an alist of important choices
+reputation/*  — number per NPC
+seen/*        — flags per visited node
+gift/<npc>/<item>? — booleans for gift relationships
+stat/*        — counters (helps, kills, hours-played)
+save/slot/N   — snapshot bundles
+save/slot/N/timestamp — when saved
+save/slot/N/name       — user-supplied slot name
+system/*      — game-level metadata (last-play, version)
+log/major-events — chronological list of big beats
+dialogue-log/<npc> — per-NPC reply history
+customer/*    — for operator-shop carts: visits, purchases, prefs
+```
+
+Each namespace has a specific job. Prefer flat within a namespace
+(`state/well-poisoned?` not `state/village/well/water/poisoned?`).
+Deep hierarchies feel organized but are a pain to read.
+
+---
+
+## state/*
+
+Boolean or symbol flags describing world-state.
+
+```scheme
+(cortex/write 'state/first-door 'red)       ;; symbol
+(cortex/write 'state/well-poisoned? #t)     ;; boolean, ?-suffixed
+(cortex/write 'state/sister-home? #f)
+(cortex/write 'state/villain-alive? #t)
+(cortex/write 'state/village-burned? #f)
+(cortex/write 'state/fox 'healed)           ;; healed | killed | ignored
+```
+
+Convention: keys ending in `?` are boolean. Keys without `?` are
+symbol-valued. Use whichever makes the checking code read nicely.
+
+---
+
+## inventory
+
+A single Cortex key holding a list.
+
+```scheme
+(define (pick-up item)
+  (let ((inv (or (cortex/read 'inventory) '())))
+    (cortex/write 'inventory (cons item inv))))
+
+(define (drop item)
+  (let ((inv (or (cortex/read 'inventory) '())))
+    (cortex/write 'inventory
+      (filter (lambda (i) (not (eq? i item))) inv))))
+
+(define (have? item)
+  (member item (or (cortex/read 'inventory) '())))
+```
+
+Never let inventory grow without bound. If your game has more than
+30 possible items, split into categories (`inventory/tools`,
+`inventory/consumables`) and consume where appropriate.
+
+---
+
+## past-choices
+
+An alist of significant decisions. Ordered by insertion, newest first.
+
+```scheme
+(define (remember-choice key value)
+  (let ((old (or (cortex/read 'past-choices) '())))
+    (cortex/write 'past-choices (cons (cons key value) old))))
+
+(define (recall-choice key)
+  (let* ((old (or (cortex/read 'past-choices) '()))
+         (pair (assoc key old)))
+    (if pair (cdr pair) #f)))
+
+;; Examples:
+(remember-choice 'first-door 'red)
+(remember-choice 'ate-honey? #t)
+(remember-choice 'spared-wolf? #t)
+```
+
+Use `past-choices` for choices that don't fit cleanly into `state/*`.
+The alist grows without a strict bound but stays manageable; Cortex
+handles the storage. Values can be any Scheme value.
+
+---
+
+## reputation/*
+
+An integer per NPC. Positive = better; negative = worse; zero =
+neutral.
+
+```scheme
+(define (rep-change npc delta)
+  (let* ((k (string->symbol
+              (string-append \"reputation/\" (symbol->string npc))))
+         (old (or (cortex/read k) 0)))
+    (cortex/write k (+ old delta))))
+
+(define (rep npc)
+  (or (cortex/read
+        (string->symbol
+          (string-append \"reputation/\" (symbol->string npc))))
+      0))
+
+;; Usage:
+(rep-change 'mira +2)      ;; kindness
+(rep-change 'mira -1)      ;; coldness
+(rep 'mira)                ;; => 1
+```
+
+Prefer small increments (+1, +2, +3). Big jumps (+10) make the
+reputation swing feel arbitrary. Small changes accumulate meaningfully
+over hours of play.
+
+Some designers prefer to keep reputation bounded (-10 to +10) and
+clamp. This prevents runaway values but also means late-game
+reputation changes stop mattering. Choose based on your pacing.
+
+---
+
+## seen/*
+
+A flag per visited node. Used to grey out already-taken choices,
+avoid replaying one-shot scenes, and offer 'you have been here before'
+recognition.
+
+```scheme
+(define (mark-seen node-id)
+  (let ((k (string->symbol
+             (string-append \"seen/\" (symbol->string node-id)))))
+    (cortex/write k #t)))
+
+(define (seen? node-id)
+  (or (cortex/read
+        (string->symbol
+          (string-append \"seen/\" (symbol->string node-id))))
+      #f))
+```
+
+Each seen-flag is a separate Cortex key. That means fast lookups —
+no traversing a list. Downside: your Cortex database has more keys.
+For a 30-scene game, that's negligible; for a 300-scene game, still
+negligible.
+
+---
+
+## gift/<npc>/<item>
+
+Booleans for gift relationships.
+
+```scheme
+(define (give item npc)
+  (drop item)
+  (let ((k (string->symbol
+             (string-append \"gift/\"
+                            (symbol->string npc)
+                            \"/\"
+                            (symbol->string item)))))
+    (cortex/write k #t)))
+
+(define (received? npc item)
+  (or (cortex/read
+        (string->symbol
+          (string-append \"gift/\"
+                         (symbol->string npc)
+                         \"/\"
+                         (symbol->string item))))
+      #f))
+
+;; Later:
+(when (received? 'mira 'letter)
+  \"MIRA: 'The letter — you brought it? Thank you.'\")
+```
+
+Compound-key trick keeps the gift-relationships flat without hardcoding.
+Any NPC-item combination is representable.
+
+---
+
+## stat/*
+
+Counters. Number of helps, kills, times slept, hours played.
+
+```scheme
+(define (stat-inc key delta)
+  (cortex/write key (+ delta (or (cortex/read key) 0))))
+
+(define (stat key)
+  (or (cortex/read key) 0))
+
+;; Usage:
+(stat-inc 'stat/helps 1)
+(stat-inc 'stat/kills 1)
+(stat-inc 'stat/hours 0.25)
+
+(stat 'stat/helps)  ;; => a number
+```
+
+Stats are useful for the companion (chapter 12) — 'you have not raised
+a hand this whole time' is a stat-check.
+
+---
+
+## save/slot/N and companions
+
+See chapter 15. Slots are numbered 0-4 typically. Slot 0 is reserved
+for auto-save.
+
+```scheme
+(cortex/write 'save/slot/1 snapshot)
+(cortex/write 'save/slot/1/timestamp (current-timestamp))
+(cortex/write 'save/slot/1/name \"before the villain reveal\")
+```
+
+---
+
+## system/*
+
+Game-level metadata that doesn't belong in the story-state.
+
+```scheme
+(cortex/write 'system/last-play-timestamp (current-timestamp))
+(cortex/write 'system/game-version \"1.0.0\")
+(cortex/write 'system/quiet-mode? #f)         ;; companion muted?
+(cortex/write 'system/hints-enabled? #t)
+```
+
+Reading these on game-open lets you offer 'welcome back' greetings
+and enforce user preferences.
+
+---
+
+## log/major-events
+
+A chronological list of the biggest beats. Used for recap
+generation.
+
+```scheme
+(define (log-major-event description)
+  (let ((log (or (cortex/read 'log/major-events) '())))
+    (cortex/write 'log/major-events
+      (cons (list (current-timestamp) description) log))))
+
+;; Usage — call once per significant scene:
+(log-major-event \"healed the fox\")
+(log-major-event \"met the shopkeeper Rowan\")
+(log-major-event \"burned the letter\")
+```
+
+The list grows chronologically, newest first. `ai/summarize` can turn
+this into a 'previously on…' recap.
+
+Do NOT log every choice here. Reserve for beats a player would
+remember — reunions, revelations, deaths, decisions the player
+actively made.
+
+---
+
+## dialogue-log/<npc>
+
+Per-NPC reply history.
+
+```scheme
+(define (dlog-key npc)
+  (string->symbol (string-append \"dialogue-log/\" (symbol->string npc))))
+
+(define (log-reply npc reply-label)
+  (let ((log (or (cortex/read (dlog-key npc)) '())))
+    (cortex/write (dlog-key npc) (cons reply-label log))))
+
+;; Usage:
+(log-reply 'mira \"Tired, actually.\")
+
+;; Later:
+(let ((last (car (or (cortex/read (dlog-key 'mira)) '(\"\")))))
+  (case last
+    ((\"Tired, actually.\")
+     \"MIRA: 'Are you still tired? Let me put a kettle on.'\")
+    ((\"I'd rather not say.\")
+     \"MIRA: 'You said last time you'd rather not — no pressure now either.'\")))
+```
+
+---
+
+## customer/* — for operator carts
+
+If you're an operator building shop carts, `customer/*` keys hold
+per-customer preferences that carry across visits.
+
+```scheme
+(cortex/write 'customer/visits (+ 1 (or (cortex/read 'customer/visits) 0)))
+(cortex/write 'customer/prefers 'tea)
+(cortex/write 'customer/last-purchase 'skillet)
+(cortex/write 'customer/fav-color 'green)
+(cortex/write 'customer/purchases
+  (cons 'skillet (or (cortex/read 'customer/purchases) '())))
+```
+
+Cortex handles per-user isolation automatically — when the runtime's
+runtime writes `customer/visits`, it's scoped to the logged-in
+customer, not the operator or the previous customer. You just write;
+scoping is handled.
+
+---
+
+## Starter template
+
+Copy this into your game as a starting point.
+
+```scheme
+;; Cortex initialization for a new narrative game.
+(define (init-game)
+  (unless (cortex/read 'system/game-started?)
+    (cortex/write 'system/game-started? #t)
+    (cortex/write 'system/first-play-timestamp (current-timestamp))
+    (cortex/write 'inventory '())
+    (cortex/write 'past-choices '())
+    (cortex/write 'log/major-events '())
+    (cortex/write 'system/hints-enabled? #t)
+    (cortex/write 'system/quiet-mode? #f)))
+
+;; Call once at game-open.
+(init-game)
+```
+
+Now your game has all the key namespaces set to empty starting
+values. Every subsequent scene reads and writes into this schema.
+
+---
+
+## What NOT to put in Cortex
+
+- Ephemeral animation state (use `world/snapshot` if you need to save it)
+- Raw text of scenes (that's in code, not memory)
+- Anything that changes 60 times per second (that's a runtime variable)
+
+Cortex writes have some cost. Do not `cortex/write` inside `on-frame`
+unless you have a specific reason. Write at scene boundaries and at
+significant player decisions. Read whenever you need to.
+
+---
+
+## Summary
+
+Namespaces: state/*, inventory, past-choices, reputation/*, seen/*,
+gift/<npc>/<item>?, stat/*, save/slot/N, system/*, log/major-events,
+dialogue-log/<npc>, customer/*.
+
+Booleans get ?-suffix. Symbols do not. Counters use whole numbers.
+Reputation is signed. Stats are non-negative. Save slots are
+numbered from 0.
+
+Do this once, at the start of your game. Everything downstream gets
+easier.")

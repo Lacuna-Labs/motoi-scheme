@@ -1,0 +1,158 @@
+(chapter
+  :book "Book of Composition"
+  :chapter-number 13
+  :title "Save and load — the .slat cart file format"
+  :audience "programmer-fluent-in-other-languages"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-of-composition-author-agent"
+     :cli-verified #t)
+  :prose
+"# Chapter 13 — Save and load
+
+Save writes a canvas to a file. Load reconstructs a canvas from a file. Both operations are the composer's disk boundary — they extend the round-trip beyond memory into the file system.
+
+## 13.1 The two verbs
+
+```
+(composer/save canvas path)      ;; -> path
+(composer/load path)             ;; -> canvas
+```
+
+Both are documented in `engineering/COMPOSER-1.0.ENG.slat`. Both are shipping. Both were run through `bin/motoi eval` to confirm they work.
+
+## 13.2 Save
+
+`composer/save` takes a canvas and a file path. It calls `composer/emit` internally to produce the form, writes the form as Scheme text to the file, and returns the path.
+
+Verified:
+
+```scheme
+(composer/save (composer/canvas (list :bind '(cart/main))
+                 (composer/slider :label \"BPM\" :bind '(cart/main :bpm) :min 60 :max 240 :step 1))
+               \"/tmp/test-canvas.slat\")
+;; => \"/tmp/test-canvas.slat\"
+```
+
+Contents of `/tmp/test-canvas.slat`:
+
+```
+(composer/canvas (:bind (quote (cart/main))) (composer/slider :label \"BPM\" :bind (quote (cart/main :bpm)) :min 60 :max 240 :step 1 :value 60))
+```
+
+One line. Every widget declaration compacted. The file is valid Scheme.
+
+## 13.3 Load
+
+`composer/load` reads the file, parses it, and returns a canvas record. If the file contains a `(composer/canvas ...)` form, the load reconstructs the canvas with all children. If no canvas form is present, load returns an empty canvas with the file's forms in its `body` field.
+
+Verified:
+
+```scheme
+(composer/load \"/tmp/test-canvas.slat\")
+;; => canvas record with one slider child
+```
+
+## 13.4 What lives on disk
+
+A saved composer file is a normal `.slat` file with two conceptual parts:
+
+1. The TARGET FORMS the widgets compose (a `(sequence ...)` for music, a `(sprite/from-grid ...)` for a sprite, etc.). Written as top-level `(define ...)` forms or standalone data.
+2. A trailing `(composer/canvas ...)` declaration that documents the widgets that produced the forms.
+
+Both are Scheme. Both are readable. Either can be edited by hand.
+
+The composer file the shipping `composer/save` writes contains ONLY the canvas declaration, not the target forms. This is by design for v1.0: the canvas declaration is what the composer reconstructs; the target forms live wherever your cart writes them (top-level `(define ...)` in the cart file, or a separate data file).
+
+## 13.5 A round-trip check
+
+The full save-load-emit cycle:
+
+```scheme
+(define c
+  (composer/canvas (list :bind '(cart/main))
+    (composer/slider :label \"BPM\" :bind '(cart/main :bpm) :min 60 :max 240 :step 1)))
+
+(composer/save c \"/tmp/rt.slat\")
+;; => \"/tmp/rt.slat\"
+
+(define c2 (composer/load \"/tmp/rt.slat\"))
+;; => canvas record
+
+(composer/emit c2)
+;; => same form as (composer/emit c)
+```
+
+The reloaded canvas emits the same form the original emitted. Round-trip closed over disk.
+
+## 13.6 Multi-file carts (v2 direction)
+
+The v2 code-distribution proposal introduces multi-file cart directories:
+
+```
+snake-classic/
+  cart.slat       ; header + imports
+  logic.slat      ; game logic
+  sprites.slat    ; asset records
+  song.slat       ; music
+  composer.slat   ; composer canvas declarations
+```
+
+A cart with `:multi-file #t` in its header signals that the runtime should load all files in the directory as one cart. The composer file becomes just the canvas declarations; the target forms live in their own topic files.
+
+v1.0 ships single-file carts. Multi-file is a v2 direction; nothing about the round-trip changes when it lands.
+
+## 13.7 Cart header (v2 direction)
+
+The v2 spec proposes a `(cart ...)` header at the top of every cart:
+
+```
+(cart
+  :name          \"snake-classic\"
+  :author        \"alfred\"
+  :version       \"1.2.0\"
+  :parent        (:from motoi.cart/nesbox/snake@0.9.0 :diverged-at 2026-07-14)
+  :verbs-used    (display for-each range sprite/blit input/read)
+  :audience      :kid
+  :one-line      \"Snake, but the food fights back.\")
+```
+
+The header carries metadata: author, version, parent (for forks), verbs used, audience, one-line description. This is where publishing (Chapter 15) reads from.
+
+v1.0's `composer/save` does not write a header automatically; you can prepend one by hand if you plan to publish. v2 will add the header on save.
+
+## 13.8 Hand-editing a saved file
+
+The single most important use of the save/load pair is hand-editing.
+
+Save a canvas. Open the file. Change any number, any string, any symbol. Save. Reload. The canvas reflects your edit.
+
+Change a slider's `:max` from 240 to 1000 by editing the number in the file. Reload. The slider now accepts up to 1000.
+
+Change a toggle's `:value #f` to `:value #t`. Reload. The toggle boots on.
+
+Change a color picker's `:value 'black` to `:value 'crimson`. Reload. The picker shows crimson.
+
+Every hand-edit is legal because the file is Scheme and the composer's load re-parses it fresh.
+
+## 13.9 What load does not do
+
+`composer/load` does NOT execute the target forms. It parses the file and looks for a `(composer/canvas ...)` form. Everything else in the file — top-level `(define ...)`, other cart forms — is stored in the canvas's `body` field but not evaluated.
+
+If you want the whole cart to run, use `bin/motoi run path/to/cart.slat`. That evaluates every top-level form. `composer/load` is specifically for reconstructing a widget graph, not running a cart.
+
+## 13.10 What to remember from this chapter
+
+- `composer/save canvas path` writes the emitted form to disk. Returns the path.
+- `composer/load path` reads the file, parses it, reconstructs the canvas.
+- The disk file is Scheme text. Grep-friendly. Diff-friendly. Editable by hand.
+- Round-trip closes over disk: save then load then emit produces the same form the original canvas emitted.
+- Multi-file carts and cart headers are v2 directions; v1.0 ships single-file carts without automatic headers.
+- Hand-editing the file is legitimate and expected. The composer parses fresh on load.
+
+Chapter 14 covers TUI mode — running the composer in a terminal.
+")

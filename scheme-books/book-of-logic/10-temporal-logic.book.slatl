@@ -1,0 +1,364 @@
+(dialect :applies ("motoi" "sakura") :note "Default: applies to both dialects.")
+
+(chapter
+  :book "Book of Logic"
+  :chapter-number 10
+  :title "Temporal Logic and Little Model Checkers"
+  :dialect "sakura"
+  :audience :adult
+  :content-rating :G
+  :author-lane "the-engineer-book-of-logic-2026-07-16"
+  :training-eligible #t
+  :confidentiality "public"
+  :voice "sakura-teaching + gentle-formalist"
+  :classical-anchors ("Pnueli — The Temporal Logic of Programs (1977)"
+                      "Clarke-Emerson-Sistla — Automatic Verification of Finite-State Concurrent Systems (1986)"
+                      "Baier-Katoen — Principles of Model Checking (2008)"
+                      "Manna-Pnueli — The Temporal Logic of Reactive and Concurrent Systems")
+  :prose
+"# Chapter 10 — Temporal Logic and Little Model Checkers
+
+Where worlds become moments in time, and where a small algorithm
+verifies that a system does the right thing forever.
+
+Modal logic, as chapter 9 set up, has worlds and an accessibility
+relation. Interpret the worlds as *moments in time* and the relation as
+*is a possible next moment*, and you get *temporal logic*.
+
+Temporal logic was invented by Arthur Prior in the late 1950s. Amir
+Pnueli's 1977 paper *The Temporal Logic of Programs* opened the door to
+computer science, and the field of *model checking* took off in the
+1980s. Today, temporal-logic model checkers routinely verify hardware
+designs, communication protocols, cryptographic proofs, and
+distributed algorithms. They catch bugs no test suite would find, and
+they have saved billions of dollars by catching design flaws before
+silicon was cut.
+
+We are going to build a *very* small temporal-logic model checker in
+Scheme. It handles a fragment of *Linear Temporal Logic* (LTL). It
+takes a finite-state transition system and a formula and answers *does
+every execution of the system satisfy the formula?*.
+
+## Two flavours: linear vs branching time
+
+There are two schools.
+
+**Linear-time logic (LTL)** treats time as a single unbranching line.
+Every state has exactly one next state. Formulas talk about the sequence
+of states along that line. Pnueli's original setting.
+
+**Branching-time logic (CTL, CTL*)** treats time as a tree. Every state
+can branch into multiple possible futures. Formulas can talk about
+*all* futures or *some* future. Clarke-Emerson's original setting.
+
+The two are incomparable in expressive power: some things one can say
+that the other cannot. LTL is arguably more intuitive; CTL is more
+computationally tractable in some ways. Modern model checkers usually
+support both.
+
+We will implement LTL for its intuitive shape. CTL is a straightforward
+adaptation once the pattern is clear.
+
+## LTL operators
+
+Standard propositional connectives, plus:
+
+- `X φ` — *next*, φ holds at the next moment.
+- `F φ` — *finally* (or *eventually*), φ holds at some future moment.
+- `G φ` — *globally* (or *always*), φ holds at every future moment.
+- `φ U ψ` — *until*, φ holds until at some point ψ holds.
+
+The dualities:
+
+- `F φ = true U φ`
+- `G φ = ¬ F ¬ φ`
+
+So you could get away with `X` and `U` alone; the others are shorthand.
+
+Read informally:
+
+- `G (request → F response)` — *whenever a request is issued, a response
+  eventually comes*. Liveness.
+- `G ¬ (writer_1 ∧ writer_2)` — *never two writers active at once*.
+  Safety.
+- `¬ (F crash)` — *never crashes*. Equivalent to `G ¬ crash`.
+
+Every reactive-system correctness property is expressible in this
+language or a small extension of it.
+
+## Transition systems
+
+A finite-state transition system is:
+
+    S = (states, initial-states, transitions, labelling)
+
+Where:
+- states is a finite set;
+- initial-states ⊆ states;
+- transitions ⊆ states × states (the *next-state* relation);
+- labelling maps each state to a set of atomic propositions that hold there.
+
+```scheme
+(define elevator-system
+  '((:states        (floor-1 floor-2 floor-3))
+    (:initial       (floor-1))
+    (:transitions   ((floor-1 floor-2) (floor-2 floor-1) (floor-2 floor-3)
+                     (floor-3 floor-2)))
+    (:labels        ((floor-1 . (at-1 not-moving))
+                     (floor-2 . (at-2 not-moving))
+                     (floor-3 . (at-3 not-moving))))))
+```
+
+Three states, six transitions. A tiny elevator that moves between
+floors 1, 2, and 3 but does not skip floors.
+
+## LTL semantics
+
+LTL is interpreted over *paths* — infinite sequences of states
+respecting the transition relation. Write `π = s_0, s_1, s_2, ...` for
+a path, and `π_i` for `s_i, s_{i+1}, ...` — the suffix starting at
+position i.
+
+    π ⊨ P            iff  P is in labelling(s_0)
+    π ⊨ ¬ φ          iff  not (π ⊨ φ)
+    π ⊨ φ ∧ ψ        iff  (π ⊨ φ) and (π ⊨ ψ)
+    π ⊨ X φ          iff  π_1 ⊨ φ
+    π ⊨ F φ          iff  there exists i ≥ 0 with π_i ⊨ φ
+    π ⊨ G φ          iff  for all i ≥ 0, π_i ⊨ φ
+    π ⊨ φ U ψ        iff  there exists i ≥ 0 with π_i ⊨ ψ and
+                          for all 0 ≤ j < i: π_j ⊨ φ
+
+A *system* satisfies a formula if *every path from every initial state*
+satisfies it. This *for-all-paths* is what makes model checking hard —
+you must consider every execution.
+
+## Checking safety properties directly
+
+A *safety property* asserts that *something bad never happens*: `G ¬
+bad`. To check this, we enumerate reachable states and verify none
+satisfy `bad`. Simple graph search.
+
+```scheme
+(define (reachable-states system)
+  (let ((initial (cdr (assq :initial system)))
+        (edges   (cdr (assq :transitions system))))
+    (let loop ((frontier initial)
+               (visited  '()))
+      (if (null? frontier)
+          visited
+          (let* ((s (car frontier))
+                 (new-visited (if (member s visited)
+                                  visited
+                                  (cons s visited)))
+                 (successors (map cadr
+                                  (filter (lambda (e)
+                                            (and (eq? (car e) s)
+                                                 (not (member (cadr e) new-visited))))
+                                          edges))))
+            (loop (append (cdr frontier) successors) new-visited))))))
+
+(define (atomic-holds? state atomic-prop system)
+  (let ((labels (cdr (assq :labels system))))
+    (member atomic-prop (cdr (assq state labels)))))
+
+(define (check-safety system atomic-prop)
+  ;; True iff atomic-prop is FALSE at every reachable state.
+  (every (lambda (s) (not (atomic-holds? s atomic-prop system)))
+         (reachable-states system)))
+```
+
+Run it:
+
+```scheme
+(check-safety elevator-system 'at-4)
+;; => #t  ; the elevator never reaches floor 4 (it does not exist)
+
+(check-safety elevator-system 'at-2)
+;; => #f  ; the elevator does reach floor 2.
+```
+
+This is the seed of model checking. Real checkers do this over billions
+of states using symbolic techniques (BDDs, SAT). Our version handles
+tens of states, which is plenty for a book.
+
+## Checking full LTL: the automaton approach
+
+For the full temporal fragment we need a smarter technique. The
+classical approach:
+
+1. Translate the formula ¬φ into a *Buchi automaton* — a finite
+   automaton over infinite words that accepts exactly the sequences
+   satisfying ¬φ.
+2. Take the product of this automaton with the transition system.
+3. Check whether the product has an accepting infinite path (a cycle
+   passing through an accepting state).
+
+If yes, the system has a path violating φ. If no, φ holds.
+
+The full Buchi construction is intricate — it fills a chapter of
+Baier-Katoen. Our small checker will handle a fragment: formulas of the
+form `G φ` and `F φ` where φ is propositional. These cover most safety
+and simple liveness properties and are checkable with modest algorithms.
+
+```scheme
+(define (eval-ltl-simple formula system)
+  ;; Handles: propositional | (G prop) | (F prop) | (not prop)
+  (cond
+    ((symbol? formula)                             ; atomic proposition
+     (every (lambda (s) (atomic-holds? s formula system))
+            (cdr (assq :initial system))))
+    ((eq? (car formula) 'G)
+     ;; Every reachable state satisfies the inner formula.
+     (every (lambda (s) (atomic-holds? s (cadr formula) system))
+            (reachable-states system)))
+    ((eq? (car formula) 'F)
+     ;; Some reachable state satisfies the inner formula.
+     (any (lambda (s) (atomic-holds? s (cadr formula) system))
+          (reachable-states system)))
+    ((eq? (car formula) 'not)
+     (not (eval-ltl-simple (cadr formula) system)))))
+
+(eval-ltl-simple '(G not-moving) elevator-system)
+;; => #t (every state has not-moving in its labelling).
+
+(eval-ltl-simple '(F at-3) elevator-system)
+;; => #t (floor-3 is reachable).
+```
+
+Real LTL is much richer than this, but the shape of the checker is
+right: reduce the formula to statements about the reachable-state graph
+and answer them by search.
+
+## Fairness
+
+One of the subtle points in temporal-logic verification: *fairness*
+assumptions. Without them, many verifications fail on infinite paths
+that get *stuck* on transitions that would take them to accepting
+states. A *fair* path is one that visits every enabled transition
+infinitely often. Model checkers let you specify fairness conditions:
+
+- *Strong fairness on transition t*: if t is enabled infinitely often,
+  it is taken infinitely often.
+- *Weak fairness on t*: if t is continuously enabled from some point
+  on, it is taken eventually.
+
+Modelling systems with fairness lets you say *the scheduler is fair*,
+which is required for most liveness proofs of concurrent systems.
+
+## What real model checkers verify
+
+Modern tools like SPIN, NuSMV, TLA+, and mCRL2 have found bugs in:
+
+- Cache coherence protocols in hardware.
+- Communication protocols (TCP, cryptographic key exchange).
+- Distributed consensus algorithms (Paxos, Raft).
+- Bus arbiters in embedded systems.
+- Elevator controllers, traffic light systems, medical device firmware.
+
+The pattern: model your system as a finite-state (or bounded-state)
+machine; write correctness properties as temporal-logic formulas; run
+the checker; get back either *satisfied* or *counter-example trace*.
+The counter-example is the killer feature — the tool does not just say
+*your system is broken*, it shows you *the exact sequence of events
+that leads to the failure*.
+
+## State explosion
+
+The bane of model checking. A system with n components each having 10
+possible internal states has 10^n global states. At n=20 that is 10^20
+states — beyond direct enumeration.
+
+The response has been decades of research on how to represent large
+state spaces symbolically:
+
+- **BDDs (Binary Decision Diagrams).** Compact canonical representation
+  of boolean functions. Enables reachability computation over sets of
+  states rather than individual states.
+- **SAT-based model checking.** Encode the model-checking problem as a
+  SAT instance and hand it to a modern SAT solver.
+- **Abstraction.** Replace the system with a smaller *abstract* system
+  that over-approximates its behaviour. Verify the abstract system; if
+  correct, done; if incorrect, refine the abstraction.
+- **Compositional reasoning.** Decompose the system into components,
+  verify each in isolation with assumptions about the others, then
+  combine.
+
+These techniques let modern checkers handle systems with 10^100 or more
+states routinely. The scale is genuinely impressive.
+
+## LTL vs. CTL: a small comparison
+
+The classic distinction. In LTL, path quantifiers are implicit — every
+formula is evaluated over paths. In CTL, path quantifiers are explicit:
+`A φ` (for all paths) and `E φ` (for some path).
+
+- LTL `G F P` — *P holds infinitely often on every path*.
+- CTL `A G (E F P)` — *from every reachable state, some future has P*.
+
+The first is a global liveness property. The second is a *reactivity*
+property saying we can always still reach P. These are different, and
+LTL can express the first but not the second, while CTL can express
+the second but not the first. CTL* combines both.
+
+## Model checking as proof
+
+There is a correspondence lurking here too: model checking corresponds
+to constructive proof, and finding a counter-example corresponds to
+extracting a falsifying witness. A trace showing violation is a proof
+of `¬ φ`, and its structure carries computational content.
+
+Some modern proof assistants use this: build a Buchi automaton for the
+negation of your property, do the emptiness check, and get either a
+proof of the property or an executable counter-example. This unifies
+model checking with theorem proving under the Curry-Howard umbrella.
+
+## Variations to try
+
+Extend `eval-ltl-simple` to handle the `X` (next) operator by picking a
+single successor of the current state. This requires walking the
+transition graph rather than the reachable-states set.
+
+Implement `until`: `(φ U ψ)` holds iff there is a path prefix where φ
+holds throughout and eventually ψ becomes true. This requires exploring
+paths rather than just states.
+
+Build a *counter-example* returner: instead of just `#t`/`#f`, when a
+property fails, return the sequence of states that witness the failure.
+This is the single feature that makes real model checkers so useful.
+
+## Try this
+
+Model a two-process mutual-exclusion protocol as a transition system.
+State encodes each process's phase (thinking, waiting, critical). Add
+the transitions of your favourite mutex algorithm — Peterson's, Lamport's
+bakery, or your own. Encode the safety property (no two in critical at
+once) and the liveness property (every waiter eventually enters
+critical). Run your checker. If it says safety fails, look at the
+counter-example. Many first-attempt mutex algorithms fail on the
+liveness property; only after a fairness assumption is added do they
+verify. This is a very hands-on way to feel why fairness matters.
+
+## Closing
+
+Temporal logic is modal logic where the modality is *time*. It lets us
+state and check reactive-system correctness properties. Small model
+checkers verify small systems directly; large model checkers use
+symbolic techniques to verify vast state spaces. The counter-example
+extraction makes model checking practically useful.
+
+Chapter 11 shifts to a very different logic: *linear logic*. Where
+classical logic treats propositions as timeless truths that can be
+reused freely, linear logic treats propositions as *resources* that are
+consumed by use. This turns out to be exactly what you need to reason
+about memory, capabilities, protocols, and concurrent messaging.
+"
+  :cross-refs
+    (:book-of-scheme :chapters (5 8)
+     :book-of-reason :chapters (6 8)
+     :book-of-reason-code :chapters (5 6 7)
+     :book-of-searle :chapters (3))
+  :verbs-used ("cond" "eq?" "cons" "car" "cdr" "cadr" "list" "map" "filter"
+               "every" "any" "member" "assq" "append" "null?" "not" "and" "or"
+               "define" "lambda" "let" "let*")
+  :word-count-estimate 5100
+)

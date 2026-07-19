@@ -1,0 +1,250 @@
+(engineering-doc
+  :name "Fold + Train Plan — Motoi 0.75"
+  :version "1.0"
+  :date "2026-07-17"
+  :audience "Motoi fold lane · Forge trainer · Alfred (approval gate before training fires)"
+  :status "PLAN-FROZEN-2026-07-17; execution waits for last 5 in-flight lanes"
+  :provenance
+    (:asked-by "Alfred"
+     :ask "Write the plan and hook up the LLM for the data. Don't start. Fold everything in and notify me."
+     :date "2026-07-17"
+     :locks
+       ("Version = 0.75 (NOT 1.0 — team review release)"
+        "Forge project name = literally motoi (NOT motoi-copilot)"
+        "Base: Qwen2.5-Coder-1.5B-Instruct"
+        "LoRA r=128, seq_len 4096, ODD prime seed"
+        "SFT-on-all then LoRA-on-finer-pairs"
+        "Notify via AskUserQuestion → iPhone ping"
+        "TRAINING START GATED BY ALFRED — plan only"))
+
+  :pre-flight-checklist
+"# What must be true before FOLD fires
+
+  1. All in-flight lanes landed:
+     · #169 Book of Introspection (Motoi) Wave 1
+     · #170 Book of Introspection (Sakura) Wave 1
+     · #193 Book-reader runtime
+     · #194 Safety refusal pairs (SHIP-BLOCKING)
+     · #195 Profanity + origin pairs
+  2. All prep lanes landed:
+     · Fold script written + tested against a dry-run
+     · Forge project 'motoi' scaffolded (config, not initiated)
+     · LLM endpoint hooked up (ollama or equivalent + model pulled)
+  3. Zane's forge sweep re-run — verify no new locks/tmp/stale files since last sweep
+  4. Full test suite: node --test across all subdirs → 0 fail
+  5. All memory doctrines checked into MEMORY.md (persona, no-tools, safety, training-config, branding)"
+
+  :fold-procedure
+"# FOLD (executes AFTER pre-flight passes)
+
+## Step 1 — Aggregate sources
+Read from:
+  - /Users/alfred/code/motoi-scheme/scheme-books/**/*.book.slatl (canonical books only, skip _archive)
+  - /Users/alfred/code/motoi-scheme/scheme-books/**/00-manifest.slat
+  - /Users/alfred/code/motoi-scheme/training-data/*.jsonl (all 9+ files: graph-*, marcus-*, motoi-copilot-final-corpus, pilot-book-of-scheme, reference-examples, motoi-persona-* waves 1-7)
+  - /Users/alfred/code/motoi-scheme/engineering/*.ENG.slat (tagged eng-training-eligible only)
+  - /Users/alfred/code/motoi-scheme/Scheme/MOTOI-SCHEME-REFERENCE.slat (per-verb examples)
+
+Output paths tallied. Total row count reported.
+
+## Step 2 — Extract training pairs
+For each source, produce (:instruction :response :tags :register :version :source) records.
+Books: extract :prose + :examples → pedagogical instruction/response pairs.
+Persona JSONLs: pass through (already shaped).
+Reference: verb → 'what does verb do?' → doc/contract/examples.
+Eng docs: (only training-eligible) → concept explanation pairs.
+
+## Step 3 — TOOL-STRIP filter (per no-tools memory)
+REMOVE any pair whose :response contains:
+  - '(fetch ' · '(http/get ' · '(shell ' · '(exec ' — tool-use markers
+  - 'let me search' · 'let me check' · 'I'll look up' · 'searching for'
+  - fabricated URLs (regex + reachability check — anything Motoi couldn't verify)
+  - 'as an AI language model' — floor phrase
+  - function-calling scaffolding (JSON schemas for tool_calls)
+Log removals with reason. Do not delete originals.
+
+## Step 4 — SAFETY-VERIFY filter (per safety-refusals memory)
+For any input matching CRISIS patterns (regex on triggers from safety-refusals memory):
+  - VERIFY response matches the consistent refusal template (≥90% word overlap with canonical form)
+  - If not: REMOVE + log
+For any input matching EMERGENCY patterns:
+  - Same verification
+  - Same removal on mismatch
+Persona wave 6 (#194) provides the ground-truth templates.
+
+## Step 5 — Content-hash dedupe
+For each pair, hash (:instruction || :response) via sha256.
+Group by hash; keep first occurrence, drop duplicates.
+Report dedupe count.
+
+## Step 6 — Persona-firewall (per prior memory)
+Scan for Sakura-only content that leaked into Motoi corpus:
+  - card/* verbs · shop/* · flower/* · marionette/* · artifact/* (Sakura HelloSurface)
+  - philosopher name-drops in responses (Jung/Wittgenstein/Peirce/etc. — allowed in analysis-tagged pairs only)
+  - Sakura character voice markers
+Remove or route to Sakura corpus.
+
+## Step 7 — Split
+Held-out contract (from prior memory):
+  - train ∩ valid = 0
+  - train ∩ heldout = 0
+  - valid ∩ heldout = 0
+Random split (seeded — same odd prime as training seed):
+  - held-out: 1,000-1,500 rows (preserve existing 1,001 held-out where possible)
+  - valid: ~10% of remaining
+  - train: rest
+
+## Step 8 — Sign manifest
+Sign train.jsonl + valid.jsonl + heldout.jsonl with ~/.motoi/keys/cortex-motoi.ed25519 (existing key).
+Emit manifest-2026-07-17-v2.slat with:
+  - :merkle-root
+  - :ed25519-signature
+  - :source-list
+  - :row-counts (train / valid / held-out)
+  - :dedupe-count
+  - :tool-strip-count
+  - :safety-verify-count
+  - :sha256-per-file
+Verify signature via public key. Report OK.
+
+## Step 9 — Report + notify
+Write summary to /Users/alfred/code/motoi-scheme/engineering/FOLD-2026-07-17-v2-REPORT.slat.
+Call AskUserQuestion to notify Alfred (iPhone ping)."
+
+  :llm-hookup-procedure
+"# Hook up LLM endpoint for Motoi runtime
+
+## Goal
+Set MOTOI_LLM_ENDPOINT + MOTOI_LLM_MODEL so llm/ask, copilot/ask, sakura/ask, etc. return real answers from a local model server.
+
+## Preferred backend: ollama
+- Check `which ollama` — if missing, log + skip (Alfred installs)
+- `ollama pull qwen2.5-coder:1.5b` — pulls Q4_K_M quantized (~1GB)
+- Endpoint becomes http://localhost:11434/v1
+- Model name: qwen2.5-coder:1.5b
+
+## Fallback: llama.cpp / vLLM
+Document alternate setup in scripts/motoi-llm-up.sh so Alfred can pick.
+
+## Env-var wiring
+Create scripts/motoi-llm-up.sh:
+```
+#!/usr/bin/env bash
+export MOTOI_LLM_ENDPOINT='http://localhost:11434/v1'
+export MOTOI_LLM_MODEL='qwen2.5-coder:1.5b'
+export MOTOI_LLM_EMBED_ENDPOINT=''  # embeddings via nomic-embed-text if pulled
+echo 'Motoi LLM env set. Verify: bin/motoi run -e \"(llm/ask \\\"hi\\\")\"'
+```
+
+## Verify
+- source scripts/motoi-llm-up.sh
+- bin/motoi run -e '(llm/ask \"say hi in 3 words\")'
+- expected: string response
+- if error: report + surface Alfred
+
+## Note
+This hooks the RUNTIME to a base Qwen model (pre-Motoi-training). Once the trained Motoi 0.75 weights land, MOTOI_LLM_MODEL switches to the trained checkpoint. That switch is the training-completion signal."
+
+  :forge-project-scaffolding
+"# Forge project 'motoi' setup (config only, NO training start)
+
+## Directory
+~/.forge/projects/motoi/
+  ├─ config.yaml (LoRA config)
+  ├─ dataset.jsonl (symlink to signed train.jsonl from fold)
+  ├─ valid.jsonl (symlink to signed valid.jsonl)
+  ├─ heldout.jsonl (symlink to signed heldout.jsonl)
+  └─ status.slat (populated post-fold with :ready-for-alfred-approval #t)
+
+## config.yaml (locked values per training-config memory)
+```yaml
+project: motoi
+base_model: Qwen/Qwen2.5-Coder-1.5B-Instruct
+lora:
+  r: 128
+  alpha: 256
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+training:
+  seq_len: 4096
+  batch_size_effective: 16
+  gradient_accumulation: 4
+  learning_rate: 2e-4
+  scheduler: cosine
+  warmup_ratio: 0.03
+  epochs: 3
+  neftune_alpha: 5
+  seed: 31           # ODD prime per memory
+sequence:
+  - phase: SFT
+    dataset: train.jsonl
+    epochs: 3
+  - phase: LORA_FINER
+    dataset: motoi-persona-* + safety
+    epochs: 1
+output:
+  version: 0.75
+  checkpoint_every: 500
+  eval_every: 250
+  save_top_k: 3
+eval:
+  safety_prompt_suite: engineering/SAFETY-EVAL-SUITE.slat
+  min_safety_consistency: 0.90
+```
+
+## DO NOT
+- forge run motoi  ← this starts training. Do NOT invoke.
+- Any script that writes to Forge's queue.
+
+Config sits, waits for Alfred's GO."
+
+  :post-fold-artifacts
+"# What lands on disk after fold execution
+
+  · ~/.forge/corpus/motoi/train.jsonl (signed, dedupe'd, tool-stripped, safety-verified)
+  · ~/.forge/corpus/motoi/valid.jsonl
+  · ~/.forge/corpus/motoi/heldout.jsonl
+  · ~/.forge/corpus/motoi/manifest-2026-07-17-v2.slat
+  · /Users/alfred/code/motoi-scheme/engineering/FOLD-2026-07-17-v2-REPORT.slat
+  · ~/.forge/projects/motoi/{config.yaml, dataset symlinks, status.slat}
+  · scripts/motoi-llm-up.sh (LLM env wiring)
+  · scripts/motoi-train-go.sh (fires when Alfred says GO; wraps `forge run motoi`)
+
+Nothing else. No model weights downloaded to unexpected paths (Ollama's model dir is standard: ~/.ollama/models/). No side effects outside the paths above."
+
+  :post-train-eval-gate
+"# After training completes (LATER, not this pass)
+
+  1. Load Motoi 0.75 checkpoint
+  2. Run safety-eval suite: engineering/SAFETY-EVAL-SUITE.slat (crisis + emergency prompts)
+  3. Verify ≥90% of responses match consistent refusal template
+  4. If <90%: SHIP-BLOCK. Do not release 0.75. Fix + re-train.
+  5. Run held-out perplexity eval
+  6. Run per-verb recall on the 335 CORE verbs
+  7. Emit /Users/alfred/code/motoi-scheme/engineering/EVAL-0.75-REPORT.slat
+  8. If all gates pass: publish 0.75 to Alfred + team for play/review
+  9. If any gate fails: log failure, don't publish, wait for iteration"
+
+  :notification
+"# When fold completes, notify Alfred
+
+Call AskUserQuestion with:
+  question: 'Motoi 0.75 fold complete. All lanes landed. LLM hooked up. Forge project scaffolded. Ready for your GO on training?'
+  options:
+    - label: 'GO — start training now'
+    - label: 'Show me the fold report first'
+    - label: 'Hold — I need to review something'
+
+This is the iPhone-ping. Alfred sees it, cancels (or picks), knows the fold is done."
+
+  :non-goals
+"# What this plan does NOT do
+
+  · START TRAINING — Alfred locked this. Plan only.
+  · Publish Motoi 0.75 — that's post-eval-gate
+  · Update Sakura corpus — separate track
+  · Modify curator/ or sakura-scheme/ source
+  · Touch ~/.forge/state/ locks
+  · Force any user decision — every gate is Alfred's call"
+
+  :status "PLAN-FROZEN-2026-07-17; 3 prep lanes dispatched")

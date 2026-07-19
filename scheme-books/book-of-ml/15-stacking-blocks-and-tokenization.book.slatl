@@ -1,0 +1,301 @@
+(chapter
+  :book "Book of ML"
+  :chapter-number 15
+  :title "Stacking blocks and tokenization"
+  :audience "kid-and-adult operators"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-19"
+     :sources ((:paper "Sennrich, Haddow, Birch 2015 — Neural Machine Translation of Rare Words with Subword Units"
+                :arxiv "1508.07909"
+                :used-for "BPE algorithm")
+               (:paper "Vaswani et al. 2017 — Attention Is All You Need"
+                :arxiv "1706.03762"
+                :used-for "stacked transformer architecture")))
+  :prose
+"# Chapter 15 — Stacking blocks and tokenization
+
+Two final pieces before chapter 16 assembles the tiny LLM.
+
+**Stacking.** A single transformer block is one 'floor' of the tower.
+Real models stack many blocks — 12 for BERT-base, 96 for GPT-3. This
+chapter shows how to stack them and why deeper is usually better up
+to a point.
+
+**Tokenization.** Whitespace tokenization (chapter 11) is fine for
+demonstration but fails at scale — rare words become 'unknown,'
+compound words don't split, punctuation is a mess. Real language
+models use subword tokenization. The most common algorithm is Byte
+Pair Encoding (BPE), which we build here in a small form.
+
+## Stacking blocks
+
+Stacking is just function composition. Each block takes a sequence
+of vectors and returns a sequence of vectors of the same shape.
+Compose them.
+
+```
+(define (stacked-transformer blocks embeddings)
+  (fold (lambda (block acc) (block acc))
+        embeddings
+        blocks))
+```
+
+`blocks` is a list of block functions. Each is a closure over its
+own weights. We fold — apply them one at a time in sequence.
+
+## Problem 1 — Two stacked blocks
+
+Not runnable end-to-end here because the block functions need many
+weight matrices, but the shape.
+
+```
+;; Assume make-block builds a full transformer block (chapter 13) as
+;; a closure. Then stacking is trivial.
+
+(define block1 (make-block ...weights1...))
+(define block2 (make-block ...weights2...))
+(define block3 (make-block ...weights3...))
+
+(define transformer
+  (lambda (embeddings)
+    (block3 (block2 (block1 embeddings)))))
+
+;; Or as a fold:
+(define transformer
+  (lambda (embeddings)
+    (fold (lambda (b acc) (b acc))
+          embeddings
+          (list block1 block2 block3))))
+```
+
+Read the shape. The output of block1 becomes the input to block2.
+Same for block2 → block3. Since blocks preserve the (seq_len,
+embed_dim) shape, they can be stacked arbitrarily.
+
+## Why deeper helps
+
+Each block can mix information across positions ONCE (in its
+attention layer) and transform per-position ONCE (in its feed-forward
+layer). With more blocks, information can flow further and be
+transformed more times.
+
+Empirically: a 1-block transformer is decent at short local patterns.
+A 12-block transformer is much better at longer-range dependencies. A
+96-block transformer can hold context over thousands of tokens. This
+is one reason GPT-3 was so much more capable than smaller models.
+
+More depth = more compute per token, more parameters to train, more
+data required. Depth is not free. The sweet spot depends on data
+budget and hardware.
+
+## Tokenization — beyond whitespace
+
+Whitespace tokenization has three problems:
+
+1. **Vocabulary explosion.** Every distinct word is a distinct token.
+   In English there are hundreds of thousands of distinct words if you
+   count all forms and typos.
+
+2. **Unknown words.** Any word not seen during training becomes an
+   [UNK] token. Rare technical terms, new slang, foreign names — all
+   [UNK].
+
+3. **Morphology loss.** 'run,' 'runs,' 'running' are three separate
+   tokens with no shared representation. The model has to learn each
+   independently.
+
+Subword tokenization fixes all three. Common words stay whole. Rare
+words split into pieces. New words are ALWAYS representable as a
+sequence of subword pieces.
+
+## Byte Pair Encoding (BPE) — the algorithm
+
+Sennrich et al. 2015 adapted BPE (originally a compression algorithm)
+for text tokenization. The idea:
+
+1. Start with a vocabulary of individual characters.
+2. Count all pairs of adjacent tokens in the training corpus.
+3. Find the most common pair. Merge it into a new token.
+4. Repeat until vocabulary reaches desired size.
+
+At tokenization time you apply the merges in the same order.
+
+## Problem 2 — BPE training on a tiny corpus
+
+Build a mini-BPE trainer. Not efficient — pedagogical.
+
+```
+(define (split-word s)
+  ;; 'cat' -> ('c' 'a' 't' '</w>')
+  (append
+    (map (lambda (i) (string (string-ref s i)))
+         (iota (string-length s)))
+    (list \"</w>\")))
+
+(define corpus
+  (list \"cat\" \"cats\" \"car\" \"cars\" \"bar\" \"bat\"))
+
+(define pieces
+  (map split-word corpus))
+;; -> ((c a t </w>) (c a t s </w>) (c a r </w>) ...)
+
+(define (pairs-in tokens)
+  ;; return list of adjacent pairs
+  (if (or (null? tokens) (null? (cdr tokens)))
+      '()
+      (cons (list (car tokens) (cadr tokens))
+            (pairs-in (cdr tokens)))))
+
+(define (count-pairs word-lists)
+  (define all-pairs (apply append (map pairs-in word-lists)))
+  ;; return an alist pair -> count
+  (fold (lambda (p acc)
+          (let ((existing (assoc p acc)))
+            (if existing
+                (map (lambda (e) (if (equal? (car e) p)
+                                     (cons p (+ (cdr e) 1))
+                                     e)) acc)
+                (cons (cons p 1) acc))))
+        '()
+        all-pairs))
+
+(define (max-pair counts)
+  (car (fold (lambda (e best) (if (> (cdr e) (cdr best)) e best))
+             (car counts) (cdr counts))))
+
+(display (max-pair (count-pairs pieces)))
+;; => the most common pair, e.g. (\"c\" \"a\") -- because c and a appear
+;; adjacent in cat, cats, car, cars.
+```
+
+Given the most common pair, we merge it. Every occurrence of that
+pair in the corpus becomes a single token. Then we recount and
+repeat.
+
+## Problem 3 — Apply a merge
+
+```
+(define (apply-merge pair word)
+  ;; Replace every occurrence of the pair with the merged token
+  (define merged (string-append (car pair) (cadr pair)))
+  (let loop ((rem word) (out '()))
+    (cond ((null? rem) (reverse out))
+          ((and (pair? rem) (pair? (cdr rem))
+                (equal? (car rem) (car pair))
+                (equal? (cadr rem) (cadr pair)))
+           (loop (cddr rem) (cons merged out)))
+          (else (loop (cdr rem) (cons (car rem) out))))))
+
+(display (apply-merge (list \"c\" \"a\")
+                      (list \"c\" \"a\" \"t\" \"</w>\")))
+;; => (\"ca\" \"t\" \"</w>\")
+```
+
+After the merge, 'ca' is one token. Now we can find the next most
+common pair — probably (ca t) — and merge again to get 'cat.' After
+enough merges, common English words are single tokens; rare words
+split into subword pieces.
+
+## Problem 4 — BPE training loop
+
+Put it together. Train BPE to build a vocabulary of size N.
+
+```
+(define (train-bpe corpus target-vocab-size)
+  ;; corpus: list of words (strings)
+  ;; return: list of merges applied in order
+  (let loop ((pieces (map split-word corpus))
+             (merges '())
+             (n 0))
+    (if (>= n target-vocab-size)
+        (reverse merges)
+        (let* ((counts (count-pairs pieces))
+               (best (if (null? counts) #f (max-pair counts))))
+          (if (or (not best) (null? counts))
+              (reverse merges)
+              (loop (map (lambda (word) (apply-merge best word)) pieces)
+                    (cons best merges)
+                    (+ n 1)))))))
+
+(display (train-bpe (list \"cat\" \"cats\" \"car\" \"cars\") 5))
+;; => a list of ~5 merges, ordered by count
+;; e.g. ((\"c\" \"a\") (\"ca\" \"t\") (\"ca\" \"r\") ...)
+```
+
+The merges are stored in ORDER. At tokenization time we apply them
+in the same order. That way 'ca' is always merged before 'cat,'
+which is important for consistency.
+
+## Problem 5 — Tokenize with a trained BPE
+
+Given a word and a list of merges, apply the merges in order.
+
+```
+(define (tokenize-bpe merges word)
+  (let loop ((tokens (split-word word)) (rest merges))
+    (if (null? rest)
+        tokens
+        (loop (apply-merge (car rest) tokens) (cdr rest)))))
+```
+
+Feed a new word (never seen in training), and BPE produces a
+tokenization — always representable because character-level tokens
+are in the base vocabulary.
+
+## For our tiny LLM
+
+BPE is overkill for chapter 16. Our tiny LLM will use a fixed
+whitespace vocabulary on a very small corpus, because the goal is to
+show the mechanics of the model, not to fight the tokenizer. In real
+GPTs, BPE (or its close relatives WordPiece and SentencePiece) is
+essential.
+
+## Capstone — A stacked-block sketch for chapter 16
+
+Preview the shape we'll assemble in the next chapter.
+
+```
+;; The plan for chapter 16:
+;;   1. Fix a small vocab from a training corpus.
+;;   2. Random-init: embedding table + positional encoding + N blocks + output projection.
+;;   3. Forward: embed, add positions, run N blocks (with causal mask), project to vocab logits.
+;;   4. Loss: for each position i, cross-entropy between logits[i] and token[i+1].
+;;   5. Backprop through everything.
+;;   6. Update.
+;;   7. Repeat.
+
+;; Sizes for a tiny model that fits in memory:
+;;   vocab_size = ~30
+;;   embed_dim  = 8
+;;   ff_hidden  = 16
+;;   heads      = 1
+;;   blocks     = 2
+;;   seq_len    = 8
+
+;; Total parameters: probably < 10,000. Trains in seconds on a
+;; short corpus.
+```
+
+That is the target. Small enough to fit in your head, big enough to
+learn something.
+
+## Why this matters
+
+Stacking is the mechanism by which transformers get 'deep.' More
+blocks = more transformation capacity = better model up to some
+limit set by data and compute. Tokenization is how symbols enter and
+exit the model — without a decent tokenizer, everything downstream
+is corrupted. Both are foundational, both usually taken for granted,
+both worth doing once by hand to see.
+
+## What's next
+
+Chapter 16. The tiny LLM. It uses everything from chapters 2-15. We
+will build it, train it on a tiny corpus, and watch it generate
+text. Not smart text — but recognizably text-shaped, produced by the
+mechanics we spent 15 chapters unpacking.
+")

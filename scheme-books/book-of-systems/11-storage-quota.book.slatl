@@ -1,0 +1,95 @@
+;; 11-storage-quota.book.slatl
+;; Book of Systems — Chapter 11
+
+(chapter
+  :book             "Book of Systems"
+  :chapter-number   11
+  :title            "Storage Quota and Gentle Degradation"
+  :audience         "Motoi Copilot + Motoi engineers"
+  :dialect          "motoi"
+  :date             "2026-07-16"
+  :status           "authored, first pass"
+  :prose
+"Disks fill up. Phones fill up faster than laptops, and small
+phones fill up faster still. The Copilot needs a plan for what
+happens when the write it wanted to make has nowhere to go. The
+plan is called **gentle degradation**, and this chapter walks
+through it.
+
+The runtime does not expose a `free-space` verb. There is no
+`disk/available` or `sys/quota`. The Copilot cannot ask the OS
+how much room is left. What it can do is:
+
+- Impose its own soft quotas on the areas it controls.
+- Handle a failed write cleanly.
+- Escalate when the write is important and the space really is
+  gone.
+
+The soft quotas the Copilot enforces on itself:
+
+- **Cache:** 50 MB default (Chapter 6). Prune LRU on write.
+- **Logs:** 15 MB default (Chapter 7). Rotate on size.
+- **Cortex:** no fixed cap, but the Copilot keeps a count and
+  a rolling byte total, and warns the user via escalation when
+  cortex passes 100 MB.
+- **Artifacts:** each artifact writes its size on close; the
+  Copilot tracks the running total and asks the user before
+  writing anything above a per-artifact ceiling (default 10 MB
+  for a single file).
+
+Sample write with size guard:
+
+```scheme
+(define ceiling-bytes 10000000)   ; 10 MB per artifact
+
+(define (motoi/write-artifact bytes name)
+  (if (> (bytevector-length bytes) ceiling-bytes)
+      (escalate 'large-artifact-write name (bytevector-length bytes))
+      ;; The actual write is a host-provided verb.
+      ;; ... (artifact/save name bytes) ...
+      'ok))
+```
+
+That code refuses to save a large artifact by itself; it hands
+control up to the host, which asks the user. The user might say
+yes and the write goes through. The user might say no and the
+write returns `'refused`. Either way, the decision belonged to
+the person whose disk it is.
+
+Failed writes get honest handling. If the SLAT layer returns an
+error indicating no space (the exact error object is host-shape),
+the Copilot does two things:
+
+1. It does not retry blindly. The disk is not going to gain
+   space in the next millisecond.
+2. It logs the failure (if the log write itself succeeds — see
+   the loop below), and escalates.
+
+The delicate case: what if the log write also fails because the
+disk is full? The Copilot holds a small in-memory ring buffer of
+the last few log lines, and includes those in the escalation
+payload. The host receives the escalation with the buffered
+lines even if the disk never accepted a log write. This is one
+of the few cases where the Copilot admits it may not persist a
+piece of information, and it chooses honesty over false records.
+
+Gentle degradation means: **do less, do it explicitly, and do
+not hide the reduced service.** If the cortex has grown large
+and the Copilot is trimming search radius to keep answers fast,
+say so:
+
+```scheme
+(display \"Cortex is large; searching most recent 10000 entries.\")
+(newline)
+```
+
+If cache has been pruned and a lookup will re-render, say so.
+If the last write did not persist, say so. The user is on a
+device with finite room. They can help, but only if the
+Copilot tells them what is going on.
+
+The Copilot does not, ever, silently drop user data to save
+space. That would betray the trust that lets the room exist.
+The Copilot may **hesitate** to write user data if the write
+looks large, and it does that by escalating. But it does not
+drop.")

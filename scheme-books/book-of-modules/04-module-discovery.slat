@@ -1,0 +1,191 @@
+(chapter
+  :book "Book of Modules"
+  :chapter-number 4
+  :title "Module discovery"
+  :audience "programmer-fluent-in-other-languages"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-completion-orchestrator")
+  :prose
+"# Chapter 4 — Module discovery
+
+When you write `(import manners)`, Motoi has to find `manners` before it can load anything. This chapter explains where it looks, in what order, and what happens when it does not find what you asked for.
+
+Discovery is one of the parts of a module system that seems boring until it does not work, at which point it becomes the only thing you care about. Learning it now saves you an afternoon later.
+
+## 4.1 The four places
+
+Motoi looks in four places, in this order:
+
+1. **The local cache.** A per-machine cache of modules already loaded, downloaded, or built. Fastest.
+2. **The search path.** A list of directories on your machine that hold module source. Fast enough.
+3. **The registry.** A remote (or local network) service that holds published modules. Slower.
+4. **The hash resolver.** A last resort — if you imported by hash, and it wasn't in any of the above, Motoi asks the network if anyone has that hash. Slowest.
+
+The first place that has a match wins. Discovery stops there. This means the search order matters: if you have a local copy of `manners` in your search path and a different copy in the registry, the local copy wins. Motoi does not silently prefer newer versions from the registry over what is right in front of it.
+
+## 4.2 The local cache
+
+Every module Motoi has ever loaded gets cached under `~/.motoi/cache/`. The cache is content-addressed — the file name is the module's hash — so no two versions collide.
+
+You do not usually need to think about the cache. It is populated automatically. When you import a module, Motoi checks the cache first; if the hash is there, it uses it. The cache is what makes repeated program runs fast: the first run pays for loading; every subsequent run just reads from the cache.
+
+If you ever suspect the cache is corrupted, delete a specific entry or the whole cache:
+
+```scheme
+(cache/purge 'manners)     ;; remove one module
+(cache/purge-all)          ;; nuclear option
+```
+
+Motoi will re-fetch what it needs on the next run. This is safe; the cache is a performance artifact, not a source of truth.
+
+## 4.3 The search path
+
+The search path is an ordered list of directories. Each directory is checked in order until a module with the right name is found.
+
+You can inspect the current search path:
+
+```scheme
+(module-path)
+;; ⇒ (\"~/.motoi/modules/\"
+;;    \"/usr/local/share/motoi/modules/\"
+;;    \"./modules/\"
+;;    \"./\")
+```
+
+The defaults are: your personal module dir, the system-wide module dir, a `modules/` subdirectory of the current working directory, and the current working directory itself. In that order.
+
+You can add to the path:
+
+```scheme
+(module-path-add! \"~/my-project/lib/\")
+```
+
+Once added, `manners.scm` under that directory would be found on `(import manners)`.
+
+You can also set the whole path fresh:
+
+```scheme
+(module-path-set!
+  '(\"./\"
+    \"~/my-project/lib/\"
+    \"~/.motoi/modules/\"))
+```
+
+Most programs do not touch the path directly. The defaults are usually right. When you need to override, do it once at the top of the program.
+
+## 4.4 The registry
+
+The registry is where published modules live. It is a remote service (or a local network service, for organizations that run their own) that stores signed module tarballs by name, version, and hash.
+
+When Motoi cannot find a module locally, it asks the registry:
+
+- \"Do you have a module named `manners`?\"
+- \"Do you have `manners` at version 1.x?\"
+- \"Do you have `manners` at hash `abc123...`?\"
+
+If the registry has a match, it returns the module. Motoi caches it locally, then loads it. Subsequent runs will hit the cache and skip the registry.
+
+The default registry is `registry.motoi.dev` (illustrative; the exact host is set in your config). You can add more registries:
+
+```scheme
+(registry-add! \"registry.mycompany.internal\")
+```
+
+Registries are checked in order; the first one that has the module wins. This lets an organization mirror the public registry while adding private modules of its own.
+
+## 4.5 The hash resolver
+
+If your import pins a hash and none of the above has that hash, the hash resolver kicks in. It asks the network if any peer has a module with the requested hash.
+
+This is a last-resort mechanism. It exists so that a signed cart with pinned hashes can still find its modules years after the original registry might have gone away. As long as *someone* on the network still has the hash, the cart still works.
+
+The hash resolver is opt-in. You have to enable it explicitly:
+
+```scheme
+(resolver/enable! 'hash)
+```
+
+Most programs never use it. Signed carts with reproducibility requirements do.
+
+## 4.6 What happens on a miss
+
+If Motoi searches all four places and finds nothing, it raises a `module-not-found` error at parse time. The error names:
+
+- The module you asked for.
+- The version pin, if any.
+- The hash pin, if any.
+- Every place searched.
+
+You should be able to look at the error and know immediately whether the problem is a typo in the name, a wrong version pin, an out-of-date cache, or a network issue.
+
+## 4.7 File-to-module mapping
+
+By convention, a module named `manners` lives in a file named `manners.scm` at the top level of a search-path directory. A module named `graphics/2d` lives in `graphics/2d.scm`, which is `2d.scm` inside a `graphics/` subdirectory.
+
+The rule is: **the module name is a slash-separated path, rooted at a search-path directory, with `.scm` appended.** Slashes in the name become directory separators. Nothing fancier.
+
+You can override this — a module can declare it lives in an unusual file, or a directory can contain a manifest that maps names to files. But the convention is enough for 95% of cases, and following it means readers can find your source instantly.
+
+## 4.8 Discovery introspection
+
+Two verbs let you ask discovery questions directly.
+
+```scheme
+(module-find 'manners)
+;; ⇒ (:location \"cache\"
+;;    :path \"~/.motoi/cache/abc123.scm\"
+;;    :version \"1.0.0\"
+;;    :hash \"abc123...\")
+
+(module-find 'graphics/2d :version \"2.x\")
+;; ⇒ (:location \"registry\"
+;;    :registry \"registry.motoi.dev\"
+;;    :version \"2.3.1\"
+;;    :hash \"def456...\")
+```
+
+`module-find` runs the discovery process but does not actually load. It is useful for tooling — a linter that wants to check every import in a project without actually running the program.
+
+## 4.9 When discovery goes slow
+
+If your program's startup feels slow, discovery is usually the culprit. Two things to check:
+
+**Cold cache.** First run after a fresh install has an empty cache. Every module goes to the registry. This is normal. The second run will be fast.
+
+**Slow registry.** If the registry is remote and the network is slow, discovery pays for every uncached module. Consider running a local mirror of the registry, or preloading the modules you know you need.
+
+You can profile discovery:
+
+```scheme
+(discovery/trace-on!)
+(import graphics)
+(import sound)
+;; ⇒ traces every place searched, in order, with timings
+```
+
+The trace tells you where the time went. Usually the answer is *the registry took a while*, which points to fixes.
+
+## 4.10 Discovery and Cortex
+
+Every discovery event is logged to Cortex. This is useful when a program's behavior changes and you want to know if a module resolution changed with it.
+
+```scheme
+(cortex/query :predicate 'module-resolved)
+;; ⇒ ((graphics module-resolved
+;;      (:hash abc123 :location cache) 1720000000))
+```
+
+If a hash changes between runs, Cortex shows you when. This is often the first clue that a dependency updated silently — usually because a `:version \"1.x\"` pin allowed a minor upgrade.
+
+## 4.11 Try it
+
+At a REPL, run `(module-path)` and read the list. Add a directory. Verify the addition took effect. Run `(module-find 'motoi/base)` — you should see it in the cache. Try to import a module you know does not exist. Read the error and confirm it lists all four places.
+
+Discovery is one of those parts of a system you should exercise once so that when a real problem happens, you already have the muscle for it.
+
+Turn the page. Chapter 5 covers versions — the most subtle single topic in the module system.")

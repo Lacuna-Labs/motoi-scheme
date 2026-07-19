@@ -1,0 +1,783 @@
+;; ch09-physical-models.slat
+;; Book of Sound — Chapter 9: Physical Models
+
+(chapter
+  :book             "Book of Sound"
+  :chapter-number   null
+  :title            "Chapter 9: Physical Models"
+  :source-path      "/Users/alfred/code/curator/BOOK/A-branch-scheme-books/new-sound/ch09-physical-models.md"
+  :size             24400
+  :sha256           "a3d0d73c58a4724c"
+  :prose
+"# Chapter 9: Physical Models
+
+A plucked guitar string doesn't start with a sine wave. It starts with a *yank*—a sharp displacement that travels down the string, bounces back from the bridge, bounces again from the nut, and keeps bouncing, each round trip losing a little energy to friction and air. By the time you *hear* it, you're hearing a loop: the string's memory of its own shape, reflected and fading. The miracle is that this messy, chaotic physics—this delay line with loss—*sounds* like music. It has a pitch. It has warmth. It has a body.
+
+Physical modeling synthesizes sound by *simulating the physics* instead of summing partials. You don't build a plucked string by adding harmonics 1, 2, 3, 4... (though you *could*—Chapter 2). You build a *delay line*, fill it with noise, and let it ring. The math is smaller. The sound is warmer. The code feels like the instrument.
+
+This chapter drills:
+- **Karplus-Strong plucked strings** (the filtered delay-line loop)
+- **Bowed and blown models** (feedback loops with excitation)
+- **Modal synthesis** (bells, mallets, banks of tuned resonators)
+- **Why physical models sound *alive***
+
+We'll start with the simplest pluck—white noise into a loop—and climb to a bell that rings with five modes. Every example runs alone. Some depend on engine seams we'll flag.
+
+---
+
+## The Karplus-Strong Algorithm
+
+In 1983, Kevin Karplus and Alex Strong published a gorgeously simple recipe for a plucked string:
+
+1. Fill a delay line (a ring buffer) with random noise.
+2. Loop: read the oldest sample, average it with its neighbor, write it back to the end.
+3. That's it. The loop *is* the string.
+
+The length of the delay line sets the pitch (if the loop is 100 samples long and the sample rate is 44,100 Hz, you get 441 Hz—close to A4). The averaging *is* the loss—high frequencies die faster than lows, so the sound mellows as it rings.
+
+the runtime's `(pluck freq dur)` verb wraps this loop. Let's hear a single pluck at 220 Hz (A3) for one second:
+
+```scheme
+(pluck 220 1.0)
+```
+
+*[needs: pluck verb (Karplus-Strong delay line)]*  
+<!-- BUILD: pluck verb — init delay line with white noise, loop with averaging filter -->
+
+The sound starts bright and noisy (because the initial buffer is random), then settles into a clear, warm tone. That settling—the noise collapsing into pitch—is the string *finding itself*.
+
+---
+
+Now pluck three notes in sequence—a rising phrase:
+
+```scheme
+(define (pluck-phrase)
+  (pluck 220 0.5)
+  (pluck 277 0.5)
+  (pluck 330 0.5))
+
+(pluck-phrase)
+```
+
+*[needs: pluck verb]*  
+<!-- BUILD: pluck verb -->
+
+Each pluck is independent. The delay line resets. This is *not* a sequence yet (Chapter 12 will add timing), but you can already hear the character: quick, percussive, settling.
+
+---
+
+## Tuning the Loop Length
+
+The delay-line length must match the pitch. At a sample rate of 44,100 Hz, a 220 Hz tone needs a loop of 44,100 ÷ 220 = 200.45 samples. You can't have a fractional delay, so real implementations interpolate or tune slightly sharp. For now, trust that `(pluck freq dur)` picks the right length.
+
+Let's pluck the same pitch twice—once short, once long—to hear how duration changes the envelope but not the attack:
+
+```scheme
+(define (pluck-short-and-long)
+  (pluck 440 0.2)
+  (pluck 440 1.5))
+
+(pluck-short-and-long)
+```
+
+*[needs: pluck verb]*  
+<!-- BUILD: pluck verb -->
+
+The short pluck cuts before the ring fully decays. The long pluck lets it fade naturally. The *attack* (that initial bright noise) is identical—it's baked into the loop fill.
+
+---
+
+## The Averaging Filter
+
+The core of Karplus-Strong is the *loss filter*: `(y[n] + y[n-1]) / 2`. This is a one-pole lowpass—it smooths out sharp corners. Each time the wave bounces through the loop, it loses a bit more treble.
+
+You can *adjust* the loss by changing the filter. A heavier average (e.g., weighting the old sample more) makes the sound die faster. A lighter average (or no filter at all) makes it ring forever—but also makes it harsh.
+
+the runtime's `(pluck freq dur :damping d)` lets you tune the damping. A value of `0.5` is the standard average. Lower values (toward `0.0`) reduce loss; higher values (toward `1.0`) kill the sound faster.
+
+Pluck with low damping (bright, long ring):
+
+```scheme
+(pluck 330 1.5 :damping 0.3)
+```
+
+*[needs: pluck verb with :damping parameter]*  
+<!-- BUILD: pluck verb :damping parameter -->
+
+Pluck with high damping (dark, short ring):
+
+```scheme
+(pluck 330 1.5 :damping 0.8)
+```
+
+*[needs: pluck verb with :damping parameter]*  
+<!-- BUILD: pluck verb :damping parameter -->
+
+The low-damping pluck sounds almost bell-like—it sustains and shimmers. The high-damping pluck is dull and dead, like a muted string.
+
+---
+
+## Plucking a Chord
+
+Karplus-Strong plucks are cheap—computationally, they're just a buffer and a couple of adds. You can run many in parallel. Let's pluck a major triad (4:5:6 ratios) by firing three plucks at once:
+
+```scheme
+(define (pluck-chord base)
+  (pluck base 2.0)
+  (pluck (* base 5/4) 2.0)
+  (pluck (* base 3/2) 2.0))
+
+(pluck-chord 220)
+```
+
+*[needs: pluck verb]*  
+<!-- BUILD: pluck verb -->
+
+The three strings ring together. Because they're all initialized with independent noise, they don't phase-cancel—they blend like real guitar strings.
+
+---
+
+## The Pluck Position
+
+On a real string, *where* you pluck changes the timbre. Plucking at the center emphasizes odd harmonics (like a square wave). Plucking near the bridge emphasizes all harmonics (brighter). You model this by *shaping* the initial noise buffer—zeroing out samples near the \"pluck point\" or weighting them.
+
+the runtime's `(pluck freq dur :position p)` lets you set the pluck position as a fraction of the string length. `0.5` is the center; `0.1` is near the bridge (bright); `0.9` is near the nut (also bright, but different harmonics).
+
+Pluck at the center (mellow, odd harmonics):
+
+```scheme
+(pluck 220 1.5 :position 0.5)
+```
+
+*[needs: pluck verb with :position parameter]*  
+<!-- BUILD: pluck verb :position parameter (init buffer with shaped excitation) -->
+
+Pluck near the bridge (bright, many harmonics):
+
+```scheme
+(pluck 220 1.5 :position 0.1)
+```
+
+*[needs: pluck verb with :position parameter]*  
+<!-- BUILD: pluck verb :position parameter -->
+
+The near-bridge pluck is steelier, more metallic. The center pluck is rounder.
+
+---
+
+## The String as a Filter
+
+Karplus-Strong is a *filter* that rings at a specific frequency. You can think of it as a comb filter with feedback—peaks at the fundamental and all its harmonics, valleys in between. The loss filter shapes how fast each harmonic decays.
+
+Because it's a filter, you can *drive* it with any excitation, not just noise. Let's pluck with a *sine* instead of noise—fill the delay line with one cycle of a sine wave:
+
+```scheme
+(pluck 440 1.0 :excite 'sine)
+```
+
+*[needs: pluck verb with :excite parameter (init buffer with sine instead of noise)]*  
+<!-- BUILD: pluck verb :excite parameter -->
+
+The sound is smoother—less attack, more immediate pitch. It's closer to a bowed string than a plucked one.
+
+---
+
+Pluck with a *square* excitation (one cycle of a square wave in the buffer):
+
+```scheme
+(pluck 440 1.0 :excite 'square)
+```
+
+*[needs: pluck verb with :excite parameter]*  
+<!-- BUILD: pluck verb :excite parameter -->
+
+The square has strong odd harmonics. The loop preserves them initially, then damps them. The result is bright and aggressive.
+
+---
+
+## Two Plucks in Dialogue
+
+Pluck two strings tuned a fifth apart (3:2), with the second delayed slightly:
+
+```scheme
+(define (pluck-fifth base)
+  (pluck base 2.0)
+  (pluck (* base 3/2) 2.0))
+
+(pluck-fifth 220)
+```
+
+*[needs: pluck verb]*  
+<!-- BUILD: pluck verb -->
+
+They ring together. The slight mistuning (if the delay-line lengths aren't perfect multiples) creates gentle beating. This is the sound of a guitar's open strings.
+
+---
+
+## Bowed Strings (Feedback Excitation)
+
+A bowed string is a plucked string that never stops being excited. The bow *drives* the delay line continuously, adding energy. The classic model is a delay line in a feedback loop with a *nonlinear* element (like a lookup table that models stick-slip friction).
+
+the runtime's `(bow freq dur)` verb wraps this loop. The excitation is continuous; the sound is smoother, more sustained:
+
+```scheme
+(bow 220 2.0)
+```
+
+*[needs: bow verb (Karplus-Strong with continuous excitation + nonlinear feedback)]*  
+<!-- BUILD: bow verb — delay line + bow-friction nonlinearity -->
+
+The attack is softer than a pluck. The sustain is even. The release fades when the excitation stops.
+
+---
+
+Bow a rising scale (five steps):
+
+```scheme
+(define (bow-scale)
+  (bow 220 0.6)
+  (bow 247 0.6)
+  (bow 277 0.6)
+  (bow 330 0.6)
+  (bow 370 0.6))
+
+(bow-scale)
+```
+
+*[needs: bow verb]*  
+<!-- BUILD: bow verb -->
+
+Each note swells and fades. The transitions are smooth—no percussive attack.
+
+---
+
+## Bowing Pressure
+
+Bowing harder increases the nonlinearity—more stick-slip, more bite. the runtime's `(bow freq dur :pressure p)` tunes this. Low pressure is smooth and glassy; high pressure is raspy and aggressive.
+
+Bow with low pressure (smooth):
+
+```scheme
+(bow 330 2.0 :pressure 0.3)
+```
+
+*[needs: bow verb with :pressure parameter]*  
+<!-- BUILD: bow verb :pressure parameter (scales nonlinear table gain) -->
+
+Bow with high pressure (raspy):
+
+```scheme
+(bow 330 2.0 :pressure 0.9)
+```
+
+*[needs: bow verb with :pressure parameter]*  
+<!-- BUILD: bow verb :pressure parameter -->
+
+The high-pressure bow has grit—you can almost hear the rosin.
+
+---
+
+## Blown Pipes (Jet Instability)
+
+A blown pipe (flute, recorder, organ pipe) is another feedback loop: the jet of air splits at the edge, creating a pressure wave that travels down the bore, reflects, and modulates the jet again. The model is similar to a bowed string, but the nonlinearity is different (a jet-drive lookup instead of friction).
+
+the runtime's `(blow freq dur)` verb models a cylindrical pipe:
+
+```scheme
+(blow 440 2.0)
+```
+
+*[needs: blow verb (delay line + jet nonlinearity)]*  
+<!-- BUILD: blow verb — delay line + jet-edge nonlinearity -->
+
+The sound is airy and hollow—more organ than violin.
+
+---
+
+Blow a descending phrase:
+
+```scheme
+(define (blow-descent)
+  (blow 880 0.5)
+  (blow 660 0.5)
+  (blow 440 0.5)
+  (blow 330 0.5))
+
+(blow-descent)
+```
+
+*[needs: blow verb]*  
+<!-- BUILD: blow verb -->
+
+The airiness is consistent across pitches. This is the character of wind.
+
+---
+
+## Breath Noise
+
+Real flutes mix the fundamental with breath noise (turbulence in the jet). You can layer a `(noise 'white)` component on top of `(blow)` to add realism:
+
+```scheme
+(define (breathy-flute freq dur)
+  (let ((fundamental (blow freq dur))
+        (breath (noise 'white)))
+    (+ (* 0.9 fundamental)
+       (* 0.1 breath))))
+
+(breathy-flute 440 1.5)
+```
+
+*[needs: blow verb, noise verb, signal arithmetic]*  
+<!-- BUILD: blow verb, noise verb, signal arithmetic -->
+
+The breath adds texture—the flute sounds *performed*, not synthesized.
+
+---
+
+## Modal Synthesis (Bells and Mallets)
+
+A bell doesn't have a harmonic series. Its modes (resonant frequencies) are *inharmonic*—they don't line up at integer multiples of a fundamental. When you strike a bell, you excite all its modes at once; they ring and decay at different rates, creating that shimmering, complex tone.
+
+Modal synthesis models this as a *bank of tuned resonators*. Each resonator is a bandpass filter (or a pair of poles) tuned to a mode frequency, with its own decay time and amplitude.
+
+the runtime's `(strike-modal freqs decays amps)` verb takes three lists—mode frequencies, decay times, and amplitudes—and sums their responses to an impulse (a sharp click):
+
+```scheme
+(strike-modal '(200 370 550 720 900)
+              '(2.0 1.5 1.0 0.8 0.6)
+              '(1.0 0.7 0.5 0.3 0.2))
+```
+
+*[needs: strike-modal verb (bank of resonators excited by impulse)]*  
+<!-- BUILD: strike-modal verb — sum of bandpass resonators, each (freq decay amp) -->
+
+This is a simple five-mode bell. The lowest mode (200 Hz) rings longest. The highest (900 Hz) dies first.
+
+[VISUAL: Five resonance curves (bandpass peaks) overlaid on a frequency axis, each labeled with its frequency and decay time. A vertical impulse spike at time=0 excites all five.]
+
+---
+
+## A Deep Bell
+
+Lower frequencies, longer decays, and more modes make a deeper, richer bell:
+
+```scheme
+(strike-modal '(100 180 290 410 540 680)
+              '(4.0 3.5 3.0 2.5 2.0 1.5)
+              '(1.0 0.8 0.6 0.5 0.4 0.3))
+```
+
+*[needs: strike-modal verb]*  
+<!-- BUILD: strike-modal verb -->
+
+This bell hums and shimmers. The low modes dominate. The high modes add sparkle.
+
+---
+
+## A Bright Chime
+
+Higher frequencies, shorter decays, and fewer modes make a bright, metallic chime:
+
+```scheme
+(strike-modal '(800 1420 2100)
+              '(0.8 0.6 0.4)
+              '(1.0 0.6 0.4))
+```
+
+*[needs: strike-modal verb]*  
+<!-- BUILD: strike-modal verb -->
+
+This is a triangle or a small handbell—quick, shimmery, percussive.
+
+---
+
+## Tuning the Inharmonicity
+
+Real bells follow a pattern: the modes are near (but not exactly) `f0, 2.4·f0, 4·f0, 5.4·f0, ...`. You can generate a mode list programmatically:
+
+```scheme
+(define (bell-modes f0 count)
+  (map (lambda (n)
+         (* f0 (case n
+                 ((0) 1.0)
+                 ((1) 2.4)
+                 ((2) 4.0)
+                 ((3) 5.4)
+                 ((4) 7.0)
+                 (else (* n 1.5)))))
+       (iota count)))
+
+(define (bell-decays count)
+  (map (lambda (n) (- 3.0 (* n 0.3))) (iota count)))
+
+(define (bell-amps count)
+  (map (lambda (n) (/ 1.0 (+ 1.0 n))) (iota count)))
+
+(strike-modal (bell-modes 220 5)
+              (bell-decays 5)
+              (bell-amps 5))
+```
+
+*[needs: strike-modal verb]*  
+<!-- BUILD: strike-modal verb -->
+
+This is a 220 Hz bell with five inharmonic modes. The ratios (1.0, 2.4, 4.0, 5.4, 7.0) give it that classic bell shimmer.
+
+---
+
+## A Marimba Bar
+
+A marimba bar is also modal, but its modes are closer to harmonic (odd ratios). Strike with a soft mallet (slow attack):
+
+```scheme
+(strike-modal '(200 600 1000 1400)
+              '(1.5 1.2 0.9 0.6)
+              '(1.0 0.5 0.3 0.2))
+```
+
+*[needs: strike-modal verb]*  
+<!-- BUILD: strike-modal verb -->
+
+The low mode dominates. The higher modes add brightness but decay quickly. This is the warm, woody sound of a struck bar.
+
+---
+
+## A Gong
+
+A gong has *many* modes, all inharmonic, with long decays and low frequencies:
+
+```scheme
+(define (gong-modes count)
+  (map (lambda (n) (+ 80 (* n 37))) (iota count)))
+
+(define (gong-decays count)
+  (map (lambda (n) (- 8.0 (* n 0.5))) (iota count)))
+
+(define (gong-amps count)
+  (map (lambda (n) (/ 1.0 (+ 1.0 (* n 0.5)))) (iota count)))
+
+(strike-modal (gong-modes 12)
+              (gong-decays 12)
+              (gong-amps 12))
+```
+
+*[needs: strike-modal verb]*  
+<!-- BUILD: strike-modal verb -->
+
+This gong rings for eight seconds. The modes are dense and clashing. The sound is huge.
+
+---
+
+## Damping a Modal Strike
+
+You can *damp* a modal sound by shortening all the decays:
+
+```scheme
+(define (damped-bell f0 damp-factor)
+  (strike-modal (bell-modes f0 5)
+                (map (lambda (d) (* d damp-factor)) (bell-decays 5))
+                (bell-amps 5)))
+
+(damped-bell 330 0.3)
+```
+
+*[needs: strike-modal verb]*  
+<!-- BUILD: strike-modal verb -->
+
+The bell rings for a fraction of a second—it's muted, like a hand on the metal.
+
+---
+
+## Striking Twice
+
+Strike the same modal set twice, with a slight delay, to simulate a double-hit:
+
+```scheme
+(define (double-strike freqs decays amps)
+  (strike-modal freqs decays amps)
+  (strike-modal freqs decays amps))
+
+(double-strike (bell-modes 220 5)
+               (bell-decays 5)
+               (bell-amps 5))
+```
+
+*[needs: strike-modal verb, sequencing/delay (currently immediate)]*  
+<!-- BUILD: strike-modal verb, scheduling for delayed second strike -->
+
+The second strike re-excites the modes. They interfere, creating beating and richness.
+
+---
+
+## Why Physical Models Feel Alive
+
+A synthesized pluck (from additive sine waves) sounds *perfect*. A Karplus-Strong pluck sounds *human*. The difference is *chaos*: the noise in the initial buffer, the slight mistuning of the loop, the way the loss filter responds to the random excitation. Physical models bake in *variation*—every pluck is slightly different, even at the same pitch.
+
+This is why a synthesized orchestra sounds flat and a sampled one sounds expensive. Physical models split the difference: they're *generative* (you can pluck any pitch, any damping, any position) but *warm* (the randomness is intrinsic).
+
+the runtime's physical models are *cheap enough to run in real time* and *good enough to play*. The code is short. The sound is alive.
+
+---
+
+## Combining Models
+
+You can layer a pluck and a modal strike—a plucked string with a resonant body:
+
+```scheme
+(define (pluck-with-body freq dur)
+  (let ((string (pluck freq dur))
+        (body (strike-modal '(180 350 520) '(1.0 0.8 0.6) '(0.3 0.2 0.1))))
+    (+ string body)))
+
+(pluck-with-body 220 2.0)
+```
+
+*[needs: pluck verb, strike-modal verb, signal arithmetic]*  
+<!-- BUILD: pluck verb, strike-modal verb, signal arithmetic -->
+
+The string is bright and percussive. The body adds depth and resonance. Together, they sound like a guitar with a carved top.
+
+---
+
+## Plucking Through a Formant
+
+Run a pluck through a formant filter (Chapter 7) to give it a vowel color:
+
+```scheme
+(define (pluck-vowel freq dur vowel-freqs)
+  (let ((string (pluck freq dur)))
+    (add-formant string vowel-freqs)))
+
+(pluck-vowel 220 1.5 '(800 1200 2600))
+```
+
+*[needs: pluck verb, add-formant verb]*  
+<!-- BUILD: pluck verb, add-formant verb -->
+
+The pluck rings with an \"ah\" color. The formants shape the noise and the decay.
+
+---
+
+## A Bowed Choir
+
+Bow three notes at once, tuned to a minor triad, to create a bowed chord:
+
+```scheme
+(define (bow-triad base)
+  (bow base 3.0)
+  (bow (* base 6/5) 3.0)
+  (bow (* base 3/2) 3.0))
+
+(bow-triad 220)
+```
+
+*[needs: bow verb]*  
+<!-- BUILD: bow verb -->
+
+The three bowed strings swell and sustain together. The minor third (6:5) gives it a melancholy color.
+
+---
+
+## A Blown Organ Chord
+
+Blow four pipes tuned to a dominant seventh (4:5:6:7ish):
+
+```scheme
+(define (blow-seventh base)
+  (blow base 3.0)
+  (blow (* base 5/4) 3.0)
+  (blow (* base 3/2) 3.0)
+  (blow (* base 7/4) 3.0))
+
+(blow-seventh 220)
+```
+
+*[needs: blow verb]*  
+<!-- BUILD: blow verb -->
+
+The four pipes blend into a hollow, airy chord. The 7:4 (near but not quite a minor seventh) adds tension.
+
+---
+
+## A Plucked Arpeggio
+
+Pluck a rising arpeggio (four notes, major triad + octave):
+
+```scheme
+(define (pluck-arpeggio base)
+  (pluck base 0.4)
+  (pluck (* base 5/4) 0.4)
+  (pluck (* base 3/2) 0.4)
+  (pluck (* base 2) 0.4))
+
+(pluck-arpeggio 220)
+```
+
+*[needs: pluck verb]*  
+<!-- BUILD: pluck verb -->
+
+Each pluck rings into the next. The overlapping decays create harmony.
+
+---
+
+## A Modal Arpeggio
+
+Strike four modal sets tuned to an arpeggio, each with different inharmonicity:
+
+```scheme
+(define (modal-arpeggio)
+  (strike-modal '(220 530 880) '(1.5 1.0 0.7) '(1.0 0.5 0.3))
+  (strike-modal '(275 660 1100) '(1.5 1.0 0.7) '(1.0 0.5 0.3))
+  (strike-modal '(330 790 1320) '(1.5 1.0 0.7) '(1.0 0.5 0.3))
+  (strike-modal '(440 1060 1760) '(1.5 1.0 0.7) '(1.0 0.5 0.3)))
+
+(modal-arpeggio)
+```
+
+*[needs: strike-modal verb]*  
+<!-- BUILD: strike-modal verb -->
+
+Four bells, rising. Each has its own shimmer. Together, they cascade.
+
+---
+
+## A Tuned Drum
+
+A drum is a membrane, not a string—its modes are *very* inharmonic (ratios like 1.0, 1.59, 2.14, 2.30, ...). Strike with a short decay:
+
+```scheme
+(strike-modal '(100 159 214 230 280)
+              '(0.5 0.4 0.3 0.25 0.2)
+              '(1.0 0.6 0.4 0.3 0.2))
+```
+
+*[needs: strike-modal verb]*  
+<!-- BUILD: strike-modal verb -->
+
+This is a tom or a hand drum—punchy, with a clear pitch but no harmonic series.
+
+---
+
+## A Kick Drum (Low Modal Strike)
+
+A kick drum is a low-tuned membrane with very short decays:
+
+```scheme
+(strike-modal '(60 95 130)
+              '(0.3 0.2 0.15)
+              '(1.0 0.5 0.3))
+```
+
+*[needs: strike-modal verb]*  
+<!-- BUILD: strike-modal verb -->
+
+Deep, punchy, fast. This is the foundation of a drum kit.
+
+---
+
+## A Snare (Noise + Modal)
+
+A snare is a modal drum *plus* noise (the rattle of the snares). Layer a short modal strike with filtered white noise:
+
+```scheme
+(define (snare)
+  (let ((drum (strike-modal '(180 330 480) '(0.2 0.15 0.1) '(1.0 0.5 0.3)))
+        (rattle (filter 'highpass (noise 'white) :cutoff 3000)))
+    (+ (* 0.6 drum)
+       (* 0.4 rattle))))
+
+(snare)
+```
+
+*[needs: strike-modal verb, filter verb, noise verb, signal arithmetic]*  
+<!-- BUILD: strike-modal verb, filter verb, noise verb, signal arithmetic -->
+
+The drum gives it body. The rattle gives it snap. Together: a snare.
+
+---
+
+## A Hi-Hat (All Modal)
+
+A hi-hat is a pair of thin cymbals—many high, inharmonic modes, all with very short decays:
+
+```scheme
+(define (hihat-modes count)
+  (map (lambda (n) (+ 800 (* n 217))) (iota count)))
+
+(define (hihat-decays count)
+  (map (lambda (n) (- 0.15 (* n 0.01))) (iota count)))
+
+(define (hihat-amps count)
+  (map (lambda (n) (/ 1.0 (+ 1.0 n))) (iota count)))
+
+(strike-modal (hihat-modes 10)
+              (hihat-decays 10)
+              (hihat-amps 10))
+```
+
+*[needs: strike-modal verb]*  
+<!-- BUILD: strike-modal verb -->
+
+Ten modes, all above 800 Hz, all gone in 0.15 seconds. Bright, crisp, metallic.
+
+---
+
+## A Ride Cymbal
+
+A ride cymbal is similar to a hi-hat but with lower modes, longer decays, and more complexity:
+
+```scheme
+(define (ride-modes count)
+  (map (lambda (n) (+ 400 (* n 137))) (iota count)))
+
+(define (ride-decays count)
+  (map (lambda (n) (- 1.2 (* n 0.08))) (iota count)))
+
+(define (ride-amps count)
+  (map (lambda (n) (/ 1.0 (+ 1.0 (* n 0.3)))) (iota count)))
+
+(strike-modal (ride-modes 15)
+              (ride-decays 15)
+              (ride-amps 15))
+```
+
+*[needs: strike-modal verb]*  
+<!-- BUILD: strike-modal verb -->
+
+Fifteen modes, ringing and clashing. This is the wash of a ride cymbal—complex and sustained.
+
+---
+
+## Why We Model Physics
+
+You could record a guitar. You could sample a bell. But a *model* lets you:
+
+- **Play any pitch** (no repitching artifacts)
+- **Tune the physics** (damping, position, pressure, mode ratios)
+- **Generate new timbres** (pluck through a formant, bow a bell)
+- **Run it live** (no disk I/O, no sample-rate conversion)
+
+Physical models are *generative instruments*. The code is the score *and* the sound. The parameters are knobs on a physical object that doesn't exist. You can build an instrument that has never been built—a plucked bell, a bowed drum, a flute with a guitar body—and it will *sound right* because the physics is consistent.
+
+This is the power of synthesis: the impossible made audible.
+
+---
+
+## Exercises
+
+1. **Write a plucked bass line**: Use `(pluck ...)` to play a four-note descending bass line (e.g., 110 Hz, 98 Hz, 87 Hz, 73 Hz), each note ringing for one second. Tune the damping so the notes blend but don't muddy.
+
+2. **Build a three-bell carillon**: Use `(strike-modal ...)` to create three bells tuned to a major triad (e.g., modes starting at 200 Hz, 250 Hz, 300 Hz). Strike them in sequence. Make the lowest bell ring the longest.
+
+3. **Model a struck and muted cymbal**: Use `(strike-modal ...)` with high, inharmonic modes (starting around 1000 Hz) and very short decays (under 0.3 seconds). Then write a second version where the decays are cut in half—this is the muted version.
+
+4. **Layer a bowed string with breath noise**: Use `(bow freq dur)` for the fundamental and `(noise 'white)` filtered through `(filter 'bandpass ...)` for the breath. Mix them 80% bow, 20% noise.
+
+5. **Generate a modal kick-snare-hat pattern**: Write three strikes—`(strike-modal ...)` for a kick (low, short), a snare (mid, with noise), and a hi-hat (high, very short). Fire them in the pattern: kick, hat, snare, hat.
+
+6. **Pluck a string and transpose it by bowing**: Pluck a 220 Hz string, then bow the same pitch. The pluck should decay naturally; the bow should swell and sustain. Hear the difference in attack and sustain.
+
+---
+
+*End of Chapter 9. Next: Chapter 10 — The Roster & Modding Voices (the instruments we have, how to modify them, families tour, macro deltas, one phrase in five instruments with three mods).*
+")

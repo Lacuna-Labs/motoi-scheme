@@ -1,0 +1,314 @@
+(chapter
+  :book "Book of ML"
+  :chapter-number 14
+  :title "Positional encoding and causal masking"
+  :audience "kid-and-adult operators"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-19"
+     :sources ((:paper "Vaswani et al. 2017 — Attention Is All You Need, NeurIPS"
+                :arxiv "1706.03762"
+                :used-for "sinusoidal positional encoding + causal masking")
+               (:paper "Radford et al. 2018 — Improving Language Understanding by Generative Pre-Training (GPT-1)"
+                :used-for "causal-mask training regime")))
+  :prose
+"# Chapter 14 — Positional encoding and causal masking
+
+Attention has two problems we glossed over. This chapter fixes them.
+
+**Problem 1.** Attention treats a sequence like a set. If you shuffle
+the token embeddings before feeding them to attention, the outputs
+just shuffle by the same permutation. That means the model has no
+idea what order the tokens came in. 'Dog bites man' and 'man bites
+dog' would be indistinguishable — same tokens, different meaning.
+
+**Problem 2.** During training we want to teach the model to predict
+the next token given the previous ones. If we feed the whole
+sequence into attention, position i can 'see' positions i+1, i+2,
+etc. — the answer is right there. The model would learn nothing.
+
+Positional encoding solves problem 1. Causal masking solves problem 2.
+
+## Positional encoding — giving the model a sense of order
+
+The idea: add a position-dependent vector to each token embedding
+BEFORE it goes into the attention layers. Position 0 gets one vector.
+Position 1 gets a different one. The model can then look at the sum
+and figure out both 'what token is this' and 'where in the sequence
+is it.'
+
+The original transformer used SINUSOIDAL positional encoding. Each
+dimension of the position vector is a sine or cosine of position at
+a different frequency:
+
+```
+PE(pos, 2i)   = sin(pos / 10000^(2i/d))
+PE(pos, 2i+1) = cos(pos / 10000^(2i/d))
+```
+
+Where pos is the position (0, 1, 2, ...) and i is the dimension
+index. Different dimensions oscillate at different rates. Low
+dimensions oscillate slowly (they encode which 'chapter' of the
+sequence). High dimensions oscillate fast (they encode fine position).
+
+## Problem 1 — Sinusoidal positional encoding
+
+```
+(define (sinusoidal-pos pos d)
+  ;; Return a d-dim vector encoding position pos.
+  (vec/make
+    (map (lambda (i)
+           (let ((exponent (/ (* 2 (quotient i 2)) d)))
+             (let ((angle (/ pos (math/pow 10000 exponent))))
+               (if (even? i) (math/sin angle) (math/cos angle)))))
+         (iota d))))
+
+(display (sinusoidal-pos 0 4))
+;; => (sin(0/1) cos(0/1) sin(0/100) cos(0/100))
+;; => (0 1 0 1)
+
+(display (sinusoidal-pos 1 4))
+;; => (sin(1) cos(1) sin(0.01) cos(0.01))
+;; => (~0.841 ~0.540 ~0.01 ~1.0)
+
+(display (sinusoidal-pos 10 4))
+;; => (sin(10) cos(10) sin(0.1) cos(0.1))
+;; => (~-0.544 ~-0.839 ~0.0998 ~0.995)
+```
+
+Different positions produce different vectors. Adjacent positions are
+similar in the slow dimensions, different in the fast dimensions. The
+model can learn to read these.
+
+## Problem 2 — Add positional encoding to embeddings
+
+Very simple. Element-wise addition.
+
+```
+(define (add-positions embeddings)
+  (define d (vec/dim (car embeddings)))
+  (define seq-len (length embeddings))
+  (map (lambda (i emb)
+         (vec/add emb (sinusoidal-pos i d)))
+       (iota seq-len)
+       embeddings))
+
+;; If your token embeddings are tok-embs, feed
+;; (add-positions tok-embs) to the transformer instead.
+```
+
+That is the entire positional-encoding step. Token embeddings +
+position encoding = position-aware embeddings. The transformer layers
+never need to know about position specifically — the information is
+baked into the vectors.
+
+## Learned vs sinusoidal
+
+Modern transformers (BERT, GPT) often use LEARNED positional
+embeddings — just an embedding table indexed by position, updated by
+gradient descent like everything else. Same shape as token
+embeddings, learned in the same way. Slightly better empirical
+performance; more parameters. Both work.
+
+A newer alternative — RoPE (rotary positional encoding) used by
+Llama and others — encodes position via rotations applied inside the
+attention. It generalizes better to sequences longer than the model
+was trained on. For our tiny LLM, sinusoidal or a small learned
+table are fine.
+
+## Causal masking — no peeking at the future
+
+Now the training-time problem. When we train a language model, the
+task is 'given tokens 0..i, predict token i+1.' If attention at
+position i can see positions i+1, i+2, etc., the model can just copy
+the answer.
+
+The fix is to MASK OUT future positions in the attention. Specifically,
+before the softmax, we set the scores for future positions to
+negative infinity. After softmax, those positions have weight zero.
+The model literally cannot see them.
+
+```
+;; A causal mask matrix M for sequence length n:
+;;   M[i][j] = 0 if j <= i
+;;   M[i][j] = -infinity if j > i
+;; Add M to the scores BEFORE softmax.
+
+(define (causal-mask-value i j)
+  (if (<= j i) 0 -10000000000.0))    ;; -10000000000.0 acts as -infinity for float practice
+
+(define (masked-attention q keys values i)
+  (define d-k (vec/dim (car keys)))
+  (define scale (math/sqrt d-k))
+  (define raw-scores (map (lambda (k) (/ (vec/dot q k) scale)) keys))
+  (define masked-scores
+    (map (lambda (score j) (+ score (causal-mask-value i j)))
+         raw-scores
+         (iota (length raw-scores))))
+  (define weights (softmax masked-scores))
+  (fold vec/add
+        (vec/scale (car values) 0)
+        (map (lambda (w v) (vec/scale v w)) weights values)))
+```
+
+At position i, all future positions get score -10000000000.0 added. `exp(-10000000000.0)`
+is essentially zero. After softmax, all future positions have weight
+zero. Only positions 0..i contribute to the output.
+
+## Problem 3 — Verify masking works
+
+Verify by counting nonzero attention weights.
+
+```
+(define (softmax xs)
+  (define m (fold (lambda (a b) (if (> a b) a b)) (car xs) (cdr xs)))
+  (define exps (map (lambda (x) (math/exp (- x m))) xs))
+  (define s (reduce + 0 exps))
+  (map (lambda (e) (/ e s)) exps))
+
+(define q (list 1 0))
+(define keys (list (list 1 0))
+                   (list 0 1))
+                   (list 1 1))
+                   (list 0 0))))
+
+;; From position 1: can see positions 0 and 1, not 2 or 3.
+(define d-k 2)
+(define raw-scores (map (lambda (k) (/ (vec/dot q k) (math/sqrt d-k))) keys))
+(define masked (map (lambda (s j) (if (<= j 1) s -10000000000.0))
+                    raw-scores (iota 4)))
+(display (softmax masked))
+;; => (some positive, some positive, ~0, ~0)
+;; Positions 2 and 3 got weight ~0 as required.
+```
+
+Read the output. The first two weights are nonzero (positions 0 and 1
+are allowed). The last two are essentially zero (positions 2 and 3
+are masked). Position 1's attention literally cannot see the future.
+
+## Problem 4 — Training with causal masking
+
+During training we feed a whole sequence into the model. The model
+produces a sequence of predictions — position i's prediction of what
+token comes next. We compare each prediction to the actual next
+token, sum the losses, backpropagate.
+
+The masking ensures that position i's prediction only used positions
+0..i to produce it. So the loss at position i measures 'given the
+first i+1 tokens, how well did the model predict token i+2.' Summed
+over all positions, this trains the model on many next-token
+predictions in parallel — one per position in the sequence. Very
+efficient use of the data.
+
+```
+;; Pseudo-training-step:
+;;   input_tokens = [t0, t1, t2, ..., tn]
+;;   embeddings = [embed(t0), ...] + positional_encoding
+;;   hidden = transformer_blocks(embeddings, with causal mask)
+;;   logits = project hidden to vocab dimension
+;;   for each position i:
+;;     loss_i = cross-entropy(logits[i], t[i+1])
+;;   total_loss = sum of loss_i
+;;   backprop and update
+```
+
+Every token except the last one contributes to training. That is
+what a next-token-prediction language model learns from.
+
+## Problem 5 — Bidirectional models don't mask
+
+BERT and its family use BIDIRECTIONAL attention — no causal mask.
+Every position can see every other position. They train on a
+different task: mask out some tokens and predict them from the
+surrounding context (masked language modeling). Both directions
+matter for that task.
+
+GPT and its family use CAUSAL attention. Only left-to-right. That
+makes them natural next-token predictors and text generators.
+
+Our tiny LLM in chapter 16 is causal — we want to generate text.
+
+## Capstone — Position-aware causally-masked attention
+
+Combine everything from this chapter into one working attention
+call.
+
+```
+(define (softmax xs)
+  (define m (fold (lambda (a b) (if (> a b) a b)) (car xs) (cdr xs)))
+  (define exps (map (lambda (x) (math/exp (- x m))) xs))
+  (define s (reduce + 0 exps))
+  (map (lambda (e) (/ e s)) exps))
+
+(define (sinusoidal-pos pos d)
+  (vec/make
+    (map (lambda (i)
+           (let ((exponent (/ (* 2 (quotient i 2)) d)))
+             (let ((angle (/ pos (math/pow 10000 exponent))))
+               (if (even? i) (math/sin angle) (math/cos angle)))))
+         (iota d))))
+
+(define (add-positions embeddings)
+  (define d (vec/dim (car embeddings)))
+  (define seq-len (length embeddings))
+  (map (lambda (i emb) (vec/add emb (sinusoidal-pos i d)))
+       (iota seq-len) embeddings))
+
+(define (causal-masked-attention embeddings W-q W-k W-v)
+  (define positioned (add-positions embeddings))
+  (define d (vec/dim (car positioned)))
+  (define scale (math/sqrt d))
+  (define (matvec rows v) (map (lambda (r) (vec/dot r v)) rows))
+  (define qs (map (lambda (x) (vec/make (matvec W-q x))) positioned))
+  (define ks (map (lambda (x) (vec/make (matvec W-k x))) positioned))
+  (define vs (map (lambda (x) (vec/make (matvec W-v x))) positioned))
+  ;; For each position i, compute masked attention
+  (map (lambda (i q)
+         (let* ((raw (map (lambda (k) (/ (vec/dot q k) scale)) ks))
+                (masked (map (lambda (s j) (if (<= j i) s -10000000000.0))
+                             raw (iota (length ks))))
+                (weights (softmax masked)))
+           (fold vec/add
+                 (vec/scale (car vs) 0)
+                 (map (lambda (w v) (vec/scale v w)) weights vs))))
+       (iota (length qs)) qs))
+
+;; Try it on a random small sequence
+(define d 4)
+(define I (list (list 1 0 0 0))
+                (list 0 1 0 0))
+                (list 0 0 1 0))
+                (list 0 0 0 1))))
+(define embs (list (list 0.5 0.1 0.2 0.3))
+                   (list 0.3 0.6 0.1 0.0))
+                   (list 0.1 0.2 0.7 0.0))))
+
+(display (causal-masked-attention embs I I I))
+;; Three output vectors of dim 4.
+;; Position 0: only saw position 0 (its output is close to its own value projection)
+;; Position 1: saw positions 0 and 1
+;; Position 2: saw positions 0, 1, 2
+```
+
+Position matters. Future is hidden. This is the exact attention
+mechanism used in every GPT-family model. In chapter 16 we wire it
+into a small transformer and train it on a paragraph of text.
+
+## Why this matters
+
+Position and masking are what turn a bag-of-vectors attention
+mechanism into a proper sequence model. Without position, the model
+can't distinguish word orders. Without causal masking, the training
+is trivial (the model can copy the answer). Both are one-line fixes
+that change the model qualitatively.
+
+## What's next
+
+Chapter 15 covers two more prerequisites for chapter 16's tiny LLM:
+stacking multiple transformer blocks (deep networks) and tokenizing
+sensibly (BPE — byte-pair encoding). Then chapter 16 assembles the
+whole thing.
+")

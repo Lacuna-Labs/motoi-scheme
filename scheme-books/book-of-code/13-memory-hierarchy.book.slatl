@@ -1,0 +1,259 @@
+(dialect :applies ("motoi") :note "Motoi Book of Code.")
+
+(chapter
+  :book             "Book of Code"
+  :chapter-number   13
+  :title            "Chapter 13 — Memory: RAM, cache, disk, and why locality matters"
+  :audience         :any
+  :dialect          "motoi"
+  :book-version     "1.0"
+  :content-rating   :G
+  :training-eligible #t
+  :confidentiality  :public
+  :provenance       ((:authored-by "book-of-code-author-agent")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Memory_hierarchy")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/CPU_cache")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Locality_of_reference")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Dynamic_random-access_memory"))
+  :prose
+"# Chapter 13 — Memory: RAM, cache, disk, and why locality matters
+
+A modern CPU can execute an ADD in about a third of a nanosecond. In
+that same third of a nanosecond, light travels about 10 centimetres.
+
+A modern DRAM chip takes about 100 nanoseconds to respond to a read.
+
+That is a **three hundred to one** ratio. If your CPU has to wait for
+DRAM every time it does an ADD, 299 out of 300 clock cycles are
+wasted waiting.
+
+So we don't do that. We put a small, fast memory very close to the CPU,
+and try to keep the data the CPU needs there. That small fast memory
+is called a **cache**, and understanding it is the difference between a
+program that runs fast and a program that seems fast but is actually a
+disgrace.
+
+## The memory hierarchy
+
+Every modern computer has a memory hierarchy that looks something like
+this:
+
+```
+   Storage     Access time    Size            Cost per bit
+   -------     -----------    ----            ------------
+   Register    ~0.3 ns        ~256 bytes      most expensive
+   L1 cache    ~1 ns          ~64 KB          very expensive
+   L2 cache    ~4 ns          ~256 KB - 1 MB  expensive
+   L3 cache    ~15 ns         ~4 - 32 MB      moderate
+   DRAM        ~100 ns        ~8 - 64 GB      cheap
+   SSD         ~50 us         ~256 GB - 4 TB  very cheap
+   Disk        ~10 ms         ~1 TB - 10 TB   dirt cheap
+   Tape/S3     ~seconds       ~unlimited      near-free per byte
+```
+
+Each level down is roughly 10× to 100× slower and 10× to 100× cheaper
+per byte. Each level is bigger. The idea: **keep the data you use most
+in the fast levels, and only reach down when you have to.**
+
+That is the mechanical heart of a modern computer. It is why an
+optimized program is a hundred times faster than a naive program that
+computes the same answer.
+
+## Two kinds of locality
+
+The reason caches work is that programs exhibit two kinds of
+**locality**:
+
+- **Temporal locality:** if you used a byte just now, you are likely
+  to use it again soon.
+- **Spatial locality:** if you used a byte, you are likely to use the
+  bytes near it soon.
+
+Loops are the great example of temporal locality: the same
+instruction bytes are executed thousands of times in a row. Arrays are
+the great example of spatial locality: when you touch element 42, you
+are probably going to touch elements 43, 44, 45 shortly.
+
+Caches exploit both. When you request a byte, the cache fetches an
+entire **cache line** — typically 64 bytes — into fast memory. That
+handles spatial locality. The line stays in the cache until something
+newer bumps it out. That handles temporal locality.
+
+If your program has good locality, most of your memory accesses hit
+the cache and the CPU never waits. If your program has bad locality
+(random access all over a big array), you thrash the cache and pay
+the DRAM cost every time.
+
+## Cache-friendly vs. cache-hostile: a demo
+
+Let us build two versions of the same computation. Both walk a
+1000-element vector, sum all the elements. One walks in order. The
+other walks in a scrambled order. Same math, wildly different speeds
+on real hardware.
+
+```
+;; Prepare a big vector
+(define big-vec (make-vector 1000000 1))       ;; a million ones
+
+;; Cache-friendly: walk in order
+(define (sum-in-order v)
+  (let loop ((i 0) (total 0))
+    (if (>= i (vector-length v))
+        total
+        (loop (+ i 1) (+ total (vector-ref v i))))))
+
+;; Cache-hostile: walk in a scrambled order
+(define (sum-scrambled v)
+  (let* ((n (vector-length v))
+         ;; step by a big prime so we jump wildly
+         (step 65537))
+    (let loop ((i 0) (count 0) (total 0))
+      (if (>= count n)
+          total
+          (loop (modulo (+ i step) n)
+                (+ count 1)
+                (+ total (vector-ref v i)))))))
+
+(sum-in-order   big-vec)   ;; => 1000000
+(sum-scrambled  big-vec)   ;; => 1000000
+```
+
+Both return 1000000. Both do a million adds. But the second one
+strides through memory in a way that thrashes the cache. On a modern
+CPU, the second is easily 5× to 20× slower than the first, depending
+on the cache size and the vector size.
+
+The lesson: **the same algorithm, in terms of operation count, can
+have very different real-world speeds because of memory access
+patterns.**
+
+## Why chapter 7's ripple-carry cared about width
+
+Recall that our 4-bit adder in chapter 7 had a ripple time proportional
+to the number of columns. Same shape here. Bigger data structures mean
+more cache misses. A working set of 32 KB fits in L1 cache. A working
+set of 32 MB does not.
+
+Rule of thumb: keep hot data in the smallest structure that will hold
+it. Don't waste bytes on padding you don't need. Use small integers
+when small integers will do. That is not premature optimization; that
+is just knowing where you are on the hierarchy.
+
+## DRAM's dirty secret: refresh
+
+DRAM cells store their bit as a tiny charge on a capacitor. The
+capacitor leaks. Within a few milliseconds, the charge is gone and
+the bit is lost.
+
+So DRAM chips **refresh** themselves — every few milliseconds, every
+row of the chip is read out and rewritten. This is invisible to
+software, but it means DRAM chips have a duty cycle where they can't
+be read while they are refreshing. It also means DRAM burns power
+even when nothing is reading it.
+
+SRAM (chapter 8) doesn't need refresh. Its cross-coupled NANDs hold
+their state as long as they have power. That is why SRAM is used for
+caches and DRAM for main memory: SRAM is faster and doesn't need
+refresh, but it takes 6 transistors per bit vs. DRAM's 1 transistor +
+1 capacitor. Trade-offs.
+
+## The stack and the heap
+
+Your program's memory divides into a few regions. Two of them matter
+here:
+
+- **Stack:** a region that grows and shrinks as functions get called
+  and return. Every function call pushes a frame; every return pops
+  one. Because access is always at the top, the stack has excellent
+  spatial locality — the top of the stack is always in cache.
+- **Heap:** a big region where variable-size objects live for as long
+  as somebody has a reference to them. Access patterns are usually
+  much worse than the stack. Cache locality depends on how the objects
+  are laid out.
+
+Motoi Scheme (like every Scheme) allocates `cons` cells, closures,
+strings, and vectors on the heap. Local variables and the small stack
+of active function calls live on the stack. Garbage collection
+periodically reclaims unreachable heap memory.
+
+Heap objects that are allocated together tend to be near each other in
+memory, which helps locality. But over time, allocation and freeing
+can fragment the heap, hurting locality. Copying garbage collectors
+(which most modern Schemes use) compact the heap during collection,
+which improves locality.
+
+## Prefetching
+
+A modern CPU also has a **prefetcher** — a small circuit that watches
+memory accesses and, when it sees a sequential pattern, speculatively
+requests the next line before the program asks for it. If it guesses
+right, the next access is a cache hit even though it is a new line.
+
+That is why `sum-in-order` above is so much faster than
+`sum-scrambled`. The prefetcher sees the sequential pattern and gets
+the next line ready before the loop asks for it. Random access defeats
+the prefetcher entirely.
+
+## Working sets
+
+The **working set** of a program is the set of memory pages the
+program touches within some short time window. If the working set fits
+in L1 cache, the program runs at peak speed. If it fits in L2, it
+runs a little slower. If it fits only in DRAM, it runs a lot slower.
+If it spills to disk, the program is dead.
+
+That last case has a name: **thrashing.** The virtual memory subsystem
+of the OS pages memory in and out from disk, and if the working set
+is bigger than RAM, every access misses and pages get swapped. Speed
+falls off a cliff. Hundreds of thousands of times slower than in-cache.
+
+Rule of thumb for a working programmer: know your working set. If
+you can, keep it small.
+
+## LLM training and inference — the same problem
+
+Large language models are made of matrices. A modern LLM has hundreds
+of billions of parameters, each a few bytes. That is hundreds of
+gigabytes of data. It does not fit in cache. It does not fit in DRAM.
+It barely fits in the whole rack of GPUs.
+
+Training loops move enormous batches of tokens through these matrices.
+Inference reads the whole model to produce a single next token. Both
+are dominated by memory bandwidth, not compute. This is why LLM
+serving is so expensive: you are not paying for the ALU. You are
+paying for the memory bus.
+
+Book of ML (chapter 16) builds a tiny LLM in Motoi Scheme. It runs on
+your laptop precisely because the model is tiny — a few hundred
+parameters. The math is the same as the big LLMs. The memory hierarchy
+matters exactly the same way. Just at a smaller scale where the whole
+model fits in L1.
+
+## What Motoi wants you to take from this
+
+- Memory is a hierarchy, not a single flat thing.
+- Programs run at the speed of their memory access pattern, not
+  their operation count.
+- Locality (both temporal and spatial) is what makes caches work.
+- Sequential access is dramatically faster than random access on
+  every real machine.
+- If you understand the hierarchy, you know why some code is a
+  hundred times faster than other code that computes the same
+  answer.
+
+## The loop appears
+
+Every loop over a large data structure is where locality matters
+most. A loop with good locality is a stream — the prefetcher keeps
+up, the cache stays warm, the CPU never waits. A loop with bad
+locality is a trap — every iteration pays a hundred-nanosecond DRAM
+tax.
+
+Chapter 12's CPU has a memory in it. Real CPUs have caches in front
+of it. Chapter 14 goes up the abstraction ladder to assembly and
+then to Scheme.
+
+## Next
+
+Chapter 14: assembly, then higher. From opcodes to Scheme.
+")

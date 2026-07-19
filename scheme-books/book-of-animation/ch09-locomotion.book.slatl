@@ -1,0 +1,647 @@
+;; ch09-locomotion.slat
+;; Book of Animation — Chapter 9: Locomotion
+
+(chapter
+  :book             "Book of Animation"
+  :chapter-number   null
+  :title            "Chapter 9: Locomotion"
+  :source-path      "/Users/alfred/code/curator/BOOK/A-branch-scheme-books/new-anim/ch09-locomotion.md"
+  :size             25086
+  :sha256           "9f00cb177e9d2e3b"
+  :prose
+"# Chapter 9: Locomotion
+
+In the last chapter you learned to give sprites bodies — to dress a point mass in glyph and expression, to make a position feel like a *creature*. But the creatures stood still, or drifted on simple velocity. A real body doesn't just *move*; it *locomotes*. It carries weight. It takes steps. It has cadence and intent, a gait that tells you what it is and how it feels about where it's going.
+
+This chapter teaches **locomotion**: the art of making motion *feel* like walking, running, hopping, prowling. You'll learn the **5-tuple motion vector** — position, velocity, acceleration, *cadence*, and *feel* — and how those last two invisible coordinates turn physics into performance. You'll compose gaits from timing patterns, learn to telegraph intent with anticipation and follow-through, and build a sprite that doesn't just *go somewhere* but *goes there like itself*.
+
+The concepts layer cleanly: vectors (Ch4) give you position and velocity, forces (Ch5) give you acceleration and integration, oscillation (Ch6) gives you rhythmic phase, and bodies (Ch8) give you something visible to carry the weight. Now we add the *when* and the *how* — the beat on which a foot falls, the pocket that makes a stride feel lazy or urgent.
+
+---
+
+## 9.1 The Missing Coordinates
+
+You've been animating with three dimensions: `x`, `y`, and `t` (time, measured in frames). A moving sprite has position and velocity; forces change velocity; `world/step` integrates it all forward.
+
+But watch a real animal walk. There are two invisible axes:
+
+1. **Cadence** — the *rhythm* of the motion. Steps happen on a beat, not continuously. A walk is 2-beat, a trot 4-beat, a gallop 3-beat with suspension.
+2. **Feel** — the *shape* of the motion within the beat. A confident stride has snap and overshoot; a weary shuffle has drag and sag.
+
+These are the **fourth and fifth coordinates** of motion. The engine calls them `cadence` and `feel`, and together with `pos`, `vel`, and `accel` they form the **5-tuple motion vector**. You won't set them directly on an entity the way you set position; instead, you'll compose them into *motion verbs* — high-level commands like \"walk to X with a prowling gait\" that bake timing and expression into the path.
+
+We'll start simple: a sprite that takes discrete steps, one per beat. Then we'll add weight, anticipation, and character.
+
+---
+
+## 9.2 A Single Step
+
+The simplest locomotion is a **step** — a single discrete motion event with a clear start, middle, and end.
+
+Let's make a sprite hop once, in place, with a parabolic arc:
+
+```scheme
+(define (step-hop)
+  (let* ((w (world/spawn))
+         (s (world/spawn w 
+              (entity/pos 8 12)
+              (entity/sprite! 'blossom-plum))))
+    
+    ;; Hop: apply an upward impulse, let gravity bring it back down
+    (world/gravity! w 0.5)
+    (entity/bounce! s 0.6)
+    (entity/friction! s 0.9)
+    (world/floor! w 12)
+    
+    ;; Single impulse at frame 0
+    (entity/accel! s 0 -8)
+    
+    ;; Step 60 frames and return the world
+    (let loop ((i 0))
+      (when (< i 60)
+        (world/step w)
+        (loop (+ i 1))))
+    
+    w))
+
+(step-hop)
+```
+
+<!-- BUILD: wire step-hop as runnable example ch09-ex01-step-hop -->
+
+[VISUAL: 8-frame animation strip showing a plum blossom sprite at y=12, arcing up to ~y=6 and falling back to y=12, settling with a small bounce.]
+
+The sprite rises under the impulse, falls under gravity, and settles. That's a hop. But it doesn't *feel* like a hop yet — there's no windup, no landing anticipation, no timing control. It just obeys physics.
+
+To make it feel like locomotion, we need to control *when* things happen, not just *what* happens.
+
+---
+
+## 9.3 Cadence: Motion on the Beat
+
+A step doesn't happen continuously — it happens *on a beat*. The foot lifts, the body shifts, the foot lands, all at discrete moments. Between those moments, the motion interpolates smoothly (or not — that's *feel*).
+
+Let's make a sprite take a step *every 24 frames* (a \"step beat\"), alternating left and right:
+
+```scheme
+(define (march-in-place)
+  (let* ((w (world/spawn))
+         (s (world/spawn w 
+              (entity/pos 8 12)
+              (entity/sprite! 'blossom-plum))))
+    
+    (world/gravity! w 0.5)
+    (world/floor! w 12)
+    (entity/bounce! s 0.3)
+    (entity/friction! s 0.85)
+    
+    ;; Every 24 frames, apply a small hop impulse
+    (let loop ((frame 0))
+      (when (< frame 120)
+        (when (= (modulo frame 24) 0)
+          (entity/accel! s 0 -6))
+        (world/step w)
+        (loop (+ frame 1))))
+    
+    w))
+
+(march-in-place)
+```
+
+<!-- BUILD: wire march-in-place as runnable example ch09-ex02-march-in-place -->
+
+[VISUAL: Plum sprite hopping 5 times at regular intervals, landing back at y=12 each time, like marching in place.]
+
+Now the hops have *cadence* — they happen on the 1 of every measure (if we treat 24 frames as one beat). But the sprite still doesn't go anywhere. Let's add horizontal motion, triggered on the same beat.
+
+---
+
+## 9.4 Walking: Horizontal Cadence
+
+A walk is \"hop + drift\". On each beat, we apply a small upward impulse (to lift the foot) and a horizontal impulse (to shift weight forward).
+
+```scheme
+(define (walk-forward)
+  (let* ((w (world/spawn))
+         (s (world/spawn w 
+              (entity/pos 2 12)
+              (entity/sprite! 'blossom-plum))))
+    
+    (world/gravity! w 0.5)
+    (world/floor! w 12)
+    (entity/bounce! s 0.2)
+    (entity/friction! s 0.7)
+    
+    ;; Every 20 frames: hop up and drift right
+    (let loop ((frame 0))
+      (when (< frame 100)
+        (when (= (modulo frame 20) 0)
+          (entity/accel! s 0 -5)    ;; lift
+          (entity/accel! s 1.2 0))  ;; drift right
+        (world/step w)
+        (loop (+ frame 1))))
+    
+    w))
+
+(walk-forward)
+```
+
+<!-- BUILD: wire walk-forward as runnable example ch09-ex03-walk-forward -->
+
+[VISUAL: Plum sprite stepping rightward across the canvas in 5 hops, each hop a small arc, ending at ~x=10.]
+
+That's recognizable as a walk — discrete steps, regular timing, horizontal progress. But it still feels mechanical. The sprite doesn't *anticipate* the step or *recover* from the landing. It just pops up and drifts.
+
+To add that, we need **feel** — the shape of motion *within* the beat.
+
+---
+
+## 9.5 Feel: The Shape of a Step
+
+\"Feel\" is the easing curve applied to motion between keyframes. A step with *snap* has fast takeoff and slow landing (ease-out). A step with *drag* has slow takeoff and fast landing (ease-in). A step with *bounce* has overshoot and settle.
+
+The engine provides `motion/with-feel`, which wraps a motion verb (like `entity/goto!`) and applies an easing curve over a duration. But that verb may not yet be wired in the headless harness — it's part of the motion-timing layer (`motionTimingVerbs.js`) that bridges frame-by-frame and high-level intent.
+
+*[needs: motion-timing headless wiring (motionTimingVerbs.js → harness seam)]*
+
+Here's what the code *will* look like once wired:
+
+```scheme
+;; EXAMPLE: walk-with-snap (awaiting motion-timing harness seam)
+(define (walk-with-snap)
+  (let* ((w (world/spawn))
+         (s (world/spawn w 
+              (entity/pos 2 12)
+              (entity/sprite! 'blossom-plum))))
+    
+    ;; Motion with snap: fast start, slow finish (ease-out)
+    ;; This verb is not yet callable in headless; it will be.
+    ;; (motion/with-feel 'snap
+    ;;   (entity/goto! s 14 12 80))  ;; 80 frames to x=14, with ease-out
+    
+    ;; Fallback: manual stepped motion for now
+    (world/gravity! w 0.5)
+    (world/floor! w 12)
+    (entity/bounce! s 0.2)
+    (entity/friction! s 0.7)
+    
+    (let loop ((frame 0))
+      (when (< frame 100)
+        (when (= (modulo frame 20) 0)
+          (entity/accel! s 0 -5)
+          (entity/accel! s 1.2 0))
+        (world/step w)
+        (loop (+ frame 1))))
+    
+    w))
+
+(walk-with-snap)
+```
+
+<!-- BUILD: mark walk-with-snap as needs-motion-timing-wiring; include in corpus but not green until seam closes -->
+
+When `motion/with-feel` is wired, you'll be able to say:
+
+```scheme
+(motion/with-feel 'snap (entity/goto! sprite target-x target-y duration))
+```
+
+…and the sprite will move to `(target-x, target-y)` over `duration` frames with an ease-out curve — fast at first, slowing into arrival. The `'snap` symbol names the curve; others include `'drag`, `'bounce`, `'elastic`, `'linear`.
+
+Until then, you compose feel manually by modulating impulse magnitude on each beat, which we'll show next.
+
+---
+
+## 9.6 Manual Feel: Varying Impulse by Phase
+
+Even without the motion-timing verbs, you can fake feel by *varying the strength of each impulse* based on where you are in the gait cycle.
+
+A confident stride front-loads the impulse (big push at the start, coast to the end). A weary shuffle back-loads it (slow start, push at the end to catch up).
+
+```scheme
+(define (walk-with-weight)
+  (let* ((w (world/spawn))
+         (s (world/spawn w 
+              (entity/pos 2 12)
+              (entity/sprite! 'blossom-plum))))
+    
+    (world/gravity! w 0.5)
+    (world/floor! w 12)
+    (entity/bounce! s 0.2)
+    (entity/friction! s 0.75)
+    
+    ;; 5 steps, each 20 frames
+    ;; Vary impulse: strong at start, weaker toward end (tired gait)
+    (let loop ((step 0) (frame 0))
+      (when (< step 5)
+        (let ((strength (- 1.5 (* step 0.2))))  ;; 1.5, 1.3, 1.1, 0.9, 0.7
+          (entity/accel! s 0 -5)
+          (entity/accel! s strength 0)
+          
+          ;; Step forward 20 frames
+          (let inner ((f 0))
+            (when (< f 20)
+              (world/step w)
+              (inner (+ f 1))))
+          
+          (loop (+ step 1) (+ frame 20)))))
+    
+    w))
+
+(walk-with-weight)
+```
+
+<!-- BUILD: wire walk-with-weight as runnable example ch09-ex04-walk-with-weight -->
+
+[VISUAL: Plum sprite taking 5 steps rightward, first step a long hop, last step a short shuffle — visibly slowing down, like fatigue.]
+
+The sprite starts bold and ends hesitant. That's *character* — emotion expressed through timing and magnitude, not just position.
+
+---
+
+## 9.7 Gaits: Named Motion Patterns
+
+A **gait** is a named composition of cadence + feel + rhythm. Humans recognize gaits instantly: walk vs. run vs. sneak vs. limp. Each has a signature timing.
+
+Let's define three gaits as procedures:
+
+```scheme
+(define (gait-walk sprite frames-per-step step-count)
+  ;; Walk: 2-beat, moderate impulse, slight hop
+  (let loop ((step 0) (frame 0))
+    (when (< step step-count)
+      (entity/accel! sprite 0 -4)
+      (entity/accel! sprite 1.0 0)
+      (let inner ((f 0))
+        (when (< f frames-per-step)
+          (world/step (entity/parent sprite))
+          (inner (+ f 1))))
+      (loop (+ step 1) (+ frame frames-per-step)))))
+
+(define (gait-run sprite frames-per-step step-count)
+  ;; Run: faster cadence, bigger horizontal impulse, more lift
+  (let loop ((step 0) (frame 0))
+    (when (< step step-count)
+      (entity/accel! sprite 0 -6)
+      (entity/accel! sprite 2.0 0)
+      (let inner ((f 0))
+        (when (< f frames-per-step)
+          (world/step (entity/parent sprite))
+          (inner (+ f 1))))
+      (loop (+ step 1) (+ frame frames-per-step)))))
+
+(define (gait-sneak sprite frames-per-step step-count)
+  ;; Sneak: slow cadence, tiny impulse, low to ground
+  (let loop ((step 0) (frame 0))
+    (when (< step step-count)
+      (entity/accel! sprite 0 -2)
+      (entity/accel! sprite 0.5 0)
+      (let inner ((f 0))
+        (when (< f frames-per-step)
+          (world/step (entity/parent sprite))
+          (inner (+ f 1))))
+      (loop (+ step 1) (+ frame frames-per-step)))))
+
+(define (demo-gaits)
+  (let* ((w (world/spawn))
+         (walker (world/spawn w (entity/pos 2 12) (entity/sprite! 'blossom-plum)))
+         (runner (world/spawn w (entity/pos 2 8) (entity/sprite! 'blossom-cherry)))
+         (sneaker (world/spawn w (entity/pos 2 4) (entity/sprite! 'blossom-pine))))
+    
+    (world/gravity! w 0.5)
+    (world/floor! w 12)
+    (entity/bounce! walker 0.2)
+    (entity/bounce! runner 0.3)
+    (entity/bounce! sneaker 0.1)
+    (entity/friction! walker 0.7)
+    (entity/friction! runner 0.6)
+    (entity/friction! sneaker 0.8)
+    
+    (gait-walk walker 20 6)
+    (gait-run runner 12 10)
+    (gait-sneak sneaker 30 4)
+    
+    w))
+
+(demo-gaits)
+```
+
+<!-- BUILD: wire demo-gaits as runnable example ch09-ex05-demo-gaits -->
+
+[VISUAL: Three sprites in horizontal lanes. Top (plum): steady walk, 6 steps. Middle (cherry): fast run, 10 quick steps. Bottom (pine): slow sneak, 4 tiny shuffles. All rightward, ending at different x positions.]
+
+Three bodies, three rhythms, three *intentions*. The code is almost identical — only the impulse magnitudes and `frames-per-step` differ. That's the power of gaits: a small timing change reads as a large personality change.
+
+---
+
+## 9.8 Anticipation and Follow-Through
+
+Real locomotion has **anticipation** (a windup before the action) and **follow-through** (a settle after). A jump doesn't start at full speed — the body crouches first. A landing doesn't stop instantly — the legs compress, then spring back.
+
+Let's add a crouch before each hop:
+
+```scheme
+(define (walk-with-anticipation)
+  (let* ((w (world/spawn))
+         (s (world/spawn w 
+              (entity/pos 2 12)
+              (entity/sprite! 'blossom-plum))))
+    
+    (world/gravity! w 0.5)
+    (world/floor! w 12)
+    (entity/bounce! s 0.3)
+    (entity/friction! s 0.7)
+    
+    ;; 4 steps, each with 6-frame anticipation + 14-frame motion
+    (let loop ((step 0))
+      (when (< step 4)
+        ;; Anticipation: small downward accel (crouch)
+        (entity/accel! s 0 1.5)
+        (let crouch ((f 0))
+          (when (< f 6)
+            (world/step w)
+            (crouch (+ f 1))))
+        
+        ;; Action: strong upward + forward impulse
+        (entity/accel! s 0 -7)
+        (entity/accel! s 1.2 0)
+        (let action ((f 0))
+          (when (< f 14)
+            (world/step w)
+            (action (+ f 1))))
+        
+        (loop (+ step 1))))
+    
+    w))
+
+(walk-with-anticipation)
+```
+
+<!-- BUILD: wire walk-with-anticipation as runnable example ch09-ex06-walk-with-anticipation -->
+
+[VISUAL: Plum sprite taking 4 steps, each step showing a visible *squash* downward before the upward hop — clear anticipation + release.]
+
+The sprite now *telegraphs* the step. You see it coming. That makes the motion readable — essential for game feel and character animation.
+
+---
+
+## 9.9 Weight: Integrating with Mass
+
+In Chapter 5 you learned that `entity/mass!` affects how forces accumulate. A heavy sprite resists acceleration; a light sprite darts.
+
+Let's make two sprites walk with the same gait code, but different masses:
+
+```scheme
+(define (walk-heavy-vs-light)
+  (let* ((w (world/spawn))
+         (heavy (world/spawn w (entity/pos 2 10) (entity/sprite! 'blossom-plum)))
+         (light (world/spawn w (entity/pos 2 6) (entity/sprite! 'blossom-cherry))))
+    
+    (world/gravity! w 0.5)
+    (world/floor! w 12)
+    (entity/bounce! heavy 0.2)
+    (entity/bounce! light 0.4)
+    (entity/friction! heavy 0.75)
+    (entity/friction! light 0.6)
+    
+    ;; Set mass
+    (entity/mass! heavy 3.0)
+    (entity/mass! light 0.5)
+    
+    ;; Same impulse pattern for both
+    (let loop ((step 0))
+      (when (< step 5)
+        (entity/accel! heavy 0 -5)
+        (entity/accel! heavy 1.0 0)
+        (entity/accel! light 0 -5)
+        (entity/accel! light 1.0 0)
+        
+        (let inner ((f 0))
+          (when (< f 20)
+            (world/step w)
+            (inner (+ f 1))))
+        
+        (loop (+ step 1))))
+    
+    w))
+
+(walk-heavy-vs-light)
+```
+
+<!-- BUILD: wire walk-heavy-vs-light as runnable example ch09-ex07-walk-heavy-vs-light -->
+
+[VISUAL: Two sprites stepping rightward. Top (plum, heavy): low, slow arcs, barely lifting off the ground. Bottom (cherry, light): high, bouncy arcs, covering more horizontal distance. Same impulse, different mass → different feel.]
+
+Same code, different character. The heavy sprite trudges; the light sprite bounds. **Mass is feel.**
+
+---
+
+## 9.10 Turning: Changing Direction Mid-Gait
+
+A sprite that can only walk in one direction isn't very alive. Let's make one that walks forward, then turns around and walks back:
+
+```scheme
+(define (walk-and-turn)
+  (let* ((w (world/spawn))
+         (s (world/spawn w 
+              (entity/pos 2 12)
+              (entity/sprite! 'blossom-plum))))
+    
+    (world/gravity! w 0.5)
+    (world/floor! w 12)
+    (entity/bounce! s 0.2)
+    (entity/friction! s 0.7)
+    
+    ;; Walk right 4 steps
+    (let loop-right ((step 0))
+      (when (< step 4)
+        (entity/accel! s 0 -5)
+        (entity/accel! s 1.0 0)
+        (let inner ((f 0))
+          (when (< f 20)
+            (world/step w)
+            (inner (+ f 1))))
+        (loop-right (+ step 1))))
+    
+    ;; Pause 20 frames (turn moment)
+    (let pause ((f 0))
+      (when (< f 20)
+        (world/step w)
+        (pause (+ f 1))))
+    
+    ;; Walk left 4 steps
+    (let loop-left ((step 0))
+      (when (< step 4)
+        (entity/accel! s 0 -5)
+        (entity/accel! s -1.0 0)  ;; impulse left
+        (let inner ((f 0))
+          (when (< f 20)
+            (world/step w)
+            (inner (+ f 1))))
+        (loop-left (+ step 1))))
+    
+    w))
+
+(walk-and-turn)
+```
+
+<!-- BUILD: wire walk-and-turn as runnable example ch09-ex08-walk-and-turn -->
+
+[VISUAL: Plum sprite walking right 4 steps, pausing briefly, then walking left 4 steps back toward start. Clear directional change, symmetric motion.]
+
+The pause is the *turn beat* — a moment to shift weight and reverse intent. In a full animation you'd add a turn *pose* (via `part/turn` from the body verbs), but even without it, the pause + reversal reads clearly.
+
+---
+
+## 9.11 Composing Gait with Steering
+
+In Chapter 10 you'll learn **steering behaviors** — high-level AI that computes desired direction (seek, flee, wander). But steering just sets *intent*; it doesn't apply locomotion timing. The bridge is: steering picks the direction, gait applies the beat.
+
+Here's a preview (not yet wired, since steering is Ch10):
+
+```scheme
+;; EXAMPLE: seek-with-gait (awaiting Ch10 ai/seek + motion-timing wiring)
+;; (define (seek-with-gait sprite target-entity)
+;;   (let ((desired (ai/seek sprite target-entity)))
+;;     ;; 'desired' is a velocity vector
+;;     ;; Apply it on a beat, not continuously
+;;     (when (= (modulo (world/frame (entity/parent sprite)) 20) 0)
+;;       (entity/accel! sprite (car desired) (cadr desired)))))
+```
+
+*[needs: Ch10 ai/seek verb + motion-timing integration]*
+
+The idea: steering computes a continuous desired velocity; you *quantize* it to a beat, turning smooth pursuit into a stepping gait. That's the marriage of physics (Ch5), AI (Ch10), and timing (Ch9).
+
+---
+
+## 9.12 The 5-Tuple in Full
+
+Let's summarize the **5-tuple motion vector** you've been building:
+
+| Coordinate | What it is | Set by | Integrated by | Feel layer |
+|------------|------------|--------|---------------|------------|
+| **pos** (x, y) | Position in space | `entity/set-pos!`, `entity/move!` | `world/step` (vel → pos) | — |
+| **vel** (vx, vy) | Velocity (rate of position change) | `entity/set-vel!`, forces | `world/step` (accel → vel) | — |
+| **accel** (ax, ay) | Acceleration (rate of velocity change) | `entity/accel!`, `world/gravity!`, etc. | `world/step` (impulse accumulation) | — |
+| **cadence** | Rhythm / beat of action | `(modulo frame beat-length)`, gait proc | You (explicitly) | `motion/cadence`, `beat/on` |
+| **feel** | Shape of interpolation (ease curve) | `motion/with-feel`, manual impulse scaling | `motion/*` verbs | `motion/with-feel`, `motion/arc`, etc. |
+
+The first three (`pos`, `vel`, `accel`) are the physics layer — they exist per-entity, updated every frame by the engine.
+
+The last two (`cadence`, `feel`) are the **performance layer** — they exist in *your code*, as timing logic and named curves. You don't set them on an entity; you *compose them into motion commands*.
+
+When the motion-timing verbs are wired, you'll write:
+
+```scheme
+(motion/with-feel 'bounce
+  (motion/cadence 24
+    (entity/goto! sprite target-x target-y)))
+```
+
+…and the sprite will move to the target *on a 24-frame beat*, *with a bounce ease curve*. Until then, you hand-code the beat loop and vary impulse magnitude to fake the curve.
+
+---
+
+## 9.13 Chapter Finale: A Sprite That Walks with Weight
+
+Let's build the chapter's promised artifact: **a sprite that walks across the canvas with a gait that conveys personality** — anticipation, follow-through, weight, and cadence all composed.
+
+We'll make a heavy sprite (plum blossom) walk slowly with a tired gait, and a light sprite (cherry blossom) skip quickly with a bouncy gait, both crossing the same distance.
+
+```scheme
+(define (finale-walk-with-weight)
+  (let* ((w (world/spawn))
+         (plum (world/spawn w 
+                 (entity/pos 1 10)
+                 (entity/sprite! 'blossom-plum)))
+         (cherry (world/spawn w 
+                   (entity/pos 1 6)
+                   (entity/sprite! 'blossom-cherry))))
+    
+    (world/gravity! w 0.5)
+    (world/floor! w 12)
+    
+    ;; Plum: heavy, slow, low bounce
+    (entity/mass! plum 3.0)
+    (entity/bounce! plum 0.15)
+    (entity/friction! plum 0.8)
+    
+    ;; Cherry: light, fast, high bounce
+    (entity/mass! cherry 0.6)
+    (entity/bounce! cherry 0.5)
+    (entity/friction! cherry 0.6)
+    
+    ;; Plum gait: 8 steps, 24 frames each, with anticipation
+    (let loop-plum ((step 0))
+      (when (< step 8)
+        ;; Crouch (anticipation)
+        (entity/accel! plum 0 1.0)
+        (let crouch ((f 0))
+          (when (< f 6)
+            (world/step w)
+            (crouch (+ f 1))))
+        
+        ;; Step (action) — weakening over time (fatigue)
+        (let ((strength (- 1.2 (* step 0.1))))
+          (entity/accel! plum 0 -4)
+          (entity/accel! plum strength 0)
+          (let action ((f 0))
+            (when (< f 18)
+              (world/step w)
+              (action (+ f 1)))))
+        
+        (loop-plum (+ step 1))))
+    
+    ;; Cherry gait: 12 steps, 16 frames each, no anticipation (instant spring)
+    ;; Run this concurrently by resetting frame counter
+    ;; (In real code you'd run both in parallel; here we sequence for simplicity)
+    ;; Reset world to start of plum's journey and run cherry separately
+    ;; OR: accept that they won't animate simultaneously in this sequential harness
+    ;; We'll interleave: plum step, cherry step, etc. — requires re-structure.
+    
+    ;; Simplified: just run cherry's gait after plum finishes
+    ;; (In a real game loop both would run each frame in parallel)
+    (let loop-cherry ((step 0))
+      (when (< step 12)
+        (entity/accel! cherry 0 -6)
+        (entity/accel! cherry 1.5 0)
+        (let action ((f 0))
+          (when (< f 16)
+            (world/step w)
+            (action (+ f 1))))
+        (loop-cherry (+ step 1))))
+    
+    w))
+
+(finale-walk-with-weight)
+```
+
+<!-- BUILD: wire finale-walk-with-weight as runnable example + chapter finale artifact ch09-finale -->
+
+[VISUAL: Two sprites (plum and cherry) walking rightward across canvas. Plum: 8 slow, low, weary steps with visible crouch before each, ending at ~x=9. Cherry: 12 quick, bouncy skips with high arcs, ending past x=15. Both feel *embodied* — you can read personality in the timing.]
+
+This is locomotion. Not just motion, not just physics — *performance*. The plum sprite trudges like it's carrying the weight of the world. The cherry sprite skips like it's late for a festival. Same engine, same verbs, different *timing* and *magnitude*.
+
+When `motion/with-feel` and `motion/cadence` are wired, you'll be able to collapse the gait loops into single declarative commands. But even hand-coded, the principle is clear: **cadence + feel = character**.
+
+---
+
+## End-of-Chapter Questions
+
+1. **What are the two \"invisible coordinates\" of the 5-tuple motion vector, and what do they control?**
+
+2. **How does `entity/mass!` affect a sprite's response to the same impulse?** Show with a short example (pseudocode OK) of two sprites receiving identical `entity/accel!` calls but moving differently.
+
+3. **What is \"anticipation\" in animation, and why does it make motion more readable?** Describe in one sentence, then sketch (in words or Scheme) how you'd add anticipation to a jump.
+
+4. **Implement a `gait-limp` procedure** that makes a sprite favor one side — e.g., every other step has half the horizontal impulse. Signature: `(gait-limp sprite frames-per-step step-count)`.
+
+5. **Why doesn't the engine store `cadence` and `feel` as entity properties the way it stores `pos` and `vel`?** (Hint: think about *when* they matter vs. *every frame*.)
+
+6. **Compose a two-part motion**: a sprite walks forward 3 steps with a bouncy gait, pauses, then *runs* backward 5 steps with a faster cadence. Use the gait procedures from §9.7 as a starting point, or write your own beat loops.
+
+---
+
+*Next chapter: **Steering** — making a sprite *decide where to go* with seek, flee, arrive, and wander, so locomotion becomes autonomous.*
+")

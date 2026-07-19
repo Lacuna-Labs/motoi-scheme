@@ -1,0 +1,241 @@
+;; appendix-f-springs-cloth-tuning.book.slatl
+;; Book of Simulation Games — Appendix F: Springs and Cloth Tuning
+;; Authored 2026-07-16 by simulation-games-engineer-lane.
+
+(dialect :applies ("motoi" "sakura"))
+
+(appendix
+  :book                "Book of Simulation Games"
+  :letter              "F"
+  :title               "Springs and Cloth Tuning"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "simulation-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + physics-simulation-emergent"
+  :book-version        "1.0.0"
+  :provenance          ((:authored-by "Engineer") (:date "2026-07-16"))
+  :prose
+"Chapter 2 built cloth from springs. This appendix is the tuning
+reference. The three sliders are stiffness `k`, rest length `L`, and
+damping `b`. Combinations of these give you rope, hair, fabric, jelly,
+rubber, chain, whip. All from the same `world/link!` primitive.
+
+---
+
+## F.1 The tuning axes
+
+**Stiffness `k`** — how hard the spring resists being stretched. Low
+`k` is a stretchy rubber band; high `k` is a rigid rod. In Motoi's
+sim units, `k` in `[0, 1]`:
+- 0.05 : very stretchy
+- 0.20 : elastic (jelly)
+- 0.40 : cloth-like
+- 0.70 : firm (rope)
+- 0.95 : near-rigid (rod)
+
+**Rest length `L`** — the equilibrium distance between endpoints.
+This is the length the spring 'wants' to be. In pixels.
+
+**Damping `b`** — how much the spring bleeds energy per oscillation.
+Low `b` rings for a long time; high `b` never oscillates.
+- 0.001 : elastic energy preserved for many bounces
+- 0.02  : gentle decay (rope, fabric)
+- 0.10  : quick settle (hair, chain)
+- 0.30  : heavily damped (thick putty)
+
+---
+
+## F.2 Preset table
+
+| Material         | k     | b     | Notes                                         |
+|------------------|------:|------:|-----------------------------------------------|
+| Elastic band     | 0.15  | 0.010 | Very stretchy, rings when released            |
+| Thin rubber      | 0.25  | 0.030 | Stretches noticeably, moderate damping        |
+| Cotton thread    | 0.40  | 0.040 | Cloth-typical; slight stretch, quick damping  |
+| Denim fabric     | 0.55  | 0.060 | Stiffer cloth, low stretch                    |
+| Leather strap    | 0.70  | 0.100 | Firm, doesn't ring                            |
+| Rope             | 0.65  | 0.080 | Firm but slightly springy                     |
+| Chain link       | 0.85  | 0.120 | Rigid, very quick damping                     |
+| Steel rod        | 0.95  | 0.150 | Effectively rigid; use for skeletons          |
+| Hair strand      | 0.30  | 0.060 | Springy with body                             |
+| Muscle fiber     | 0.50  | 0.100 | Firm but damped                               |
+| Rubber band, hot | 0.20  | 0.005 | Rings audibly on release                      |
+
+## F.3 Rope
+
+```scheme
+(define (rope-segment n rest-length)
+  (world/reset!)
+  (world/gravity! 0 0.3)
+  (let ((balls (make-vector n)))
+    (let loop-i ((i 0))
+      (when (< i n)
+        (let ((b (world/spawn 'rope (+ 100 (* i 2)) (+ 20 (* i rest-length)))))
+          (entity/mass! b 0.5)
+          (entity/drag! b 0.01)
+          (when (= i 0) (entity/pin! b))
+          (vector-set! balls i b))
+        (loop-i (+ i 1))))
+    (let loop-j ((j 0))
+      (when (< j (- n 1))
+        (let ((L (world/link! (vector-ref balls j)
+                              (vector-ref balls (+ j 1)))))
+          (world/link-rest!      L rest-length)
+          (world/link-stiffness! L 0.65)     ;; rope preset
+          (world/link-damping!   L 0.08))
+        (loop-j (+ j 1))))
+    balls))
+
+(rope-segment 15 8)
+```
+
+15-segment rope, hangs, swings naturally.
+
+## F.4 Cloth
+
+```scheme
+;; A 15x15 cloth grid, cotton-thread tuned.
+(define (cotton-cloth cols rows spacing)
+  (let ((g (cloth cols rows spacing)))
+    (world/each 'thread
+      (lambda (b)
+        (world/each-link-of b
+          (lambda (L)
+            (world/link-stiffness! L 0.40)
+            (world/link-damping!   L 0.04)))))
+    g))
+```
+
+Cotton is soft and drapes. Denim is stiffer:
+
+```scheme
+(define (denim-cloth cols rows spacing)
+  (let ((g (cloth cols rows spacing)))
+    (world/each 'thread
+      (lambda (b)
+        (world/each-link-of b
+          (lambda (L)
+            (world/link-stiffness! L 0.55)
+            (world/link-damping!   L 0.06)))))
+    g))
+```
+
+## F.5 Chain
+
+```scheme
+;; A short heavy chain.
+(define chain-links '())
+(let loop ((i 0))
+  (when (< i 8)
+    (let ((b (world/spawn 'chain-link 240 (+ 40 (* i 20)))))
+      (entity/mass! b 2.0)                ;; heavy
+      (entity/drag! b 0.02)
+      (when (= i 0) (entity/pin! b))
+      (when (not (null? chain-links))
+        (let ((L (world/link! (car chain-links) b)))
+          (world/link-rest!      L 20)
+          (world/link-stiffness! L 0.85)   ;; near-rigid
+          (world/link-damping!   L 0.12)))
+      (set! chain-links (cons b chain-links)))
+    (loop (+ i 1))))
+```
+
+## F.6 Tearing
+
+Add a stretch threshold: if the spring is stretched past 1.8x rest,
+break it.
+
+```scheme
+;; After each frame, check for over-stretched links.
+(on-frame
+  (lambda (t)
+    (world/step)
+    (world/each-link
+      (lambda (L)
+        (let* ((rest    (world/link-rest L))
+               (current (world/link-current-length L))
+               (stretch (/ current rest)))
+          (when (> stretch 1.8)
+            (world/link-remove! L)))))))
+```
+
+Cloth with a tearing threshold: pull hard on the mouse anchor and
+the cloth rips where tension is highest. Great for fabric-damage
+sims, for cardboard tearing, for skin (in a cartoon sense).
+
+## F.7 Self-collision
+
+Cloth normally doesn't self-collide; we treat threads as passing
+through each other. For realistic cloth, add self-collision:
+
+```scheme
+(world/each 'thread
+  (lambda (b)
+    (ai/separate b 'thread 8 1.5)))
+```
+
+Each thread now weakly pushes other nearby threads. Enough to
+prevent visible interpenetration; not enough to disrupt normal
+draping. Costs O(n^2) per frame though — for 225 threads that's
+50K checks. `world/spatial-index` helps.
+
+## F.8 Air resistance
+
+Add `entity/drag!` to each cloth ball. In still air, drag is small.
+In wind, cloth billows:
+
+```scheme
+(world/wind! 0.5 0)   ;; sideways wind
+(world/each 'thread
+  (lambda (b) (entity/drag! b 0.03)))
+```
+
+Sideways wind + drag + top-pinned cloth = the flag effect. It ripples
+and waves. If you also tune damping down slightly, the wave motion
+persists.
+
+## F.9 Adding shearing resistance
+
+A grid of 4-neighbor springs allows the cloth to shear (deform into
+parallelograms). To resist shearing, add diagonal springs:
+
+```scheme
+;; After building 4-neighbor springs, add diagonals.
+(let loop-y ((r 0))
+  (when (< r (- rows 1))
+    (let loop-x ((c 0))
+      (when (< c (- cols 1))
+        (let ((L1 (world/link!
+                    (vector-ref g (+ (* r cols) c))
+                    (vector-ref g (+ (* (+ r 1) cols) c 1))))
+              (L2 (world/link!
+                    (vector-ref g (+ (* r cols) c 1))
+                    (vector-ref g (+ (* (+ r 1) cols) c)))))
+          (world/link-rest!      L1 (* spacing 1.414))
+          (world/link-stiffness! L1 0.30)
+          (world/link-damping!   L1 0.05)
+          (world/link-rest!      L2 (* spacing 1.414))
+          (world/link-stiffness! L2 0.30)
+          (world/link-damping!   L2 0.05))
+        (loop-x (+ c 1))))
+    (loop-y (+ r 1))))
+```
+
+Diagonal springs at ~40% stiffness of the axis springs keep cloth
+from shearing while still allowing normal draping.
+
+## F.10 The takeaway
+
+Stiffness controls springiness. Damping controls decay. Rest length
+sets equilibrium. Everything else — rope, cloth, chain, hair,
+jelly — is a triple of these values plus the topology of the links.
+Print the tuning table; keep it in reach.
+
+Related:
+- Chapter 2: springs, chains, cloth in detail
+- Appendix A: integrator matters for stiff systems
+- Chapter 11: mass-spring-damper analysis")

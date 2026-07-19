@@ -1,0 +1,282 @@
+;; 15-interop.slat
+;; Book of Values — Chapter 15
+
+(chapter
+  :book              "Book of Values"
+  :chapter-number    15
+  :title             "Interop"
+  :audience          :engineer
+  :dialect           "motoi"
+  :book-version      "1.1"
+  :provenance        "book-of-values-author-2026-07-16 book-of-values-expander-2026-07-17"
+  :training-eligible #t
+  :content-rating    :G
+  :prose
+"# Chapter 15 — Interop
+
+Values leave your program. Values arrive from other programs. At
+the boundary, everything you built inside — the shapes, the
+tags, the units, the provenance — either survives the transit or
+gets flattened.
+
+This is the chapter about the boundary.
+
+## The two axes
+
+Interop moves along two axes.
+
+- **Format.** JSON, CSV, XML, SLAT, wire protocols, database
+  tables. Each has its own vocabulary of value shapes.
+
+- **Semantic.** What a value *means* on the other side.
+  `\"price\"` in the incoming JSON might be cents, might be dollars,
+  might be a string with a currency symbol.
+
+Format is easy. Semantic is where the bugs are.
+
+## JSON: everything is a scalar
+
+JSON has: strings, numbers, booleans, null, arrays, objects. No
+symbols. No characters. No dates. No decimals. Numbers are IEEE
+754 doubles (though most parsers will accept a big integer).
+
+Consequences:
+
+- **Symbols become strings.** Your `'usd` becomes `\"usd\"`.
+- **Money as `(money 'usd 12345)` becomes** something like
+  `[\"money\", \"usd\", 12345]` or `{\"currency\": \"usd\",
+  \"minor\": 12345}`. Both work. Pick one and stick with it.
+- **Times become strings** — ISO 8601 is the standard, `\"2026-07-
+  17T03:23:42.945Z\"`.
+- **Missing becomes `null`** — and you lose the distinction between
+  the three flavors of missing from Chapter 13, unless you encode
+  them explicitly.
+
+Emitting a money value as JSON (as an object). Motoi's base env
+does not ship `symbol->string`, so we do the currency-code
+translation with an explicit table — which is what a real
+serialiser would do anyway.
+
+```
+(define (currency->code cur)
+  (cond ((eq? cur 'usd) \"USD\")
+        ((eq? cur 'eur) \"EUR\")
+        ((eq? cur 'gbp) \"GBP\")
+        ((eq? cur 'jpy) \"JPY\")
+        (else \"???\")))
+
+(define (money->json-string m)
+  (let ((cur (cadr m))
+        (min (caddr m)))
+    (string-append
+      \"{\\\"currency\\\":\\\"\"
+      (currency->code cur)
+      \"\\\",\\\"minor\\\":\"
+      (number->string min)
+      \"}\")))
+
+(money->json-string (list 'money 'usd 12345))
+;; -> \"{\\\"currency\\\":\\\"USD\\\",\\\"minor\\\":12345}\"
+```
+
+At the string level. Real Motoi programs would use a JSON writer
+verb when one is available. For now, the string form works.
+
+The lookup-table pattern turns out to be more robust than
+`symbol->string` anyway: it lets you keep internal symbols short
+(`'usd`) and external codes canonical (`\"USD\"`), and it refuses
+unknown currencies at the boundary instead of emitting garbage.
+
+## CSV: everything is a string
+
+CSV has strings and nothing else. Numbers are strings that look like
+numbers. Dates are strings. Empty cells are empty strings, which
+could mean *empty* or *missing*.
+
+Consequences:
+
+- **Type is not carried.** You have to know column meanings from
+  outside the file (the header, a schema doc, or a convention).
+- **Commas and quotes need escaping.** A field with a comma has to
+  be quoted. A field with a quote has to have the quote doubled.
+- **Multi-line fields** are legal in real CSV but often broken by
+  simple parsers.
+- **Currency, unit, timezone: not there.** You have to add them,
+  either as separate columns or by convention (whole file is USD,
+  whole file is UTC).
+
+Emitting one row for our money value, again using the code-table:
+
+```
+(define (money->csv-row m)
+  (string-append
+    (currency->code (cadr m))
+    \",\"
+    (number->string (caddr m))))
+
+(money->csv-row (list 'money 'usd 12345))
+;; -> \"USD,12345\"
+```
+
+Parsing back would require string tokenisation. Motoi's base env
+does not ship `string-split` or character literals at time of
+writing. A pragmatic parser threads through the string with
+`string-ref` and equality on one-character substrings, or you use
+a library that adds parser verbs. Either way, keep the parser
+small, keep it at the boundary, and make it *return the shaped
+value* — so nothing downstream has to know a CSV row was ever
+involved.
+
+<!-- NEEDS-ALFRED: Confirm whether the frozen CORE ships any
+     string tokenisation verbs (e.g. string-split, string-index).
+     If yes, the CSV parser example can be made concrete. -->
+
+
+DO: define one boundary function per direction (in and out) and
+call it exactly once, at the edge.
+DON'T: sprinkle `symbol->string` calls throughout your business logic.
+WHY: if the wire format changes, you have one function to edit —
+not fifty places to hunt.
+
+## SLAT: values carry structure
+
+SLAT is Motoi's native format. It preserves symbols, lists, and
+tags natively. `(money usd 12345)` written to a SLAT file reads
+back as `(money usd 12345)`. No coercion, no loss.
+
+This is why the shapes-with-tags pattern from Chapter 1 is a good
+fit for Motoi programs — the values round-trip through storage
+without changing.
+
+## Byte order
+
+Same integer, different byte order, different meaning.
+
+- **Big-endian** (network order): high byte first. Used in most
+  protocols.
+- **Little-endian**: low byte first. Used by x86 and ARM in memory.
+
+The integer 1 as four bytes:
+
+- Big-endian: `00 00 00 01`
+- Little-endian: `01 00 00 00`
+
+Same number. Different bit pattern. If you serialize on one platform
+and deserialize on another without agreeing on the order, the
+number is garbage.
+
+Most modern formats (JSON, XML, CBOR) are byte-order agnostic
+because they don't send raw bytes. Binary formats (protobuf,
+MessagePack, raw C structs, image file headers) very much are.
+
+DO: read the format spec. Know if it says big-endian or little-endian.
+DON'T: send raw integer bytes without a byte-order convention.
+WHY: this bug shows up as a wildly wrong number, not as a subtle
+drift. It's obvious at test time and invisible in review.
+
+## Wire protocols
+
+Any protocol that carries integers has a bit width. HTTP status
+codes are `100..599` in a small integer. Timestamps in Unix
+protocols are 32-bit or 64-bit. TCP sequence numbers wrap at 2^32.
+
+- **Read the spec.** Do not guess.
+- **Check the ceiling.** Values on the wire may be bounded in ways
+  your canonical is not.
+- **Escape properly.** URL parameters, JSON strings, XML, CSV — all
+  have escape rules. Break them and you get wrong data or a
+  security bug.
+
+## Databases
+
+Databases have their own type systems. `INTEGER`, `BIGINT`,
+`DECIMAL(p, s)`, `NUMERIC`, `FLOAT`, `REAL`, `DOUBLE`, `MONEY`,
+`TIMESTAMP`, `TIMESTAMPTZ`. Not the same. Not portable.
+
+- `INTEGER` is often 32-bit signed. Overflows at 2.1 billion.
+- `BIGINT` is often 64-bit signed. Overflows at 9.2 quintillion.
+- `DECIMAL(19,4)` is a fixed-point type. 15 digits before the
+  decimal, 4 after. Exact for money.
+- `MONEY` — do not use. Every database's `MONEY` type is subtly
+  different and none of them are good.
+- `TIMESTAMP` without `TZ` means *no timezone info*. You will
+  guess wrong later.
+- `TIMESTAMPTZ` (or equivalents) store UTC and convert on the way
+  in and out. Prefer this.
+
+For money in a database, the choice is: `DECIMAL(n, m)` in a
+schema that documents `n` and `m`, or `BIGINT` in minor units. Both
+work. Both are defensible. Pick, document, stick.
+
+## The boundary function
+
+The clean pattern for interop: **one function per direction, at
+the edge of your program**.
+
+```
+;; Boundary function: JSON string in, canonical money out.
+(define (json->money s)
+  ;; Sketch. A real impl would use a JSON parser.
+  ;; Input: {\"currency\":\"usd\",\"minor\":12345}
+  ;; Output: (money usd 12345)
+  ;; ...
+  'not-shown-here)
+
+;; Boundary function: canonical money in, JSON string out.
+(define (money->json m)
+  ;; See money->json-string above.
+  'not-shown-here)
+```
+
+Inside your program, only canonical values move. The boundary
+functions are the only code that knows about JSON. If a downstream
+system changes its format, you change one function. Everything else
+stays.
+
+## The schema is a value too
+
+The schema of an incoming payload is itself a value with a shape.
+Version it. Record which version you were expecting when you
+parsed. If a payload arrives in a version you don't recognize,
+refuse, don't guess.
+
+```
+(define (parse-with-schema payload expected-version)
+  (let ((v (cadr (assoc 'schema-version payload))))
+    (cond
+      ((not (= v expected-version))
+         (list 'error 'schema-mismatch
+               ':expected expected-version
+               ':got v))
+      (else
+         (list 'ok payload)))))
+```
+
+## Recap
+
+- JSON flattens shapes. Recreate them on parse, tag them on emit.
+- CSV loses type. Add units and currencies as columns or in a
+  companion schema doc.
+- SLAT is Motoi-native. Shapes round-trip.
+- Every wire protocol has integer widths. Check them.
+- Every database has type quirks. `BIGINT` in minor units, or
+  `DECIMAL(n, m)`, for money. `TIMESTAMPTZ` for time.
+- One boundary function per direction per format. Canonical
+  everywhere else.
+- Version the schema. Refuse unknown versions.
+
+Next: verification. How to prove your value discipline still holds
+when the code changes.")
+
+(example :ref "ch15-money-json"
+         :code "(begin (define (cc c) (cond ((eq? c 'usd) \"USD\") (else \"???\"))) (define (m->j m) (let ((cur (cadr m)) (min (caddr m))) (string-append \"{\\\"currency\\\":\\\"\" (cc cur) \"\\\",\\\"minor\\\":\" (number->string min) \"}\"))) (m->j (list 'money 'usd 12345)))"
+         :expected "{\"currency\":\"USD\",\"minor\":12345}")
+(example :ref "ch15-money-csv"
+         :code "(begin (define (cc c) (cond ((eq? c 'usd) \"USD\") (else \"???\"))) (define (m->csv m) (string-append (cc (cadr m)) \",\" (number->string (caddr m)))) (m->csv (list 'money 'usd 12345)))"
+         :expected "USD,12345")
+(example :ref "ch15-schema-mismatch"
+         :code "(begin (define (parse-v payload exp) (let ((v (cadr (assoc 'schema-version payload)))) (cond ((not (= v exp)) (list 'error 'schema-mismatch ':expected exp ':got v)) (else (list 'ok payload))))) (parse-v (list (list 'schema-version 2) (list 'x 1)) 1))"
+         :expected "(error schema-mismatch :expected 1 :got 2)")
+(example :ref "ch15-schema-ok"
+         :code "(begin (define (parse-v payload exp) (let ((v (cadr (assoc 'schema-version payload)))) (cond ((not (= v exp)) (list 'error 'schema-mismatch ':expected exp ':got v)) (else (list 'ok payload))))) (parse-v (list (list 'schema-version 1) (list 'x 1)) 1))"
+         :expected "(ok ((schema-version 1) (x 1)))")

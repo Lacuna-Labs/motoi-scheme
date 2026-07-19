@@ -1,0 +1,405 @@
+;; ch12-bosses.book.slatl
+;; Book of Arcade Games — Chapter 12: Bosses
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Arcade Games"
+  :chapter-number      12
+  :title               "Bosses"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + game-design"
+  :book-version        "1.0.0"
+  :draws-from-preserved (:book "book-of-games-preserved" :ch 15)
+  :prose
+"Every good arcade game ends with a boss. One enemy that survives longer,
+patterns you learn by dying, phases that get harder as the fight
+progresses. The boss compresses everything you learned in chapters 1-11
+into ninety seconds of concentrated challenge.
+
+The trick to a good boss is legibility. The player must be able to LEARN
+the boss. Its patterns must be readable — 'ah, when it goes red it
+fires an X-cross of bullets.' Random bullet hell is bad boss design;
+deterministic-until-you-lose-focus is good boss design. The player fails
+because they made a mistake, not because a dice rolled against them.
+
+This chapter builds a three-phase boss: 100 HP; different attack in
+each third; phase transition marked with camera-shake and a color
+change. The core is a state machine driven by HP thresholds and a
+tick-based attack cycle. In under 100 lines.
+
+---
+
+## 12.1 The state machine
+
+Everything about a boss is state. Boss health. Current phase. Attack
+cooldown. Sub-attack index. Time-in-phase. Store it all.
+
+```scheme
+;; Boss state.
+(define boss-phase 1)
+(define attack-tick 0)
+(define phase-timer 0)
+```
+
+Three variables. That's it. Everything else derives from these three
+plus `entity/hp!` of the boss.
+
+---
+
+## 12.2 The boss
+
+Spawn, shape, health.
+
+```scheme
+(define (boss-and-player)
+  (world/reset!)
+  (collision/define-layers!
+   '((player :collides-with (boss boss-bullet))
+     (boss   :collides-with (player player-bullet))
+     (player-bullet :collides-with (boss))
+     (boss-bullet   :collides-with (player))))
+  (let ((p (world/spawn 'player 160 210))
+        (b (world/spawn 'boss   160 40)))
+    (entity/shape! p 'triangle 8)  (entity/layer! p 'player)
+    (entity/shape! b 'rect 40 40) (entity/layer! b 'boss)
+    (entity/hp! p 5) (entity/hp! b 100)
+    (entity/solid! p #t) (entity/solid! b #t)
+    ...))
+```
+
+The boss is 40×40 pixels. Not huge on paper. Huge in feel because it's
+the ONLY thing that big on the screen.
+
+---
+
+## 12.3 Phase 1 — Deliberate
+
+Boss wanders slowly, fires single shots every 60 frames.
+
+```scheme
+;; Phase 1: single-shot every 60 frames, aimed at player.
+(define (phase-1-attack boss player)
+  (when (= (modulo attack-tick 60) 0)
+    (let* ((dx (- (entity/x player) (entity/x boss)))
+           (dy (- (entity/y player) (entity/y boss)))
+           (mag (max 0.01 (geom/distance 0 0 dx dy)))
+           (vx (* (/ dx mag) 2))
+           (vy (* (/ dy mag) 2))
+           (bul (world/spawn 'boss-bullet
+                             (entity/x boss) (entity/y boss))))
+      (entity/shape! bul 'circle 3)
+      (entity/layer! bul 'boss-bullet)
+      (entity/set-vel! bul vx vy))))
+```
+
+`geom/distance` (from the geom library) computes 2D distance. We
+normalize the direction (divide by magnitude) then scale to speed 2.
+The bullet fires straight at the player's position AT THE MOMENT OF
+FIRE.
+
+---
+
+## 12.4 Phase 2 — Aggressive
+
+Boss chases the player. Shots come every 30 frames. Two-way spread.
+
+```scheme
+;; Phase 2: chase + 3-shot spread every 30 frames.
+(define (phase-2-attack boss player)
+  (ai/seek boss player)
+  (entity/max-speed! boss 1.5)
+  (when (= (modulo attack-tick 30) 0)
+    (let ((dx (- (entity/x player) (entity/x boss)))
+          (dy (- (entity/y player) (entity/y boss))))
+      (let ((base-ang (geom/atan2 dy dx)))
+        (for-each
+         (lambda (delta)
+           (let* ((ang (+ base-ang delta))
+                  (bul (world/spawn 'boss-bullet
+                                    (entity/x boss) (entity/y boss))))
+             (entity/shape! bul 'circle 3)
+             (entity/layer! bul 'boss-bullet)
+             (entity/set-vel! bul (* 2.5 (geom/cos ang))
+                                  (* 2.5 (geom/sin ang)))))
+         (list -0.3 0 0.3))))))
+```
+
+`geom/atan2 dy dx` returns the angle of the vector (dx, dy). We build
+three shots at angles (base-0.3, base, base+0.3) — a cone spread.
+Three shots × 30 frame cadence = 6 shots per second. Twitchy.
+
+---
+
+## 12.5 Phase 3 — Bullet Hell
+
+Ring bursts of 12 bullets every 90 frames. Boss stops moving.
+
+```scheme
+;; Phase 3: ring burst every 90 frames + boss stationary at top.
+(define (phase-3-attack boss player)
+  (entity/set-vel! boss 0 0)
+  (when (= (modulo attack-tick 90) 0)
+    (let loop ((i 0))
+      (when (< i 12)
+        (let* ((ang (* (/ 6.283 12) i))
+               (bul (world/spawn 'boss-bullet
+                                 (entity/x boss) (entity/y boss))))
+          (entity/shape! bul 'circle 3)
+          (entity/layer! bul 'boss-bullet)
+          (entity/set-vel! bul (* 2 (geom/cos ang))
+                               (* 2 (geom/sin ang))))
+        (loop (+ i 1))))))
+```
+
+12 bullets in a ring. Player must dodge or hide. Boss stationary makes
+positioning matter — approach from the sides during the pause between
+bursts.
+
+---
+
+## 12.6 The full fight
+
+Wire it all up.
+
+```scheme
+;; Full boss fight — three phases, HP-driven transitions.
+(define boss-phase 1)
+(define attack-tick 0)
+
+(define (boss-fight)
+  (world/reset!)
+  (collision/define-layers!
+   '((player :collides-with (boss boss-bullet))
+     (boss   :collides-with (player player-bullet))
+     (player-bullet :collides-with (boss))
+     (boss-bullet   :collides-with (player))))
+  (let ((p (world/spawn 'player 160 210))
+        (b (world/spawn 'boss   160 40)))
+    (entity/shape! p 'triangle 8)  (entity/layer! p 'player)
+    (entity/shape! b 'rect 40 40) (entity/layer! b 'boss)
+    (entity/hp! p 5) (entity/hp! b 100)
+    (entity/solid! p #t) (entity/solid! b #t)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -4 0))
+       (when (input/down? 'right) (entity/move! p 4 0))
+       (when (input/pressed? 'a)
+         (let ((bul (world/spawn 'player-bullet
+                                 (entity/x p) (- (entity/y p) 8))))
+           (entity/shape! bul 'circle 2)
+           (entity/layer! bul 'player-bullet)
+           (entity/set-vel! bul 0 -6)))
+       ;; Phase-transition detection.
+       (let ((hp (entity/hp! b 0)))
+         (cond
+           ((and (< hp 66) (= boss-phase 1))
+            (set! boss-phase 2)
+            (world/camera-shake! 10 0.95)
+            (audio/play 'phase-shift))
+           ((and (< hp 33) (= boss-phase 2))
+            (set! boss-phase 3)
+            (world/camera-shake! 15 0.97)
+            (audio/play 'phase-shift))))
+       ;; Attack routing.
+       (cond ((= boss-phase 1) (phase-1-attack b p))
+             ((= boss-phase 2) (phase-2-attack b p))
+             ((= boss-phase 3) (phase-3-attack b p)))
+       (set! attack-tick (+ attack-tick 1))
+       (world/step)
+       ;; Collision handling.
+       (for-each
+        (lambda (pair)
+          (let ((a (car pair)) (bp (cadr pair)))
+            (let ((kinds (list (entity/kind a) (entity/kind bp))))
+              (cond
+                ((or (equal? kinds '(player-bullet boss))
+                     (equal? kinds '(boss player-bullet)))
+                 (entity/damage! b 1)
+                 (entity/despawn!
+                  (if (eq? (entity/kind a) 'player-bullet) a bp)))
+                ((or (equal? kinds '(boss-bullet player))
+                     (equal? kinds '(player boss-bullet)))
+                 (entity/damage! p 1)
+                 (entity/despawn!
+                  (if (eq? (entity/kind a) 'boss-bullet) a bp))
+                 (world/camera-shake! 5 0.9))
+                ((or (equal? kinds '(boss player))
+                     (equal? kinds '(player boss)))
+                 (entity/damage! p 1)
+                 (world/camera-shake! 8 0.9))))))
+        (world/collisions))
+       ;; Cleanup off-screen bullets.
+       (world/each 'boss-bullet
+                   (lambda (bul)
+                     (when (or (< (entity/x bul) -10) (> (entity/x bul) 330)
+                               (< (entity/y bul) -10) (> (entity/y bul) 250))
+                       (entity/despawn! bul))))
+       (world/each 'player-bullet
+                   (lambda (bul)
+                     (when (< (entity/y bul) 0) (entity/despawn! bul))))
+       ;; Boss death?
+       (when (<= (entity/hp! b 0) 0)
+         (paint-text \"VICTORY\" 130 100)
+         (world/camera-shake! 20 0.97)
+         (audio/play 'victory))
+       (paint-clear)
+       (when (entity/alive? b)
+         (paint-cell (case boss-phase ((1) 'boss1) ((2) 'boss2) ((3) 'boss3))
+                     (entity/x b) (entity/y b) 40 40))
+       (world/each 'boss-bullet
+                   (lambda (bul)
+                     (paint-cell 'boss-bullet (entity/x bul) (entity/y bul) 3 3)))
+       (world/each 'player-bullet
+                   (lambda (bul)
+                     (paint-cell 'player-bullet (entity/x bul) (entity/y bul) 2 2)))
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       (paint-text (string-append \"Boss HP: \" (number->string (entity/hp! b 0)))
+                   10 10)
+       (paint-text (string-append \"You HP: \" (number->string (entity/hp! p 0)))
+                   10 20)
+       (paint-text (string-append \"Phase: \" (number->string boss-phase))
+                   10 30)))))
+
+(big-bang boss-fight)
+```
+
+Ninety-second boss fight in one function. Three phases. HP-driven
+transitions. Camera-shake and sound cue on phase change. Clean death
+scene. That is the arcade boss template.
+
+---
+
+## 12.7 The four patterns for bosses
+
+**Composition.** The boss is composed of health + phase + attack
+pattern + physics + shape. Each phase COMPOSES its own attack behavior
+from the primitives (spawn bullet, aim, ring-burst).
+
+**Orchestration.** Frame loop orchestrates: player input, phase-
+transition check, active-phase attack routine, physics step, collision
+walk, cleanup, paint. Phase-transition check MUST come before the
+attack routine so the new phase fires immediately.
+
+**In-routing.** HP damage routes to phase-transition check. Player
+bullets route to boss damage. Boss bullets route to player damage.
+The routing table is a small `cond` on collision-kind pairs.
+
+**Routing.** Every attack routine routes bullets from boss position
+to trajectories computed by phase-specific math. `world/camera-shake!`
+routes phase-transitions to visual feedback. `audio/play` routes
+transitions to audio feedback.
+
+---
+
+## 12.8 Common desktop tasks
+
+**End-of-sale boss.** A shop's month-long clearance ends with a boss
+mini-game: destroy the giant discount-flag icon by clicking rapidly.
+Three phases of increasing click-required density. Winners get an
+extra 10% off.
+
+**Complaint-triage boss.** For an operator, the 'boss' is a difficult
+customer message that requires multiple back-and-forth responses. Phase
+1: simple response. Phase 2: escalation, more research needed. Phase
+3: manager intervention. Same phase-machine, different content.
+
+---
+
+## 12.9 Pitfalls
+
+**Bullets all fire on the same frame.** Multiple `attack-tick` checks
+share the same modulo. Give each phase its own timer or use a
+staggered offset.
+
+**Boss teleports on phase transition.** You reset boss position on
+phase change. Don't; the fight should feel continuous. Only change
+BEHAVIOR, not position.
+
+**Player can't damage boss.** Layer setup missing. Check that
+`player-bullet` collides with `boss`.
+
+**Bullet count grows unbounded.** Cleanup missing. Every frame, walk
+`world/each 'boss-bullet` and despawn those off-screen.
+
+**Boss dies but game continues.** Add a `game/state` transition to
+victory-screen. Chapter 14 covers this.
+
+**Phase 3 is unbeatable.** Playtest. Tune bullet count from 12 to 8.
+Tune burst frequency from 90 to 120. Tune bullet speed from 2 to 1.5.
+Playtest again.
+
+---
+
+## 12.10 Try this yourself
+
+1. Add phase 4: below 10 HP, boss shakes uncontrollably and fires
+   both cone AND ring simultaneously.
+2. Give boss a shield: unless bullet hits the top-center 20-pixel
+   area, damage is 0. Kids learn to aim.
+3. Randomize phase-2 attack: 50% cone, 50% chase-and-slam.
+4. Add mini-enemies that spawn during phase 3 to distract player.
+5. Add a heal drop after each phase transition. Player recovers 1 HP
+   between phases.
+6. Boss dodge: on player-bullet approach, boss moves ±20 pixels 50%
+   of the time. Not always — sometimes lets it through.
+
+---
+
+## 12.11 What we built
+
+A three-phase boss with HP-gated transitions, three attack patterns,
+camera-shake feedback, and cleanup. About 100 lines. The template
+for every arcade climax.
+
+Next chapter: the score. What's the point of hitting anything if the
+score doesn't ratchet up? Combo, multiplier, escalation, the number
+that grows and grows.")
+
+(code-block :chapter 12 :lang "scheme" :source
+"(define boss-phase 1)
+(define attack-tick 0)
+(define (boss-anchor)
+  (world/reset!)
+  (collision/define-layers!
+   '((player :collides-with (boss boss-bullet))
+     (boss   :collides-with (player player-bullet))
+     (player-bullet :collides-with (boss))
+     (boss-bullet   :collides-with (player))))
+  (let ((p (world/spawn 'player 160 210))
+        (b (world/spawn 'boss   160 40)))
+    (entity/shape! p 'triangle 8)  (entity/layer! p 'player)
+    (entity/shape! b 'rect 40 40) (entity/layer! b 'boss)
+    (entity/hp! p 5) (entity/hp! b 100)
+    (entity/solid! p #t) (entity/solid! b #t)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -4 0))
+       (when (input/down? 'right) (entity/move! p 4 0))
+       (when (input/pressed? 'a)
+         (let ((bul (world/spawn 'player-bullet
+                                 (entity/x p) (- (entity/y p) 8))))
+           (entity/shape! bul 'circle 2)
+           (entity/layer! bul 'player-bullet)
+           (entity/set-vel! bul 0 -6)))
+       ;; Phase transitions.
+       (let ((hp (entity/hp! b 0)))
+         (cond ((and (< hp 66) (= boss-phase 1))
+                (set! boss-phase 2) (world/camera-shake! 10 0.95))
+               ((and (< hp 33) (= boss-phase 2))
+                (set! boss-phase 3) (world/camera-shake! 15 0.97))))
+       (set! attack-tick (+ attack-tick 1))
+       (world/step)
+       (paint-clear)
+       (when (entity/alive? b)
+         (paint-cell 'boss (entity/x b) (entity/y b) 40 40))
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       (paint-text (string-append \"HP: \" (number->string (entity/hp! b 0)))
+                   10 10)))))
+(big-bang boss-anchor)")

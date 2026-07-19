@@ -1,0 +1,375 @@
+;; ch16-ship-it.book.slatl
+;; Book of Arcade Games — Chapter 16: Ship It: The Whole Cabinet
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Arcade Games"
+  :chapter-number      16
+  :title               "Ship It: The Whole Cabinet"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + game-design"
+  :book-version        "1.0.0"
+  :prose
+"You have read fifteen chapters. You built a ball, a paddle, a ship, a
+cannon, a shmup, a jump, a tile world, a boss. You tuned feel. You
+scored. You ran a coin-op loop. You played with a friend on the same
+screen.
+
+This chapter is where you make it yours.
+
+The suggested template is a 3-level shoot-em-up with a boss on level
+3. Your job is not to copy it. Your job is to build YOUR game. Maybe a
+top-down maze runner. Maybe a puzzle platformer. Maybe a two-player
+racing brawler. The chapter provides the SKELETON — the cabinet loop,
+the state transitions, the persistence — and lets you fill in the
+levels.
+
+At the end you (define-card) the game, publish it to a share URL,
+send that URL to three friends, watch them play, listen to what they
+say, iterate. Then you close the book and open a new one.
+
+---
+
+## 16.1 The template
+
+A 3-level shmup with a boss on level 3. Uses everything from chapters
+1, 5, 6, 11, 12, 13, 14.
+
+```scheme
+;; game.slat — full arcade shmup, ready to define-card.
+
+(define game-state 'attract)
+(define state-timer 0)
+(define current-level 1)
+(define current-score 0)
+(define combo 0)
+(define combo-decay-at 0)
+(define player-hp 3)
+(define boss-phase 1)
+(define spawn-counter 0)
+
+(define (init-play)
+  (world/reset!)
+  (collision/define-layers!
+   '((player :collides-with (enemy enemy-bullet boss boss-bullet coin))
+     (enemy  :collides-with (player player-bullet))
+     (boss   :collides-with (player player-bullet))
+     (player-bullet :collides-with (enemy boss))
+     (enemy-bullet  :collides-with (player))
+     (boss-bullet   :collides-with (player))
+     (coin :collides-with (player))))
+  (let ((p (world/spawn 'player 160 210)))
+    (entity/shape! p 'triangle 8)
+    (entity/layer! p 'player)
+    (entity/solid! p #t))
+  (set! player-hp 3)
+  (set! current-score 0)
+  (set! combo 0)
+  (set! current-level 1))
+
+(define (init-level lvl)
+  ;; Clear enemies/bullets; keep player.
+  (world/each 'enemy (lambda (e) (entity/despawn! e)))
+  (world/each 'boss  (lambda (b) (entity/despawn! b)))
+  (world/each 'enemy-bullet (lambda (b) (entity/despawn! b)))
+  (world/each 'player-bullet (lambda (b) (entity/despawn! b)))
+  (set! spawn-counter 0)
+  (set! boss-phase 1)
+  (when (= lvl 3)
+    (let ((b (world/spawn 'boss 160 40)))
+      (entity/shape! b 'rect 40 40)
+      (entity/layer! b 'boss)
+      (entity/hp! b 100))))
+
+(define (transition new-state)
+  (set! game-state new-state)
+  (set! state-timer 0)
+  (case new-state
+    ((play) (init-play) (init-level 1))
+    ((next-level)
+     (set! current-level (+ current-level 1))
+     (if (> current-level 3)
+         (transition 'victory)
+         (begin (init-level current-level)
+                (transition 'play))))))
+
+(define (level-tick p)
+  (cond
+    ((< current-level 3)
+     ;; Levels 1-2: enemy waves.
+     (set! spawn-counter (+ spawn-counter 1))
+     (let ((spawn-rate (- 40 (* 5 current-level))))
+       (when (>= spawn-counter spawn-rate)
+         (set! spawn-counter 0)
+         (let ((e (world/spawn 'enemy
+                               (+ 20 (modulo (world/hash) 280))
+                               -10)))
+           (entity/shape! e 'rect 10 10)
+           (entity/layer! e 'enemy)
+           (entity/set-vel! e 0 (+ 1 (* 0.5 current-level)))
+           (entity/solid! e #t))))
+     ;; Level complete after 30 seconds.
+     (when (> state-timer (* 60 30))
+       (transition 'next-level)))
+    (else
+     ;; Level 3: boss phase transitions.
+     (world/each 'boss
+                 (lambda (b)
+                   (let ((hp (entity/hp! b 0)))
+                     (cond
+                       ((and (< hp 66) (= boss-phase 1))
+                        (set! boss-phase 2)
+                        (world/camera-shake! 10 0.95))
+                       ((and (< hp 33) (= boss-phase 2))
+                        (set! boss-phase 3)
+                        (world/camera-shake! 15 0.97)))
+                     ;; Basic boss shot cadence.
+                     (when (= (modulo state-timer (case boss-phase
+                                                    ((1) 60)
+                                                    ((2) 30)
+                                                    ((3) 90))) 0)
+                       (let ((bul (world/spawn 'boss-bullet
+                                               (entity/x b) (entity/y b))))
+                         (entity/shape! bul 'circle 3)
+                         (entity/layer! bul 'boss-bullet)
+                         (entity/set-vel! bul 0 3)))
+                     (when (<= hp 0)
+                       (entity/despawn! b)
+                       (transition 'victory)))))
+     )))
+
+(define (handle-collisions p)
+  (for-each
+   (lambda (pair)
+     (let ((a (car pair)) (b (cadr pair)))
+       (let ((kinds (list (entity/kind a) (entity/kind b))))
+         (cond
+           ((or (equal? kinds '(player-bullet enemy))
+                (equal? kinds '(enemy player-bullet)))
+            (entity/despawn! (if (eq? (entity/kind a) 'player-bullet) a b))
+            (entity/despawn! (if (eq? (entity/kind a) 'enemy) a b))
+            (set! combo (+ combo 1))
+            (set! combo-decay-at (+ (world/frame) 60))
+            (set! current-score (+ current-score (* 100 combo))))
+           ((or (equal? kinds '(player-bullet boss))
+                (equal? kinds '(boss player-bullet)))
+            (entity/despawn! (if (eq? (entity/kind a) 'player-bullet) a b))
+            (entity/damage! (if (eq? (entity/kind a) 'boss) a b) 1)
+            (set! current-score (+ current-score 200)))
+           ((or (equal? kinds '(enemy-bullet player))
+                (equal? kinds '(player enemy-bullet))
+                (equal? kinds '(boss-bullet player))
+                (equal? kinds '(player boss-bullet)))
+            (entity/despawn!
+             (if (or (eq? (entity/kind a) 'enemy-bullet)
+                     (eq? (entity/kind a) 'boss-bullet)) a b))
+            (set! player-hp (- player-hp 1))
+            (world/camera-shake! 8 0.9))))))
+   (world/collisions))
+  (when (>= (world/frame) combo-decay-at) (set! combo 0)))
+
+(define (paint-hud)
+  (paint-text (string-append \"Score: \" (number->string current-score)) 10 10)
+  (paint-text (string-append \"HP: \" (number->string player-hp)) 10 20)
+  (paint-text (string-append \"Level: \" (number->string current-level))
+              10 30)
+  (when (> combo 0)
+    (paint-text (string-append \"x\" (number->string combo)) 260 20)))
+
+(define (game-frame)
+  (set! state-timer (+ state-timer 1))
+  (paint-clear)
+  (case game-state
+    ((attract)
+     (paint-text \"MY ARCADE GAME\" 100 60)
+     (paint-text \"PRESS START\"
+                 (+ 100 (round (* 15 (tick/sine (* 0.05 state-timer)))))
+                 140)
+     (paint-text (string-append \"High: \"
+                                (number->string
+                                 (or (cortex/read 'my-game-high) 0)))
+                 110 190)
+     (when (input/pressed? 'a) (transition 'play)))
+    ((play)
+     (let ((p (car (world/find 'player))))
+       (when (input/down? 'left)  (entity/move! p -4 0))
+       (when (input/down? 'right) (entity/move! p 4 0))
+       (when (input/pressed? 'a)
+         (let ((bul (world/spawn 'player-bullet
+                                 (entity/x p) (- (entity/y p) 8))))
+           (entity/shape! bul 'circle 2)
+           (entity/layer! bul 'player-bullet)
+           (entity/set-vel! bul 0 -6)))
+       (level-tick p)
+       (world/step)
+       (handle-collisions p)
+       (world/each 'player-bullet
+                   (lambda (b) (when (< (entity/y b) 0) (entity/despawn! b))))
+       (world/each 'enemy
+                   (lambda (e) (when (> (entity/y e) 250) (entity/despawn! e))))
+       (world/each 'enemy-bullet
+                   (lambda (b) (when (> (entity/y b) 250) (entity/despawn! b))))
+       (when (<= player-hp 0) (transition 'game-over))
+       (world/each 'enemy
+                   (lambda (e) (paint-cell 'enemy (entity/x e) (entity/y e) 10 10)))
+       (world/each 'boss
+                   (lambda (b) (paint-cell 'boss (entity/x b) (entity/y b) 40 40)))
+       (world/each 'player-bullet
+                   (lambda (b) (paint-cell 'bullet (entity/x b) (entity/y b) 2 2)))
+       (world/each 'enemy-bullet
+                   (lambda (b) (paint-cell 'enemy-bullet (entity/x b) (entity/y b) 3 3)))
+       (world/each 'boss-bullet
+                   (lambda (b) (paint-cell 'boss-bullet (entity/x b) (entity/y b) 3 3)))
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       (paint-hud)))
+    ((game-over)
+     (paint-text \"GAME OVER\" 120 100)
+     (paint-text (string-append \"Score: \" (number->string current-score))
+                 110 130)
+     (when (> current-score (or (cortex/read 'my-game-high) 0))
+       (cortex/write 'my-game-high current-score))
+     (when (> state-timer 180) (transition 'attract)))
+    ((victory)
+     (paint-text \"YOU WIN!\" 125 90)
+     (paint-text (string-append \"Score: \" (number->string current-score))
+                 110 120)
+     (when (> current-score (or (cortex/read 'my-game-high) 0))
+       (cortex/write 'my-game-high current-score))
+     (when (> state-timer 240) (transition 'attract)))))
+
+(define (my-arcade-game)
+  (transition 'attract)
+  (on-frame game-frame))
+
+;; Publish as a card so friends can play from a URL.
+(define-card 'my-arcade-game
+  :title \"My Arcade Game\"
+  :entry my-arcade-game
+  :description \"3 levels + boss. Built with Motoi Scheme.\"
+  :cortex-keys '(my-game-high))
+
+(big-bang my-arcade-game)
+```
+
+Read it end-to-end. Then run it. Then break it. Then remake the parts
+you break in your own image.
+
+---
+
+## 16.2 Diagnostic checklist
+
+Before you share the URL, run the play-test:
+
+- Does the first play last more than 30 seconds? If not, level 1 is
+  too hard.
+- Does level 3 boss die too fast? Too slow? Tune HP.
+- Does the score number FEEL good to watch grow? If not, revisit
+  chapter 13.
+- Does the ship feel snappy? Loose? Revisit chapter 6.
+- Does the game over screen let you get back to play in under 5
+  seconds? If not, shorten it.
+- Does the high score persist? Test by refreshing the page.
+- Does 'a' feel like the fire button and not the confirm button
+  during the game-over screen? If your accidental confirm sends you
+  back to attract, that is a UX bug.
+
+---
+
+## 16.3 Publish
+
+`define-card` in the code above registers the game as a shareable
+card. The runtime generates a URL. Copy the URL, send to a friend.
+They open it in a browser or in their own Motoi runtime and play.
+
+Their high score writes to their OWN Cortex, not yours. Each player
+has their own persistence.
+
+---
+
+## 16.4 The four patterns — a summary
+
+You have seen these sixteen times. This is the last time.
+
+**Composition.** Your whole game is a composition of small verbs.
+Player = shape + layer + hp + solid. Enemy = same, different tag.
+Boss = same, different HP. Levels = compositions of enemies over
+time.
+
+**Orchestration.** Frame loop orchestrates: state-dispatch, input,
+spawn, step, collision-walk, cleanup, paint, HUD. Every frame the
+same order. That order IS the game.
+
+**In-routing.** Input routes to state-specific handlers. Collisions
+route to kind-pair handlers. State transitions route through
+`transition`.
+
+**Routing.** Bullets route to physics engine. Score routes to display
+AND to Cortex. Camera-shake routes phase transitions to visual
+feedback. Every action-verb routes somewhere.
+
+Every arcade game is these four patterns in different arrangements.
+So is every simulation. So is every narrative. Once you see them, you
+carry them forward.
+
+---
+
+## 16.5 A note to the reader who just built their first arcade game
+
+You did this. Nobody else. The code above is a template; your game is
+what you did with it. The tuning is yours. The choices are yours.
+
+When your friends play, they don't see the chapters. They see a game.
+That's the whole point.
+
+---
+
+## 16.6 What comes next
+
+The next book is Book of Simulation Games. Physics is not the game's
+foundation there — physics IS the game. Boids, orbits, cellular
+automata, particle systems, agents that learn.
+
+Or come back and re-read chapter 6 (feel), chapter 7 (jump), chapter
+12 (boss). Every chapter rewards a second pass with new eyes.
+
+Or turn the page. Appendix A tabulates every bounce coefficient you
+will ever need. Appendix L has twelve micro-games in thirty lines
+each — one morning's play if you want to move fast.
+
+You built an arcade game. Go build another.")
+
+(code-block :chapter 16 :lang "scheme" :source
+"(define game-state 'attract)
+(define state-timer 0)
+(define (ship-it-anchor)
+  (on-frame
+   (lambda ()
+     (set! state-timer (+ state-timer 1))
+     (paint-clear)
+     (case game-state
+       ((attract)
+        (paint-text \"MY ARCADE GAME\" 100 60)
+        (paint-text \"PRESS START\"
+                    (+ 100 (round (* 15 (tick/sine (* 0.05 state-timer)))))
+                    140)
+        (when (input/pressed? 'a)
+          (set! game-state 'play)
+          (set! state-timer 0)
+          (world/reset!)
+          (world/spawn 'player 160 210)))
+       ((play)
+        (world/each 'player
+                    (lambda (p)
+                      (when (input/down? 'left)  (entity/move! p -4 0))
+                      (when (input/down? 'right) (entity/move! p 4 0))
+                      (paint-cell 'player (entity/x p) (entity/y p) 8 8)))
+        (world/step)
+        (when (> state-timer 600) (set! game-state 'attract) (set! state-timer 0)))))))
+(big-bang ship-it-anchor)")

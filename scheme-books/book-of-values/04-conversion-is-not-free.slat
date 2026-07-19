@@ -1,0 +1,311 @@
+;; 04-conversion-is-not-free.slat
+;; Book of Values — Chapter 4
+
+(chapter
+  :book              "Book of Values"
+  :chapter-number    4
+  :title             "Conversion Is Not Free"
+  :audience          :engineer
+  :dialect           "motoi"
+  :book-version      "1.1"
+  :provenance        "book-of-values-author-2026-07-16 book-of-values-expander-2026-07-17"
+  :training-eligible #t
+  :content-rating    :G
+  :prose
+"# Chapter 4 — Conversion Is Not Free
+
+Converting one unit into another looks like arithmetic. It isn't. It's
+a transaction. Every conversion has hidden pieces: a rate, a moment
+when that rate was true, a fee, a rounding rule, and a direction. Miss
+any of them and the number that comes out the other side is fiction
+that arithmetic cannot fix.
+
+## The hidden pieces
+
+Convert USD to EUR. You know it's not just multiplication. You need:
+
+- **A rate.** Something like *0.918 EUR per USD*.
+- **A moment.** The rate was 0.918 at 14:03 UTC on Tuesday. It is not
+  0.918 now.
+- **A fee.** The bank takes a cut. So does the exchange. So might your
+  card.
+- **A rounding rule.** Euros use cents. Fractional cents don't exist.
+  Rounding *up* costs the customer money. Rounding *down* costs you.
+- **A direction.** USD → EUR at rate 0.918 is not EUR → USD at rate
+  1/0.918. Bid and ask are different. Banks live in the spread.
+
+That's five things that were not in the number `0.918`. Every one of
+them is a place where a bug can hide.
+
+DO: model a conversion as a *record* that carries all five pieces.
+DON'T: multiply by a bare rate constant and store the result.
+WHY: the receipt has to reproduce the conversion. If the rate is
+in a code constant, the receipt cannot be reproduced by anyone who
+doesn't know what the constant was on that day.
+
+Currency conversion is the loudest example. The same shape applies to
+converting feet to meters (rate is fixed, but the rounding rule
+matters), to converting seconds since epoch into local time (rate
+depends on timezone rules that change), to converting sensor readings
+into engineering units (calibration constants drift), and to converting
+one team's data schema into another team's.
+
+## The convert-record
+
+Model conversion as a record, not a scalar.
+
+```
+(define (fx-rate from to rate at)
+  (list 'fx-rate from to rate at))
+
+(fx-rate 'usd 'eur 918 \"2026-07-16T14:03:00Z\")
+;; -> (fx-rate usd eur 918 \"2026-07-16T14:03:00Z\")
+```
+
+Notice the rate is `918`, not `0.918`. The rate is expressed as *minor
+units of `to` per one major unit of `from`*, scaled by 1000. Why?
+Because floats and money don't mix (Chapter 6). We keep the scaling
+factor visible and consistent.
+
+Accessors:
+
+```
+(define (fx-from x) (cadr x))
+(define (fx-to   x) (caddr x))
+(define (fx-rate-value x) (cadddr x))  ;; per 1 major unit, scaled x1000
+
+;; Motoi doesn't ship cadddr — build it.
+(define (fourth xs) (car (cdr (cdr (cdr xs)))))
+(define (fifth  xs) (car (cdr (cdr (cdr (cdr xs))))))
+```
+
+Wait — Motoi doesn't have `cadddr` in the base env. That's a good
+reminder. Use `car` / `cdr` compositions or write named helpers. This
+book uses `first`, `second`, `third`, `fourth`, `fifth` where the
+`cxxxx` family runs out.
+
+```
+(define (first  xs) (car xs))
+(define (second xs) (car (cdr xs)))
+(define (third  xs) (car (cdr (cdr xs))))
+(define (fourth xs) (car (cdr (cdr (cdr xs)))))
+(define (fifth  xs) (car (cdr (cdr (cdr (cdr xs))))))
+```
+
+## Doing the conversion
+
+The convert function takes a money value and an fx-rate, applies the
+rate, applies the fee, applies the rounding, and returns a new money
+value plus a receipt.
+
+Skeleton:
+
+```
+(define (money currency minor) (list 'money currency minor))
+(define (money-currency m) (second m))
+(define (money-minor    m) (third  m))
+
+(define (fx-convert money rate fee-basis-points rounding)
+  ;; money           — a (money currency minor)
+  ;; rate            — an (fx-rate from to rate-x1000 at)
+  ;; fee-basis-points — integer, hundredths of a percent (100 bp = 1%)
+  ;; rounding        — 'up | 'down | 'nearest
+  (let* ((from-cur (money-currency money))
+         (to-cur   (third rate))
+         (rate1000 (fourth rate))
+         (from-minor (money-minor money)))
+    (cond
+      ((not (eq? from-cur (second rate)))
+         (list 'error 'fx-convert 'wrong-rate from-cur (second rate)))
+      (else
+         (let* ((gross (quotient (* from-minor rate1000) 1000))
+                (fee   (quotient (* gross fee-basis-points) 10000))
+                (net   (- gross fee)))
+           (list 'converted
+                 (money to-cur net)
+                 ':gross  gross
+                 ':fee    fee
+                 ':rate   rate
+                 ':rounding rounding))))))
+```
+
+A run:
+
+```
+(define usd->eur-tuesday
+  (list 'fx-rate 'usd 'eur 918 \"2026-07-16T14:03:00Z\"))
+
+(fx-convert (money 'usd 10000) usd->eur-tuesday 50 'down)
+;; ->
+;; (converted (money eur 9135)
+;;            :gross 9180
+;;            :fee 45
+;;            :rate (fx-rate usd eur 918 \"2026-07-16T14:03:00Z\")
+;;            :rounding down)
+```
+
+$100.00 USD converts to €91.35 EUR after a 0.5% (50 basis points) fee.
+The gross was €91.80. The fee was €0.45. Do the fee math:
+9180 × 50 / 10000 = 45.9, integer-quotient truncates to 45. Net =
+9180 − 45 = 9135.
+
+Every piece of that computation is *in the receipt*. Provenance is
+built in. If somebody asks *why* the customer got €91.34 instead of
+€91.80 — the answer is right there.
+
+## Rounding-side matters
+
+The example used integer `quotient`, which truncates. Truncation is a
+choice. There are others.
+
+- **Down** — always round toward zero. The house keeps fractional
+  minor units. Customer-friendly for *fees*, house-friendly for
+  *conversions*.
+- **Up** — always round away from zero. House-friendly for fees,
+  customer-friendly for refunds.
+- **Nearest** — round to closest, break ties one of several ways.
+  Fair-feeling but has to be specified precisely.
+- **Banker's / half-even** — round to nearest, ties go to the even
+  digit. Reduces systematic bias in aggregates.
+
+Chapter 11 covers all of these in detail. For now: **pick a rounding
+mode, name it in the receipt, and stick with it.**
+
+## Rate freshness
+
+The `at` timestamp on the rate is not decoration. It is the answer to
+a question that will be asked in a compliance audit. *Why did we use
+0.918 for this transaction?* Because that was the rate at 14:03 UTC
+Tuesday when the transaction posted. If the timestamp isn't on the
+rate, the answer is *we don't know*.
+
+A stale rate is worse than a wrong rate because a wrong rate is
+obvious in aggregate and a stale rate is not. A stale rate lets small
+losses accumulate for weeks before somebody notices.
+
+Freshness check:
+
+```
+(define (rate-age-ms rate now-ms rate-ms)
+  (- now-ms rate-ms))
+
+(define (rate-fresh? rate max-age-ms now-ms rate-ms)
+  (<= (rate-age-ms rate now-ms rate-ms) max-age-ms))
+
+(rate-fresh? 'ignored 300000 1000000 800000)
+;; -> #t     (200000 ms = 200s, under 300s max)
+
+(rate-fresh? 'ignored 300000 1000000 500000)
+;; -> #f     (500000 ms = 500s, over 300s max)
+```
+
+For real fx rates, five minutes is a generous ceiling and thirty
+seconds is common. Set it explicitly. Refuse to convert with a stale
+rate. Log the refusal.
+
+## Non-currency conversions cost something too
+
+Feet to meters looks free. The rate is fixed: 0.3048 meters per foot.
+Even here the rounding side matters.
+
+```
+(define (ft->m-mm feet)
+  ;; return millimeters (integer)
+  (quotient (* feet 3048) 10))
+
+(ft->m-mm 100)
+;; -> 30480    ;; 100 ft = 30.480 m = 30480 mm
+
+(ft->m-mm 33)
+;; -> 10058    ;; 33 ft ≈ 10.058 m (10058 mm, off from 10.0584 by 4 microns)
+```
+
+We're storing meters as millimeters (integer minor unit) because we
+have not forgotten Chapter 2. The rounding side (truncation via
+`quotient`) means we lost up to 4 microns per conversion. For a shelf
+in a garage that doesn't matter. For a machine part it does.
+
+**When lossy conversion is unavoidable, record the loss.** A receipt
+record like the fx one is not overkill.
+
+## Composing conversions
+
+Three conversions in a row lose more precision than one. This is not a
+paranoid warning — it's arithmetic.
+
+```
+(define (round-trip inches)
+  ;; in -> cm -> in
+  (define cm (quotient (* inches 254) 100))
+  (define back (quotient (* cm 100) 254))
+  back)
+
+(round-trip 10)
+;; -> 10
+
+(round-trip 1)
+;; -> 1
+```
+
+Those look right because integer arithmetic happened to align. Try:
+
+```
+(round-trip 7)
+;; -> 6
+```
+
+7 inches went in. 6 inches came out. Two integer truncations
+cooperated to lose an inch. The bug is subtle because the answer is
+still a number, still an integer, still positive. It just isn't right.
+
+Two rules to compose safely:
+
+1. **Convert once, at the boundary.** Keep the value in canonical form
+   in the middle of the program. Only convert on input and output.
+2. **When you must convert twice, do the math symbolically once.** Two
+   truncations chained give a bigger error than one. Write the
+   round-trip as one operation with one rounding step.
+
+## Recap
+
+- Conversion carries a rate, a moment, a fee, a rounding rule, and a
+  direction.
+- Model it as a record, not a scalar.
+- Record every piece in a receipt. Provenance is not free either, but
+  it is much cheaper than answering *why did we use 0.918* six months
+  later without any evidence.
+- Rounding-side is a choice. Name it. Chapter 11 covers modes in
+  detail.
+- Stale rates are a class of bug that hides. Check freshness.
+- Even non-currency conversions have a rounding side and can lose
+  precision.
+- Chained conversions lose precision faster than single ones. Convert
+  once at the boundary.
+
+Next: where did the *number* come from in the first place?")
+
+(example :ref "ch4-fx-ctor"
+         :code "(begin (define (fx-rate f t r at) (list 'fx-rate f t r at)) (fx-rate 'usd 'eur 918 \"2026-07-16T14:03:00Z\"))"
+         :expected "(fx-rate usd eur 918 \"2026-07-16T14:03:00Z\")")
+(example :ref "ch4-fx-convert-gross"
+         :code "(quotient (* 10000 918) 1000)"
+         :expected 9180)
+(example :ref "ch4-fx-convert-fee"
+         :code "(quotient (* 9180 50) 10000)"
+         :expected 45)
+(example :ref "ch4-fx-convert-net"
+         :code "(- 9180 (quotient (* 9180 50) 10000))"
+         :expected 9135)
+(example :ref "ch4-fresh-yes"
+         :code "(<= (- 1000000 800000) 300000)"
+         :expected #t)
+(example :ref "ch4-fresh-no"
+         :code "(<= (- 1000000 500000) 300000)"
+         :expected #f)
+(example :ref "ch4-ft-to-mm"
+         :code "(quotient (* 100 3048) 10)"
+         :expected 30480)
+(example :ref "ch4-roundtrip-lost"
+         :code "(quotient (* (quotient (* 7 254) 100) 100) 254)"
+         :expected 6
+         :teaching "7 inches in, 6 inches out. Chained truncations lie.")

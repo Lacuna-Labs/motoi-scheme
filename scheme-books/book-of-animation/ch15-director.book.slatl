@@ -1,0 +1,681 @@
+;; ch15-director.slat
+;; Book of Animation — Chapter 15: The Director
+
+(chapter
+  :book             "Book of Animation"
+  :chapter-number   null
+  :title            "Chapter 15: The Director"
+  :source-path      "/Users/alfred/code/curator/BOOK/A-branch-scheme-books/new-anim/ch15-director.md"
+  :size             32602
+  :sha256           "e501f5f50d49bc29"
+  :prose
+"# Chapter 15: The Director
+
+You've given sprites bodies (Ch8), taught them to walk with weight (Ch9), sent them chasing across the surface (Ch10), orchestrated their flocking (Ch11), and plotted their paths around obstacles (Ch12). You've composed scenes from these parts (Ch13) and aimed a camera to watch them (Ch14).
+
+But *who decides* what happens next?
+
+Until now, every animation you've authored has been either deterministic choreography (a flower sways because you told it to sway, on a fixed schedule) or reactive behavior (a sprite seeks because you wired `ai/seek` to fire every tick). That's enough to build beautiful systems — but it's not enough to build a sprite that *chooses*.
+
+This chapter teaches **the director**: the AI subsystem that decides *which* behavior a sprite should perform, *when* to switch, and *how* to weigh competing goals. You'll learn three decision architectures, each suited to different scales of complexity:
+
+1. **Behavior trees** — compositional, hierarchical, debuggable. \"Try this, then that, but only if…\"
+2. **Utility AI** — score every option, pick the best. \"I'm 80% hungry, 30% scared — eating wins.\"
+3. **Policy-based selection** — map world-state to action directly. \"In this configuration, always do X.\"
+
+Each has tradeoffs. Trees are readable and composable but can grow brittle. Utility scales to many competing drives but requires careful scoring. Policies are fast and data-driven but opaque without tooling. By the end of this chapter, you'll know when to reach for each, and you'll have built a sprite that decides — on its own — whether to graze, flee, or explore, moment by moment, as the world changes around it.
+
+---
+
+## 15.1 The simplest choice: `ai/decide`
+
+The humblest director is a function that looks at the world and returns a behavior to run. `ai/decide` takes that function and an entity, calls it every tick, and applies whatever the function returns.
+
+Here's a sprite that wanders unless you get close — then it flees:
+
+```scheme
+(let ((sprite (world/spawn 'x 0 'y 0 'sprite 'blossom-plum)))
+  (big-bang
+    (on-tick
+      (lambda (w)
+        (world/step)
+        (let ((dist (entity/distance sprite
+                      (list (world/camera-x) (world/camera-y)))))
+          (ai/decide sprite
+            (lambda (self)
+              (if (< dist 5.0)
+                (ai/flee self (list (world/camera-x) (world/camera-y)) 2.0)
+                (ai/wander self 0.5 1.0)))))
+        'ok))
+    (to-draw (lambda (w)
+               (paint-cell 0 0 'clear)
+               (world/frame)))))
+```
+
+<!-- BUILD: wire this as runnable example ch15-ex01-decide-basic.scm; depends on ai/decide + ai/flee + ai/wander from §20 + world/camera-x/y accessor gap -->
+
+*[needs: ai/decide + world/camera-x/y accessor]*
+
+[VISUAL: A plum-blossom sprite wandering in lazy arcs across a pale surface; when the camera (or a touch cursor, in the live app) approaches within 5 cells, the sprite darts away.]
+
+The lambda you pass to `ai/decide` receives the entity and must return a *steering force* — the same `(dx dy)` pair that `ai/seek`, `ai/flee`, and `ai/wander` produce. Every tick, `ai/decide` calls your lambda, takes the force, and applies it to the entity's velocity (respecting `ai/max-force!` if you've set it).
+
+This is the atomic unit of agency: **look at the world, pick a force, apply it.**
+
+---
+
+## 15.2 Behavior trees: composing decisions
+
+A single `if` is fine for two choices. But what if a sprite should:
+
+- **First**, check if it's hurt → if yes, flee to safety.
+- **Otherwise**, check if food is nearby → if yes, approach and eat.
+- **Otherwise**, check if it's bored → if yes, explore.
+- **Otherwise**, idle.
+
+You *could* nest `if` forms, but they tangle fast. A **behavior tree** gives you composable nodes that succeed, fail, or keep running, and combinators that wire them into readable hierarchies.
+
+The engine provides:
+
+- `ai/bt-action` — wraps a lambda; succeeds if the lambda returns `'success`, fails if `'fail`, keeps running if `'running`.
+- `ai/bt-condition` — wraps a predicate; succeeds if true, fails if false.
+- `ai/bt-sequence` — tries children left-to-right; fails if any child fails, succeeds if all succeed.
+- `ai/bt-selector` — tries children left-to-right; succeeds if any child succeeds, fails if all fail.
+- `ai/bt-parallel` — runs all children; you specify how many must succeed for the parallel to succeed.
+- `ai/bt-invert` — flips success ↔ fail.
+- `ai/bt-force` — always succeeds or always fails (useful for fallback branches).
+- `ai/bt-tick` — runs the tree and returns its status.
+
+Here's a sprite that flees if hurt, seeks food if hungry, wanders if bored, else idles:
+
+```scheme
+(define (make-grazer)
+  (let ((sprite (world/spawn 'x 0 'y 0 'sprite 'blossom-lotus 'hp 10 'hunger 0)))
+    ;; plant some \"food\" entities
+    (world/spawn 'x 8 'y 8 'kind 'food 'sprite 'grass)
+    (world/spawn 'x -8 'y -8 'kind 'food 'sprite 'grass)
+    
+    ;; build the behavior tree
+    (let ((tree
+            (ai/bt-selector
+              ;; branch 1: if hurt, flee to center
+              (ai/bt-sequence
+                (ai/bt-condition (lambda (self) (< (entity/hp self) 5)))
+                (ai/bt-action (lambda (self)
+                  (ai/flee self '(0 0) 1.5)
+                  'success)))
+              
+              ;; branch 2: if hungry and food exists, seek nearest food
+              (ai/bt-sequence
+                (ai/bt-condition (lambda (self) (> (entity/get self 'hunger 0) 3)))
+                (ai/bt-action (lambda (self)
+                  (let ((food (world/find (lambda (e) (eq? (entity/kind e) 'food)))))
+                    (if food
+                      (begin
+                        (ai/seek self (entity/pos food) 1.0)
+                        'success)
+                      'fail)))))
+              
+              ;; branch 3: if bored, wander
+              (ai/bt-sequence
+                (ai/bt-condition (lambda (self) (> (world/frame) 100)))
+                (ai/bt-action (lambda (self)
+                  (ai/wander self 0.3 0.8)
+                  'success)))
+              
+              ;; fallback: idle (do nothing)
+              (ai/bt-force 'success))))
+      
+      (big-bang
+        (on-tick
+          (lambda (w)
+            (world/step)
+            ;; tick the tree every frame
+            (ai/bt-tick tree sprite)
+            ;; hunger rises over time
+            (entity/set! sprite 'hunger (+ (entity/get sprite 'hunger 0) 0.01))
+            'ok))
+        (to-draw (lambda (w)
+                   (paint-cell 0 0 'clear)
+                   (world/frame)))))))
+
+(make-grazer)
+```
+
+<!-- BUILD: wire as runnable ch15-ex02-bt-grazer.scm; depends on ai/bt-* suite from §20 + entity/hp + entity/get/set! -->
+
+*[needs: ai/bt-* suite + entity/hp + entity/get/set!]*
+
+[VISUAL: A lotus sprite drifting slowly at first, then seeking one of two grass sprites, then (if you externally damage it via a REPL command like `(entity/damage! sprite 6)`) fleeing toward the center.]
+
+The tree reads top-to-bottom: \"Try fleeing if hurt. If that branch fails (not hurt), try seeking food if hungry. If that fails (not hungry or no food), try wandering if bored. If that fails (not bored yet), do nothing.\"
+
+**Key insight:** Each branch is isolated. You can re-order them, replace one, or nest a sub-tree inside any node. The tree is *data* — you can serialize it, diff it, or build it from a config file.
+
+---
+
+## 15.3 Blackboards: shared memory for trees
+
+Behavior trees often need to remember things across ticks: \"I picked *this* food item last tick; keep seeking it until I arrive.\" A **blackboard** is a key-value store shared by all nodes in a tree.
+
+The engine provides:
+
+- `ai/bb-set! entity key val` — write.
+- `ai/bb-get entity key default` — read.
+- `ai/bb-has? entity key` — check.
+- `ai/bb-del! entity key` — erase.
+
+Here's a sprite that picks a food target, remembers it, and keeps seeking until close, then eats it:
+
+```scheme
+(define (make-persistent-seeker)
+  (let ((sprite (world/spawn 'x 0 'y 0 'sprite 'blossom-cherry)))
+    (world/spawn 'x 10 'y 10 'kind 'food 'sprite 'grass)
+    (world/spawn 'x -10 'y -10 'kind 'food 'sprite 'grass)
+    
+    (let ((tree
+            (ai/bt-selector
+              ;; if we have a target and we're close, eat it
+              (ai/bt-sequence
+                (ai/bt-condition (lambda (self)
+                  (and (ai/bb-has? self 'target)
+                       (< (entity/distance self (ai/bb-get self 'target #f)) 1.0))))
+                (ai/bt-action (lambda (self)
+                  (let ((target (ai/bb-get self 'target #f)))
+                    (entity/despawn! target)
+                    (ai/bb-del! self 'target)
+                    'success))))
+              
+              ;; if we have a target, keep seeking it
+              (ai/bt-sequence
+                (ai/bt-condition (lambda (self) (ai/bb-has? self 'target)))
+                (ai/bt-action (lambda (self)
+                  (ai/seek self (entity/pos (ai/bb-get self 'target #f)) 1.0)
+                  'running)))
+              
+              ;; pick a new target
+              (ai/bt-action (lambda (self)
+                (let ((food (world/find (lambda (e) (eq? (entity/kind e) 'food)))))
+                  (if food
+                    (begin
+                      (ai/bb-set! self 'target food)
+                      'running)
+                    'fail)))))))
+      
+      (big-bang
+        (on-tick
+          (lambda (w)
+            (world/step)
+            (ai/bt-tick tree sprite)
+            'ok))
+        (to-draw (lambda (w)
+                   (paint-cell 0 0 'clear)
+                   (world/frame)))))))
+
+(make-persistent-seeker)
+```
+
+<!-- BUILD: wire as runnable ch15-ex03-bt-blackboard.scm; depends on ai/bb-* + ai/bt-* + entity/despawn! -->
+
+*[needs: ai/bb-* + ai/bt-* + entity/despawn!]*
+
+[VISUAL: A cherry-blossom sprite choosing one of two grass sprites, gliding toward it in a straight line, arriving, and making the grass vanish (eaten), then pivoting to seek the other grass sprite.]
+
+The blackboard decouples decision (pick a target) from execution (seek it). The tree can have separate branches for \"pick,\" \"pursue,\" and \"arrive,\" each checking and updating the blackboard. This is how you build multi-tick behaviors (patrol a route, gather resources, build a structure) without tangling state into each action node.
+
+---
+
+## 15.4 Utility AI: scoring the options
+
+Behavior trees are great when you have a clear priority ladder: \"always flee if hurt.\" But what if priorities *shift*? A sprite might be 60% hungry, 40% tired, 20% curious. Which wins?
+
+**Utility AI** scores every possible action and picks the highest. Each action has a *utility function* that maps world-state to a score (0.0–1.0). The director evaluates all functions and executes the winner.
+
+The engine provides `ai/utility`, which takes an entity and a list of `(utility-fn action-fn)` pairs. It calls each utility-fn with the entity, picks the highest, and runs that action-fn.
+
+Here's a sprite juggling hunger, fear, and boredom:
+
+```scheme
+(define (make-utility-sprite)
+  (let ((sprite (world/spawn 'x 0 'y 0 'sprite 'blossom-willow 
+                             'hunger 0 'fear 0 'boredom 0)))
+    (world/spawn 'x 12 'y 0 'kind 'food 'sprite 'grass)
+    (world/spawn 'x -12 'y 0 'kind 'threat 'sprite 'thorn)
+    
+    (big-bang
+      (on-tick
+        (lambda (w)
+          (world/step)
+          
+          ;; drives drift over time
+          (entity/set! sprite 'hunger (min 1.0 (+ (entity/get sprite 'hunger 0) 0.005)))
+          (entity/set! sprite 'boredom (min 1.0 (+ (entity/get sprite 'boredom 0) 0.003)))
+          
+          ;; fear rises if threat is near
+          (let ((threat (world/find (lambda (e) (eq? (entity/kind e) 'threat)))))
+            (if threat
+              (let ((d (entity/distance sprite threat)))
+                (entity/set! sprite 'fear (if (< d 8.0) (- 1.0 (/ d 8.0)) 0.0)))
+              (entity/set! sprite 'fear 0.0)))
+          
+          ;; utility AI: score three actions
+          (ai/utility sprite
+            (list
+              ;; action 1: seek food (utility = hunger)
+              (cons
+                (lambda (self) (entity/get self 'hunger 0))
+                (lambda (self)
+                  (let ((food (world/find (lambda (e) (eq? (entity/kind e) 'food)))))
+                    (if food (ai/seek self (entity/pos food) 1.0)))))
+              
+              ;; action 2: flee threat (utility = fear)
+              (cons
+                (lambda (self) (entity/get self 'fear 0))
+                (lambda (self)
+                  (let ((threat (world/find (lambda (e) (eq? (entity/kind e) 'threat)))))
+                    (if threat (ai/flee self (entity/pos threat) 1.5)))))
+              
+              ;; action 3: wander (utility = boredom)
+              (cons
+                (lambda (self) (entity/get self 'boredom 0))
+                (lambda (self) (ai/wander self 0.4 0.6)))))
+          'ok))
+      (to-draw (lambda (w)
+                 (paint-cell 0 0 'clear)
+                 (world/frame))))))
+
+(make-utility-sprite)
+```
+
+<!-- BUILD: wire as runnable ch15-ex04-utility-drives.scm; depends on ai/utility from §20 -->
+
+*[needs: ai/utility from §20]*
+
+[VISUAL: A willow sprite oscillating between three behaviors: when hunger is low and the thorn (threat) is far, it wanders lazily; as hunger rises, it starts drifting toward the grass (food); but if the thorn gets close, fear spikes and the sprite suddenly flees, overriding hunger. The drives are visualized as three small bars overlaid on the sprite: hunger (green), fear (red), boredom (blue).]
+
+The utility function for \"seek food\" is just `(entity/get self 'hunger 0)` — the hungrier the sprite, the higher the score. Fear and boredom compete the same way. Every tick, `ai/utility` picks the highest and runs that action.
+
+**Key insight:** You can shape utility curves to get nuanced behavior. A quadratic hunger curve (`(* h h)`) makes the sprite ignore food until *very* hungry, then obsess over it. A clamped fear curve (`(max 0.8 fear)`) ensures fleeing almost always wins if a threat is present. The math is the personality.
+
+---
+
+## 15.5 Combining trees and utility
+
+You can nest utility selection *inside* a behavior tree node, or use a tree to gate when utility runs. Here's a sprite that uses a tree to decide \"am I in danger?\" and utility to pick between foraging strategies when safe:
+
+```scheme
+(define (make-hybrid-sprite)
+  (let ((sprite (world/spawn 'x 0 'y 0 'sprite 'blossom-maple 
+                             'hunger 0 'energy 1.0)))
+    (world/spawn 'x 10 'y 10 'kind 'food 'sprite 'grass)
+    (world/spawn 'x -15 'y 0 'kind 'threat 'sprite 'thorn)
+    
+    (let ((foraging-utility
+            (lambda (self)
+              (ai/utility self
+                (list
+                  ;; high-energy: explore for new food
+                  (cons
+                    (lambda (s) (entity/get s 'energy 0))
+                    (lambda (s) (ai/wander s 0.5 1.0)))
+                  
+                  ;; low-energy: beeline to nearest food
+                  (cons
+                    (lambda (s) (- 1.0 (entity/get s 'energy 0)))
+                    (lambda (s)
+                      (let ((food (world/nearest s 'food)))
+                        (if food (ai/seek s (entity/pos food) 1.2)))))))))
+          
+          (tree
+            (ai/bt-selector
+              ;; if threat is near, flee (overrides foraging)
+              (ai/bt-sequence
+                (ai/bt-condition (lambda (self)
+                  (let ((threat (world/nearest self 'threat)))
+                    (and threat (< (entity/distance self threat) 8.0)))))
+                (ai/bt-action (lambda (self)
+                  (let ((threat (world/nearest self 'threat)))
+                    (ai/flee self (entity/pos threat) 2.0)
+                    'success))))
+              
+              ;; otherwise, run utility-based foraging
+              (ai/bt-action (lambda (self)
+                (foraging-utility self)
+                'success)))))
+      
+      (big-bang
+        (on-tick
+          (lambda (w)
+            (world/step)
+            (ai/bt-tick tree sprite)
+            ;; energy drains, hunger rises
+            (entity/set! sprite 'energy (max 0.0 (- (entity/get sprite 'energy 0) 0.002)))
+            (entity/set! sprite 'hunger (min 1.0 (+ (entity/get sprite 'hunger 0) 0.004)))
+            'ok))
+        (to-draw (lambda (w)
+                   (paint-cell 0 0 'clear)
+                   (world/frame)))))))
+
+(make-hybrid-sprite)
+```
+
+<!-- BUILD: wire as runnable ch15-ex05-hybrid-tree-utility.scm; depends on ai/utility + ai/bt-* + world/nearest -->
+
+*[needs: ai/utility + ai/bt-* + world/nearest gap]*
+
+[VISUAL: A maple sprite switching between two modes: when the thorn is far, it either wanders (high energy) or seeks the grass (low energy); but the moment the thorn wanders within 8 cells, the sprite immediately pivots to flee, ignoring hunger. Once the thorn drifts away, it resumes foraging.]
+
+The tree enforces the hard rule (\"always flee if threatened\"), and utility handles the soft tradeoff (\"explore vs. beeline\"). This is a common pattern in game AI: use trees for crisp state transitions, utility for continuous value judgments.
+
+---
+
+## 15.6 Policies: world-state → action
+
+The third architecture is **policy-based selection**: a lookup table (or learned function) that maps world-state directly to an action, no scoring, no tree traversal.
+
+`ai/policy` takes a list of `(predicate-fn action-fn)` pairs. It evaluates predicates in order and runs the first action whose predicate returns true. If you order them carefully, you get a *decision table*:
+
+```scheme
+(define (make-policy-sprite)
+  (let ((sprite (world/spawn 'x 0 'y 0 'sprite 'blossom-oak 'state 'calm)))
+    (world/spawn 'x 8 'y 8 'kind 'food 'sprite 'grass)
+    (world/spawn 'x -8 'y -8 'kind 'ally 'sprite 'blossom-pine)
+    
+    (let ((policy
+            (ai/policy
+              (list
+                ;; rule 1: if an ally is near and I'm calm, follow it
+                (cons
+                  (lambda (self)
+                    (and (eq? (entity/state self) 'calm)
+                         (let ((ally (world/nearest self 'ally)))
+                           (and ally (< (entity/distance self ally) 6.0)))))
+                  (lambda (self)
+                    (ai/seek self (entity/pos (world/nearest self 'ally)) 0.8)))
+                
+                ;; rule 2: if food is near, seek it (and set state to feeding)
+                (cons
+                  (lambda (self)
+                    (let ((food (world/nearest self 'food)))
+                      (and food (< (entity/distance self food) 10.0))))
+                  (lambda (self)
+                    (entity/set! self 'state 'feeding)
+                    (ai/seek self (entity/pos (world/nearest self 'food)) 1.0)))
+                
+                ;; rule 3: otherwise, wander and set state to exploring
+                (cons
+                  (lambda (self) #t)
+                  (lambda (self)
+                    (entity/set! self 'state 'exploring)
+                    (ai/wander self 0.3 0.7)))))))
+      
+      (big-bang
+        (on-tick
+          (lambda (w)
+            (world/step)
+            (ai/policy-act policy sprite)
+            'ok))
+        (to-draw (lambda (w)
+                   (paint-cell 0 0 'clear)
+                   (world/frame)))))))
+
+(make-policy-sprite)
+```
+
+<!-- BUILD: wire as runnable ch15-ex06-policy-table.scm; depends on ai/policy + ai/policy-act from §20 + world/nearest gap -->
+
+*[needs: ai/policy + ai/policy-act + world/nearest gap]*
+
+[VISUAL: An oak sprite wandering until the pine ally approaches within 6 cells, at which point the oak follows the pine; if the grass (food) comes within 10 cells, the oak switches to seeking it, ignoring the ally. State labels ('calm', 'feeding', 'exploring') appear as small glyphs above the sprite.]
+
+Policies are *fast* (just predicate checks, no tree traversal or utility evaluation) and *data-driven* (you can load rules from a file or generate them from a learned model). The tradeoff is opacity: a 50-rule policy is hard to debug by inspection. Use policies when speed matters and you have tooling to visualize/test them.
+
+---
+
+## 15.7 Learning policies: reinforcement bridge (preview)
+
+The policies we've shown are *hand-authored*. But a policy is just a function from state to action — the same shape a reinforcement-learning agent produces. You can train a small net (or decision-tree learner) offline, export the weights, and load them as a runtime policy.
+
+Here's the *shape* of a learned policy (the training harness is out of scope for this chapter, but the runtime interface is simple):
+
+```scheme
+;; (fictional) A policy learned offline and serialized as a decision tree.
+;; Each node is (feature threshold left-action right-action).
+(define learned-tree
+  '((hunger 0.5
+      (distance-to-food 5.0 seek-food wander)
+      (distance-to-threat 8.0 flee idle))))
+
+(define (eval-tree tree state)
+  (if (not (pair? tree))
+    tree  ;; leaf: return action symbol
+    (let ((feature (car tree))
+          (threshold (cadr tree))
+          (left (caddr tree))
+          (right (cadddr tree)))
+      (if (< (cdr (assoc feature state)) threshold)
+        (eval-tree left state)
+        (eval-tree right state)))))
+
+(define (make-learned-sprite)
+  (let ((sprite (world/spawn 'x 0 'y 0 'sprite 'blossom-cedar)))
+    (world/spawn 'x 10 'y 10 'kind 'food 'sprite 'grass)
+    
+    (big-bang
+      (on-tick
+        (lambda (w)
+          (world/step)
+          
+          ;; build state vector
+          (let* ((food (world/nearest sprite 'food))
+                 (state (list
+                          (cons 'hunger (entity/get sprite 'hunger 0))
+                          (cons 'distance-to-food
+                                (if food (entity/distance sprite food) 999.0)))))
+            
+            ;; eval tree, dispatch action
+            (let ((action (eval-tree learned-tree state)))
+              (cond
+                ((eq? action 'seek-food)
+                 (if food (ai/seek sprite (entity/pos food) 1.0)))
+                ((eq? action 'wander)
+                 (ai/wander sprite 0.4 0.6))
+                ((eq? action 'flee)
+                 ;; (flee logic would go here)
+                 (ai/wander sprite 0.2 0.4))
+                (else (void)))))
+          
+          (entity/set! sprite 'hunger (min 1.0 (+ (entity/get sprite 'hunger 0) 0.005)))
+          'ok))
+      (to-draw (lambda (w)
+                 (paint-cell 0 0 'clear)
+                 (world/frame))))))
+
+(make-learned-sprite)
+```
+
+<!-- BUILD: this is a pedagogical sketch; mark as \"illustrative\" — it runs but the learned-tree is a dummy; real RL integration is a future docs/REINFORCEMENT.md chapter -->
+
+[VISUAL: A cedar sprite behaving according to the decision tree: when hunger < 0.5 and food is within 5 cells, it seeks; otherwise it wanders. The tree structure is overlaid as a small diagram in the corner, highlighting which branch is active each tick.]
+
+The key insight: the tree is *data*. You can serialize it, diff it, A/B test it, or evolve it with a genetic algorithm. the runtime's determinism means you can run the same learned policy on device and in a training harness and get identical results — no floating-point drift, no RNG divergence.
+
+This is the bridge to Chapter 16's finale: a garden where some sprites follow hand-authored trees, others run utility AI, and a few are governed by learned policies, all interacting in the same deterministic world.
+
+---
+
+## 15.8 Finale: The chooser sprite
+
+Let's compose everything: a sprite with a behavior tree that gates high-level modes (flee, forage, socialize), utility AI that picks *how* to forage, a blackboard that remembers the current target, and a policy that decides which social behavior to perform when near an ally.
+
+```scheme
+(define (make-chooser-sprite)
+  (let ((sprite (world/spawn 'x 0 'y 0 'sprite 'blossom-magnolia 
+                             'hunger 0 'fear 0 'social 0 'state 'idle)))
+    ;; populate world
+    (world/spawn 'x 12 'y 12 'kind 'food 'sprite 'grass 'tag 'food-1)
+    (world/spawn 'x -12 'y -12 'kind 'food 'sprite 'grass 'tag 'food-2)
+    (world/spawn 'x 0 'y 15 'kind 'threat 'sprite 'thorn)
+    (world/spawn 'x -8 'y 0 'kind 'ally 'sprite 'blossom-pine)
+    
+    ;; utility: how to forage
+    (define (forage-utility self)
+      (ai/utility self
+        (list
+          ;; if very hungry, beeline to nearest food
+          (cons
+            (lambda (s) (if (> (entity/get s 'hunger 0) 0.7) 1.0 0.0))
+            (lambda (s)
+              (let ((food (world/nearest s 'food)))
+                (if food
+                  (begin
+                    (ai/bb-set! s 'target food)
+                    (ai/seek s (entity/pos food) 1.5))))))
+          
+          ;; if moderately hungry, pick closest food and remember it
+          (cons
+            (lambda (s) (entity/get s 'hunger 0))
+            (lambda (s)
+              (if (not (ai/bb-has? s 'target))
+                (let ((food (world/nearest s 'food)))
+                  (if food (ai/bb-set! s 'target food))))
+              (if (ai/bb-has? s 'target)
+                (ai/seek s (entity/pos (ai/bb-get s 'target #f)) 1.0)
+                (ai/wander s 0.3 0.5)))))))
+    
+    ;; policy: social behaviors
+    (define social-policy
+      (ai/policy
+        (list
+          ;; if ally is very close, align with it
+          (cons
+            (lambda (self)
+              (let ((ally (world/nearest self 'ally)))
+                (and ally (< (entity/distance self ally) 3.0))))
+            (lambda (self)
+              (let ((ally (world/nearest self 'ally)))
+                (ai/align self (list ally) 5.0 0.8))))
+          
+          ;; if ally is near, seek it
+          (cons
+            (lambda (self)
+              (let ((ally (world/nearest self 'ally)))
+                (and ally (< (entity/distance self ally) 8.0))))
+            (lambda (self)
+              (ai/seek self (entity/pos (world/nearest self 'ally)) 0.6)))
+          
+          ;; otherwise idle
+          (cons (lambda (self) #t) (lambda (self) (void))))))
+    
+    ;; top-level tree
+    (define tree
+      (ai/bt-selector
+        ;; mode 1: flee if threatened
+        (ai/bt-sequence
+          (ai/bt-condition (lambda (self)
+            (let ((threat (world/nearest self 'threat)))
+              (and threat (< (entity/distance self threat) 10.0)))))
+          (ai/bt-action (lambda (self)
+            (entity/set! self 'state 'fleeing)
+            (let ((threat (world/nearest self 'threat)))
+              (ai/flee self (entity/pos threat) 2.0))
+            'success)))
+        
+        ;; mode 2: socialize if social drive is high and ally is near
+        (ai/bt-sequence
+          (ai/bt-condition (lambda (self)
+            (and (> (entity/get self 'social 0) 0.5)
+                 (let ((ally (world/nearest self 'ally)))
+                   (and ally (< (entity/distance self ally) 10.0))))))
+          (ai/bt-action (lambda (self)
+            (entity/set! self 'state 'socializing)
+            (ai/policy-act social-policy self)
+            'success)))
+        
+        ;; mode 3: forage (utility-based)
+        (ai/bt-action (lambda (self)
+          (entity/set! self 'state 'foraging)
+          (forage-utility self)
+          'success))))
+    
+    (big-bang
+      (on-tick
+        (lambda (w)
+          (world/step)
+          (ai/bt-tick tree sprite)
+          
+          ;; drives drift
+          (entity/set! sprite 'hunger (min 1.0 (+ (entity/get sprite 'hunger 0) 0.004)))
+          (entity/set! sprite 'social (min 1.0 (+ (entity/get sprite 'social 0) 0.002)))
+          
+          ;; fear rises if threat is near
+          (let ((threat (world/nearest sprite 'threat)))
+            (entity/set! sprite 'fear
+              (if (and threat (< (entity/distance sprite threat) 10.0))
+                0.8
+                (* (entity/get sprite 'fear 0) 0.95))))  ;; decay
+          
+          ;; if we reached food, eat it
+          (when (ai/bb-has? sprite 'target)
+            (let ((target (ai/bb-get sprite 'target #f)))
+              (when (< (entity/distance sprite target) 1.5)
+                (entity/despawn! target)
+                (ai/bb-del! sprite 'target)
+                (entity/set! sprite 'hunger 0.0))))
+          'ok))
+      (to-draw (lambda (w)
+                 (paint-cell 0 0 'clear)
+                 (world/frame))))))
+
+(make-chooser-sprite)
+```
+
+<!-- BUILD: wire as the chapter finale ch15-finale-chooser.scm; depends on full ai/* suite + world/nearest + ai/align gap; this is the capstone example for the chapter -->
+
+*[needs: full ai/* suite (bt, utility, policy) + world/nearest + ai/align gap]*
+
+[VISUAL: A magnolia sprite in a small world with two grass sprites (food), one thorn (threat), and one pine (ally). The sprite's state is overlaid as a label: 'fleeing' when the thorn is near, 'socializing' when the ally approaches and social drive is high, 'foraging' otherwise. During foraging, the sprite either beelines to the nearest food (high hunger) or wanders toward a remembered target (moderate hunger). When it reaches food, the food vanishes and hunger resets. The three drives (hunger, fear, social) are shown as small bars. The camera gently follows the sprite (Ch14 camera verbs).]
+
+This sprite *chooses*. It doesn't follow a script. It weighs fear against hunger against loneliness, picks the mode that matters most *right now*, and acts. When the world changes — the threat wanders close, the ally drifts away, the food is consumed — the sprite re-evaluates and pivots.
+
+That's agency. And you built it by composing three decision architectures, each doing what it does best: trees for mode-switching, utility for continuous tradeoffs, policies for fast lookups.
+
+---
+
+## End-of-chapter questions
+
+1. **Concept:** What's the difference between `ai/decide` and `ai/utility`? When would you use one over the other?
+
+2. **Behavior trees:** Write a behavior tree for a sprite that: (1) flees if HP < 3, (2) seeks the nearest ally if lonely (a custom drive), (3) wanders otherwise. Use `ai/bt-selector` and `ai/bt-sequence`.
+
+3. **Blackboard:** Extend the persistent-seeker example (§15.3) so the sprite remembers *which* food item it ate last and refuses to seek that same one again (even if it respawns). Hint: store the food's `entity/tag` in the blackboard.
+
+4. **Utility shaping:** In the utility-drives example (§15.4), hunger rises linearly. Change the utility function for \"seek food\" to `(* h h)` (quadratic). How does the sprite's behavior change? Why?
+
+5. **Hybrid:** In the hybrid tree-utility example (§15.5), what happens if you move the \"flee if threatened\" branch *below* the foraging action in the selector? Why does order matter in a `bt-selector`?
+
+6. **Finale remix:** Take the chooser sprite (§15.8) and add a fourth mode: \"rest\" — if energy < 0.3, move to the center of the world and idle until energy refills. Where in the tree should this branch go? How do you ensure it doesn't block fleeing?
+
+---
+
+<!-- BUILD notes for the chapter:
+
+This chapter depends on the full ai/* suite (ai/bt-*, ai/utility, ai/policy, ai/bb-*) from the forthcoming §20 reference. The headless harness must wire:
+
+- ai/decide, ai/utility, ai/policy, ai/policy-act
+- ai/bt-sequence, ai/bt-selector, ai/bt-parallel, ai/bt-action, ai/bt-condition, ai/bt-invert, ai/bt-force, ai/bt-tick
+- ai/bb-set!, ai/bb-get, ai/bb-has?, ai/bb-del!
+- world/nearest (or an entity/* equivalent for finding nearest by kind/tag)
+- ai/align (used in the finale social policy)
+
+Once those seams close, all examples in this chapter run deterministically and green. The finale (§15.8) is the chapter's capstone and should be saved as an Automation cart (\"The Chooser Sprite — Ch15 finale\").
+
+Training-pair extraction:
+- Each example → canonical pair (\"make a sprite that flees if hurt, seeks food if hungry, else wanders\" → full program).
+- Paraphrase 3–4 natural reformulations per example.
+- Include reasoning pairs: \"Why does the bt-selector stop at the first success?\" → \"Because that's the definition of a selector node: it tries children left-to-right and succeeds as soon as any child succeeds.\"
+- Tag all pairs with chapter=15, section=§15.N.
+- Negative examples: \"make a behavior tree that always succeeds\" → WRONG: (ai/bt-sequence (ai/bt-force 'fail)) — that always fails. CORRECT: (ai/bt-force 'success).
+
+-->
+")

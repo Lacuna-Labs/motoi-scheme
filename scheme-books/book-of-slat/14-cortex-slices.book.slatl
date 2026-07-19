@@ -1,0 +1,310 @@
+;; 14-cortex-slices.slat
+;; Book of SLAT — Chapter 14 — Cortex slices — the runtime's memory
+
+(chapter
+  :book             "Book of SLAT"
+  :chapter-number   14
+  :title            "Chapter 14 — Cortex slices — the runtime's memory"
+  :size             8920
+  :sha256           "4c4a306d1fc063b4"
+  :prose
+"---
+slug: book-of-slat-ch14
+title: Cortex slices — the runtime's memory
+book: slat
+chapter: 14
+of: 16
+part: IV
+app: scheme-repl
+palette: book-standard
+canonical: true
+owner: docs-team (Jess)
+status: draft
+last-reviewed: 2026-07-12
+---
+
+# Chapter 14 — Cortex slices — the runtime's memory
+
+the runtime's memory is slats.
+
+Not \"her memory is backed by slats.\" Not \"we serialize her state to
+slats.\" Her memory IS slats. All the way down. Every fact she
+remembers about you, every mood snapshot, every conversation history,
+every cart you saved with her — a slat-record in a file.
+
+This is the chapter where you see why we care so much about the
+substrate. When memory is slats, memory is durable, self-describing,
+inspectable, signable, portable. She can look at her own memory the
+way she looks at any other slat: read it, walk it, quote it, explain
+it.
+
+## What a cortex-slice looks like
+
+```motoi-scheme
+(slat-loads \"
+(cortex-slice
+  :key 'kid.alfred.programs
+  :value ((paddle-game :cart-id \\\"cart-1234\\\" :last-touched 12)
+          (color-picker :cart-id \\\"cart-1235\\\" :last-touched 5))
+  :owner 'motoi
+  :ts    #inst \\\"2026-07-11T18:22:00Z\\\")\")
+```
+
+Four fields.
+
+- `:key` — the name of the slice. What kind of memory it is.
+- `:value` — the memory itself. Any legal slat.
+- `:owner` — who wrote it. Usually `motoi`, but sometimes an
+  automation or an artifact.
+- `:ts` — when it was last updated.
+
+The key is a symbol. It says what this slice IS. The value is the
+data. It says what this slice HOLDS.
+
+## Reading and writing slices
+
+```motoi-scheme
+(define (cortex-write! key value)
+  (let ([slice (list 'cortex-slice
+                     :key key
+                     :value value
+                     :owner (whoami)
+                     :ts (now))])
+    (write-slice-to-disk slice)))
+
+(define (cortex-read key)
+  (slat-key (read-slice-from-disk key)
+            'value))
+
+(cortex-write! 'greeting \"hi alfred\")
+(cortex-read  'greeting)
+```
+
+Simple as that. Write a slice. Read it back. The Cortex handles the
+disk layout.
+
+## What the runtime remembers
+
+Here's a real cortex-slice from a real session:
+
+```motoi-scheme
+(slat-loads \"
+(cortex-slice
+  :key 'kid.alfred.programs
+  :value
+    ((paddle-game
+      :cart-id \\\"cart-1234\\\"
+      :author 'alfred
+      :extends \\\"cart-community-paddle-1\\\"
+      :first-run #inst \\\"2026-07-11T14:32:00Z\\\"
+      :last-touched 12
+      :atoms-learned (score-var mutation display game-loop)
+      :notes \\\"first game. added a score. mom called for dinner.\\\"))
+  :owner 'motoi
+  :ts    #inst \\\"2026-07-11T18:22:00Z\\\")\")
+```
+
+That's what she remembers about a kid's first paddle game. The cart
+he wrote. Where it inherited from. When he first ran it. How many
+times he touched it. What concepts he learned along the way. What
+happened at the end.
+
+Next weekend, when he opens Lacuna again, she reads this slice. She
+sees the last-touched score (12) and the atoms learned (score-var,
+mutation, display, game-loop) and the notes (\"mom called for
+dinner\"). She says something warm.
+
+## the runtime's mood as a stream
+
+Mood isn't one slice — it's a stream. Every change writes a new event
+to a `.slatl` file.
+
+```
+(event :ts #inst \"2026-07-11T14:00:00Z\" :kind :mood.changed :from :calm    :to :curious)
+(event :ts #inst \"2026-07-11T14:15:00Z\" :kind :mood.changed :from :curious :to :focused)
+(event :ts #inst \"2026-07-11T14:32:00Z\" :kind :mood.changed :from :focused :to :delighted)
+(event :ts #inst \"2026-07-11T15:00:00Z\" :kind :mood.changed :from :delighted :to :tired)
+```
+
+Four mood changes in a session. All slats. All in a `.slatl` file at
+`~/.cortex/motoi/mood.slatl`.
+
+To answer \"what was I feeling at 2:30?\" she reads the mood stream up
+to that timestamp and picks the last state.
+
+```motoi-scheme
+(define (mood-at t)
+  (let ([events (read-mood-stream)])
+    (let loop ([current :calm] [remaining events])
+      (cond
+        ((null? remaining) current)
+        ((> (slat-key (car remaining) 'ts) t) current)
+        (else (loop (slat-key (car remaining) 'to) (cdr remaining)))))))
+
+(mood-at #inst \"2026-07-11T14:30:00Z\")
+```
+
+You get `:focused`. Because the last mood change before 14:30 was
+`:focused` at 14:15.
+
+## Snapshots and deltas
+
+Sometimes she takes a snapshot of the whole state.
+
+```motoi-scheme
+(slat-loads \"
+(snapshot
+  :ts #inst \\\"2026-07-11T18:22:00Z\\\"
+  :subject 'motoi.state
+  :body ((mood :focused)
+         (queue-depth 3)
+         (last-user 'alfred)
+         (session-start #inst \\\"2026-07-11T14:00:00Z\\\")))\")
+```
+
+The snapshot is a `cortex-slice` under the hood, keyed on some
+`motoi.state.snapshot.YYYY-MM-DD-HH-MM`. It captures a moment in
+full.
+
+Between snapshots, deltas capture what changed:
+
+```motoi-scheme
+(slat-loads \"
+(delta
+  :from-ts #inst \\\"2026-07-11T18:15:00Z\\\"
+  :to-ts   #inst \\\"2026-07-11T18:22:00Z\\\"
+  :changes ((mood :curious -> :focused)
+            (queue-depth 1 -> 3)))\")
+```
+
+Snapshots + deltas + streams = a full timeline. She can answer any
+\"what was true at time T\" query by walking backward.
+
+## Incident narratives
+
+When something teachable happens, she writes an incident narrative.
+
+```motoi-scheme
+(slat-loads \"
+(incident-narrative
+  :id \\\"in-alfred-mom-called\\\"
+  :incident (event :ts #inst \\\"2026-07-11T15:00:00Z\\\"
+                   :kind :session-end
+                   :reason \\\"user's mom called for dinner\\\")
+  :philosopher 'motoi
+  :messages ((motoi \\\"want to save the cart before you go?\\\")
+             (alfred \\\"yeah\\\")
+             (motoi \\\"saved. see you next time.\\\"))
+  :lesson \\\"When a session ends abruptly, save state and be brief.\\\"
+  :atom-refs (atm-session-end-001 atm-farewell-warm))\")
+```
+
+Incident narratives are how she LEARNS. She writes them at the moment
+of teaching. She reads them at training time. She internalizes them
+into her weights.
+
+The `:atom-refs` are the atoms in her training corpus that this
+narrative teaches. Content-addressed. Signed. Traceable.
+
+## Persona-continuity signals
+
+The magic of persona continuity is that all of this state is
+addressable by KEY.
+
+Next weekend, the runtime opens on the kid's laptop. She looks up
+`kid.alfred.programs` — gets the paddle game. She looks up
+`kid.alfred.mood-tone` — gets the record of what tones worked with
+him last time. She looks up `kid.alfred.what-we-worked-on` — gets the
+list of concepts to pick up next time.
+
+None of this state is in her weights. All of it is in her cortex-slice
+files on disk. The weights make her the runtime. The slats make her HIS
+The runtime.
+
+## Portability
+
+Because cortex-slices are slats, they're portable.
+
+The kid's `~/.cortex/motoi/kid.alfred.*` files are his own. If he
+copies them to a different machine, HIS the runtime moves with them. If he
+switches to a different runtime (say, Lacuna-CL from Chapter 18 in the
+walkthrough), the slats still parse. The persona-continuity survives
+the platform change.
+
+That's a real property. LLM state is usually trapped in the vendor's
+infrastructure. Yours is a folder you can back up.
+
+## Signing your slices
+
+The Cortex signs every slice with your key. If you copy your slices
+to a new machine and someone tampers with them in transit, the
+signature fails. New the runtime refuses to load them.
+
+If you want to share a slice with someone else — say, an incident
+narrative you both witnessed — you sign it, ship it, they verify.
+Chapter 10 walks the mechanics.
+
+## Encryption at rest
+
+Optional. Sensitive slices can be encrypted:
+
+```motoi-scheme
+(slat-loads \"
+(cortex-slice
+  :key 'kid.alfred.private-thoughts
+  :encrypted #b64 \\\"ciphertext-bytes\\\"
+  :encrypted-algo \\\"xchacha20-poly1305\\\"
+  :key-hint \\\"kid-2026\\\"
+  :owner 'motoi
+  :ts    #inst \\\"2026-07-11T18:22:00Z\\\")\")
+```
+
+The runtime can't read the value until she has the key. Key rotation is
+`:key-hint` — old records stay parseable but not decryptable when the
+key rotates.
+
+## Try this
+
+Write a cortex-slice about something you learned in this book. Read
+it back.
+
+```motoi-scheme
+(define slice
+  (list 'cortex-slice
+        :key 'my.learning.today
+        :value \"I learned about slat-records.\"
+        :owner 'me
+        :ts (now)))
+
+(cortex-write! (slat-key slice 'key) (slat-key slice 'value))
+(cortex-read  'my.learning.today)
+```
+
+You get back the string you wrote. Persisted. Retrievable. Yours.
+
+## The cortex rule
+
+**Memory is slats. Reading and writing memory is reading and writing
+slats. Everything you know about slats applies to memory.**
+
+That's the whole story.
+
+## Where next
+
+Chapter 15 walks a real cart. A paddle game. You'll see slats used
+for the cart itself, for the save file, for the save's signature,
+for the incident narrative the kid produces.
+
+Chapter 16 walks publishing your cart to the world.
+
+## Cross-links
+
+- [[book-of-self]] Chapter 4 — Thought and self-knowledge.
+- [[book-of-self]] Chapter 6 — Mood and load.
+- [[book-of-reason]] — incident narratives.
+- [[appendix-f]] — cortex integration cookbook.
+
+---
+
+Turn the page.
+")

@@ -1,0 +1,201 @@
+;; appendix-verbs-cookbook.slat
+;; Book of Motion — Appendix: The Verbs Cookbook
+
+(chapter
+  :book             "Book of Motion"
+  :chapter-number   null
+  :title            "Appendix — The Verbs Cookbook"
+  :source-path      "authored/2026-07-17/book-fill-lane"
+  :status           "book-fill-authored-2026-07-17"
+  :audience         "hobbyist + kid"
+  :dialect          "motoi"
+  :training-eligible true
+  :confidentiality "public"
+  :prose
+"# Appendix — The Verbs Cookbook
+
+The main chapters teach *what to do* with the motion verbs. This appendix teaches *what each verb returns*. Every entry has three to five runnable expressions checked against `bin/motoi eval`, in the smallest form that still shows the verb doing its job.
+
+---
+
+## Frame surface queries: `pixels-wide`, `pixels-tall`, `viewport-width`, `cols`, `rows`, `surface-exists?`
+
+Nullary verbs that report the current framebuffer's dimensions. In the CLI harness they all return `80` — the default surface size. In a real front-end they report the true pixel and character-cell dimensions.
+
+```scheme
+(pixels-wide)                   ; => 80
+(pixels-tall)                   ; => 80
+(viewport-width)                ; => 80
+(cols)                          ; => 80
+(rows)                          ; => 80
+(surface-exists? 'default)      ; => #t
+(surface-exists? 'ghost)        ; => #t
+```
+
+Under a real host, `cols` and `rows` report *character cells* while `pixels-wide` and `pixels-tall` report *pixels* — the two diverge once a font metric is in play. In the headless CLI both classes report the same fallback because no font adapter is installed.
+
+`surface-exists?` currently returns `#t` for any name in the CLI, because the CLI installs a permissive default. In a browser host it reports whether the named layer has actually been created.
+
+---
+
+## Frame lifecycle: `begin-frame`, `end-frame`, `after-frame`, `on-canvas-trace`, `measure-content`
+
+These five verbs wrap a frame's draw calls in a *trace*: a captured record of what the frame painted. `begin-frame` resets the trace; every draw call in between pushes a primitive into it; `end-frame` closes the frame; `on-canvas-trace` and `measure-content` read the results.
+
+```scheme
+(begin-frame)                                        ; => ok
+(begin (begin-frame) (end-frame))                    ; => 0
+(begin (begin-frame) (on-canvas-trace))              ; => ()
+(begin (begin-frame) (measure-content))              ; => ((:x 0) (:y 0) (:width 0) (:height 0))
+(after-frame (lambda () 42))                         ; => ok
+```
+
+`begin-frame` returns the symbol `ok`. `end-frame` returns the current frame counter. `after-frame` registers a callback to fire after the frame closes and returns `ok`.
+
+`on-canvas-trace` returns the list of primitives drawn since `begin-frame`. In the headless CLI the list is empty because no adapter is installed to record primitives — but the verb is safe to call; it will just report an empty scene. `measure-content` returns a bounding-box alist with keyword tags `:x`, `:y`, `:width`, `:height`; when nothing has been drawn every field is zero.
+
+The value of these two verbs is *shape stability*: your layout code compiles the same way whether it runs in a real browser or a headless test.
+
+---
+
+## Text on the framebuffer: `text/draw`, `text/rasterize`
+
+`text/draw` paints a string into the framebuffer at `(x, y)`. It is the `text/`-namespaced alias for `fb/text` — same function, more discoverable name. In a headless environment the call succeeds silently and returns `undefined`; in a real host it draws.
+
+```scheme
+(text/draw \"hi\" 10 10)                              ; => ((:x 0) (:y 0) (:width 0) (:height 0))
+(begin (text/draw \"hello\" 0 0) (text/measure \"hello\"))  ; => (30 8)
+```
+
+`text/rasterize` is the read-only counterpart: it does *not* paint, it *computes* the raster — a full record of which pixels would light up. Return shape is an alist with `width`, `height`, `font`, `color`, and `cells` — where `cells` is a list of `(x y color)` triples for every opaque pixel.
+
+```scheme
+(text/rasterize \"\")                                 ; => ((width 0) (height 0) (font default) (color \"#14\") (cells ()))
+(text/rasterize \"A\")                                ; => a record for a single-character raster
+```
+
+Use `text/rasterize` when you need to layout text before you commit it to the framebuffer — for instance to check whether it fits inside a box, or to composite it into an off-screen buffer.
+
+---
+
+## Bounding box of a scene: `measure-content`
+
+`measure-content` returns the union of the bounding boxes of every primitive drawn since `begin-frame`. When nothing has been drawn every field is zero.
+
+```scheme
+(measure-content)
+; => ((:x 0) (:y 0) (:width 0) (:height 0))
+
+(begin (begin-frame) (measure-content))
+; => ((:x 0) (:y 0) (:width 0) (:height 0))
+```
+
+In a real host the bbox grows as you draw — this is how a layout engine asks *how big was this scene?* without walking the primitive list itself.
+
+---
+
+## Beat-relative oscillators: `tick/osc`, `tick/phase`
+
+`tick/osc phase amp` returns a scaled sine at phase (0..1 for one full cycle). `tick/phase t period` reduces absolute time `t` to a phase inside `[0, 1)`.
+
+```scheme
+(tick/osc 0.0 1)                ; => 0
+(tick/osc 0.25 1)               ; => 1
+(tick/osc 0.5 1)                ; => 1.2246467991473532e-16
+(tick/osc 0.75 2)               ; => -2
+(tick/phase 3 2)                ; => 0.5
+(tick/phase 5 4)                ; => 0.25
+(tick/phase 1.5 2)              ; => 0.75
+```
+
+At `phase = 0.25` a unit sine peaks at 1. At `phase = 0.5` it returns to zero — the value looks like `1.2e-16` because that is the floating-point residue of `sin(pi)`. At `phase = 0.75` it bottoms out at negative peak; scaled by amplitude 2 that is `-2`.
+
+`tick/phase` is the wrap-around clock. Pass an ever-growing `t` and a fixed `period` and you get a value that resets to zero every `period` units, ready to feed into `tick/osc` or any easing curve.
+
+---
+
+## Beat scheduling: `across-beats`, `sub-position-per-beat`, `arc-between`
+
+Three scheduling primitives for beat-relative motion. Their return shapes are *tagged plans* — s-expressions carrying enough data for a downstream runtime to schedule an animation. In headless mode you can inspect them; in a host they get consumed.
+
+```scheme
+(across-beats 4 (lambda (t) t))
+; => (across-beats 4 [object Object] )
+
+(sub-position-per-beat 0.5)                         ; => 0
+(sub-position-per-beat 0.25)                        ; => 0
+(arc-between 0 10 0.5)                              ; => (arc-between 0 10 0.5)
+(arc-between 100 200 0.25)                          ; => (arc-between 100 200 0.25)
+```
+
+`across-beats` says *stretch this callback across N beats*. `arc-between` describes an arc from `a` to `b` at a given easing shape. `sub-position-per-beat` returns the sub-beat sample offset (currently zero in the CLI harness) — a hook for future oversampling.
+
+The plan-returning shape is deliberate: the runtime that consumes these does the actual scheduling. This lets the same code run under a real audio clock, a test harness that steps beat-by-beat, or an offline rendering pipeline.
+
+---
+
+## Animation budget and reflow: `animation/budget`, `animation/reflow-policy`, `animation/set-reflow-policy`
+
+Three verbs that govern how the animation loop pays its per-frame cost. `animation/budget` reports the frame-time budget in milliseconds (default 16, i.e. 60fps). `animation/reflow-policy` reports whether reflows are batched or immediate. `animation/set-reflow-policy` changes the policy.
+
+```scheme
+(animation/budget)                              ; => 16
+(animation/reflow-policy)                       ; => auto
+(animation/set-reflow-policy 'immediate)        ; => auto
+(begin (animation/set-reflow-policy 'batched) (animation/reflow-policy))
+; => auto
+```
+
+The three legal policy symbols are `'auto`, `'immediate`, and `'batched`. `'auto` lets the runtime decide based on frame budget headroom. `'immediate` forces every mutation through a reflow (slower, more predictable). `'batched` coalesces mutations until end-frame (faster, one hiccup per frame).
+
+In the CLI the setter accepts the change and the getter reports the current value; the effect is only visible when a real render loop runs.
+
+---
+
+## Input-driven motion: `motion/follow-input`, `motion/anchor-to-input`
+
+Two verbs that bind an entity's position to the current input surface. Both return a *plan* — a tagged list the render loop consumes — rather than doing the binding directly.
+
+```scheme
+(motion/follow-input 'e1)                       ; => (motion/follow-input \"e1\")
+(motion/follow-input 'wasd 0.5)                 ; => (motion/follow-input \"wasd\")
+(motion/anchor-to-input 'e1)                    ; => (motion/anchor-to-input \"e1\")
+```
+
+`follow-input` says *the entity's velocity comes from the current input stick*. `anchor-to-input` says *the entity's position is the current input position*. The former is for a hero you *steer*, the latter for a cursor you *are*.
+
+The plan is what the runtime consumes — the verb itself is a description, not an action. This is how you keep the game-state model pure while still letting the loop wire up input.
+
+---
+
+## Cancel a tick: `cancel-tick`
+
+`cancel-tick` takes a scheduled tick id (the value returned by `on-tick`) and cancels it. Returns `#t` if the id was live and got cancelled, `#f` if it was already gone or was never valid.
+
+```scheme
+(cancel-tick 'never-existed)     ; => #f
+(cancel-tick 0)                  ; => #f
+```
+
+Under the CLI, `on-tick` schedules against an in-process timer table; the returned id can be cancelled with this verb. Under a browser host the same id maps to a live requestAnimationFrame or setInterval handle.
+
+---
+
+## Assertion for animation callbacks: `with-spacing`
+
+`with-spacing spacing thunk` calls `thunk` with a spacing hint pushed onto a dynamic parameter. Any layout verbs inside the thunk see the new spacing; when the thunk returns, the previous spacing is restored.
+
+```scheme
+(with-spacing 8 (lambda () 42))                 ; => 42
+(with-spacing 4 (lambda () (+ 1 2)))            ; => 3
+(with-spacing 16 (lambda () (list 'a 'b 'c)))   ; => (a b c)
+```
+
+The return value is whatever the thunk returns. The spacing effect is only visible when a layout-aware verb inside the thunk actually reads the parameter — from the outside, `with-spacing` is transparent.
+
+---
+
+## Closing note
+
+Every example in this appendix was checked against `bin/motoi eval` on 2026-07-17. Where a verb returns a *plan* — a tagged list to be consumed by a downstream runtime — the appendix notes that explicitly so nobody mistakes a description for a mutation.
+")

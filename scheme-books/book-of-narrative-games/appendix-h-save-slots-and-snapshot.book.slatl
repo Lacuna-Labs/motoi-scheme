@@ -1,0 +1,369 @@
+;; appendix-h-save-slots-and-snapshot.book.slatl
+
+(dialect :applies ("motoi" "sakura"))
+
+(appendix
+  :book                "Book of Narrative Games"
+  :letter              "H"
+  :title               "Save Slots and world/snapshot"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :training-eligible   #t
+  :confidentiality     "public"
+  :book-version        "1.0.0"
+  :prose
+"Two save systems. Cortex-based (automatic, always on, low-cost) and
+snapshot-based (explicit, heavier, captures full runtime state).
+Combined, they handle every save requirement a narrative game has.
+
+This appendix covers slot naming, versioning, migration when your
+story changes, and the small UX details that make save systems
+feel good.
+
+---
+
+## Cortex-based saves: what's automatic
+
+Every `cortex/write` is persistent. Nothing else needed. The player
+who closes the game and reopens it a week later sees the same Cortex
+state.
+
+That covers:
+- past-choices
+- inventory
+- reputation
+- world-state flags
+- customer preferences
+- everything under state/*, log/*, dialogue-log/*
+
+For most narrative games, this is 90% of what saves need to do.
+
+---
+
+## Snapshot-based saves: what's manual
+
+For the other 10% — animation state, ongoing timers, entity positions
+mid-scene, camera position — use `world/snapshot`.
+
+```scheme
+(define (save-now slot)
+  ;; Cortex is already saved. Snapshot the rest.
+  (let ((snap (world/snapshot)))
+    (cortex/write (slot-key slot) snap)
+    (cortex/write (slot-timestamp slot) (current-timestamp))))
+
+(define (load-now slot)
+  (let ((snap (cortex/read (slot-key slot))))
+    (when snap
+      (world/restore! snap))))
+```
+
+`world/snapshot` returns a large blob (kilobytes-to-megabytes) of
+the current runtime state. `world/restore!` accepts that blob and
+resets the runtime to that state.
+
+Only snapshot when you actually need the mid-scene state saved. For
+scene-boundary saves, Cortex is enough.
+
+---
+
+## The three-tier save strategy
+
+Combine three save mechanisms for robust user experience.
+
+### Tier 1: Cortex auto-persist (invisible)
+
+Every scene write happens continuously. The player never thinks
+about it. If they crash-quit, everything up to their last write is
+preserved.
+
+### Tier 2: Auto-save at chapter boundaries (slot 0)
+
+At every chapter transition, snapshot to slot 0.
+
+```scheme
+(define (chapter-transition n)
+  (save-now 0)                        ;; auto-slot
+  (cortex/write 'current-chapter n)
+  (start-chapter n))
+```
+
+If the player quits mid-chapter and opens next week, they can
+'resume from auto-save' — which returns them to the chapter start,
+not the middle of a scene.
+
+### Tier 3: Manual named saves (slots 1-4)
+
+The player explicitly saves via menu.
+
+```scheme
+(define (save-menu)
+  (paint-text 20 40 \"~ save ~\")
+  ;; List slots 1-4 with names + timestamps
+  ;; Player presses 1-4 to save
+  )
+```
+
+Named saves are for the player who wants to branch — 'save here, try
+option A, come back if I don't like it.'
+
+Together the three tiers cover: crash resilience (tier 1), casual
+resume (tier 2), deliberate branching (tier 3).
+
+---
+
+## Slot design
+
+Reserve slot 0 for auto-save. Offer slots 1-4 for manual. That is
+five total. More is over-engineered for most games.
+
+```scheme
+(define (all-slots) '(0 1 2 3 4))
+
+(define (slot-key n)
+  (string->symbol (string-append \"save/slot/\" (number->string n))))
+
+(define (slot-name n)
+  (or (cortex/read
+        (string->symbol
+          (string-append \"save/slot/\" (number->string n) \"/name\")))
+      (case n
+        ((0) \"Auto-save\")
+        (else (string-append \"Save \" (number->string n))))))
+
+(define (slot-timestamp n)
+  (cortex/read
+    (string->symbol
+      (string-append \"save/slot/\" (number->string n) \"/timestamp\"))))
+
+(define (slot-empty? n)
+  (not (cortex/read (slot-key n))))
+```
+
+Each slot has three keys: the snapshot, an optional name, a
+timestamp. Empty slots have none of these; `slot-empty?` returns #t.
+
+---
+
+## The save menu UX
+
+Show ALL slots including empty ones. The player needs to see the
+whole space.
+
+```scheme
+(define (save-menu)
+  (scene/imagine)
+  (surface/paper)
+  (paint-text 40 40 \"~ save your progress ~\")
+
+  (let loop ((n 0))
+    (when (<= n 4)
+      (let* ((empty? (slot-empty? n))
+             (name (slot-name n))
+             (ts (slot-timestamp n))
+             (label
+              (cond
+                (empty? (string-append \"[\" (number->string n) \"] \" name \"  (empty)\"))
+                (else   (string-append \"[\" (number->string n) \"] \" name
+                                       \"  (\" (ts->prose ts) \")\")))))
+        (paint-text 60 (+ 80 (* n 35)) label))
+      (loop (+ n 1))))
+
+  (paint-text 40 300 \"[press 0-4 to save into that slot]\")
+  (paint-text 40 325 \"[ESC to cancel]\"))
+```
+
+Slot 0 (auto-save) is offered too — but it's usually filled and
+players usually don't overwrite it. Their choice.
+
+Timestamp prose ('2 hours ago', 'yesterday', '3 days ago') is
+friendlier than raw timestamps.
+
+---
+
+## The load menu
+
+Same shape, different action.
+
+```scheme
+(define (load-menu)
+  (scene/imagine)
+  (surface/paper)
+  (paint-text 40 40 \"~ load a save ~\")
+
+  (let loop ((n 0))
+    (when (<= n 4)
+      (let* ((empty? (slot-empty? n))
+             (name (slot-name n)))
+        (paint-text 60 (+ 80 (* n 35))
+          (if empty?
+              (string-append \"[\" (number->string n) \"] (empty)\")
+              (string-append \"[\" (number->string n) \"] \" name))))
+      (loop (+ n 1))))
+
+  (paint-text 40 300 \"[press 0-4 to load; ESC to cancel]\"))
+```
+
+Do not offer to load empty slots. Grey them out or filter them from
+input.
+
+---
+
+## Overwrite confirmation
+
+If a player is about to overwrite an existing save, confirm.
+
+```scheme
+(define (save-with-confirm slot)
+  (cond
+    ((slot-empty? slot)
+     (save-now slot))
+    (else
+     (paint-text 40 400
+       (string-append \"[\" (number->string slot) \"] already has \"
+                      (slot-name slot) \" — overwrite?\"))
+     (paint-text 40 430 \"[Y] yes   [N] no\")
+     (on-key
+       (lambda (k)
+         (case k
+           ((y) (save-now slot))
+           ((n) (cancel-save))))))))
+```
+
+Do NOT confirm for slot 0. Auto-saves overwrite silently — that's
+the point.
+
+---
+
+## Naming a save
+
+Let the player type a name for the save.
+
+```scheme
+(define (save-with-name slot)
+  (paint-text 40 400 \"Name this save (or leave blank for default):\")
+  (input/text-buffer 40 430
+    :on-submit
+    (lambda (name)
+      (when (not (empty-string? name))
+        (cortex/write
+          (string->symbol (string-append \"save/slot/\"
+                                         (number->string slot)
+                                         \"/name\"))
+          name))
+      (save-now slot))))
+```
+
+Player types 'before the villain reveal' and it becomes the slot's
+label. If they type nothing, the default 'Save 1' name is used.
+
+Small feature. Big user value. Named saves are the difference between
+5 anonymous slots and 5 memorable moments.
+
+---
+
+## Migration when the story updates
+
+The hardest problem in save systems: your story updates but old
+saves point to node ids that no longer exist.
+
+Three strategies.
+
+### Strategy 1: version the save
+
+Every save records the story version at the time of saving.
+
+```scheme
+(define (save-now slot)
+  (let ((snap (world/snapshot)))
+    (cortex/write (slot-key slot) snap)
+    (cortex/write (slot-version-key slot) (story-version))))
+```
+
+When loading, check version:
+
+```scheme
+(define (load-now slot)
+  (let ((saved-version (cortex/read (slot-version-key slot)))
+        (current-version (story-version)))
+    (cond
+      ((equal? saved-version current-version)
+       (world/restore! (cortex/read (slot-key slot))))
+      (else
+       (offer-migration slot saved-version)))))
+```
+
+If versions differ, migrate.
+
+### Strategy 2: migration functions
+
+For each version pair, write a migration.
+
+```scheme
+(define (migrate save-blob from-v to-v)
+  (cond
+    ((and (equal? from-v \"1.0.0\") (equal? to-v \"1.1.0\"))
+     (migrate-1.0-to-1.1 save-blob))
+    ;; ... more migration paths ...
+    (else
+     ;; No migration path — offer to start over.
+     save-blob)))
+
+(define (migrate-1.0-to-1.1 blob)
+  ;; If node 'kitchen-old was renamed to 'kitchen, rewrite it in the blob.
+  ;; If new state flags need default values, set them.
+  ;; Return updated blob.
+  ...)
+```
+
+This is real engineering work. For games that update frequently, it's
+worth doing. For a game shipped once and rarely updated, skip.
+
+### Strategy 3: 'restart from chapter' fallback
+
+If migration fails, offer to restart the player from the beginning
+of the chapter they were in.
+
+```scheme
+(define (offer-restart-chapter slot)
+  (let ((chapter (cortex/read 'current-chapter)))
+    (paint-text 40 400
+      (string-append \"This save is from an older version. Restart\n\"
+                     \"chapter \" (number->string chapter)
+                     \" from the beginning?\"))
+    (paint-text 40 460 \"[Y] restart   [N] cancel\")))
+```
+
+Lossy but usable. The player loses mid-chapter progress but keeps
+Cortex flags (choices, reputation, inventory).
+
+---
+
+## Cross-device save (advanced)
+
+For players who play on phone and tablet, saves should sync.
+
+`cortex/write` under the hood syncs to the cloud (for logged-in
+users) — so Cortex-based saves are automatically cross-device.
+
+`world/snapshot` may or may not sync depending on backend. If your
+snapshots are large, they may live only on the local device.
+
+For safest cross-device: rely on Cortex for state; use snapshot only
+for one-session ephemeral saves. That is the discipline for cross-
+device narrative games.
+
+---
+
+## Summary
+
+Two save systems: Cortex (automatic, always on) and snapshot (manual,
+heavier). Three tiers: auto-persist, chapter auto-save, named manual
+slots. Five total slots (0-4). Name your saves. Confirm overwrites
+(except slot 0). Version your saves for migration.
+
+The player who loves your game will replay it. The player who quits
+should be able to come back where they left off. Save systems make
+both possible.")

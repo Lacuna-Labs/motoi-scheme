@@ -1,0 +1,276 @@
+(chapter
+  :book "Book of ML"
+  :chapter-number 11
+  :title "Tokens and embeddings"
+  :audience "kid-and-adult operators"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-19"
+     :sources ((:paper "Mikolov et al. 2013 — Efficient Estimation of Word Representations in Vector Space (word2vec)"
+                :arxiv "1301.3781"
+                :used-for "the geometric interpretation of embeddings")
+               (:reference "MOTOI-SCHEME-REFERENCE.slat" :section "vec/, list")))
+  :prose
+"# Chapter 11 — Tokens and embeddings
+
+Language is symbols. Networks eat numbers. The bridge between them
+is embeddings — a table that maps each symbol to a vector of numbers.
+Once every symbol has a vector, the vector arithmetic from chapters
+2-10 applies to language.
+
+This chapter builds that bridge in three pieces:
+
+1. Tokenization — split text into symbols.
+2. A vocabulary — number the symbols.
+3. An embedding table — associate each numbered symbol with a
+   learnable vector.
+
+## Problem 1 — Tokenize on whitespace
+
+The simplest tokenizer splits on spaces. Not great for real language
+(no punctuation handling, no subword) but a fine starting point.
+
+```
+(define (whitespace-tokenize text)
+  ;; string-split is in Motoi's r7rs completions
+  (string-split text \" \"))
+
+(display (whitespace-tokenize \"the cat sat on the mat\"))
+;; => (\"the\" \"cat\" \"sat\" \"on\" \"the\" \"mat\")
+```
+
+Six tokens. Notice 'the' appears twice — the tokenizer produces a
+sequence, not a set. Order matters. The model will use position to
+know that the second 'the' comes after 'cat sat on the.'
+
+## Problem 2 — A vocabulary from a corpus
+
+The vocabulary is the set of distinct tokens the model knows about.
+Every token in it gets a number (its index). Tokens not in the
+vocabulary become an 'unknown' symbol.
+
+```
+(define (build-vocab tokens)
+  ;; Return an alist: token -> id
+  (define (add-unique acc tok)
+    (if (assoc tok acc)
+        acc
+        (cons (cons tok (length acc)) acc)))
+  (reverse (fold add-unique '() tokens)))
+
+(define corpus
+  (whitespace-tokenize \"the cat sat on the mat and the mat sat still\"))
+
+(display (build-vocab corpus))
+;; => ((\"the\" . 0) (\"cat\" . 1) (\"sat\" . 2) (\"on\" . 3)
+;;     (\"mat\" . 4) (\"and\" . 5) (\"still\" . 6))
+;; 7 unique tokens
+```
+
+The vocabulary maps each distinct word to a numeric id. `'the'` gets
+0. `'cat'` gets 1. And so on. Real vocabularies for language models
+have between 30,000 and 100,000 entries.
+
+## Problem 3 — Token to id, id to token
+
+Two lookups. Given a token, get its id. Given an id, get the token
+back. Both are needed at training time (token→id for input) and
+inference (id→token for output).
+
+```
+(define vocab (build-vocab (whitespace-tokenize \"the cat sat on the mat\")))
+
+(define (tok->id tok)
+  (let ((entry (assoc tok vocab)))
+    (if entry (cadr entry) -1)))    ;; -1 = unknown  (see note below)
+
+(define (id->tok id)
+  (let loop ((rest vocab))
+    (cond ((null? rest) \"[UNK]\")
+          ((= (cadr (car rest)) id) (car (car rest)))
+          (else (loop (cdr rest))))))
+
+(display (tok->id \"cat\"))     ;; => 1
+(display (id->tok 3))            ;; => \"on\"
+(display (tok->id \"llama\"))    ;; => -1  (not in vocab)
+```
+
+`assoc` is a linear search. For real vocabs you'd use a hash table
+(chapter 3 of Book of R7RS Recipes covers `make-hash-table`). The
+idea is the same, just faster.
+
+Note about Motoi's alist convention. Motoi's `cons` produces proper
+lists rather than R5RS-style dotted pairs, so a vocab entry built as
+`(cons \"cat\" 1)` is the two-element list `(\"cat\" 1)`, not the
+dotted pair `(\"cat\" . 1)`. The key is `(car entry)`, and the value
+is `(cadr entry)`. Same shape as any other alist, just a different
+accessor for the value. If you copy code from an R7RS book that uses
+`(cdr entry)` to get the value, remember to swap in `cadr` for Motoi.
+
+## Problem 4 — One-hot encoding
+
+The most naive way to turn a token into a vector: a vector of length
+vocab-size, all zeros except a 1 at the token's index. This is called
+one-hot.
+
+```
+(define vocab (build-vocab (whitespace-tokenize \"a b c d e\")))
+(define vocab-size (length vocab))
+
+(define (one-hot id)
+  (vec/make
+    (map (lambda (i) (if (= i id) 1 0))
+         (iota vocab-size))))
+
+(display (one-hot 0))    ;; => vector (1 0 0 0 0)
+(display (one-hot 2))    ;; => vector (0 0 1 0 0)
+```
+
+One-hot vectors are correct but wasteful. In a vocab of 50,000, every
+token is a 50,000-dimensional vector that is mostly zero. And more
+important: one-hot vectors carry no meaning — the vectors for 'cat'
+and 'kitten' are as orthogonal as those for 'cat' and 'kilowatt.'
+
+Embeddings fix both problems.
+
+## Problem 5 — The embedding table
+
+An embedding table is a matrix of shape (vocab-size, embed-dim). Row
+i is the embedding vector for token id i. Looking up a token becomes:
+'fetch row i.' No matrix multiplication needed — direct indexing.
+
+```
+(define vocab-size 7)
+(define embed-dim 4)
+
+;; Random init — every token gets a random 4-dim vector at start
+(define (random-vec dim)
+  (vec/make (map (lambda (_) (- (* (random) 0.4) 0.2))
+                 (iota dim))))
+
+(define embedding-table
+  (map (lambda (_) (random-vec embed-dim)) (iota vocab-size)))
+
+(define (embed id) (list-ref embedding-table id))
+
+(display (embed 0))    ;; embedding of token 0 — a 4-dim vector
+(display (embed 3))    ;; embedding of token 3 — a different 4-dim vector
+```
+
+The embedding for each token is a vector in 4-dimensional space.
+Initially those vectors are random and meaningless. During training,
+gradient descent updates them so tokens used in similar contexts end
+up in similar directions. That is the miracle: the embeddings LEARN
+meaning by pushing similar-context tokens closer together.
+
+## Problem 6 — A tokenized sentence as a sequence of embeddings
+
+```
+(define sentence \"the cat sat\")
+(define vocab (build-vocab (whitespace-tokenize \"the cat sat on the mat\")))
+(define vocab-size (length vocab))
+(define embed-dim 4)
+
+(define embedding-table
+  (map (lambda (_)
+         (vec/make (map (lambda (_) (- (* (random) 0.4) 0.2))
+                        (iota embed-dim))))
+       (iota vocab-size)))
+
+(define (tok->id tok)
+  (let ((entry (assoc tok vocab)))
+    (if entry (cadr entry) -1)))
+
+(define (embed-sentence text)
+  (map (lambda (tok) (list-ref embedding-table (tok->id tok)))
+       (whitespace-tokenize text)))
+
+(display (embed-sentence sentence))
+;; => a list of 3 vectors of dim 4
+```
+
+A sentence has become a matrix — one row per token, one column per
+embedding dimension. This is the shape the transformer eats. Every
+subsequent chapter operates on this shape.
+
+## Problem 7 — Learning embeddings by co-occurrence (word2vec sketch)
+
+The classic word2vec trick: train an embedding table so that words
+that appear near each other have similar embeddings. The loss:
+predict the surrounding context from the center word. Backprop
+through the prediction updates the center word's embedding.
+
+We won't implement full word2vec here — chapter 16's tiny LLM learns
+its embeddings the same way, as part of the whole model. But the
+core observation is: embeddings are just parameters. The training
+loop from chapter 10 updates them by gradient descent, exactly like
+it updates the network weights.
+
+Mikolov et al. 2013 showed that trained embeddings capture stunning
+patterns: `king - man + woman ≈ queen`. Vector arithmetic on words
+matches semantic arithmetic. The embedding space encodes meaning as
+geometry. That was one of the most important results in NLP in the
+last twenty years.
+
+## Capstone — Similarity search in an embedding space
+
+Build a tiny vocabulary with hand-set embeddings. Show that words we
+consider similar are close in cosine distance.
+
+```
+(define vocab
+  (list (list \"cat\"    (list 0.8 0.2 0.1 0.0))
+        (list \"kitten\" (list 0.7 0.3 0.1 0.0))
+        (list \"dog\"    (list 0.7 0.1 0.2 0.0))
+        (list \"car\"    (list 0.0 0.1 0.8 0.2))
+        (list \"truck\"  (list 0.1 0.0 0.7 0.3))
+        (list \"book\"   (list 0.0 0.0 0.0 0.9))))
+
+(define (cosine a b)
+  (/ (vec/dot a b) (* (vec/norm a) (vec/norm b))))
+
+(define query (cadr (assoc \"cat\" vocab)))
+
+(for-each (lambda (entry)
+            (display (car entry))
+            (display \" -> similarity \")
+            (display (cosine query (cadr entry)))
+            (newline))
+          vocab)
+;; cat    -> 1.0
+;; kitten -> 0.98
+;; dog    -> 0.94
+;; car    -> 0.11
+;; truck  -> 0.13
+;; book   -> 0.00
+```
+
+Cat is closest to kitten and dog. Cat is nearly orthogonal to book.
+The geometry of the embedding space captures a notion of similarity.
+When you look up an embedding, you get semantic content — not just
+an index.
+
+Real embeddings are learned, not hand-crafted. But the shape is the
+same: high-dimensional vectors, similar contexts → similar
+directions, cosine to compare.
+
+## Why this matters
+
+Embeddings are the ground floor of every language model. Every token
+in every prompt goes through an embedding lookup before anything
+else happens. The embedding table is one of the biggest parameter
+groups in a language model — for a 50,000 vocab with 768-dim
+embeddings, the table alone has 38.4 million parameters. Learning
+good embeddings is a large part of what training does.
+
+## What's next
+
+Chapter 12 introduces attention. The transformer's core mechanism.
+Given a sequence of embedded tokens, produce a new sequence where
+each position is a weighted mixture of the others. The weights are
+computed by soft lookup — a dot-product comparison of query and key
+vectors. Attention is what let language models get big.
+")

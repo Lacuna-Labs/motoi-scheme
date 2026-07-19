@@ -1,0 +1,206 @@
+(dialect :applies ("motoi" "sakura") :note "Default: applies to both dialects. When a split exists between Motoi and Sakura, add sibling records in the same doc, each tagged with a per-record :dialect override.")
+(chapter
+  :book "Book of Jesse"
+  :chapter-number 6
+  :title "Chapter 5 — Fantasy Console Mode"
+  :provenance
+    (:source-path "/Users/alfred/code/scheme-lang/docs/BOOK-OF-JESSE.md"
+     :source-sha "a4fe105b21fbbb37e6b52bd1b3884eed3a65127db421fa7e044480d4d024873e"
+     :recovered-at "2026-07-14"
+     :recovery-item "recovery-008")
+  :prose
+"## Chapter 5 — Fantasy Console Mode
+
+If you spend afternoons in TIC-80, this chapter is where Motoi Scheme starts feeling like home. The framebuffer, input, and audio primitives compose the same way `cls`/`circ`/`spr`/`btn`/`sfx` do — same shape, small differences in spelling.
+
+Before we dive in, a note on the API surface. The Motoi Scheme runtime exposes a low-level surface API — `surface-paint-dots`, `surface-paint-text`, `clear-surface-layer`, and friends — that takes a surface handle, a layer name, and a dot-list. That's the real underlying machinery, and if you want to know the exact shapes you'd look them up in the reference (`,help surface-paint-dots`). But most game code doesn't reach that deep. It goes through a small convenience layer we'll build here — a handful of one-line wrappers over the real verbs. This is exactly the same pattern TIC-80 uses: `circ()` is a wrapper around lower-level pixel operations, and you never think about that.
+
+So we'll start by defining `clear`, `paint`, and `text` in a few lines. Everything else in the chapter uses those. If you'd rather skip the wrapper and write the underlying verb directly, `,help surface-paint-dots` will get you there.
+
+```scheme
+;; the convenience layer — save as ~/scheme/fc.scm and (,load) it
+(define (surf) (system/surface))
+(define (clear color)
+  (clear-surface-layer (surf) 'base)
+  (paint-cell (surf) 'base 0 0 color))
+(define (paint shape color)
+  ;; shape is a tagged list like (circle cx cy r) or (disc cx cy r)
+  ;; expand to dots and hand to surface-paint-dots
+  (surface-paint-dots (surf) 'base (shape->dots shape) color))
+(define (text x y str color)
+  (surface-paint-text (surf) str x y 'default 8 color))
+```
+
+`shape->dots` is a small helper that turns a `(circle cx cy r)` into a dot-list — the reference has it as `shape/rasterize` in some dialects, and any dialect that ships fantasy-console mode will provide its own. If your dialect ships one, use it; if not, write the ten-line one you need.
+
+That's the pattern. Now onward.
+
+### The screen
+
+```scheme
+(set-mode 240 136)
+```
+
+That's TIC-80's default resolution. Motoi Scheme's default is the same. You can go bigger:
+
+```scheme
+(set-mode 320 200)  ;; classic DOS
+(set-mode 480 270)  ;; 16:9-ish
+```
+
+The framebuffer is one surface; you draw into it every frame, and the display layer flushes it.
+
+### The frame loop
+
+Motoi Scheme doesn't have a magic `TIC()` global. Instead you register a frame handler with `on-frame`:
+
+```scheme
+(define t 0)
+
+(define (frame)
+  (clear 0)                                ;; TIC-80: cls(0)
+  (paint (circle 120 68 (+ 10 (* 5 (sin (/ t 20))))) 5)
+  (set! t (+ t 1)))
+
+(on-frame frame)
+```
+
+`on-frame` registers `frame` to run each display tick. The display driver drives the pump. When you type `,exit`, the pump stops.
+
+If you'd rather do this without a global mutable `t`, thread it through state — which is idiomatic Scheme, and the shape the world/entity verbs are built around. `on-tick` is the state-threading variant (it takes a `(state) -> state'` handler, like Racket's `big-bang`):
+
+```scheme
+(define (step state)
+  (+ state 1))
+
+(define (draw state)
+  (clear 0)
+  (paint (circle 120 68 (+ 10 (* 5 (sin (/ state 20))))) 5))
+
+(big-bang 0
+  (on-tick step)
+  (to-draw draw))
+```
+
+Either works. Global `set!` reads faster to Lua eyes; the `big-bang` style composes better as your program grows and matches the pure-functional shape Scheme rewards.
+
+### Input
+
+The six-button model, familiar from every fantasy console:
+
+```scheme
+(input/buttons)                            ;; ⇒ (up down left right a b)
+(input/down? 'left)                        ;; ⇒ #t/#f — held?
+(input/pressed? 'a)                        ;; ⇒ #t/#f — went down this frame?
+```
+
+Keyboard-to-button mapping is the terminal-standard TIC-80 mapping: arrows for movement, `Z` for A, `X` for B. Override it in your `config.slat` if you want WASD.
+
+### Drawing
+
+```scheme
+;; primitives — return tagged lists, no side effect
+(circle cx cy r)                           ;; outline
+(disc cx cy r)                             ;; filled
+(line x1 y1 x2 y2)
+(rect x y w h)
+
+;; painting them into the framebuffer (convenience layer)
+(paint shape color)                        ;; paint any of the above
+(text x y \"hello\" color)                   ;; text
+(clear color)                              ;; wipe the frame
+
+;; underlying real verbs, if you want them
+(surface-paint-dots surf 'base dots color) ;; the primitive
+(clear-surface-layer surf 'base)           ;; the primitive
+```
+
+`shape` is *any* of the primitives above — same shape you can `map` over. If you want ten circles, `map` produces the list; a `paints` wrapper for lists is another one-liner over `surface-paint-dots`.
+
+### Audio
+
+The reference has 13 audio verbs. The ones you'll reach for first:
+
+```scheme
+(audio/listen)                             ;; permission gate — call once
+(audio/play 'kick-drum)                    ;; queue a sound
+(audio/play 'ambient :loop #t)             ;; loop a track
+(audio/halt handle)                        ;; stop something you played
+(audio/master-volume 0.7)                  ;; global gain, 0..1
+
+;; analysis (for music-reactive visuals)
+(audio/spectrum)                           ;; ⇒ 32-element vector, FFT bands
+(audio/onset?)                             ;; ⇒ #t on the frame a drum hits
+(audio/onset-strength)                     ;; ⇒ number, 0..∞
+(audio/tempo)                              ;; ⇒ BPM
+(audio/key)                                ;; ⇒ (note mode confidence) | #f
+```
+
+If TIC-80's `sfx(n)` felt fine, `audio/play 'sound-n` feels the same. The difference: you get FFT and onset detection built in, which unlocks music-reactive visuals without extra libraries.
+
+### Build a game inline — Bouncing ball → paddle → Pong
+
+Start with a bouncing ball. Two coordinates, two velocities:
+
+```scheme
+(set-mode 240 136)
+
+(define x 120) (define y 68)
+(define vx 2)  (define vy 1)
+
+(define (frame)
+  (clear 0)
+
+  ;; move
+  (set! x (+ x vx))
+  (set! y (+ y vy))
+
+  ;; bounce
+  (when (or (< x 4) (> x 236)) (set! vx (- vx)))
+  (when (or (< y 4) (> y 132)) (set! vy (- vy)))
+
+  ;; draw
+  (paint (disc x y 3) 12))
+
+(on-frame frame)
+```
+
+Save as `ball.scm`, `,load ball.scm` at the REPL, and it runs. A red-ish disc bounces around the framebuffer.
+
+Now add a paddle. Read input, draw a rect:
+
+```scheme
+(define px 120)
+
+(define (frame)
+  (clear 0)
+
+  ;; ball
+  (set! x (+ x vx)) (set! y (+ y vy))
+  (when (or (< x 4) (> x 236)) (set! vx (- vx)))
+  (when (< y 4) (set! vy (- vy)))
+
+  ;; paddle
+  (when (input/down? 'left)  (set! px (max 20  (- px 3))))
+  (when (input/down? 'right) (set! px (min 220 (+ px 3))))
+
+  ;; paddle collision
+  (when (and (> y 128) (< y 132)
+             (> x (- px 20)) (< x (+ px 20)))
+    (set! vy (- vy)))
+
+  ;; game over
+  (when (> y 136)
+    (set! x 120) (set! y 68) (set! vy 1))
+
+  ;; draw
+  (paint (disc x y 3) 12)
+  (paint (rect (- px 20) 130 40 4) 15))
+
+(on-frame frame)
+```
+
+That's a half-Pong. Add a second paddle, keep score, and you have Pong. It's under a hundred lines. Ambitions grow from there — see Chapter 14 for four more starters.
+
+---
+")

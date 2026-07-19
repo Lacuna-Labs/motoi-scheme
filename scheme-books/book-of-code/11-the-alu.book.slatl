@@ -1,0 +1,282 @@
+(dialect :applies ("motoi") :note "Motoi Book of Code.")
+
+(chapter
+  :book             "Book of Code"
+  :chapter-number   11
+  :title            "Chapter 11 — The ALU: combining adders and logic"
+  :audience         :any
+  :dialect          "motoi"
+  :book-version     "1.0"
+  :content-rating   :G
+  :training-eligible #t
+  :confidentiality  :public
+  :provenance       ((:authored-by "book-of-code-author-agent")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Arithmetic_logic_unit")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/74181")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Multiplexer"))
+  :prose
+"# Chapter 11 — The ALU: combining adders and logic
+
+The **arithmetic-logic unit** is the block of a CPU that does the
+number crunching. It takes two operands, an opcode telling it what to
+do, and produces a result plus some flag bits.
+
+An ALU can typically:
+
+- Add and subtract.
+- AND, OR, XOR, NOT (bit-wise).
+- Compare (which is really subtract-and-look-at-flags).
+- Shift left and shift right.
+
+Some ALUs also multiply and divide, but those are usually separate
+blocks. The core ALU is add, subtract, and the bitwise logic gates,
+plus a **select** circuit that picks one answer from all of them
+based on the opcode.
+
+## The multiplexer
+
+The key ingredient we don't have yet is the **multiplexer** — MUX for
+short. A multiplexer is a switch controlled by a select signal. It
+takes several inputs and one select input, and passes exactly one of
+the inputs to the output.
+
+**ASCII diagram of a 4-to-1 multiplexer:**
+
+```
+   In-0 ----+
+            |
+   In-1 ----+----->[MUX]------> Output
+            |         ^
+   In-2 ----+         |
+            |       Select
+   In-3 ----+       (2 bits)
+```
+
+If Select = 00, output = In-0. If Select = 01, output = In-1. And so
+on. A multiplexer is a **select** in silicon.
+
+You can build a MUX from ordinary gates. For a 2-to-1 MUX with select
+S:
+
+```
+   Out = (S AND In-1) OR ((NOT S) AND In-0)
+```
+
+Read: if S is 1, take In-1. If S is 0, take In-0. That is a MUX.
+
+```
+(define (mux-2 s in-0 in-1)
+  (or (and s in-1)
+      (and (not s) in-0)))
+
+(mux-2 #f 'apple 'banana)   ;; => apple    (but only for #f/#t inputs)
+```
+
+In our ALU we will use a MUX to pick one of the several arithmetic and
+logic answers based on the opcode.
+
+## The ALU sketch
+
+An n-bit ALU has:
+
+- Two n-bit operand inputs A and B.
+- A k-bit opcode input.
+- One n-bit result output.
+- Some flag outputs — zero, carry, overflow, negative.
+
+Internally it computes ALL of the operations in parallel (add, subtract,
+AND, OR, XOR, NOT, shift), and a MUX picks the correct answer based on
+the opcode.
+
+**ASCII diagram of a small ALU:**
+
+```
+     A       B        opcode
+     |       |          |
+     v       v          |
+   +-----+-----+-----+ |
+   | ADD | AND | OR  | |
+   +-----+-----+-----+ |
+     |     |     |     |
+     v     v     v     v
+     +------ MUX -------+---> Result
+                        |
+                        +---> flags (zero, carry, ...)
+```
+
+We do them all in parallel, then pick. In real chips that seems
+wasteful, but computing all the operations at once and then selecting
+is often faster and cheaper than a serial approach.
+
+## A 4-bit ALU in Motoi Scheme
+
+Reuse `ripple-add` from chapter 7, plus the gates from chapter 5, plus
+`invert-bits` and `twos-complement-negate`.
+
+We define opcodes as symbols. Real ALUs use bit patterns; symbols are
+clearer for the book.
+
+```
+;; from previous chapters:
+;; (define (ripple-add a b) ...)
+;; (define (invert-bits bs) ...)
+;; (define (twos-complement-negate bs) ...)
+;; (define (int->bits n w) ...)
+;; (define (bits->int bs) ...)
+
+(define (alu op a-bits b-bits)
+  (case op
+    ((add)
+     (car (ripple-add a-bits b-bits)))
+    ((sub)
+     (car (ripple-add a-bits (twos-complement-negate b-bits))))
+    ((and)
+     (map (lambda (x y) (and x y)) a-bits b-bits))
+    ((or)
+     (map (lambda (x y) (or x y)) a-bits b-bits))
+    ((xor)
+     (map (lambda (x y)
+            (and (or x y) (not (and x y))))
+          a-bits b-bits))
+    ((not)
+     (invert-bits a-bits))
+    ((shl)
+     (cons #f (reverse (cdr (reverse a-bits)))))     ;; shift left by 1
+    ((shr)
+     (append (cdr a-bits) (list #f)))                ;; shift right by 1
+    (else (error 'unknown-opcode op))))
+```
+
+Try it. Take 5 and 3 in 4-bit form.
+
+```
+(let* ((a (int->bits 5 4))
+       (b (int->bits 3 4)))
+  (list
+    (list 'add     (bits->int (alu 'add a b)))
+    (list 'sub     (bits->int (alu 'sub a b)))
+    (list 'and     (bits->int (alu 'and a b)))
+    (list 'or      (bits->int (alu 'or  a b)))
+    (list 'xor     (bits->int (alu 'xor a b)))
+    (list 'not-a   (bits->int (alu 'not a b)))
+    (list 'shl-a   (bits->int (alu 'shl a b)))
+    (list 'shr-a   (bits->int (alu 'shr a b)))))
+
+;; => ((add 8)
+;;     (sub 2)
+;;     (and 1)   ;; 5=0101, 3=0011, AND=0001=1
+;;     (or  7)   ;; 5|3 = 7
+;;     (xor 6)   ;; 5^3 = 6
+;;     (not-a 10) ;; ~0101 in 4 bits = 1010 = 10
+;;     (shl-a 10) ;; 5 << 1 = 10
+;;     (shr-a 2)) ;; 5 >> 1 = 2
+```
+
+Every result matches what you would compute by hand.
+
+## Flags
+
+Real ALUs emit **flag bits** alongside the result. The most common:
+
+- **Z** (zero): result is all zero.
+- **C** (carry): the add overflowed. For subtract, it means \"no borrow.\"
+- **N** (negative): the top bit of the result is 1 (i.e. two's
+  complement negative).
+- **V** (overflow): the signed arithmetic overflowed.
+
+The CPU tests these flags to decide branches. `IF Z, JUMP TO ...` is
+the assembly-level equivalent of `if x == 0`. Every conditional you
+have ever written eventually compiles into a flag test.
+
+Add flags to our ALU:
+
+```
+(define (alu-with-flags op a-bits b-bits)
+  (let ((result (alu op a-bits b-bits)))
+    (let ((z (not (memv #t result)))               ;; all bits false?
+          (n (car (reverse result))))              ;; top bit?
+      (list 'result result
+            'z z
+            'n n))))
+
+(alu-with-flags 'sub (int->bits 5 4) (int->bits 5 4))
+;; => (result (#f #f #f #f) z #t n #f)
+;; 5 - 5 = 0, zero flag set.
+
+(alu-with-flags 'sub (int->bits 3 4) (int->bits 5 4))
+;; => (result (#f #t #t #t) z #f n #t)
+;; 3 - 5 = -2 in 4-bit two's complement = 1110, negative flag set.
+```
+
+That is what a CPU sees after an ALU op: the result plus the flags.
+Chapter 12 uses the flags to decide whether to branch.
+
+## The 74181 — a real 4-bit ALU chip
+
+In 1970, Texas Instruments (them again) released the **74181**, a
+4-bit ALU chip. It could do sixteen arithmetic operations and sixteen
+logic operations. It had a 24-pin package. Two of them wired together
+gave you an 8-bit ALU. Four gave you 16-bit.
+
+The 74181 shipped in the CPUs of many computers in the 1970s — the
+DEC PDP-11 among them. It is often shown in university digital
+electronics courses as the classic pre-microprocessor ALU. If you have
+ever seen a photograph of a chip and thought \"look at all those wires\",
+that is probably a 74181.
+
+By the late 1970s, whole CPUs — the 6502, the Z80, the 8080 —
+integrated the ALU onto a single chip along with the register file
+and control logic. No more 74181 as a separate part.
+
+## Composing to wider ALUs
+
+Our 4-bit ALU can add two 4-bit numbers. To add two 8-bit numbers, we
+can either (a) chain two 4-bit ALUs, propagating the carry-out of the
+low one into the carry-in of the high one, or (b) write an 8-bit ALU
+directly. Both approaches work.
+
+The composability of adders (chapter 7) is what makes ALU-widening
+straightforward. Every CPU designer picks a width — 8, 16, 32, 64 —
+and builds an ALU that wide. Same shape. Same gates. Just more of them.
+
+## The ALU is not sequential
+
+Notice something: our ALU doesn't have a clock. It doesn't have state.
+It is pure combinational. Give it inputs, get outputs (after gate
+delays). It doesn't remember what it did last time.
+
+The **sequential** part — the memory, the registers, the program
+counter — lives around the ALU. The ALU just calculates. The rest of
+the CPU decides what to calculate and remembers the answers.
+
+This split — combinational compute engine + surrounding sequential
+control — is the pattern of every processor. Chapter 12 wires the ALU
+into a full CPU.
+
+## What Motoi wants you to take from this
+
+- An ALU is adders + logic gates + a select circuit (MUX).
+- It computes many operations in parallel and picks one based on the
+  opcode.
+- It emits flag bits alongside its result. The flags drive branches.
+- It is pure combinational — no memory of its own. The memory is
+  outside the ALU.
+
+You have now seen every combinational block a CPU needs: gates,
+adders, multiplexers, and their composition. Everything else in the
+CPU is memory (chapter 8, 9) or control (chapter 12). We are almost
+at the CPU.
+
+## The loop appears
+
+The ALU by itself has no loop. But in a running CPU, the ALU is
+inside a big loop: fetch instruction, decode, feed operands to the
+ALU, latch the result into a register, tick the clock, increment the
+program counter, fetch the next instruction, repeat. Chapter 12 draws
+that loop.
+
+## Next
+
+Chapter 12: the CPU. Fetch, decode, execute. The biggest loop in the
+book.
+")

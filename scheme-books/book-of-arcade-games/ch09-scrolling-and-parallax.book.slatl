@@ -1,0 +1,387 @@
+;; ch09-scrolling-and-parallax.book.slatl
+;; Book of Arcade Games — Chapter 9: Scrolling and Parallax
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Arcade Games"
+  :chapter-number      9
+  :title               "Scrolling and Parallax"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + game-design"
+  :book-version        "1.0.0"
+  :draws-from-preserved (:book "book-of-games-preserved" :ch 13 :ch 14)
+  :prose
+"Two-dimensional games learned to feel three-dimensional before there
+was a Z-axis. The trick is parallax. When you drive down a road, the
+fencepost right next to you flies past your window; the mountain on the
+horizon barely moves; the sun in the sky doesn't move at all. Your brain
+computes depth from the difference in apparent motion.
+
+Video games discovered this in the mid-1980s. A shoot-em-up with a
+starfield background moving at half speed felt vast. A jungle-runner
+with grass in front, trees behind, mountains further behind, sky
+behind that — each moving at its own rate — felt like flying through
+a WORLD, not walking a screen.
+
+This chapter builds a three-layer parallax scene. Foreground grass at
+1.0×, mid-hills at 0.5×, distant mountains at 0.2×. The camera pans as
+the player runs, and the layers pan at different rates, and the world
+gains depth. Same tile grid we built in chapter 8; different rules for
+how the background paints.
+
+---
+
+## 9.1 The near layer
+
+Start with just the foreground — camera-follow motion.
+
+```scheme
+;; Player runs right; foreground grass follows the camera exactly.
+(define (near-only)
+  (world/reset!)
+  (scene/grid 'ground 60 1 32 20 0 200)
+  (world/each 'ground
+              (lambda (t) (entity/shape! t 'rect 32 20) (entity/solid! t #t)))
+  ;; A row of grass tiles that scroll 1:1 with the camera.
+  (scene/grid 'grass 60 1 32 8 0 192)
+  (world/each 'grass
+              (lambda (t) (entity/shape! t 'rect 32 8)))
+  (let ((p (world/spawn 'player 100 168)))
+    (entity/shape! p 'rect 16 32)
+    (entity/solid! p #t)
+    (world/gravity! 0 0.5)
+    (world/camera-follow! p 0.1 60 40)
+    (world/camera-bounds! 0 0 1920 240)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/pressed? 'a)
+         (entity/set-vel! p (car (entity/vel p)) -10))
+       (world/step)
+       (paint-clear)
+       (world/each 'ground
+                   (lambda (t)
+                     (paint-cell 'ground (entity/x t) (entity/y t) 32 20)))
+       (world/each 'grass
+                   (lambda (t)
+                     (paint-cell 'grass (entity/x t) (entity/y t) 32 8)))
+       (paint-cell 'player (entity/x p) (entity/y p) 16 32)))))
+
+(big-bang near-only)
+```
+
+Nothing new — everything scrolls with the camera at rate 1.0×.
+Walking right, all tiles slide left across the screen at the same
+rate the player moves.
+
+---
+
+## 9.2 Add a slower layer
+
+Now for the depth. We paint hills that scroll at HALF the camera rate.
+
+```scheme
+;; Foreground scrolls at 1.0x; mid-hills at 0.5x.
+(define (two-layer-parallax)
+  (world/reset!)
+  (scene/grid 'ground 60 1 32 20 0 200)
+  (world/each 'ground
+              (lambda (t) (entity/shape! t 'rect 32 20) (entity/solid! t #t)))
+  (let ((p (world/spawn 'player 100 168)))
+    (entity/shape! p 'rect 16 32)
+    (entity/solid! p #t)
+    (world/gravity! 0 0.5)
+    (world/camera-follow! p 0.1 60 40)
+    (world/camera-bounds! 0 0 1920 240)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/pressed? 'a)
+         (entity/set-vel! p (car (entity/vel p)) -10))
+       (world/step)
+       (paint-clear)
+       ;; The camera is at some world position; get x-component.
+       (let ((cam-x (car (world/camera))))
+         ;; Mid-hills: 5 hill sprites, each 64 wide, at y = 140.
+         ;; Their apparent x = world-x - camera-x * 0.5
+         ;; So we paint them at (world-x - cam-x * 0.5).
+         (let loop ((i 0))
+           (when (< i 5)
+             (let ((world-hill-x (* i 200))
+                   (screen-hill-x (- (* i 200) (* cam-x 0.5))))
+               ;; Only paint if visible.
+               (when (and (> screen-hill-x -64) (< screen-hill-x 384))
+                 (paint-cell 'hill (+ screen-hill-x cam-x) 140 64 40)))
+             (loop (+ i 1)))))
+       (world/each 'ground
+                   (lambda (t)
+                     (paint-cell 'ground (entity/x t) (entity/y t) 32 20)))
+       (paint-cell 'player (entity/x p) (entity/y p) 16 32)))))
+
+(big-bang two-layer-parallax)
+```
+
+Read the middle-layer paint math carefully.
+
+The camera is at world-x `cam-x`. Normally, an object at world-x `wx`
+appears on screen at `wx - cam-x`. But for a parallax layer at rate
+0.5, we want the object to appear on screen at `wx - cam-x * 0.5` —
+half as much offset. Since `paint-cell` subtracts the camera under the
+hood, we PASS a world-x of `screen-x + cam-x` — which becomes
+`(wx - cam-x * 0.5) + cam-x = wx + cam-x * 0.5`, so `paint-cell`
+displays it at `(wx + cam-x * 0.5) - cam-x = wx - cam-x * 0.5`. That's
+the parallax we wanted.
+
+Simpler mental model: 'draw each layer as if the camera moved at
+(1 - rate) times its actual speed.'
+
+The mid-hills drift half as fast as the ground. Kids running right
+see the hills slide slowly. Their brain interprets: hills are far
+away. No Z-axis needed.
+
+---
+
+## 9.3 Three layers
+
+Add distant mountains and sky.
+
+```scheme
+;; Three parallax layers: sky (0), mountains (0.2), hills (0.5),
+;; plus foreground (1.0).
+(define (three-layer-parallax)
+  (world/reset!)
+  (scene/grid 'ground 60 1 32 20 0 200)
+  (world/each 'ground
+              (lambda (t) (entity/shape! t 'rect 32 20) (entity/solid! t #t)))
+  (let ((p (world/spawn 'player 100 168)))
+    (entity/shape! p 'rect 16 32)
+    (entity/solid! p #t)
+    (world/gravity! 0 0.5)
+    (world/camera-follow! p 0.1 60 40)
+    (world/camera-bounds! 0 0 1920 240)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/pressed? 'a)
+         (entity/set-vel! p (car (entity/vel p)) -10))
+       (world/step)
+       (paint-clear)
+       (let ((cam-x (car (world/camera))))
+         ;; Sky — doesn't scroll. Just paint at absolute (0, 0).
+         (paint-cell 'sky (+ 160 cam-x) 40 320 80)
+         ;; Distant mountains — 5 sprites at 0.2x rate.
+         (let loop ((i 0))
+           (when (< i 6)
+             (paint-cell 'mountain
+                         (+ (* i 200) (* cam-x 0.2)) 100 100 60)
+             (loop (+ i 1))))
+         ;; Mid hills — 5 sprites at 0.5x rate.
+         (let loop ((i 0))
+           (when (< i 8)
+             (paint-cell 'hill
+                         (+ (* i 200) (* cam-x 0.5)) 150 80 40)
+             (loop (+ i 1))))
+         (world/each 'ground
+                     (lambda (t)
+                       (paint-cell 'ground (entity/x t) (entity/y t) 32 20)))
+         (paint-cell 'player (entity/x p) (entity/y p) 16 32))))))
+
+(big-bang three-layer-parallax)
+```
+
+Note the simplification: for parallax layers, we pass a world-x of
+`(offset) + (cam-x * rate)`. The runtime subtracts cam-x, giving
+`(offset - cam-x * (1 - rate))`. When rate is 1.0 (foreground), the
+layer moves in perfect step with camera-shift. When rate is 0.5
+(mid), half. When rate is 0.2 (distant), one-fifth. When rate is 0
+(sky), no motion at all.
+
+Play it. The kid runs right. Ground streams past. Grass tips wave in
+front (add wobble via `tick/sine` per tile). Hills roll gently. Distant
+mountains barely stir. The sky sits still.
+
+That is depth from motion. It costs perhaps twenty lines of paint code.
+
+---
+
+## 9.4 Parallax within a layer
+
+You can vary parallax rate WITHIN a layer for even more depth cues.
+Close mountains at 0.4, far mountains at 0.15. Or clouds at 0.7 (with
+independent time-wind) so they drift even when the camera is still.
+
+```scheme
+;; Clouds that drift independently of camera motion.
+(define cloud-time 0)
+
+(define (moving-clouds)
+  (world/reset!)
+  (scene/grid 'ground 60 1 32 20 0 200)
+  (world/each 'ground
+              (lambda (t) (entity/shape! t 'rect 32 20) (entity/solid! t #t)))
+  (let ((p (world/spawn 'player 100 168)))
+    (entity/shape! p 'rect 16 32)
+    (entity/solid! p #t)
+    (world/gravity! 0 0.5)
+    (world/camera-follow! p 0.1 60 40)
+    (world/camera-bounds! 0 0 1920 240)
+    (on-frame
+     (lambda ()
+       (set! cloud-time (+ cloud-time 0.5))
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (world/step)
+       (paint-clear)
+       (let ((cam-x (car (world/camera))))
+         ;; Three clouds drifting.
+         (let loop ((i 0))
+           (when (< i 4)
+             (let ((cloud-x (modulo (+ (* i 200)
+                                        (* cam-x 0.3)
+                                        (* cloud-time 0.4))
+                                    1920)))
+               (paint-cell 'cloud (+ cloud-x cam-x) 60 40 15))
+             (loop (+ i 1))))
+         (world/each 'ground
+                     (lambda (t)
+                       (paint-cell 'ground (entity/x t) (entity/y t) 32 20)))
+         (paint-cell 'player (entity/x p) (entity/y p) 16 32))))))
+
+(big-bang moving-clouds)
+```
+
+The clouds drift right at 0.4 pixels per frame regardless of camera
+motion, AND parallax at rate 0.3 with camera. `modulo` wraps them
+around the world width so they always have something to show.
+
+---
+
+## 9.5 The four patterns in a scrolling world
+
+**Composition.** Each layer is composed of position + parallax-rate +
+paint. Chapter 8's world composition is base-layer only; this chapter
+composes multiple parallax layers.
+
+**Orchestration.** Paint order matters. Sky first (backmost). Then
+mountains. Then hills. Then ground and entities. Then any UI overlay
+last. If you paint in the wrong order, distant things cover close
+things and the world looks broken.
+
+**In-routing.** No new input routing.
+
+**Routing.** The critical routing: WHICH cam-x offset each layer sees.
+That is a routing table — layer -> parallax rate. Change the table,
+change the depth.
+
+---
+
+## 9.6 Common desktop tasks
+
+**Shop-page depth.** A shop's landing page can be a parallax scene:
+background 'shop atmosphere' image at 0.2 rate, mid-layer product
+categories at 0.6, foreground featured items at 1.0. As the customer
+scrolls, the page gets depth. This is not a game — but it IS the same
+paint routing.
+
+**Receipt scrolling.** An order confirmation can scroll past like a
+side-scroller — the receipt items pass in the foreground, brand imagery
+in the mid, sky in back. Physics of a page turn done as parallax.
+
+---
+
+## 9.7 Pitfalls
+
+**Layer flickers on scroll.** Your parallax rate isn't a clean
+fraction of pixel positions and rounding causes jitter. Round to
+integers per frame: `(round (* cam-x rate))`.
+
+**Distant layer runs out.** Your sprites for the layer don't loop.
+Wrap with `modulo` on the world width.
+
+**Player disappears behind mountain.** Paint order — mountain painted
+AFTER player. Reverse the order.
+
+**Layer scrolls the wrong way.** You added instead of subtracted.
+Parallax means slower motion IN THE SAME direction, not motion in the
+opposite direction.
+
+**Performance drops with too many layers.** Cap at 3-4 layers. Paint
+only visible sprites (frustum-cull with `when` predicate).
+
+---
+
+## 9.8 Try this yourself
+
+1. Add a fourth layer: fog just in front of the mountains, rate
+   0.35, semi-transparent.
+2. Add wind: shift the cloud drift with `tick/sine (* frame 0.01)`
+   so clouds meander instead of moving in a straight line.
+3. Vertical parallax: as the player jumps high, the mountains rise
+   slightly. The horizon moves.
+4. Time-of-day: swap sky color from blue to orange to purple over
+   1000 frames. The parallax pieces don't move, but their palette
+   does.
+5. Depth-of-field: paint distant layer with smaller sprites and
+   dimmer color (via `paint-glow` opposite).
+6. A cave scene: everything inverse. Distant walls scroll faster
+   than close walls, and near you feels big.
+
+---
+
+## 9.9 What we built
+
+Multi-layer parallax with three rates. Cloud drift independent of
+camera. Paint-order awareness. World-width wrapping for infinite
+layers.
+
+Next chapter: put enemies in this world that don't just drift — they
+REACT. Chase you when close. Run away when hurt. Wander when idle.
+Simple AI, arcade-style.")
+
+(code-block :chapter 9 :lang "scheme" :source
+"(define (parallax-anchor)
+  (world/reset!)
+  (scene/grid 'ground 60 1 32 20 0 200)
+  (world/each 'ground
+              (lambda (t) (entity/shape! t 'rect 32 20) (entity/solid! t #t)))
+  (let ((p (world/spawn 'player 100 168)))
+    (entity/shape! p 'rect 16 32)
+    (entity/solid! p #t)
+    (world/gravity! 0 0.5)
+    (world/camera-follow! p 0.1 60 40)
+    (world/camera-bounds! 0 0 1920 240)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/pressed? 'a)
+         (entity/set-vel! p (car (entity/vel p)) -10))
+       (world/step)
+       (paint-clear)
+       (let ((cam-x (car (world/camera))))
+         (paint-cell 'sky (+ 160 cam-x) 40 320 80)
+         (let loop ((i 0))
+           (when (< i 6)
+             (paint-cell 'mountain
+                         (+ (* i 200) (* cam-x 0.2)) 100 100 60)
+             (loop (+ i 1))))
+         (let loop ((i 0))
+           (when (< i 8)
+             (paint-cell 'hill
+                         (+ (* i 200) (* cam-x 0.5)) 150 80 40)
+             (loop (+ i 1))))
+         (world/each 'ground
+                     (lambda (t)
+                       (paint-cell 'ground (entity/x t) (entity/y t) 32 20)))
+         (paint-cell 'player (entity/x p) (entity/y p) 16 32))))))
+(big-bang parallax-anchor)")

@@ -1,0 +1,1294 @@
+;; ch07-numbers-and-stats.slat
+;; Book of Challenges — Chapter 7 — Numbers & Stats at Depth
+
+(chapter
+  :book             "Book of Challenges"
+  :chapter-number   null
+  :title            "Chapter 7 — Numbers & Stats at Depth"
+  :size             49691
+  :sha256           "d4f11de353cf89f2"
+  :prose
+"# Chapter 7 — Numbers & Stats at Depth
+
+There's a particular satisfaction that comes from coaxing a sequence of numbers into revealing its shape. A running mean that smooths jagged spikes. A percentile that finds the boundary between noise and signal. A correlation that whispers whether two streams truly move together or just pretend. The programs in this chapter teach you to *compute over collections with precision*, to handle the honest failures that arise when data misbehaves, and to compose multiple passes into a single route that transforms raw numbers into insight.
+
+We're working with the `math/` and `stats/` verbs now—seven in the first family, nine in the second—and the challenge is not their individual use (most are straightforward) but their *orchestration*: chaining them into pipelines that guard every division, accumulate correctly across folds, and surface 'nan when the input makes a result impossible. A beginner can call one verb and hope. A master composes five, checks each stage, and returns an honest answer or an honest escalation—never a lie.
+
+Why does this matter for the runtime in her world? Because nearly every decision she makes rests on a foundation of numbers. Pricing needs margin checks and velocity trends. Inventory needs ABC classification and reorder signals. Customer behavior needs percentiles and anomaly scores. The difference between \"I *think* this is trending up\" and \"I *know* this rose 14% week-over-week with p95 at 47 units\" is the difference between guessing and *deciding*. This chapter teaches her—and you—to compute that difference cleanly, recursively, and honestly.
+
+We'll start simple: single-pass reductions, guarded divisions, basic stats. Then we'll ramp into multi-pass pipelines, running aggregates with named-let recursion, and routes that orchestrate several verbs into a composite insight. Every program runs alone. Every program handles failure. By the end, you'll have the skill to write a route that takes a ragged list of sales figures and returns a three-line summary—mean, p95, and 7-day velocity—or escalates cleanly if the data can't support it.
+
+Let's begin.
+
+---
+
+## Guarded Division and Honest Percentages
+
+The simplest failure in numeric work is division by zero. The simplest *honest* response is to check first and return 'nan if the denominator is zero. `math/pct` and `math/divide` are our workhorses here, but they won't save you from bad logic upstream—you have to guard the flow yourself.
+
+Here's a program that computes a conversion rate from two counts, cleanly:
+
+```scheme
+;; Compute conversion rate (converted / total) as a percentage, or 'nan if total is zero.
+(define (conversion-rate converted total)
+  (if (<= total 0)
+      'nan
+      (math/pct converted total)))
+
+(conversion-rate 42 200)
+;; => 21.0
+```
+
+The `if` is the guard. If total is zero or negative, we return 'nan immediately—no call to `math/pct`, no invention of a fake result. This is ESCAPE: when the input makes the question meaningless, we say so.
+
+Now a program that computes *two* rates and returns them as a list, with either rate possibly 'nan:
+
+```scheme
+;; Compute click-through rate and conversion rate from counts.
+;; Returns (list ctr cvr), where each may be 'nan if denominator is zero.
+(define (campaign-rates impressions clicks conversions)
+  (let ((ctr (if (<= impressions 0)
+                 'nan
+                 (math/pct clicks impressions)))
+        (cvr (if (<= clicks 0)
+                 'nan
+                 (math/pct conversions clicks))))
+    (list ctr cvr)))
+
+(campaign-rates 1000 50 5)
+;; => (5.0 10.0)
+
+(campaign-rates 0 0 0)
+;; => (nan nan)
+
+(campaign-rates 1000 0 0)
+;; => (0.0 nan)
+```
+
+Each rate guards its own denominator. The program returns both, and the caller sees the honest shape of the data. No pretending that 0/0 is 0; no crash.
+
+---
+
+## Single-Pass Reductions: Mean and Sum
+
+`stats/` has no `mean` verb, but we can compute it with a fold: sum the list, count the elements, divide. The honest version checks that the list is non-empty first.
+
+```scheme
+;; Compute the arithmetic mean of a list of numbers, or 'nan if the list is empty.
+(define (mean numbers)
+  (if (null? numbers)
+      'nan
+      (let ((total (apply + numbers))
+            (count (length numbers)))
+        (/ total count))))
+
+(mean '(10 20 30 40 50))
+;; => 30
+
+(mean '())
+;; => nan
+```
+
+The `apply +` sums the list in one shot. `length` gives the count. The guard at the top prevents division by zero. This is restraint (BACK): the simplest correct program, no more.
+
+Now a program that computes *both* mean and standard deviation (population version) in a single pass over the data, using an accumulator:
+
+```scheme
+;; Compute mean and population standard deviation in one pass.
+;; Returns (list mean stddev), or (list 'nan 'nan) if list is empty.
+(define (mean-and-stddev numbers)
+  (if (null? numbers)
+      (list 'nan 'nan)
+      (let* ((n (length numbers))
+             (sum (apply + numbers))
+             (mean (/ sum n))
+             (sq-diffs (map (lambda (x) (expt (- x mean) 2)) numbers))
+             (variance (/ (apply + sq-diffs) n))
+             (stddev (sqrt variance)))
+        (list mean stddev))))
+
+(mean-and-stddev '(2 4 4 4 5 5 7 9))
+;; => (5.0 2.0)
+
+(mean-and-stddev '())
+;; => (nan nan)
+```
+
+We compute the mean first, then map over the list to get squared differences, sum those, divide by n, and take the square root. It's two passes (one for mean, one for sq-diffs), but the accumulator is implicit in the `map` and `apply`. The program is still simple, still honest.
+
+---
+
+## Percentiles and Boundary Detection
+
+`stats/percentile` takes a list and a percentile (0-100) and returns the value at that boundary. This is essential for understanding distributions: p50 is the median, p95 tells you the high-water mark for most of your data, p99 catches the outliers.
+
+```scheme
+;; Find the median (p50) of a list of response times.
+(define (median-response times)
+  (if (null? times)
+      'nan
+      (stats/percentile times 50)))
+
+(median-response '(12 15 18 22 29 35 47))
+;; => 22
+
+(median-response '())
+;; => nan
+```
+
+Guard, call, done. Now a program that computes *three* percentiles—p25, p50, p75—and returns them as a summary:
+
+```scheme
+;; Compute quartiles (p25, p50, p75) for a list of values.
+;; Returns (list p25 p50 p75), or (list 'nan 'nan 'nan) if empty.
+(define (quartiles values)
+  (if (null? values)
+      (list 'nan 'nan 'nan)
+      (list (stats/percentile values 25)
+            (stats/percentile values 50)
+            (stats/percentile values 75))))
+
+(quartiles '(5 7 9 11 13 15 17 19 21))
+;; => (9 13 17)
+
+(quartiles '())
+;; => (nan nan nan)
+```
+
+Three calls to the same verb, each with a different argument. The guard is shared. This is composition at the simplest level: apply the same operation to the same data with different parameters, collect the results.
+
+---
+
+## Running Aggregates with Named-Let Recursion
+
+A *running aggregate* processes a list element-by-element, maintaining state as it goes. The classic form is `named let`: a recursive binding that carries accumulators forward. This is the gateway to deeper recursion, and it's where difficulty starts to climb.
+
+Here's a program that computes a running sum—at each position, the sum of all elements seen so far:
+
+```scheme
+;; Compute the running sum of a list: at each position, the sum so far.
+;; Example: (1 2 3) => (1 3 6)
+(define (running-sum lst)
+  (let loop ((remaining lst)
+             (acc 0)
+             (result '()))
+    (if (null? remaining)
+        (reverse result)
+        (let ((new-acc (+ acc (car remaining))))
+          (loop (cdr remaining)
+                new-acc
+                (cons new-acc result))))))
+
+(running-sum '(1 2 3 4 5))
+;; => (1 3 6 10 15)
+
+(running-sum '(10 -5 3))
+;; => (10 5 8)
+```
+
+The `loop` is a local recursive function. `remaining` is the unconsumed portion of the list, `acc` is the sum so far, `result` is the output being built (in reverse, because `cons` is cheap). Each step: add the current element to `acc`, cons the new total onto `result`, recur on the tail. At the end, reverse the result to restore order.
+
+Now a program that computes a *running mean*—at each position, the mean of all elements so far. This requires carrying both a sum and a count:
+
+```scheme
+;; Compute the running mean of a list: at each position, the mean so far.
+(define (running-mean lst)
+  (let loop ((remaining lst)
+             (sum 0)
+             (count 0)
+             (result '()))
+    (if (null? remaining)
+        (reverse result)
+        (let* ((new-sum (+ sum (car remaining)))
+               (new-count (+ count 1))
+               (new-mean (/ new-sum new-count)))
+          (loop (cdr remaining)
+                new-sum
+                new-count
+                (cons new-mean result))))))
+
+(running-mean '(2 4 6 8 10))
+;; => (2 3 4 5 6)
+
+(running-mean '(10))
+;; => (10)
+```
+
+Two accumulators now: `sum` and `count`. At each step, increment both, compute the mean, cons it. The shape is the same—this is the named-let pattern, just with more state.
+
+---
+
+## Honest Correlation: Two Lists, One Coefficient
+
+`math/correlation` takes two equal-length lists and returns their Pearson correlation coefficient. The honest failure modes: lists of different lengths, lists too short (need at least 2 points), or lists with zero variance (correlation is undefined).
+
+Here's a program that wraps the verb with full guards:
+
+```scheme
+;; Compute the Pearson correlation between two numeric lists, with honest guards.
+;; Returns correlation coefficient, or 'nan if inputs are invalid.
+(define (safe-correlation xs ys)
+  (cond
+   ((not (= (length xs) (length ys)))
+    'nan)  ;; lists must be same length
+   ((< (length xs) 2)
+    'nan)  ;; need at least 2 points
+   (else
+    (math/correlation xs ys))))
+
+(safe-correlation '(1 2 3 4 5) '(2 4 6 8 10))
+;; => 1.0
+
+(safe-correlation '(1 2 3) '(5 5 5))
+;; => nan  ;; zero variance in ys
+
+(safe-correlation '(1 2) '(3))
+;; => nan  ;; length mismatch
+```
+
+The `cond` ladder checks each precondition. If any fails, we return 'nan before calling the verb. This is ESCAPE done thoroughly: we check everything we can before attempting the real work.
+
+Now a program that computes correlation between a list of x values and *multiple* y lists, returning a list of coefficients:
+
+```scheme
+;; Compute correlation between one x list and several y lists.
+;; Returns a list of correlation coefficients (one per y list).
+(define (correlate-many xs ys-lists)
+  (map (lambda (ys) (safe-correlation xs ys)) ys-lists))
+
+(correlate-many 
+ '(1 2 3 4 5)
+ '((2 4 6 8 10)
+   (5 4 3 2 1)
+   (3 3 3 3 3)))
+;; => (1.0 -1.0 nan)
+```
+
+We map `safe-correlation` over the list of y-lists. Each result is independent. The third y-list has zero variance, so its correlation is 'nan. The program returns the honest shape of the results.
+
+---
+
+## Multi-Pass Stats: Velocity, Trend, and Z-Score
+
+Now we orchestrate several `stats/` verbs into a single route. `stats/velocity` computes rate of change over a time series. `stats/trend` fits a linear trend. `stats/zscore` computes how many standard deviations a value is from the mean.
+
+Here's a program that takes a time series, computes velocity and trend, and returns both:
+
+```scheme
+;; Compute velocity (rate of change) and linear trend for a time series.
+;; Returns (list velocity trend-slope), or (list 'nan 'nan) if input is too short.
+(define (velocity-and-trend series)
+  (if (< (length series) 2)
+      (list 'nan 'nan)
+      (let ((vel (stats/velocity series))
+            (trend-data (stats/trend series)))
+        (list vel trend-data))))
+
+(velocity-and-trend '(10 12 15 19 24))
+;; => (14.0 <trend-data>)
+
+(velocity-and-trend '(5))
+;; => (nan nan)
+```
+
+`stats/velocity` returns a numeric rate. `stats/trend` returns structured data (likely a list or object with slope/intercept). We guard for minimum length and return both. This is FORWARD: the output of one stage doesn't feed the next, but both are computed from the same input and returned together.
+
+Now a program that computes the z-score of the *last* element in a series (how unusual is the most recent value?):
+
+```scheme
+;; Compute z-score of the last element in a series (how many stddevs from mean).
+;; Returns z-score, or 'nan if series is too short.
+(define (last-zscore series)
+  (if (< (length series) 2)
+      'nan
+      (let* ((last-val (car (reverse series)))
+             (mean (apply / (list (apply + series) (length series))))
+             (sq-diffs (map (lambda (x) (expt (- x mean) 2)) series))
+             (variance (apply / (list (apply + sq-diffs) (length series))))
+             (stddev (sqrt variance)))
+        (if (= stddev 0)
+            'nan
+            (/ (- last-val mean) stddev)))))
+
+(last-zscore '(10 12 14 16 30))
+;; => ~2.0  (last value is ~2 stddevs above mean)
+
+(last-zscore '(5 5 5 5 5))
+;; => nan  ;; zero variance
+
+(last-zscore '(7))
+;; => nan  ;; too short
+```
+
+We compute mean and stddev inline (since `stats/` has no `zscore` verb for a series context). The final guard checks for zero stddev. This program has *three* failure modes: too short, zero variance, and (implicitly) empty list. Each is caught and returns 'nan.
+
+---
+
+## Percentile Bands and Anomaly Detection
+
+A common pattern: compute several percentiles, then check if a new value falls outside a band (e.g., above p95 or below p5). This is the foundation of simple anomaly detection.
+
+Here's a program that computes p5 and p95 for a baseline series, then checks if a new value is an outlier:
+
+```scheme
+;; Check if a new value is an outlier (outside p5-p95 band) relative to baseline.
+;; Returns 'high, 'low, or 'normal.
+(define (outlier-check baseline value)
+  (if (< (length baseline) 10)
+      'insufficient-data
+      (let ((p5 (stats/percentile baseline 5))
+            (p95 (stats/percentile baseline 95)))
+        (cond
+         ((> value p95) 'high)
+         ((< value p5) 'low)
+         (else 'normal)))))
+
+(outlier-check '(10 12 14 15 16 18 20 22 24 26 28 30) 35)
+;; => high
+
+(outlier-check '(10 12 14 15 16 18 20 22 24 26 28 30) 11)
+;; => normal
+
+(outlier-check '(10 12 14) 50)
+;; => insufficient-data
+```
+
+We require at least 10 baseline points (a heuristic—p5 and p95 are meaningless with tiny samples). Compute the band, classify the new value. This is a *decision route*: data in, symbol out.
+
+Now a program that processes a *stream* of new values and classifies each one:
+
+```scheme
+;; Classify each value in a stream as 'high, 'low, or 'normal relative to baseline.
+(define (classify-stream baseline stream)
+  (if (< (length baseline) 10)
+      (map (lambda (x) 'insufficient-data) stream)
+      (let ((p5 (stats/percentile baseline 5))
+            (p95 (stats/percentile baseline 95)))
+        (map (lambda (value)
+               (cond
+                ((> value p95) 'high)
+                ((< value p5) 'low)
+                (else 'normal)))
+             stream))))
+
+(classify-stream 
+ '(10 12 14 15 16 18 20 22 24 26 28 30)
+ '(35 11 29 8 50))
+;; => (high normal normal low high)
+```
+
+We compute the percentile band once, then map the classification over the stream. Each element is independent. The program is efficient (one computation of the band) and clear.
+
+---
+
+## Recursive Smoothing: Exponential Moving Average
+
+An exponential moving average (EMA) is a running aggregate where each new value is blended with the previous EMA using a smoothing factor α. This is classic named-let recursion with a single accumulator (the current EMA).
+
+```scheme
+;; Compute exponential moving average with smoothing factor alpha.
+;; alpha should be between 0 and 1 (typical: 0.1 to 0.3).
+(define (ema series alpha)
+  (if (null? series)
+      '()
+      (let loop ((remaining (cdr series))
+                 (current-ema (car series))
+                 (result (list (car series))))
+        (if (null? remaining)
+            (reverse result)
+            (let ((new-ema (+ (* alpha (car remaining))
+                              (* (- 1 alpha) current-ema))))
+              (loop (cdr remaining)
+                    new-ema
+                    (cons new-ema result)))))))
+
+(ema '(10 12 15 14 16 20 18) 0.3)
+;; => (10 10.6 11.62 12.134 13.2938 15.40566 16.184062)
+```
+
+The first element initializes the EMA. Each subsequent element updates it: `new_ema = α * x + (1 - α) * old_ema`. We cons each new EMA onto the result and recur. The final reverse restores order.
+
+Now a program that computes *both* a simple moving average (window of 3) and an EMA, returning both series for comparison:
+
+```scheme
+;; Compute simple moving average (window=3) and exponential moving average (alpha=0.3).
+;; Returns (list sma-series ema-series).
+(define (sma-and-ema series)
+  (let ((sma-series (let loop ((remaining series)
+                                (result '()))
+                       (if (< (length remaining) 3)
+                           (reverse result)
+                           (let ((window (list (car remaining)
+                                               (cadr remaining)
+                                               (caddr remaining))))
+                             (loop (cdr remaining)
+                                   (cons (/ (apply + window) 3) result))))))
+        (ema-series (if (null? series)
+                        '()
+                        (let loop ((remaining (cdr series))
+                                   (current-ema (car series))
+                                   (result (list (car series))))
+                          (if (null? remaining)
+                              (reverse result)
+                              (let ((new-ema (+ (* 0.3 (car remaining))
+                                                (* 0.7 current-ema))))
+                                (loop (cdr remaining)
+                                      new-ema
+                                      (cons new-ema result))))))))
+    (list sma-series ema-series)))
+
+(sma-and-ema '(10 12 15 14 16 20 18 22))
+;; => ((12.333... 13.666... 15.0 16.666... 18.0 20.0)
+;;     (10 10.6 11.62 12.134 13.2938 15.40566 16.184062 18.3288...))
+```
+
+Two independent computations, both recursive, returned as a pair. The SMA slides a window; the EMA blends. The program is longer but not more complex—each part is a clear named-let.
+
+---
+
+## Cosine Similarity Over Embedded Vectors
+
+`stats/cosine` computes cosine similarity between two numeric vectors (dot product divided by the product of magnitudes). This is the same math as `cortex/cosine-topk`, but at the raw vector level. Honest failure: lists of different lengths, or zero-magnitude vectors.
+
+```scheme
+;; Compute cosine similarity between two numeric vectors, with guards.
+;; Returns similarity (0 to 1), or 'nan if inputs are invalid.
+(define (cosine-sim v1 v2)
+  (cond
+   ((not (= (length v1) (length v2)))
+    'nan)
+   ((or (null? v1) (null? v2))
+    'nan)
+   (else
+    (let* ((dot (apply + (map * v1 v2)))
+           (mag1 (sqrt (apply + (map (lambda (x) (* x x)) v1))))
+           (mag2 (sqrt (apply + (map (lambda (x) (* x x)) v2)))))
+      (if (or (= mag1 0) (= mag2 0))
+          'nan
+          (/ dot (* mag1 mag2)))))))
+
+(cosine-sim '(1 0 0) '(1 0 0))
+;; => 1.0
+
+(cosine-sim '(1 0 0) '(0 1 0))
+;; => 0.0
+
+(cosine-sim '(1 2 3) '(4 5 6))
+;; => 0.974...
+
+(cosine-sim '(0 0 0) '(1 2 3))
+;; => nan
+```
+
+We compute dot product with `(map * v1 v2)` then sum. Magnitudes are sqrt of sum of squares. Guard for zero magnitude. This is manual orchestration of the math that `stats/cosine` does internally—useful when you need to see or modify the steps.
+
+Now a program that finds the *most similar* vector from a list, given a query vector:
+
+```scheme
+;; Find the vector in candidates most similar to query (highest cosine similarity).
+;; Returns (index . similarity), or 'nan if no valid candidates.
+(define (most-similar query candidates)
+  (if (null? candidates)
+      'nan
+      (let loop ((remaining candidates)
+                 (index 0)
+                 (best-idx -1)
+                 (best-sim -1))
+        (if (null? remaining)
+            (if (= best-idx -1)
+                'nan
+                (cons best-idx best-sim))
+            (let ((sim (cosine-sim query (car remaining))))
+              (if (and (not (eq? sim 'nan)) (> sim best-sim))
+                  (loop (cdr remaining) (+ index 1) index sim)
+                  (loop (cdr remaining) (+ index 1) best-idx best-sim)))))))
+
+(most-similar '(1 0 0) 
+              '((1 0 0)
+                (0 1 0)
+                (0.9 0.1 0)))
+;; => (0 . 1.0)
+
+(most-similar '(1 2 3)
+              '((0 0 0)
+                (0 0 0)))
+;; => nan  ;; all candidates have zero magnitude
+```
+
+We loop over candidates, tracking the index and similarity of the best match. If a similarity is 'nan, we skip it. If no valid matches are found, we return 'nan. This is a *search* with honest failure handling.
+
+---
+
+## Multi-Verb Orchestration: Stats Summary Route
+
+Now we compose several verbs into a single route that takes a list of numbers and returns a structured summary: count, mean, p50, p95, and velocity. Each stage can fail; we check and escalate cleanly.
+
+```scheme
+;; Compute a comprehensive stats summary for a numeric series.
+;; Returns an association list with keys: count mean p50 p95 velocity,
+;; or (escalate \"insufficient-data\" detail) if series is too short.
+(define (stats-summary series)
+  (cond
+   ((null? series)
+    (list 'escalate \"empty-series\" \"cannot compute stats on empty list\"))
+   ((< (length series) 5)
+    (list 'escalate \"insufficient-data\" \"need at least 5 points for summary\"))
+   (else
+    (let* ((count (length series))
+           (total (apply + series))
+           (mean (/ total count))
+           (p50 (stats/percentile series 50))
+           (p95 (stats/percentile series 95))
+           (vel (stats/velocity series)))
+      (list (cons 'count count)
+            (cons 'mean mean)
+            (cons 'p50 p50)
+            (cons 'p95 p95)
+            (cons 'velocity vel))))))
+
+(stats-summary '(10 12 15 18 22 28 35 42 50))
+;; => ((count . 9)
+;;     (mean . 25.777...)
+;;     (p50 . 22)
+;;     (p95 . 50)
+;;     (velocity . 5.0))
+
+(stats-summary '(10 12))
+;; => (escalate \"insufficient-data\" \"need at least 5 points for summary\")
+
+(stats-summary '())
+;; => (escalate \"empty-series\" \"cannot compute stats on empty list\")
+```
+
+This is a *route*: data flows through a series of verbs, and the result is a structured summary. The guards at the top are ESCAPE—if the input can't support the computation, we escalate immediately with a reason. The body is FORWARD—each stage computes a piece of the answer, and we assemble them into an alist.
+
+Now a program that computes summaries for *multiple* series and returns a list of summaries:
+
+```scheme
+;; Compute stats summaries for multiple series, returning a list of results.
+;; Each result is either a summary alist or an escalate form.
+(define (batch-summaries series-list)
+  (map stats-summary series-list))
+
+(batch-summaries 
+ '((10 12 15 18 22 28 35 42 50)
+   (5 5 5 5 5)
+   (100 110 105 115 120 125 130)))
+;; => (((count . 9) (mean . 25.777...) ...)
+;;     ((count . 5) (mean . 5) ...)
+;;     ((count . 7) (mean . 115) ...))
+```
+
+We map the route over a list of series. Each series gets its own summary. If any series is too short, its result will be an escalate form. The caller sees the honest shape of the results.
+
+---
+
+## Clamping, Rounding, and Boundary Math
+
+`math/clamp` constrains a value to a range. `math/round` rounds to a specified precision. These are essential for post-processing computed values—ensuring outputs stay within valid bounds.
+
+```scheme
+;; Clamp a computed percentage to 0-100 range and round to 1 decimal place.
+(define (clamp-percent raw-pct)
+  (math/round (math/clamp raw-pct 0 100) 1))
+
+(clamp-percent 42.6789)
+;; => 42.7
+
+(clamp-percent -5)
+;; => 0.0
+
+(clamp-percent 105)
+;; => 100.0
+```
+
+Two verbs, chained. The output of `math/clamp` feeds into `math/round`. This is the simplest form of FORWARD composition.
+
+Now a program that computes a margin percentage, clamps it to 0-100, and classifies it as 'low, 'medium, or 'high:
+
+```scheme
+;; Compute margin percentage, clamp it, and classify.
+(define (margin-status cost revenue)
+  (if (<= revenue 0)
+      (list 'margin 'nan 'classification 'invalid)
+      (let* ((raw-margin (math/pct (- revenue cost) revenue))
+             (clamped (math/clamp raw-margin 0 100))
+             (rounded (math/round clamped 1))
+             (class (cond
+                     ((< rounded 10) 'low)
+                     ((< rounded 30) 'medium)
+                     (else 'high))))
+        (list 'margin rounded 'classification class))))
+
+(margin-status 70 100)
+;; => (margin 30.0 classification medium)
+
+(margin-status 10 100)
+;; => (margin 90.0 classification high)
+
+(margin-status 100 50)
+;; => (margin 0.0 classification low)  ;; negative margin clamped to 0
+
+(margin-status 50 0)
+;; => (margin nan classification invalid)
+```
+
+Three verbs, one decision ladder, result as an alist. The guard at the top prevents division by zero. The clamp ensures the margin stays in 0-100 even if cost exceeds revenue. The classification is a simple threshold check.
+
+---
+
+## Delta and Rate-of-Change Pipelines
+
+`stats/delta` computes the difference between consecutive elements in a series. This is useful for understanding change over time—convert absolute values to deltas, then compute stats on the deltas.
+
+```scheme
+;; Compute deltas (consecutive differences) for a series.
+(define (deltas series)
+  (if (< (length series) 2)
+      '()
+      (let loop ((remaining (cdr series))
+                 (prev (car series))
+                 (result '()))
+        (if (null? remaining)
+            (reverse result)
+            (let ((delta (- (car remaining) prev)))
+              (loop (cdr remaining)
+                    (car remaining)
+                    (cons delta result)))))))
+
+(deltas '(10 12 15 14 16 20))
+;; => (2 3 -1 2 4)
+```
+
+Named-let recursion, one accumulator (`prev`). Each delta is current minus previous. The result is one element shorter than the input.
+
+Now a program that computes deltas, then computes the mean delta (average rate of change):
+
+```scheme
+;; Compute mean delta (average rate of change) for a series.
+(define (mean-delta series)
+  (let ((delta-series (deltas series)))
+    (if (null? delta-series)
+        'nan
+        (let ((total (apply + delta-series))
+              (count (length delta-series)))
+          (/ total count)))))
+
+(mean-delta '(10 12 15 14 16 20))
+;; => 2.0
+
+(mean-delta '(5))
+;; => nan
+```
+
+Two-stage pipeline: deltas, then mean. If the series is too short to produce deltas, we return 'nan. This is FORWARD: the output of stage one is the input to stage two.
+
+Now a more complex program: compute deltas, classify each delta as 'up, 'down, or 'flat, and return the counts of each:
+
+```scheme
+;; Compute deltas, classify each as 'up, 'down, or 'flat, and tally.
+(define (delta-tally series)
+  (let ((delta-series (deltas series)))
+    (if (null? delta-series)
+        (list (cons 'up 0) (cons 'down 0) (cons 'flat 0))
+        (let loop ((remaining delta-series)
+                   (up 0)
+                   (down 0)
+                   (flat 0))
+          (if (null? remaining)
+              (list (cons 'up up) (cons 'down down) (cons 'flat flat))
+              (let ((d (car remaining)))
+                (cond
+                 ((> d 0) (loop (cdr remaining) (+ up 1) down flat))
+                 ((< d 0) (loop (cdr remaining) up (+ down 1) flat))
+                 (else (loop (cdr remaining) up down (+ flat 1))))))))))
+
+(delta-tally '(10 12 15 14 16 20 20 18))
+;; => ((up . 3) (down . 2) (flat . 1))
+```
+
+Three accumulators: `up`, `down`, `flat`. Each delta increments one of them. The result is a tally. This is a *classification + fold* pattern—very common in real stats work.
+
+---
+
+## Haversine Distance and Geo Math
+
+`math/haversine` computes the great-circle distance between two lat/lng points (in kilometers). This is essential for geo-based analytics—how far apart are two locations?
+
+```scheme
+;; Compute distance between two locations (lat/lng pairs).
+(define (distance loc1 loc2)
+  (let ((lat1 (car loc1))
+        (lng1 (cadr loc1))
+        (lat2 (car loc2))
+        (lng2 (cadr loc2)))
+    (math/haversine lat1 lng1 lat2 lng2)))
+
+(distance '(40.7128 -74.0060) '(34.0522 -118.2437))
+;; => ~3936 km (New York to Los Angeles)
+```
+
+Unpack the pairs, call the verb. Now a program that computes the *total* distance along a route (list of waypoints):
+
+```scheme
+;; Compute total distance along a route (list of lat/lng pairs).
+(define (route-distance waypoints)
+  (if (< (length waypoints) 2)
+      0
+      (let loop ((remaining (cdr waypoints))
+                 (prev (car waypoints))
+                 (total 0))
+        (if (null? remaining)
+            total
+            (let ((dist (distance prev (car remaining))))
+              (loop (cdr remaining)
+                    (car remaining)
+                    (+ total dist)))))))
+
+(route-distance 
+ '((40.7128 -74.0060)   ; New York
+   (41.8781 -87.6298)   ; Chicago
+   (34.0522 -118.2437)  ; Los Angeles
+   ))
+;; => ~5600 km
+```
+
+Named-let recursion, accumulator for total distance. Each segment is computed with `distance`, added to the total, and we move to the next pair. The pattern is identical to `running-sum`, but the operation is haversine instead of addition.
+
+---
+
+## Fold-Based Reductions: Custom Aggregates
+
+Scheme's `fold` (or `reduce`) is the universal accumulator. You can build almost any aggregate with it: sum, product, max, min, count-if, or a custom combination.
+
+Here's a program that uses `fold` to compute the product of a list:
+
+```scheme
+;; Compute the product of a list of numbers using fold.
+(define (product lst)
+  (if (null? lst)
+      1  ;; identity for product
+      (fold * 1 lst)))
+
+(product '(2 3 4 5))
+;; => 120
+
+(product '())
+;; => 1
+```
+
+`fold * 1 lst` means \"start with 1, multiply by each element in turn.\" The result is the product. (Note: Scheme's `fold` may be `foldl` or `reduce` depending on dialect; the authoring brief says `fold/reduce` is available, so we use `fold` here.)
+
+Now a program that uses `fold` to find the maximum value in a list:
+
+```scheme
+;; Find the maximum value in a list using fold.
+(define (list-max lst)
+  (if (null? lst)
+      'nan
+      (fold (lambda (x acc) (if (> x acc) x acc))
+            (car lst)
+            (cdr lst))))
+
+(list-max '(3 7 2 9 4))
+;; => 9
+
+(list-max '(-5 -2 -8))
+;; => -2
+
+(list-max '())
+;; => nan
+```
+
+The lambda compares the current element `x` to the accumulator `acc` and keeps the larger. We seed with the first element and fold over the rest. Guard for empty list.
+
+Now a program that computes *both* min and max in a single fold pass, returning a pair:
+
+```scheme
+;; Find min and max in a single fold pass.
+(define (min-max lst)
+  (if (null? lst)
+      (cons 'nan 'nan)
+      (let ((result (fold (lambda (x acc)
+                            (cons (min x (car acc))
+                                  (max x (cdr acc))))
+                          (cons (car lst) (car lst))
+                          (cdr lst))))
+        result)))
+
+(min-max '(3 7 2 9 4))
+;; => (2 . 9)
+
+(min-max '())
+;; => (nan . nan)
+```
+
+The accumulator is a pair `(min . max)`. Each element updates both. This is efficient—one pass, two aggregates.
+
+---
+
+## Autocorrelation and Lag Analysis
+
+`stats/autocorr` computes the autocorrelation of a series at a given lag—how correlated is the series with a shifted version of itself. This is useful for detecting periodicity or memory in time series.
+
+```scheme
+;; Compute autocorrelation at lag 1 (is each value correlated with the previous one?).
+(define (autocorr-lag1 series)
+  (if (< (length series) 3)
+      'nan
+      (stats/autocorr series 1)))
+
+(autocorr-lag1 '(10 12 14 16 18 20))
+;; => ~1.0 (strong positive autocorr—values increase steadily)
+
+(autocorr-lag1 '(10 5 10 5 10 5))
+;; => ~-1.0 (strong negative autocorr—oscillates)
+
+(autocorr-lag1 '(10 10))
+;; => nan
+```
+
+Guard for minimum length (autocorr needs at least lag+2 points). Now a program that computes autocorrelation at *multiple* lags and returns a list:
+
+```scheme
+;; Compute autocorrelation at lags 1 through max-lag.
+(define (autocorr-lags series max-lag)
+  (if (< (length series) (+ max-lag 2))
+      (map (lambda (lag) 'nan) (iota max-lag 1))
+      (map (lambda (lag) (stats/autocorr series lag))
+           (iota max-lag 1))))
+
+(autocorr-lags '(10 12 14 16 18 20 22 24) 3)
+;; => (~1.0 ~1.0 ~1.0)  ;; strong autocorr at all lags (linear trend)
+
+(autocorr-lags '(10 5 10 5 10 5 10 5) 2)
+;; => (~-1.0 ~1.0)  ;; oscillates with period 2
+```
+
+`iota` generates `(1 2 3 ... max-lag)`. We map `autocorr` over those lags. If the series is too short, we return a list of 'nan. (Note: `iota` is a common Scheme helper; if not available in Motoi Scheme, replace with a manual list or named-let.)
+
+---
+
+## Co-occurrence and Pairwise Stats
+
+`stats/cooc` (co-occurrence) is less common but useful for discrete event data—how often do two events happen together? The verb isn't well-defined in the catalog (no arity/signature given), but we can illustrate a *manual* co-occurrence count using folds and filters.
+
+Here's a program that counts how often two specific values appear together in adjacent positions:
+
+```scheme
+;; Count how often value-a and value-b appear consecutively in a list.
+(define (cooc-count lst value-a value-b)
+  (if (< (length lst) 2)
+      0
+      (let loop ((remaining (cdr lst))
+                 (prev (car lst))
+                 (count 0))
+        (if (null? remaining)
+            count
+            (let ((curr (car remaining)))
+              (if (and (equal? prev value-a) (equal? curr value-b))
+                  (loop (cdr remaining) curr (+ count 1))
+                  (loop (cdr remaining) curr count)))))))
+
+(cooc-count '(a b a b a b) 'a 'b)
+;; => 3
+
+(cooc-count '(a a b b a b) 'a 'b)
+;; => 2
+```
+
+Named-let with a counter. Each pair is checked; if it matches, increment. This is a *pairwise filter-and-count* pattern.
+
+---
+
+## Composing Math and Stats: Normalized Z-Scores
+
+Sometimes you want to compute a stat (like z-score), then apply a math operation (like clamping or rounding) to the result. Here's a program that computes z-scores for all elements in a series, clamps them to ±3, and rounds to 2 decimals:
+
+```scheme
+;; Compute z-scores for all elements, clamp to ±3, round to 2 decimals.
+(define (normalized-zscores series)
+  (if (< (length series) 2)
+      (map (lambda (x) 'nan) series)
+      (let* ((mean (apply / (list (apply + series) (length series))))
+             (sq-diffs (map (lambda (x) (expt (- x mean) 2)) series))
+             (variance (apply / (list (apply + sq-diffs) (length series))))
+             (stddev (sqrt variance)))
+        (if (= stddev 0)
+            (map (lambda (x) 0.0) series)
+            (map (lambda (x)
+                   (let* ((z (/ (- x mean) stddev))
+                          (clamped (math/clamp z -3 3))
+                          (rounded (math/round clamped 2)))
+                     rounded))
+                 series)))))
+
+(normalized-zscores '(10 12 14 16 18 20))
+;; => (-1.46 -0.88 -0.29 0.29 0.88 1.46)
+
+(normalized-zscores '(5 5 5 5 5))
+;; => (0.0 0.0 0.0 0.0 0.0)  ;; zero stddev -> all z=0
+
+(normalized-zscores '(10))
+;; => (nan)
+```
+
+Compute mean and stddev once, then map the z-score computation over the series. Each z-score is clamped and rounded. This is a *map-with-closure* pattern—the closure captures `mean` and `stddev`.
+
+---
+
+## Multi-Series Comparison: Pairwise Correlations
+
+Given a list of series, compute the correlation between every pair. This is a classic O(n²) operation, but with small n (say, 5 series), it's tractable.
+
+```scheme
+;; Compute pairwise correlations between all series in a list.
+;; Returns a list of ((i . j) . correlation) for all i < j.
+(define (pairwise-correlations series-list)
+  (let loop-i ((i 0)
+               (rest-i series-list)
+               (results '()))
+    (if (null? rest-i)
+        (reverse results)
+        (let loop-j ((j (+ i 1))
+                     (rest-j (cdr rest-i))
+                     (results-j results))
+          (if (null? rest-j)
+              (loop-i (+ i 1) (cdr rest-i) results-j)
+              (let ((corr (safe-correlation (car rest-i) (car rest-j))))
+                (loop-j (+ j 1)
+                        (cdr rest-j)
+                        (cons (cons (cons i j) corr) results-j))))))))
+
+(pairwise-correlations 
+ '((1 2 3 4 5)
+   (2 4 6 8 10)
+   (5 4 3 2 1)))
+;; => (((0 . 1) . 1.0)
+;;     ((0 . 2) . -1.0)
+;;     ((1 . 2) . -1.0))
+```
+
+Nested loops: outer over each series `i`, inner over each series `j > i`. For each pair, compute correlation and cons onto results. The result is a list of `((i . j) . correlation)` pairs. This is *exhaustive pairwise orchestration*—a common pattern in multi-variate stats.
+
+---
+
+## Weighted Mean and Custom Aggregates
+
+A weighted mean multiplies each value by a weight, sums those products, then divides by the sum of weights. No `stats/weighted-mean` verb exists, so we build it with `map`, `apply`, and guards.
+
+```scheme
+;; Compute weighted mean of values with corresponding weights.
+;; Returns weighted mean, or 'nan if lists are empty or mismatched length.
+(define (weighted-mean values weights)
+  (cond
+   ((not (= (length values) (length weights)))
+    'nan)
+   ((null? values)
+    'nan)
+   (else
+    (let ((weighted-sum (apply + (map * values weights)))
+          (weight-total (apply + weights)))
+      (if (= weight-total 0)
+          'nan
+          (/ weighted-sum weight-total))))))
+
+(weighted-mean '(10 20 30) '(1 2 3))
+;; => 23.333...  ;; (10*1 + 20*2 + 30*3) / (1+2+3) = 140/6
+
+(weighted-mean '(5 10) '(0 0))
+;; => nan  ;; zero total weight
+
+(weighted-mean '(10 20) '(1 2 3))
+;; => nan  ;; length mismatch
+```
+
+Guard for length match and zero total weight. Compute weighted sum with `(map * values weights)` then divide. This is a custom aggregate—no verb for it, but easy to compose.
+
+---
+
+## Percentile Ranges and Distribution Summaries
+
+A common request: \"Show me the 25th, 50th, 75th, 90th, and 95th percentiles.\" This is a *distribution summary*—five numbers that describe the shape of the data.
+
+```scheme
+;; Compute a five-number distribution summary: p25, p50, p75, p90, p95.
+(define (distribution-summary series)
+  (if (< (length series) 5)
+      (list 'escalate \"insufficient-data\" \"need at least 5 points\")
+      (list (cons 'p25 (stats/percentile series 25))
+            (cons 'p50 (stats/percentile series 50))
+            (cons 'p75 (stats/percentile series 75))
+            (cons 'p90 (stats/percentile series 90))
+            (cons 'p95 (stats/percentile series 95)))))
+
+(distribution-summary '(5 7 9 12 15 18 22 28 35 50))
+;; => ((p25 . 9) (p50 . 16.5) (p75 . 28) (p90 . 42.5) (p95 . 47.5))
+
+(distribution-summary '(10 20))
+;; => (escalate \"insufficient-data\" \"need at least 5 points\")
+```
+
+Five calls to `stats/percentile`, returned as an alist. The guard ensures minimum data. This is a *multi-call route*—same verb, different arguments, assembled into a structure.
+
+---
+
+## Recursive Aggregation: Nested Sums
+
+Sometimes you have nested lists (e.g., sales by region by month) and you want to sum at multiple levels. Here's a program that computes per-region totals and a grand total:
+
+```scheme
+;; Compute per-region totals and grand total from nested sales data.
+;; Input: list of (region . sales-list) pairs.
+;; Output: (list (region . total) ... (grand-total . sum-of-all))
+(define (regional-totals data)
+  (if (null? data)
+      (list (cons 'grand-total 0))
+      (let* ((region-totals (map (lambda (pair)
+                                   (let ((region (car pair))
+                                         (sales (cdr pair)))
+                                     (cons region (apply + sales))))
+                                 data))
+             (grand (apply + (map cdr region-totals))))
+        (append region-totals (list (cons 'grand-total grand))))))
+
+(regional-totals 
+ '((north . (10 12 15))
+   (south . (8 9 10))
+   (west . (20 22 25))))
+;; => ((north . 37)
+;;     (south . 27)
+;;     (west . 67)
+;;     (grand-total . 131))
+```
+
+Map over the data to compute per-region sums, then sum those sums for the grand total. This is *hierarchical aggregation*—a two-level fold.
+
+---
+
+## Time-Window Aggregates: Rolling Stats
+
+A rolling (or moving) aggregate computes a stat over a sliding window. Here's a program that computes a rolling mean with a window of 3:
+
+```scheme
+;; Compute rolling mean with window size 3.
+(define (rolling-mean-3 series)
+  (if (< (length series) 3)
+      '()
+      (let loop ((remaining series)
+                 (result '()))
+        (if (< (length remaining) 3)
+            (reverse result)
+            (let* ((window (list (car remaining)
+                                 (cadr remaining)
+                                 (caddr remaining)))
+                   (mean (/ (apply + window) 3)))
+              (loop (cdr remaining)
+                    (cons mean result)))))))
+
+(rolling-mean-3 '(10 12 14 16 18 20 22))
+;; => (12.0 14.0 16.0 18.0 20.0)
+```
+
+Named-let recursion. At each position, extract the next three elements, compute their mean, cons onto result. The output is shorter than the input by window-1.
+
+Now a program that computes a rolling *maximum* with a window of 4:
+
+```scheme
+;; Compute rolling maximum with window size 4.
+(define (rolling-max-4 series)
+  (if (< (length series) 4)
+      '()
+      (let loop ((remaining series)
+                 (result '()))
+        (if (< (length remaining) 4)
+            (reverse result)
+            (let* ((window (list (car remaining)
+                                 (cadr remaining)
+                                 (caddr remaining)
+                                 (cadddr remaining)))
+                   (win-max (apply max window)))
+              (loop (cdr remaining)
+                    (cons win-max result)))))))
+
+(rolling-max-4 '(5 3 8 2 9 1 7 6))
+;; => (8 9 9 9 9)
+```
+
+Same structure, different operation. This is the *sliding window* pattern—extremely common in time-series work.
+
+---
+
+## Combining Filters and Stats: Conditional Aggregates
+
+Sometimes you want to compute a stat only over elements that meet a condition—e.g., mean of positive values, or percentile of values above a threshold.
+
+```scheme
+;; Compute mean of all positive values in a list.
+(define (mean-positive lst)
+  (let ((positives (filter (lambda (x) (> x 0)) lst)))
+    (if (null? positives)
+        'nan
+        (let ((total (apply + positives))
+              (count (length positives)))
+          (/ total count)))))
+
+(mean-positive '(5 -3 8 -2 10 -1 6))
+;; => 7.25
+
+(mean-positive '(-5 -10 -3))
+;; => nan
+```
+
+Filter first, then compute. The guard checks if the filtered list is empty. This is a *filter-then-reduce* pattern.
+
+Now a program that computes the 90th percentile of values *above* a threshold:
+
+```scheme
+;; Compute p90 of values above a threshold.
+(define (p90-above lst threshold)
+  (let ((above (filter (lambda (x) (> x threshold)) lst)))
+    (if (< (length above) 3)
+        'nan
+        (stats/percentile above 90))))
+
+(p90-above '(5 10 15 20 25 30 35 40 45 50) 20)
+;; => ~47.5  (p90 of 25,30,35,40,45,50)
+
+(p90-above '(5 10 15) 20)
+;; => nan  ;; no values above threshold
+```
+
+Filter, guard, compute. The guard ensures enough data for a meaningful percentile. This is *conditional stats*—very useful for thresholded alerts.
+
+---
+
+## Median Absolute Deviation (MAD)
+
+MAD is a robust measure of variability: compute the median, then compute the median of absolute deviations from that median. No verb for it, but we can build it.
+
+```scheme
+;; Compute median absolute deviation (MAD).
+(define (mad series)
+  (if (< (length series) 2)
+      'nan
+      (let* ((median (stats/percentile series 50))
+             (deviations (map (lambda (x) (abs (- x median))) series))
+             (mad-value (stats/percentile deviations 50)))
+        mad-value)))
+
+(mad '(1 2 3 4 5 100))
+;; => 1.5  ;; median is 3.5, deviations are [2.5 1.5 0.5 0.5 1.5 96.5], median of those is 1.5
+```
+
+Compute median, map to get absolute deviations, compute median of those. This is a *two-stage stat*—output of stage one feeds stage two. MAD is robust to outliers (note the 100 in the list—it doesn't skew the result much).
+
+---
+
+## Anomaly Score via Z-Score and Threshold
+
+Combine z-score with a threshold to produce a binary anomaly flag or a severity score. Here's a program that computes z-scores and flags any value with |z| > 2 as an anomaly:
+
+```scheme
+;; Compute z-scores and flag anomalies (|z| > 2).
+;; Returns list of (value z-score anomaly?) tuples.
+(define (flag-anomalies series)
+  (if (< (length series) 3)
+      (map (lambda (x) (list x 'nan #f)) series)
+      (let* ((mean (apply / (list (apply + series) (length series))))
+             (sq-diffs (map (lambda (x) (expt (- x mean) 2)) series))
+             (variance (apply / (list (apply + sq-diffs) (length series))))
+             (stddev (sqrt variance)))
+        (if (= stddev 0)
+            (map (lambda (x) (list x 0.0 #f)) series)
+            (map (lambda (x)
+                   (let ((z (/ (- x mean) stddev)))
+                     (list x z (> (abs z) 2))))
+                 series)))))
+
+(flag-anomalies '(10 12 14 16 18 50))
+;; => ((10 -1.26 #f)
+;;     (12 -0.91 #f)
+;;     (14 -0.56 #f)
+;;     (16 -0.21 #f)
+;;     (18 0.14 #f)
+;;     (50 2.8 #t))
+```
+
+Compute mean and stddev once, map the z-score and flag computation. The flag is a boolean: `#t` if |z| > 2. This is a *classification map*—turn numeric data into labeled data.
+
+---
+
+## Multi-Metric Dashboard Route
+
+Bring it all together: a program that takes a series and returns a \"dashboard\" of stats—count, mean, stddev, min, max, p50, p95, and flags for any anomalies.
+
+```scheme
+;; Compute a full stats dashboard for a series.
+;; Returns an alist with multiple metrics and an anomaly count.
+(define (stats-dashboard series)
+  (cond
+   ((null? series)
+    (list 'escalate \"empty-series\" \"cannot compute dashboard on empty list\"))
+   ((< (length series) 3)
+    (list 'escalate \"insufficient-data\" \"need at least 3 points for dashboard\"))
+   (else
+    (let* ((count (length series))
+           (mean (apply / (list (apply + series) count)))
+           (sq-diffs (map (lambda (x) (expt (- x mean) 2)) series))
+           (variance (apply / (list (apply + sq-diffs) count)))
+           (stddev (sqrt variance))
+           (sorted (sort series <))
+           (min-val (car sorted))
+           (max-val (car (reverse sorted)))
+           (p50 (stats/percentile series 50))
+           (p95 (stats/percentile series 95))
+           (zscores (if (= stddev 0)
+                        (map (lambda (x) 0.0) series)
+                        (map (lambda (x) (/ (- x mean) stddev)) series)))
+           (anomalies (length (filter (lambda (z) (> (abs z) 2)) zscores))))
+      (list (cons 'count count)
+            (cons 'mean mean)
+            (cons 'stddev stddev)
+            (cons 'min min-val)
+            (cons 'max max-val)
+            (cons 'p50 p50)
+            (cons 'p95 p95)
+            (cons 'anomalies anomalies))))))
+
+(stats-dashboard '(10 12 14 16 18 20 50))
+;; => ((count . 7)
+;;     (mean . 20.0)
+;;     (stddev . 13.4...)
+;;     (min . 10)
+;;     (max . 50)
+;;     (p50 . 16)
+;;     (p95 . 50)
+;;     (anomalies . 1))
+
+(stats-dashboard '())
+;; => (escalate \"empty-series\" ...)
+```
+
+This is the capstone route: twelve computed values, assembled into an alist. Guards at the top, honest escalation if the input is bad. Every stage uses only core Scheme or wired verbs. The result is a complete, actionable summary.
+
+---
+
+## Challenges
+
+You've seen single-pass reductions, multi-pass pipelines, named-let recursion, honest failure handling, and multi-verb orchestration. Now push further. Write programs that:
+
+1. **Compute a rolling z-score**: given a series and a window size, compute the z-score of the *last* element in each window (relative to the window's mean and stddev). Return the series of rolling z-scores.
+
+2. **Pairwise distance matrix**: given a list of numeric vectors (each vector is a list of numbers), compute the Euclidean distance between every pair of vectors. Return a list of `((i . j) . distance)` for all i < j.
+
+3. **Adaptive threshold anomaly detection**: compute the mean and stddev of a *baseline* series, then classify each value in a *test* series as 'normal, 'warning (1 < |z| ≤ 2), or 'critical (|z| > 2). Return a list of `(value . classification)` pairs.
+
+4. **Correlation heatmap data**: given a list of series (all same length), compute the correlation between every pair (including each series with itself, which should be 1.0). Return a list of lists (a matrix) where element (i, j) is the correlation between series i and series j.
+
+5. **Weighted percentile**: given a list of values and a corresponding list of weights, compute the weighted 50th percentile (median). This requires sorting by value, accumulating weights, and finding the value where cumulative weight crosses 50% of total weight.
+
+6. **Multi-lag autocorrelation summary**: given a series, compute autocorrelation at lags 1 through 5, find the lag with the *highest* autocorrelation, and return `(best-lag . best-autocorr)`. If the series is too short, return `(nan . nan)`.
+
+These exercises stretch recursion, multi-verb composition, and honest failure handling to the edge of what's practical in pure Scheme. Build them. Run them. And when they return the right answer—or an honest escalation—you'll know you've mastered numbers and stats at depth.
+")

@@ -1,0 +1,328 @@
+(chapter
+  :book "Book of Jesse"
+  :chapter-number 12
+  :title "Sound and motion on one timeline"
+  :audience "programmer-fluent-in-other-languages"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-of-jesse-author-agent"
+     :cli-verified #t)
+  :prose
+"# Chapter 12 — Sound and motion on one timeline
+
+Most languages treat sound and animation as separate systems. You call one library to play a note and another library to move a sprite; if you want them synchronized, you build the coordination yourself with wall-clock queries and math.
+
+Motoi ships with sound and motion on the *same* timeline. When you say `(audio/tempo 128)` and `(animation/tick dt)`, both systems agree about what time it is and what a beat costs. A drum hit and a sprite bounce that should land together can be declared together and land together.
+
+This is a small idea with a large payoff. It is one of the things Motoi does better than most languages, because most languages inherited their audio API from a C wrapper and their animation API from a browser or game engine, and the two were never designed to know about each other.
+
+## 12.1 The timeline
+
+Motoi's core timing is a single monotonic clock, ticked at whatever cadence the host provides (typically ~60 fps for graphics, sample-accurate for audio). Two subsystems read from that clock:
+
+- **Audio scheduling.** `audio/play`, `note/strike`, `note/place-at`, `synth/kit`, `synth/chord`. These schedule events *relative* to the current tempo and cursor.
+- **Animation tweening.** `motion`, `motion/move-to`, `fade`, `slide`, `bounce`. These interpolate values over a duration in seconds.
+
+Because both reference the same clock, cross-domain synchronization is a natural consequence.
+
+## 12.2 Tempo as a first-class value
+
+Set the tempo once. Everything else derives:
+
+```scheme
+(audio/tempo 128)     ; 128 bpm — dance music
+```
+
+Verified:
+
+```
+$ bin/motoi eval '(audio/tempo 128)'
+128
+```
+
+Every audio verb that takes a duration takes it in *seconds*. At 128 bpm, a beat is 60/128 = 0.469 seconds. A quarter beat (a sixteenth note) is ~0.117 seconds. You can compute this once and reuse:
+
+```scheme
+(define bpm 128)
+(define beat (/ 60 bpm))
+(define eighth (/ beat 2))
+(define sixteenth (/ beat 4))
+
+(audio/play 'tone 440 sixteenth)
+```
+
+Verified:
+
+```
+$ bin/motoi eval '(define bpm 128) (define beat (/ 60 bpm)) (define eighth (/ beat 2)) eighth'
+0.234375
+```
+
+If you want a metric-aware audio system where you play *at beat 3.5* rather than *0.72 seconds from now*, wrap the tempo:
+
+```scheme
+(define (at-beat n)
+  (* n (/ 60 (audio/tempo))))
+
+(note/place-at 'C4 (at-beat 0.5) 'quarter)
+(note/place-at 'E4 (at-beat 1.0) 'quarter)
+(note/place-at 'G4 (at-beat 1.5) 'quarter)
+```
+
+`note/place-at` is one of Motoi's most useful verbs: schedule a note at an absolute time offset from now. The audio engine keeps a scheduled timeline; ticks advance it.
+
+## 12.3 The animation timeline
+
+Motion primitives return tween handles. The animation engine holds them and calls `animation/tick` to advance them each frame:
+
+```scheme
+(motion 'up 3)                     ; move something up 3 units
+(fade 'in 1.0)                     ; fade in over 1 second
+(slide 'left 0.5)                  ; slide left over 0.5 seconds
+(bounce 3 1.0)                     ; bounce 3 times over 1 second
+```
+
+Verified — the tween handles are opaque:
+
+```
+$ bin/motoi eval '(fade (quote in) 1.0)'
+[object Object]
+```
+
+The animation engine tracks them internally. On each frame:
+
+```scheme
+(animation/tick (/ 1 60))   ; 60 fps
+```
+
+Verified:
+
+```
+$ bin/motoi eval '(animation/tick 0.016)'
+0
+```
+
+Returns the count of tweens still running (0 here because nothing was actually queued in a fresh eval). In a real game loop, you'd tick every frame with the frame delta.
+
+## 12.4 The crux — a beat and a bounce that land together
+
+Say you want a sprite to bounce on every kick drum hit. In most languages you'd:
+
+1. Schedule the drum hit.
+2. Query the wall clock at some point.
+3. Compute when the bounce should start.
+4. Start the bounce.
+5. Hope the audio latency doesn't push things out of sync.
+
+In Motoi, both subsystems read the same clock. If you declare them together, they run together:
+
+```scheme
+(define (kick-and-bounce sprite)
+  (synth/kit 'kick 0.15)
+  (bounce sprite 1 0.15))
+```
+
+Called once, both happen now. The kick will play for 150 ms; the bounce animates over the same 150 ms. Their timing is aligned because they share the clock. There is no coordination code because there is no coordination *needed*.
+
+Extending to a beat pattern:
+
+```scheme
+(define (loop-beat sprite n)
+  (let go ((i 0))
+    (when (< i n)
+      (kick-and-bounce sprite)
+      ;; wait until next beat (audio-scheduler handles this)
+      (go (+ i 1)))))
+```
+
+The audio scheduler queues each kick sample-accurately; the animation engine schedules each bounce; both happen on their shared timeline.
+
+## 12.5 A chord and a fade that end together
+
+The other direction: an animation triggers when a sound completes.
+
+```scheme
+(define (chord-then-fade)
+  (synth/chord (list 440 550 660) 2.0)   ; two-second chord
+  (motion/on-settle
+    (fade 'out 2.0)                      ; two-second fade
+    (lambda () (display \"scene ended\"))))
+```
+
+`motion/on-settle` fires a callback when the tween completes. Since the fade is 2 seconds and the chord is 2 seconds, they finish together, and the callback fires. Cross-subsystem completion synchronization.
+
+## 12.6 Notes and pitches
+
+Motoi's audio kit has both raw-Hz and named-pitch APIs. Named pitches:
+
+```scheme
+(note/strike 'C4 0.25)         ; middle C for a quarter second
+(note/strike 'A440 0.25)       ; standard tuning A
+(note/strike 'D#5 0.125)       ; D-sharp octave 5, eighth-second
+```
+
+Under the hood, these convert to Hz via a lookup table. The names follow scientific pitch notation.
+
+Chords with named notes:
+
+```scheme
+(synth/chord (list 'C4 'E4 'G4) 1.0)     ; C major triad
+```
+
+## 12.7 Kits and patches
+
+`synth/kit` gives you drum sounds by name:
+
+```scheme
+(synth/kit 'kick 0.15)
+(synth/kit 'snare 0.15)
+(synth/kit 'hat 0.05)
+(synth/kit 'tom-hi 0.2)
+(synth/kit 'tom-lo 0.2)
+(synth/kit 'clap 0.1)
+```
+
+Verified — kick plays:
+
+```
+$ bin/motoi eval \"(synth/kit 'kick 0.2)\"
+ok
+```
+
+`synth/play` gives you a raw pitched patch:
+
+```scheme
+(synth/play 440 0.25)          ; 440 Hz for 250 ms
+```
+
+For the demo-scene work in Chapter 16 you'll layer these into full beats.
+
+## 12.8 Envelopes and shapes
+
+Sounds have shapes over time — attack, sustain, decay, release (ADSR). Motoi's `audio/play` takes a shape parameter:
+
+```scheme
+;; 'tone kind — square wave (chiptune default)
+(audio/play 'tone 440 0.25 'square)
+(audio/play 'tone 440 0.25 'sine)
+(audio/play 'tone 440 0.25 'saw)
+(audio/play 'tone 440 0.25 'noise)
+```
+
+Each shape has a characteristic feel:
+
+- **Square:** rich in odd harmonics; the classic 8-bit sound.
+- **Sine:** pure, mellow; used sparingly, felt everywhere.
+- **Saw:** aggressive, buzzy; leads and basses.
+- **Noise:** unpitched; drums, effects, textures.
+
+Chapter 16 explores composing these into a chip-tune palette.
+
+## 12.9 A minimal sequencer
+
+A sequencer is a data-driven beat player. The audio kit gives you the primitives; the language gives you the composition. A 4-bar sequencer:
+
+```scheme
+(define pattern
+  (list
+    (list 'kick 'rest 'snare 'rest)
+    (list 'kick 'kick 'snare 'rest)
+    (list 'kick 'rest 'snare 'kick)
+    (list 'kick 'rest 'snare 'snare)))
+
+(define (play-bar bar step-time)
+  (for-each
+    (lambda (hit)
+      (unless (eq? hit 'rest)
+        (synth/kit hit step-time))
+      ;; audio scheduler advances by step-time regardless
+      )
+    bar))
+
+(define (play-pattern pat)
+  (define step-time (/ 60 (audio/tempo) 4))     ; sixteenth note
+  (for-each (lambda (bar) (play-bar bar step-time)) pat))
+
+(play-pattern pattern)
+```
+
+This reads like sheet music. The macro form of the beat DSL (Chapter 11) makes it read cleaner still.
+
+## 12.10 A note-and-move dance
+
+Here's the payoff pattern — sound and motion woven together:
+
+```scheme
+(define (dance-step sprite pitch)
+  (note/strike pitch 0.25)
+  (bounce sprite 1 0.25))
+
+(define (dance sprite melody)
+  (for-each
+    (lambda (note)
+      (dance-step sprite note))
+    melody))
+
+(dance my-sprite (list 'C4 'D4 'E4 'F4 'G4 'A4 'B4 'C5))
+```
+
+Each note plays; each note the sprite bounces once; scale ascends; sprite bounces eight times. Sound and motion share the tempo, share the timeline, share the intent.
+
+## 12.11 The macro payoff
+
+Now combine Chapter 11 with this. A macro for beat-plus-motion:
+
+```scheme
+(define-syntax on-beat
+  (syntax-rules ()
+    ((_ (sound motion) ...)
+     (begin
+       (begin sound motion)
+       ...))))
+
+;; usage
+(on-beat
+  ((synth/kit 'kick 0.15)  (bounce ball 1 0.15))
+  ((synth/kit 'snare 0.15) (fade ball 'flash 0.15))
+  ((synth/kit 'kick 0.15)  (bounce ball 1 0.15))
+  ((synth/kit 'snare 0.15) (slide ball 'right 0.15)))
+```
+
+The macro is trivial. What it *reads like* is a score: each row is a beat, with sound and visual side-by-side.
+
+You could not do this cleanly in a language where sound and motion live in different libraries with different time bases. In Motoi you can.
+
+## 12.12 Comparisons
+
+**In Python**, sound is `pygame.mixer` or `simpleaudio`; animation is `pygame.sprite` or Pyglet; syncing them requires wall-clock queries and manual scheduling. Doable, but you're the coordinator.
+
+**In JavaScript**, `Web Audio API` gives you sample-accurate scheduling with `AudioContext.currentTime`; canvas animation uses `requestAnimationFrame`; they run on the *same* clock in the browser but the APIs are unrelated shapes. Sync is possible; convenient it isn't.
+
+**In Godot / Unity**, sound and animation live inside the engine and coordinate via engine primitives. This is comparable to Motoi's model, at the cost of a much bigger runtime.
+
+Motoi's win: same expressive model, tiny footprint, s-expression composition. If you want to hand a kid a computer and have them make a beat with matching visuals in one afternoon, this is the story that works.
+
+## 12.13 Latency, sample accuracy, and the honest caveats
+
+Motoi's audio scheduler queues events. Actual playback latency depends on the host — a browser Web Audio backend, a Node.js audio backend, a native backend. Sample-accurate scheduling is *possible* through the underlying engine but is not guaranteed at the Motoi API level. For most work — games, demos, teaching — it's imperceptibly good. For professional DAW work where every millisecond matters, use a DAW.
+
+Animation is frame-rate-limited to whatever the host provides. `animation/tick` takes a delta; you supply it. On a 60 fps host, you get 16.67 ms resolution.
+
+These are honest boundaries. Motoi is a chip-tune-and-demo-scene tool, not a Pro Tools competitor. It is *very good* at the thing it aims at.
+
+## 12.14 What to remember
+
+- One clock, two subsystems.
+- Tempo is first-class; every audio duration reads from it.
+- Motion tweens run on the same tick as audio schedules.
+- `motion/on-settle` fires callbacks at tween completion — cross-subsystem synchronization.
+- Named pitches, drum kits, shape parameters — all present in the base.
+- Macros let you write beat-plus-motion scores that read like music.
+- Not a DAW replacement; a fantasy-console-scale audio+visual kit.
+
+Next chapter: Cortex — programs that remember what you did.
+")

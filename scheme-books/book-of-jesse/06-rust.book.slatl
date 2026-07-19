@@ -1,0 +1,341 @@
+(chapter
+  :book "Book of Jesse"
+  :chapter-number 6
+  :title "Motoi for Rust programmers"
+  :audience "programmer-fluent-in-other-languages"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-of-jesse-author-agent"
+     :cli-verified #t)
+  :prose
+"# Chapter 6 — Motoi for Rust programmers
+
+Rust and Motoi are the widest gap in this book. Rust is a systems language with an ownership model, no garbage collector, static types, borrow-checked memory safety, and zero-cost abstractions. Motoi is a dynamically typed, garbage-collected, interpreted Lisp that is happy to allocate freely.
+
+If your work is *writing a memory-safe, high-performance system where every allocation matters* — you are in the Rust world, and Motoi is not going to compete for that job. This chapter is not a pitch to switch. It is a translation guide for the times you want a small, expressive language for prototyping, for tools, for scripting alongside your Rust programs, or for writing DSLs that generate Rust code.
+
+## 6.1 Hello, world
+
+Rust:
+
+```rust
+fn main() {
+    println!(\"hello, world\");
+}
+```
+
+Motoi:
+
+```scheme
+(display \"hello, world\") (newline)
+```
+
+Verified:
+
+```
+$ bin/motoi eval '(display \"hello, world\")'
+hello, world
+```
+
+Rust's `println!` is a macro (the `!`), which will be a familiar pattern in this book — much of Motoi's convenience is macros too. But Rust's compilation model puts macro expansion at compile time behind a rigorous type system. Motoi expands macros at read time and evaluates at run time.
+
+## 6.2 The ownership question
+
+Rust's ownership model is the language's defining feature. Every value has one owner. Moving transfers ownership; borrowing lends a reference; the borrow checker verifies safety at compile time.
+
+Motoi has *none* of this. All values are garbage-collected. Multiple references to the same list are fine. Mutation happens by copying (functional idiom) or by `set!` (explicit).
+
+There is nothing to translate here. Rust's ownership is a *design constraint* that shapes how you write; Motoi lets you ignore memory and pays for that with GC pauses. The two languages solve genuinely different problems.
+
+What a Rust programmer can *use* from this observation: writing a small tool in Motoi is faster than writing it in Rust, because you don't fight the borrow checker. If the tool's runtime cost doesn't matter and correctness comes from types you can't have, Motoi's cost is minor. If it matters, Rust.
+
+## 6.3 Variables and functions
+
+Rust:
+
+```rust
+let x = 3;
+let y = x * x;
+println!(\"{}\", x + y);       // 12
+```
+
+Motoi:
+
+```scheme
+(let* ((x 3)
+       (y (* x x)))
+  (display (+ x y)))
+```
+
+Verified:
+
+```
+$ bin/motoi eval '(let* ((x 3) (y (* x x))) (+ x y))'
+12
+```
+
+Rust's `let` bindings are immutable by default (`let mut` for mutable). Motoi's `let` bindings are immutable by convention; `set!` is available and explicit.
+
+Functions:
+
+```rust
+fn square(x: i32) -> i32 { x * x }
+```
+
+Motoi:
+
+```scheme
+(define (square x) (* x x))
+```
+
+Verified:
+
+```
+$ bin/motoi eval '(define (square x) (* x x)) (square 5)'
+25
+```
+
+Rust's type annotations are load-bearing; the compiler uses them to check every call site. Motoi's absence of annotations means the same function works on any argument you can multiply — integers, floats, ratios (from a module), symbolic expressions (via a CAS module). Different tradeoff. Rust catches wrong-type at compile time. Motoi discovers new-type-that-works at runtime.
+
+## 6.4 Structs and enums
+
+Rust:
+
+```rust
+struct Point { x: i32, y: i32 }
+enum Shape {
+    Circle { center: Point, radius: f64 },
+    Rectangle { corner: Point, w: i32, h: i32 },
+}
+```
+
+Motoi's closest translation is a tagged pair or list:
+
+```scheme
+(define (make-point x y) (list 'point x y))
+(define (point-x p) (cadr p))
+(define (point-y p) (caddr p))
+
+(define (make-circle center radius)
+  (list 'circle center radius))
+(define (make-rectangle corner w h)
+  (list 'rectangle corner w h))
+
+(define (shape-kind s) (car s))
+```
+
+Verified:
+
+```
+$ bin/motoi eval \"(define (make-point x y) (list 'point x y)) (define (point-x p) (cadr p)) (define (point-y p) (caddr p)) (let ((p (make-point 3 4))) (list (point-x p) (point-y p)))\"
+(3 4)
+```
+
+For proper record support with named fields and pattern matching, Motoi has a records module. In the base, tagged lists get you far.
+
+**Pattern matching.** Rust's `match` is one of its best features:
+
+```rust
+match shape {
+    Shape::Circle { radius, .. } => 3.14 * radius * radius,
+    Shape::Rectangle { w, h, .. } => (w * h) as f64,
+}
+```
+
+Motoi's base language has `case` for constant matching:
+
+```scheme
+(case (car shape)
+  ((circle)    (* 3.14 (caddr shape) (caddr shape)))
+  ((rectangle) (* (caddr shape) (cadddr shape))))
+```
+
+For structural pattern matching — the destructuring form Rust does — Motoi has a `match` module:
+
+```scheme
+;; from the match module
+(match shape
+  (('circle _ r) (* 3.14 r r))
+  (('rectangle _ w h) (* w h)))
+```
+
+`match` is one of the most-imported modules. Rust's version is more powerful because it enforces exhaustiveness at compile time. Motoi's is more flexible because it can destructure over any shape.
+
+## 6.5 Traits and generics
+
+Rust's traits are its polymorphism story:
+
+```rust
+trait Area {
+    fn area(&self) -> f64;
+}
+
+impl Area for Circle {
+    fn area(&self) -> f64 { 3.14 * self.radius * self.radius }
+}
+```
+
+Motoi's version is dispatch on tag:
+
+```scheme
+(define (area shape)
+  (case (car shape)
+    ((circle)    (* 3.14 (caddr shape) (caddr shape)))
+    ((rectangle) (* (caddr shape) (cadddr shape)))))
+```
+
+Or, with the generics module, a proper method-per-type dispatch:
+
+```scheme
+(define-method (area (s 'circle)) (* 3.14 (caddr s) (caddr s)))
+(define-method (area (s 'rectangle)) (* (caddr s) (cadddr s)))
+```
+
+Rust's traits are checked at compile time; new trait implementations produce compile errors if unused or errors at call sites if missing. Motoi's methods fail at runtime if called on a type without an implementation. The safety tradeoff is real.
+
+## 6.6 Result and Option
+
+Rust's `Result<T, E>` and `Option<T>` are its answer to \"this might fail\" and \"this might be missing.\" The compiler forces you to handle both cases.
+
+Motoi's equivalent is a pair convention:
+
+```scheme
+;; option-like: either ('some value) or 'none
+(define (maybe-divide a b)
+  (if (= b 0) 'none (list 'some (/ a b))))
+
+;; result-like: either ('ok value) or ('err message)
+(define (safe-divide a b)
+  (if (= b 0)
+      (list 'err \"division by zero\")
+      (list 'ok (/ a b))))
+```
+
+Motoi's runtime does not force you to handle both branches. You have to remember. This is a real hazard. Rust's exhaustiveness check is a genuine safety feature you give up.
+
+Alternative: use exceptions. `error` and `with-exception-handler` (Chapter 1) work for the error case. For \"missing,\" `#f` is the universal sentinel — every lookup returns either the value or `#f`.
+
+## 6.7 Iterators
+
+Rust's iterators are lazy, zero-cost, and one of the language's aesthetic high points:
+
+```rust
+let sum: i32 = (1..=10).filter(|x| x % 2 == 0).sum();   // 30
+```
+
+Motoi's equivalent (eager):
+
+```scheme
+(apply + (filter even? (map (lambda (x) (+ x 1)) (list 0 1 2 3 4 5 6 7 8 9))))
+```
+
+Or, more concisely with a range helper:
+
+```scheme
+(define (range n) (let loop ((i 0)) (if (= i n) '() (cons i (loop (+ i 1))))))
+(apply + (filter even? (map (lambda (x) (+ x 1)) (range 10))))
+```
+
+Verified:
+
+```
+$ bin/motoi eval '(define (range n) (let loop ((i 0)) (if (= i n) (quote ()) (cons i (loop (+ i 1)))))) (apply + (filter even? (map (lambda (x) (+ x 1)) (range 10))))'
+30
+```
+
+Motoi's core `map` and `filter` allocate intermediate lists. Rust's iterators fuse. For most Motoi programs this doesn't matter. For hot code where it does matter, use tail-recursive loops or import the stream module for laziness.
+
+## 6.8 Concurrency
+
+Rust: `std::thread`, `async`/`.await`, `tokio`, channels via `mpsc`, `Arc<Mutex<T>>`, `Send`/`Sync` traits enforced by the compiler.
+
+Motoi: single-threaded core. Concurrency module provides channels + processes, closer to Go or Erlang.
+
+Rust's `Send + Sync` is a compile-time guarantee that a value can safely cross thread boundaries. Motoi has no equivalent because Motoi's core has no threads.
+
+For CPU-bound parallel work, Rust wins outright. For coordination-shaped concurrency (many things reacting to events, actor systems, game entities), Motoi's channel model is comfortable.
+
+## 6.9 The macro comparison
+
+Both languages have real macros. Rust's macros come in two flavors:
+
+- `macro_rules!` — pattern-based, hygienic, like `syntax-rules`.
+- Procedural macros — arbitrary compile-time code, like `syntax-case`.
+
+Motoi's core has `syntax-rules`; the module system provides `syntax-case`. Chapter 11 dives in.
+
+The difference in *feel*: Rust's macros expand into token trees checked by the compiler. Motoi's macros expand into s-expressions evaluated at runtime. Rust's macros compose with the type system; Motoi's compose with the value system. Both are powerful in their own ways.
+
+## 6.10 Zero-cost abstractions
+
+Rust's guiding principle: abstractions should compile away to the same code you'd write by hand. `iter().filter().map().sum()` compiles to a tight loop.
+
+Motoi does not make this promise. Every `map` allocates a new list. Every `filter` walks and filters. Every closure captures its environment. Interpretation has overhead the compiler cannot remove.
+
+For hot code where nanoseconds matter, Motoi is not the tool. For most code — where a program runs once per keystroke or once per frame or once per network request — the overhead is invisible.
+
+## 6.11 Ecosystem and tooling
+
+Rust has cargo, clippy, rustfmt, a good LSP, crates.io with tens of thousands of packages, integration with many editors.
+
+Motoi has bin/motoi (the interpreter/REPL/formatter), a reference manual, and a small set of modules.
+
+This is a real gap. For anything involving external systems — HTTP clients, database drivers, cryptography libraries — Rust's ecosystem is where the work has been done.
+
+## 6.12 Why you might pick Motoi for something Rust-adjacent
+
+- Prototyping the algorithm before writing the Rust.
+- Writing a DSL that emits Rust code.
+- Writing a build script or tool that shouldn't be in Rust.
+- Writing the game logic (Motoi) while Rust handles the engine.
+- Teaching functional programming ideas that Rust also uses.
+
+Why you stay in Rust:
+
+- Anything performance-sensitive.
+- Anything memory-constrained.
+- Anything security-sensitive at the systems level.
+- Anything you plan to ship as a binary with no interpreter.
+
+Rust and Motoi don't compete. They live in different neighborhoods.
+
+## 6.13 A translation exercise
+
+Rust:
+
+```rust
+fn word_lengths(s: &str) -> Vec<usize> {
+    s.split_whitespace().map(|w| w.len()).collect()
+}
+
+word_lengths(\"a bb ccc dddd\")   // [1, 2, 3, 4]
+```
+
+Motoi (assuming `string-split` from a module):
+
+```scheme
+(define (word-lengths s)
+  (map string-length (string-split s \" \")))
+
+(word-lengths \"a bb ccc dddd\")  ;; (1 2 3 4)
+```
+
+Same shape. Motoi's version doesn't tell you `s` is a string or that the result is a list of integers. If a caller passes a symbol, it fails at runtime with a wrong-type error. Rust catches this at compile time.
+
+That is the entire tradeoff, in miniature.
+
+## 6.14 What to remember
+
+- Rust and Motoi occupy different neighborhoods entirely.
+- Rust for systems, high performance, memory safety, deployment as binaries.
+- Motoi for prototyping, DSLs, small tools, teaching.
+- Ownership doesn't translate — Motoi is garbage-collected, all references are shared.
+- Pattern matching in Motoi comes from a module.
+- Neither is a substitute for the other.
+
+Next chapter: Ruby.
+")

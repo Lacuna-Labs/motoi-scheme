@@ -1,0 +1,276 @@
+;; 05-provenance.slat
+;; Book of Values — Chapter 5
+
+(chapter
+  :book              "Book of Values"
+  :chapter-number    5
+  :title             "Provenance"
+  :audience          :engineer
+  :dialect           "motoi"
+  :book-version      "1.1"
+  :provenance        "book-of-values-author-2026-07-16 book-of-values-expander-2026-07-17"
+  :training-eligible #t
+  :content-rating    :G
+  :prose
+"# Chapter 5 — Provenance
+
+*Where did this number come from?*
+
+If you cannot answer that question about every value in your program,
+you do not really know what your program is doing. You know what it
+*computed*. You don't know what it computed *from*.
+
+Provenance is the trail of where a value came from. A price the user
+typed. A price the price feed sent. A price the sensor read. A price
+you calculated from two other prices. Every one of those is a
+different animal wearing the same suit.
+
+## The four wells
+
+Values enter your program from a small number of places. Learn them.
+
+1. **User input.** The user typed it. It may be wrong. It may be blank.
+   It may be in a different unit than you expected. It might be an
+   attack.
+
+2. **Machine input.** A sensor. A hardware register. A file the last
+   run wrote. It may be stale. It may be miscalibrated. The device may
+   be lying because it is broken. It cannot be malicious the way a
+   user can, but it can be *wrong in ways you did not anticipate*.
+
+3. **Network input.** Another service sent it. The other service may
+   have all the bugs you don't. It may be a different version of the
+   protocol. The network in between may have corrupted a byte, and
+   most protocols will tell you if that happened, but not all of
+   them.
+
+4. **Computed.** You made it. From other values. Every computed value
+   inherits the trustworthiness of the *least trusted* input, and
+   compounds the *precision loss* of every operation along the way.
+
+Every value your program touches belongs to one of those four wells.
+It matters which one.
+
+DO: know which well every value came from before you compute with it.
+DON'T: mix values from different wells without recording the mix.
+WHY: the level of trust you can place in a computed result is the
+minimum of the trust levels of its inputs.
+
+## The provenance ladder
+
+Provenance runs on a ladder from *most trusted* to *least trusted*.
+
+1. **Constants defined in code.** Trusted because they were reviewed.
+2. **Hard-coded lookup tables.** Trusted because they were reviewed.
+3. **Configuration set at deploy.** Trusted if the deploy pipeline was.
+4. **Local file (last run wrote).** Trusted as of the last run.
+5. **Sensor read (calibrated).** Trusted within the sensor's spec.
+6. **Network from a trusted peer.** Trusted if the peer is.
+7. **Sensor read (uncalibrated).** Trusted only for order of magnitude.
+8. **Network from an untrusted peer.** Not trusted; sanitize.
+9. **User input.** Not trusted; validate.
+10. **Cross-tenant data.** Actively hostile until proven otherwise.
+
+Rungs 1–5 rarely bite you. Rungs 6–10 are where the interesting bugs
+live. Every value's provenance should tell you which rung it stands
+on so downstream code knows how much scrutiny to apply.
+
+## Provenance as data
+
+Same trick as always. Tag the value.
+
+```
+(define (val x source)
+  ;; x     — the raw value (number, string, whatever)
+  ;; source — a symbol naming the well: 'user 'sensor 'net 'computed
+  (list 'val x source))
+
+(define (val-raw v)    (cadr v))
+(define (val-source v) (caddr v))
+
+(val 42 'sensor)
+;; -> (val 42 sensor)
+```
+
+That is minimum viable provenance. In practice you want more.
+
+```
+(define (val* x source detail)
+  (list 'val x source detail))
+
+(val* 42 'sensor '((sensor-id . thermo-3) (read-at . \"2026-07-16T14:00Z\")))
+;; -> (val 42 sensor ((sensor-id . thermo-3) (read-at . \"2026-07-16T14:00Z\")))
+```
+
+The detail can be a nested list of key/value pairs. Motoi lists are
+cheap. There is no wrong shape to put in there as long as it is
+consistent within your program.
+
+## Computed values inherit
+
+When you compute a value from other values, the new value carries the
+*combined* provenance.
+
+```
+(define (val-combine result source-a source-b)
+  (list 'val result 'computed
+        (list ':from source-a ':and source-b)))
+
+(define a (val 100 'user))
+(define b (val 42  'sensor))
+(val-combine (+ (val-raw a) (val-raw b)) a b)
+;; -> (val 142 computed (:from (val 100 user) :and (val 42 sensor)))
+```
+
+The result knows its parents. If somebody asks *why is this 142* the
+answer is *because the user typed 100 and the sensor read 42, at the
+timestamps recorded*.
+
+You can walk that chain. The trail can go five deep. It should not
+usually go a hundred deep — if it does, your program has grown a
+value that touches too much of the world.
+
+## Cortex as the long-term trail
+
+Motoi has a persistent memory called Cortex. Values you want to
+remember beyond the current run go there.
+
+```
+(cortex/remember \"latest-thermo\" (val 42 'sensor))
+;; -> #t
+
+(cortex/recall \"latest-thermo\")
+;; -> (val 42 sensor)
+```
+
+Cortex writes stick. The next process to start up can read them back.
+Appendix D covers Cortex integration for value provenance in more
+detail — including keeping a rolling history so *when* something was
+written is recoverable.
+
+For now: **use Cortex for values whose provenance matters across
+runs.** Don't use Cortex as a general database. It is a *memory*, not
+a table.
+
+## The trust ladder
+
+Once you have provenance you can enforce trust. A function that only
+accepts machine-sourced values can refuse a user-sourced one, and
+vice versa.
+
+```
+(define (temp-from-sensor? v)
+  (and (pair? v)
+       (eq? (car v) 'val)
+       (eq? (val-source v) 'sensor)))
+
+(define (adjust-thermostat v)
+  (if (temp-from-sensor? v)
+      (list 'ok 'adjusting (val-raw v))
+      (list 'refused 'not-sensor-sourced v)))
+
+(adjust-thermostat (val 42 'sensor))
+;; -> (ok adjusting 42)
+
+(adjust-thermostat (val 42 'user))
+;; -> (refused not-sensor-sourced (val 42 user))
+```
+
+That refusal is a shape check with a purpose. A thermostat should not
+adjust because a user typed a number in a form. It should adjust
+because the sensor read a temperature. The provenance says which is
+which.
+
+## Sensor drift and calibration
+
+A sensor is a machine that lies slightly. Every sensor has a *drift*
+— a slow change in its calibration over time. Every sensor has a
+*noise floor* — a smallest change it can distinguish. Every sensor
+has a *range* — outside of which the readings are meaningless.
+
+None of that is in the number the sensor gives you.
+
+Provenance can carry it.
+
+```
+(define (sensor-read raw sensor-id read-at
+                     drift-ppm noise-floor low-limit high-limit)
+  (list 'val raw 'sensor
+        (list ':id sensor-id
+              ':at read-at
+              ':drift-ppm drift-ppm
+              ':noise-floor noise-floor
+              ':range (list low-limit high-limit))))
+
+(sensor-read 421 'thermo-3 \"2026-07-16T14:00Z\"
+             150 0.5 -20 200)
+;; -> (val 421 sensor
+;;      (:id thermo-3
+;;       :at \"2026-07-16T14:00Z\"
+;;       :drift-ppm 150
+;;       :noise-floor 0.5
+;;       :range (-20 200)))
+```
+
+Now any function that consumes this reading can check *is this in
+range*, *is the drift small enough that we trust the calibration*,
+*is the change from the last reading larger than the noise floor*.
+Without provenance the function would just get `421` and would not
+know to check anything.
+
+## Computed loss of precision
+
+Every arithmetic operation on a computed value can lose precision.
+The lost precision is invisible unless you track it.
+
+For financial totals: since we store money as integer minor units
+(Chapter 2), pure addition loses nothing. Subtraction of two positives
+can go negative but is otherwise exact. Multiplication by a scalar is
+exact for integer scalars.
+
+*Division and percentage* are where loss happens, and the receipt
+pattern from Chapter 4 is how you record it.
+
+For sensor values: every read is a re-measurement, and a re-measured
+value is *not* the same value as the previous one, even if the sensor
+happens to return the same integer. That's provenance too — two
+different readings of *the same underlying quantity* are two different
+values with two different provenances.
+
+## Recap
+
+- Every value comes from somewhere. Know which of the four wells.
+- Attach the well to the value: `(val raw source detail)`.
+- Computed values inherit the provenance of their inputs.
+- Cortex is the long-term store for values whose history you must
+  keep across runs.
+- Provenance lets you enforce a trust ladder — functions can accept
+  or refuse based on where a value came from.
+- Sensors have drift, noise floors, and ranges. None of that lives in
+  the reading. It lives in the provenance.
+- Computed loss of precision is invisible unless tracked.
+
+Next: the float trap. Why the previous three chapters kept insisting
+on integer arithmetic.")
+
+(example :ref "ch5-val-ctor"
+         :code "(begin (define (val x s) (list 'val x s)) (val 42 'sensor))"
+         :expected "(val 42 sensor)")
+(example :ref "ch5-val-source"
+         :code "(begin (define (val x s) (list 'val x s)) (define (val-source v) (caddr v)) (val-source (val 42 'sensor)))"
+         :expected "sensor")
+(example :ref "ch5-val-combine"
+         :code "(begin (define (val x s) (list 'val x s)) (define (val-raw v) (cadr v)) (define (val-combine r a b) (list 'val r 'computed (list ':from a ':and b))) (val-combine (+ (val-raw (val 100 'user)) (val-raw (val 42 'sensor))) (val 100 'user) (val 42 'sensor)))"
+         :expected "(val 142 computed (:from (val 100 user) :and (val 42 sensor)))")
+(example :ref "ch5-cortex-write"
+         :code "(cortex/remember \"latest-thermo\" (list 'val 42 'sensor))"
+         :expected #t)
+(example :ref "ch5-cortex-read"
+         :code "(begin (cortex/remember \"latest-thermo\" (list 'val 42 'sensor)) (cortex/recall \"latest-thermo\"))"
+         :expected "(val 42 sensor)")
+(example :ref "ch5-trust-ladder-ok"
+         :code "(begin (define (val x s) (list 'val x s)) (define (val-source v) (caddr v)) (define (from-sensor? v) (and (pair? v) (eq? (car v) 'val) (eq? (val-source v) 'sensor))) (if (from-sensor? (val 42 'sensor)) 'ok 'refused))"
+         :expected "ok")
+(example :ref "ch5-trust-ladder-refuse"
+         :code "(begin (define (val x s) (list 'val x s)) (define (val-source v) (caddr v)) (define (from-sensor? v) (and (pair? v) (eq? (car v) 'val) (eq? (val-source v) 'sensor))) (if (from-sensor? (val 42 'user)) 'ok 'refused))"
+         :expected "refused")

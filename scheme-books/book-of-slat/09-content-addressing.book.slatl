@@ -1,0 +1,230 @@
+;; 09-content-addressing.slat
+;; Book of SLAT — Chapter 9 — Content addressing
+
+(chapter
+  :book             "Book of SLAT"
+  :chapter-number   9
+  :title            "Chapter 9 — Content addressing"
+  :size             6257
+  :sha256           "f2da6a3a9ad3a612"
+  :prose
+"---
+slug: book-of-slat-ch09
+title: Content addressing
+book: slat
+chapter: 9
+of: 16
+part: III
+app: scheme-repl
+palette: book-standard
+canonical: true
+owner: docs-team (Jess)
+status: draft
+last-reviewed: 2026-07-12
+---
+
+# Chapter 9 — Content addressing
+
+Every slat has a fingerprint.
+
+You give the canonical bytes to a hash function. It gives you back a
+short, unique string. That string is the slat's **content ID**.
+
+Two writers producing the same value produce the same canonical bytes,
+so they produce the same content ID. Two writers producing different
+values produce different content IDs. Almost always. Sha256 collision
+probability is stupendously small — one in 2^256, which is more atoms
+than exist in the reachable universe.
+
+## The hash
+
+```motoi-scheme
+(slat-cid '(event :ts 1 :kind \"card.opened\" :by 'motoi))
+```
+
+You get back a base64 string. Sixty-four characters. Same string every
+time you hash the same value.
+
+Different value, different content ID:
+
+```motoi-scheme
+(slat-cid '(event :ts 2 :kind \"card.opened\" :by 'motoi))
+```
+
+The `:ts 2` changes the bytes. The hash changes. You get a different
+content ID.
+
+Same fields, different order — same content ID:
+
+```motoi-scheme
+(define cid-a (slat-cid '(event :ts 1 :kind \"card.opened\")))
+(define cid-b (slat-cid '(event :kind \"card.opened\" :ts 1)))
+(equal? cid-a cid-b)
+```
+
+`#t`. Because canonicalization sorted the keys before hashing.
+
+## Why we care
+
+**Deduplication.** The atom store keys atoms by content ID. If two
+authors write the same atom independently, the store sees one content
+ID and keeps one copy. No manual dedup step.
+
+**Attribution.** When the runtime quotes an atom in an incident narrative,
+she quotes its content ID. Any reader can look up the exact atom she
+meant. The reference is the value.
+
+**Caching.** The reasoning cache keys on content ID. Same input,
+cache hit. Different input, cache miss. No stale results.
+
+**Verification.** The training pipeline verifies each atom's content
+ID before ingest. Any tampered atom shows up immediately — its hash
+doesn't match its filename.
+
+## Embedding the CID
+
+You can embed the CID in the record itself when you want it visible:
+
+```motoi-scheme
+(define event
+  '(event :ts 1 :kind \"card.opened\" :by 'motoi
+          :cid #b64 \"abc123...\"))
+```
+
+The `:cid` field is the hash of everything else. You compute it before
+you write the record, then include it. Consumers verify by rehashing
+the record with the `:cid` field removed.
+
+Not automatic. The reader neither computes nor verifies unless asked.
+Consumers who care compute the CID at write time and check at read
+time.
+
+## Content-addressed atoms in the training corpus
+
+Here's what an atom looks like in the corpus, with its content ID:
+
+```motoi-scheme
+(slat-loads \"
+(atom
+  :id \\\"atm-scheme-lambda-001\\\"
+  :cid #b64 \\\"a4f2b8c9d1e3...\\\"
+  :type 'code
+  :domain 'scheme
+  :weight 1.0
+  :body (lambda (x) (* x x)))\")
+```
+
+The `:id` is the human-facing name. The `:cid` is the machine-facing
+fingerprint. Two atoms with the same body have the same CID even if
+they were named differently. The corpus resolves the duplication.
+
+## Merkle trees over slat sets
+
+When you have a set of slats — a training corpus, a manifest, a
+snapshot of a cortex — you can build a Merkle tree over the content
+IDs.
+
+- **Leaf** = sha256 of the canonical bytes of one slat.
+- **Node** = sha256 of two children concatenated.
+- **Root** = one hash that summarizes the whole set.
+
+Now: if any leaf changes, its parent hash changes, and every ancestor
+up to the root changes. If nothing changes, the root is stable.
+
+That's the Merkle property. Attestation over any number of slats with
+one hash.
+
+## An attestation record
+
+```motoi-scheme
+(slat-loads \"
+(slat-set
+  :root #b64 \\\"root-hash-here\\\"
+  :count 100
+  :hash-algo \\\"sha256\\\"
+  :merkle-scheme \\\"slat-merkle-v1\\\"
+  :signed-by \\\"cortex@lacuna\\\"
+  :signature #b64 \\\"signature-here\\\")\")
+```
+
+The `:root` is the Merkle root over 100 atoms. The `:signed-by`
+identifies the signer. The `:signature` is an ed25519 signature over
+the root plus the metadata.
+
+A consumer receiving this attestation can:
+
+1. Verify the signature (Chapter 10).
+2. Walk the Merkle tree of the atoms.
+3. Confirm the root matches.
+
+If any single atom has been changed, the consumer detects it. If the
+signature is forged, the consumer detects it. If the atoms are
+authentic and the signature is real, the consumer trusts the whole
+corpus.
+
+That's how training corpora ship in Weave-2. That's how the runtime can
+prove — mathematically — that she was trained on exactly what her
+operator authorized.
+
+## Try this
+
+Compute the CID of two records that have the same fields in different
+orders.
+
+```motoi-scheme
+(define a (slat-loads \"(event :ts 1 :kind \\\"card.opened\\\" :by 'motoi)\"))
+(define b (slat-loads \"(event :by 'motoi :ts 1 :kind \\\"card.opened\\\")\"))
+(equal? (slat-cid a) (slat-cid b))
+```
+
+`#t`. Same value, same CID.
+
+Compute the CID of two records with a tiny difference.
+
+```motoi-scheme
+(define a (slat-loads \"(event :ts 1 :kind \\\"card.opened\\\")\"))
+(define b (slat-loads \"(event :ts 2 :kind \\\"card.opened\\\")\"))
+(equal? (slat-cid a) (slat-cid b))
+```
+
+`#f`. Different value, different CID.
+
+Compute the Merkle root over a small set.
+
+```motoi-scheme
+(define atoms
+  (list
+    (slat-loads \"(atom :id \\\"a\\\" :body 1)\")
+    (slat-loads \"(atom :id \\\"b\\\" :body 2)\")
+    (slat-loads \"(atom :id \\\"c\\\" :body 3)\")))
+
+(slat-merkle-root atoms)
+```
+
+You get one hash. Change any atom, get a different hash.
+
+## The content-ID rule
+
+**Same value → same CID. Different value → different CID.**
+
+The whole security story rests on this. If canonicalization is
+correct, the hash is correct. If the hash is correct, the signature
+verifies. If the signature verifies, you can trust the substrate.
+
+## Where next
+
+Chapter 10 walks signing. Now that we have canonical bytes and a
+content ID, we can sign the CID with an ed25519 key. The receiver
+verifies the signature with the public key. If they match, the slat
+is authentic and untampered.
+
+## Cross-links
+
+- [[book-of-self]] Chapter 11 — How I was made, which walks the
+  corpus attestation the runtime verifies before ingest.
+- [[appendix-g]] — signing recipes.
+
+---
+
+Turn the page.
+")

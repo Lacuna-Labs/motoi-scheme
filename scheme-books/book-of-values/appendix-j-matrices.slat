@@ -1,0 +1,401 @@
+;; appendix-j-matrices.slat
+;; Book of Values — Appendix J
+
+(chapter
+  :book              "Book of Values"
+  :chapter-number    "J"
+  :title             "Appendix J — Matrices and Transforms"
+  :audience          :engineer
+  :dialect           "motoi"
+  :book-version      "1.1"
+  :provenance        "book-of-values-expander-2026-07-17"
+  :training-eligible #t
+  :content-rating    :G
+  :prose
+"# Appendix J — Matrices and Transforms
+
+Vectors are one-dimensional bags of numbers. Matrices are two-
+dimensional bags of numbers. In Motoi, both are just lists — but the
+*meaning* is what makes them useful, and the meaning is *how they
+transform other values*.
+
+A matrix is the shape you use to say: *when I multiply this by a
+vector, the vector rotates / scales / shears / projects*. Every
+graphics transform, every neural-net layer, every camera projection,
+every physics simulation is matrices multiplying vectors. Learn this
+once and it shows up everywhere.
+
+The frozen Motoi core does not ship a matrix library. That's fine —
+you can build matrices out of lists in a page of code, and *knowing
+how to build them* is more valuable than knowing which library
+function to call.
+
+## Shape a matrix
+
+A 2×2 matrix is a list of two rows, each a list of two numbers.
+
+```
+(list (list 1 0) (list 0 1))
+;; -> ((1 0) (0 1))
+```
+
+That's the *identity matrix* — the one that doesn't change anything.
+When you multiply it by a vector, the vector comes out unchanged.
+It's the `1` of matrix arithmetic.
+
+Give the shape a name:
+
+```
+(define (mat2 a b c d)
+  (list (list a b) (list c d)))
+
+(mat2 1 0 0 1)
+;; -> ((1 0) (0 1))
+```
+
+Four numbers, laid out as two rows of two. Row-major order.
+
+For a 3×3:
+
+```
+(define (mat3 a b c d e f g h i)
+  (list (list a b c) (list d e f) (list g h i)))
+
+(mat3 1 0 0 0 1 0 0 0 1)
+;; -> ((1 0 0) (0 1 0) (0 0 1))
+```
+
+That's the 3×3 identity. Same idea, more numbers.
+
+DO: name the constructor. `(mat2 1 0 0 1)` is legible.
+DON'T: build raw `(list (list 1 0) (list 0 1))` everywhere — the
+row structure is easy to get wrong.
+WHY: matrix indexing bugs are the worst. Named constructors are a
+one-shot check that the layout is right.
+
+## Multiply a matrix by a vector
+
+The core operation. Given a matrix `M` and a vector `v`, produce a
+new vector `Mv`.
+
+For a 2×2 times a 2-vector:
+
+```
+(define (mat2*vec m v)
+  (list
+    (+ (* (car (car m))  (car v))
+       (* (cadr (car m)) (cadr v)))
+    (+ (* (car (cadr m))  (car v))
+       (* (cadr (cadr m)) (cadr v)))))
+
+(mat2*vec (mat2 1 0 0 1) (list 3 4))
+;; -> (3 4)
+```
+
+Identity times `(3 4)` is `(3 4)`. Good.
+
+Every output component is the *dot product of the matrix row with
+the vector*. Row 1 dot v gives the first output. Row 2 dot v gives
+the second. That's the whole algorithm. The lookup pattern —
+`(car (car m))`, `(cadr (car m))`, and so on — is verbose in
+Scheme; a helper would clean it up, but this is the machinery.
+
+## Scaling matrix
+
+A scaling matrix stretches or shrinks each axis by a constant.
+
+```
+(define (scale-matrix sx sy)
+  (mat2 sx 0
+        0  sy))
+
+(mat2*vec (scale-matrix 2 3) (list 1 1))
+;; -> (2 3)
+```
+
+Point `(1 1)` scaled by `(2 3)` becomes `(2 3)`. X doubled, Y
+tripled. The pattern of zeros off-diagonal is what makes it a pure
+scale — no rotation, no shear.
+
+## Rotation matrix
+
+Rotation is where matrices earn their keep. The 2×2 rotation matrix
+for angle θ (counter-clockwise) is:
+
+```
+[  cos θ  -sin θ ]
+[  sin θ   cos θ ]
+```
+
+In Motoi:
+
+```
+(define (rot-matrix theta)
+  (mat2 (geom/cos theta) (- 0 (geom/sin theta))
+        (geom/sin theta) (geom/cos theta)))
+
+(rot-matrix 0)
+;; -> ((1 0) (0 1))
+```
+
+At θ = 0, no rotation — the identity. Rotate a unit vector by 90°:
+
+```
+(begin
+  (define (mat2*vec m v)
+    (list
+      (+ (* (car (car m))  (car v))
+         (* (cadr (car m)) (cadr v)))
+      (+ (* (car (cadr m))  (car v))
+         (* (cadr (cadr m)) (cadr v)))))
+  (define (rot-matrix theta)
+    (list
+      (list (geom/cos theta) (- 0 (geom/sin theta)))
+      (list (geom/sin theta) (geom/cos theta))))
+  (mat2*vec (rot-matrix (geom/->radians 90)) (list 1 0)))
+;; -> (6.123233995736766e-17 1)
+```
+
+The result is *almost* `(0 1)`. The `6.12e-17` in the x-coordinate
+is *cos(90°)* computed via a Taylor series — the true answer is
+zero, but the float can only get within ~10^-16 of it. Chapter 6
+warned you. For pixel rendering, floor to integer at display time
+and the ghost disappears.
+
+The rotation happened: `(1 0)` turned into `(0 1)`. That is 90°
+counter-clockwise. If you plot it, `(1 0)` points east; `(0 1)`
+points north. Rotation applied.
+
+## Composing transforms
+
+The beautiful part: if you rotate then scale, the composed transform
+is *one matrix* — the product of the two matrices. Multiply the
+matrices once, then apply the product to a million vectors.
+
+Matrix multiplication for 2×2:
+
+```
+(define (mat2*mat2 a b)
+  (mat2
+    (+ (* (car (car a))  (car (car b)))
+       (* (cadr (car a)) (car (cadr b))))
+    (+ (* (car (car a))  (cadr (car b)))
+       (* (cadr (car a)) (cadr (cadr b))))
+    (+ (* (car (cadr a))  (car (car b)))
+       (* (cadr (cadr a)) (car (cadr b))))
+    (+ (* (car (cadr a))  (cadr (car b)))
+       (* (cadr (cadr a)) (cadr (cadr b))))))
+```
+
+Verbose, but each cell of the output is the dot product of a row
+of the left matrix with a column of the right matrix. Try it:
+
+```
+(begin
+  (define (mat2 a b c d) (list (list a b) (list c d)))
+  (define (mat2*mat2 A B)
+    (mat2
+      (+ (* (car (car A))  (car (car B)))
+         (* (cadr (car A)) (car (cadr B))))
+      (+ (* (car (car A))  (cadr (car B)))
+         (* (cadr (car A)) (cadr (cadr B))))
+      (+ (* (car (cadr A))  (car (car B)))
+         (* (cadr (cadr A)) (car (cadr B))))
+      (+ (* (car (cadr A))  (cadr (car B)))
+         (* (cadr (cadr A)) (cadr (cadr B))))))
+  (mat2*mat2 (mat2 1 0 0 1) (mat2 2 0 0 3)))
+;; -> ((2 0) (0 3))
+```
+
+Identity times scale is scale. Good check.
+
+DO: precompute the composed matrix, then apply to your vectors.
+DON'T: apply each transform separately in a loop over many vectors —
+that's the slow path.
+WHY: matrix multiplication is O(n²) once; applying a composed matrix
+to k vectors is O(k·n²) instead of O(k·m·n²) for m transforms.
+
+## The order matters
+
+Matrix multiplication is **not commutative**. `A × B ≠ B × A` in
+general. This is the difference between *rotate then translate* and
+*translate then rotate* — very different results.
+
+For example, rotating around the origin then translating by (10, 0)
+puts the rotated shape at (10, 0). Translating by (10, 0) then
+rotating around the origin puts the shape somewhere on a circle of
+radius 10.
+
+The convention in graphics: read transforms *right to left*. `T × R
+× v` means *first rotate v, then translate the result*. That's
+because `T × R × v = T × (R × v)` — the innermost matrix touches
+the vector first.
+
+DO: memorize this direction.
+DON'T: guess.
+WHY: half the graphics bugs in the world are transforms applied in
+the wrong order.
+
+## Transpose
+
+The transpose of a matrix flips rows and columns. Row 1 becomes
+column 1. This is the operation that undoes a rotation, when the
+matrix is a *rotation matrix* — in that special case, transpose
+equals inverse.
+
+```
+(define (mat2-transpose m)
+  (mat2 (car  (car m))
+        (car  (cadr m))
+        (cadr (car m))
+        (cadr (cadr m))))
+
+(mat2-transpose (mat2 1 2 3 4))
+;; -> ((1 3) (2 4))
+```
+
+Rows and columns swapped. For a rotation matrix, this is how you
+build the inverse:
+
+```
+(begin
+  (define (mat2 a b c d) (list (list a b) (list c d)))
+  (define (rot-matrix theta)
+    (mat2 (geom/cos theta) (- 0 (geom/sin theta))
+          (geom/sin theta) (geom/cos theta)))
+  (define (mat2-transpose m)
+    (mat2 (car (car m))  (car (cadr m))
+          (cadr (car m)) (cadr (cadr m))))
+  (mat2-transpose (rot-matrix (geom/->radians 45))))
+;; -> ((0.7071067811865476 0.7071067811865475) (-0.7071067811865475 0.7071067811865476))
+```
+
+The transpose of `rot(45°)` is `rot(-45°)`. Applying rotation then
+its transpose gets you back to where you started — modulo the float
+ghosts. That's the *orthogonality* property of rotation matrices,
+one of the most useful facts in graphics.
+
+## When to use a matrix vs when not to
+
+Matrices earn their keep when:
+
+- You have *many* vectors to transform the same way. Compose once,
+  apply many times.
+- You have *many transforms* to compose. Multiply them together
+  once, apply the result.
+- The transform is *linear* — sums map to sums, scales map to scales.
+  Rotation, scaling, reflection, shearing, projection are all linear.
+
+Matrices are *overkill* when:
+
+- You have one vector and one transform. Just do the transform
+  directly.
+- The transform isn't linear. Adding a vector `(dx dy)` to a point is
+  a *translation*, and translations are not linear in 2D — they
+  need the *3×3 homogeneous* trick (add a 1 in the third slot of
+  each vector). If you don't need translations composed with
+  rotations, skip the homogeneous coordinates.
+
+DO: use a matrix when you have hundreds of vectors and multiple
+transforms.
+DON'T: reach for a matrix to translate one point by (10, 0). Just
+add a displacement.
+WHY: complexity should match the problem. Matrices are worth their
+weight when the operation count justifies them.
+
+## Tensors, in one paragraph
+
+A vector is a *rank-1 tensor*. A matrix is a *rank-2 tensor*. Rank-3
+tensors show up in neural networks and physics — a cube of numbers,
+indexed by three coordinates. Rank-4 tensors show up in relativity
+and image batches (batch × height × width × channels). Motoi does
+not ship a tensor library. If you need one, wrap Cortex-adjacent
+storage in nested lists and write helpers that respect the shape.
+Same rules as vectors and matrices, one more dimension deep.
+
+## The determinant, in two lines
+
+For 2×2, the *determinant* tells you how much a transform changes
+area. Zero means the matrix squashes everything to a line — no
+inverse.
+
+```
+(define (mat2-det m)
+  (- (* (car (car m))  (cadr (cadr m)))
+     (* (cadr (car m)) (car  (cadr m)))))
+
+(mat2-det (mat2 1 0 0 1))
+;; -> 1
+
+(mat2-det (mat2 2 0 0 3))
+;; -> 6
+
+(mat2-det (mat2 1 2 2 4))
+;; -> 0
+```
+
+Identity has determinant 1 (no area change). Scale by (2, 3) has
+determinant 6 (area multiplied by 6). The last matrix is *singular*
+— its rows are linearly dependent (row 2 = 2× row 1), so it
+projects everything onto a line. No inverse exists.
+
+DO: check the determinant before inverting a matrix.
+DON'T: divide by zero.
+WHY: a singular matrix has no inverse. Some algorithms silently
+return garbage rather than erroring.
+
+## Recap
+
+- A matrix is a list of rows of numbers. In Motoi, `((a b) (c d))`
+  is a 2×2.
+- Matrix times vector: dot each row with the vector.
+- Rotation, scaling, and shear are linear transforms — matrices.
+  Translation is not linear; use homogeneous coordinates if you
+  need to compose it with rotations.
+- Matrix × matrix is not commutative. Order matters.
+- Read transforms right to left: `T × R × v` = rotate then translate.
+- Transpose = inverse *for rotations*, in general only for orthogonal
+  matrices.
+- The determinant tells you the area scaling factor. Zero means
+  singular — no inverse.
+
+Next: geometry values — points, lines, circles, polygons.")
+
+(example :ref "app-j-identity-2x2"
+         :code "(list (list 1 0) (list 0 1))"
+         :expected "((1 0) (0 1))")
+(example :ref "app-j-mat2-constructor"
+         :code "(begin (define (mat2 a b c d) (list (list a b) (list c d))) (mat2 1 0 0 1))"
+         :expected "((1 0) (0 1))")
+(example :ref "app-j-identity-3x3"
+         :code "(begin (define (mat3 a b c d e f g h i) (list (list a b c) (list d e f) (list g h i))) (mat3 1 0 0 0 1 0 0 0 1))"
+         :expected "((1 0 0) (0 1 0) (0 0 1))")
+(example :ref "app-j-mv-identity"
+         :code "(begin (define (mat2 a b c d) (list (list a b) (list c d))) (define (mv m v) (list (+ (* (car (car m)) (car v)) (* (cadr (car m)) (cadr v))) (+ (* (car (cadr m)) (car v)) (* (cadr (cadr m)) (cadr v))))) (mv (mat2 1 0 0 1) (list 3 4)))"
+         :expected "(3 4)")
+(example :ref "app-j-mv-scale"
+         :code "(begin (define (mat2 a b c d) (list (list a b) (list c d))) (define (mv m v) (list (+ (* (car (car m)) (car v)) (* (cadr (car m)) (cadr v))) (+ (* (car (cadr m)) (car v)) (* (cadr (cadr m)) (cadr v))))) (mv (mat2 2 0 0 3) (list 1 1)))"
+         :expected "(2 3)")
+(example :ref "app-j-rot-identity"
+         :code "(begin (define (mat2 a b c d) (list (list a b) (list c d))) (define (rot theta) (mat2 (geom/cos theta) (- 0 (geom/sin theta)) (geom/sin theta) (geom/cos theta))) (rot 0))"
+         :expected "((1 0) (0 1))")
+(example :ref "app-j-rot-90-unit-x"
+         :code "(begin (define (mv m v) (list (+ (* (car (car m)) (car v)) (* (cadr (car m)) (cadr v))) (+ (* (car (cadr m)) (car v)) (* (cadr (cadr m)) (cadr v))))) (define (rot theta) (list (list (geom/cos theta) (- 0 (geom/sin theta))) (list (geom/sin theta) (geom/cos theta)))) (mv (rot (geom/->radians 90)) (list 1 0)))"
+         :expected "(6.123233995736766e-17 1)"
+         :teaching "cos(90°) is not exactly 0 — it's a float ghost of order 10^-17. Floor to int at pixel time.")
+(example :ref "app-j-mm-identity-scale"
+         :code "(begin (define (mat2 a b c d) (list (list a b) (list c d))) (define (mm A B) (mat2 (+ (* (car (car A)) (car (car B))) (* (cadr (car A)) (car (cadr B)))) (+ (* (car (car A)) (cadr (car B))) (* (cadr (car A)) (cadr (cadr B)))) (+ (* (car (cadr A)) (car (car B))) (* (cadr (cadr A)) (car (cadr B)))) (+ (* (car (cadr A)) (cadr (car B))) (* (cadr (cadr A)) (cadr (cadr B)))))) (mm (mat2 1 0 0 1) (mat2 2 0 0 3)))"
+         :expected "((2 0) (0 3))")
+(example :ref "app-j-transpose"
+         :code "(begin (define (mat2 a b c d) (list (list a b) (list c d))) (define (tp m) (mat2 (car (car m)) (car (cadr m)) (cadr (car m)) (cadr (cadr m)))) (tp (mat2 1 2 3 4)))"
+         :expected "((1 3) (2 4))")
+(example :ref "app-j-det-identity"
+         :code "(begin (define (mat2 a b c d) (list (list a b) (list c d))) (define (det m) (- (* (car (car m)) (cadr (cadr m))) (* (cadr (car m)) (car (cadr m))))) (det (mat2 1 0 0 1)))"
+         :expected 1)
+(example :ref "app-j-det-scale"
+         :code "(begin (define (mat2 a b c d) (list (list a b) (list c d))) (define (det m) (- (* (car (car m)) (cadr (cadr m))) (* (cadr (car m)) (car (cadr m))))) (det (mat2 2 0 0 3)))"
+         :expected 6)
+(example :ref "app-j-det-singular"
+         :code "(begin (define (mat2 a b c d) (list (list a b) (list c d))) (define (det m) (- (* (car (car m)) (cadr (cadr m))) (* (cadr (car m)) (car (cadr m))))) (det (mat2 1 2 2 4)))"
+         :expected 0
+         :teaching "Determinant 0 means the matrix is singular — no inverse.")

@@ -1,0 +1,751 @@
+(chapter
+  :book "Book of Introspection"
+  :chapter-number 1
+  :title "What is introspection — programs that can look inside themselves"
+  :audience "programmer-learning-motoi"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-of-introspection-author-agent"
+     :sources ("src/introspect.js" "src/repl.js" "src/verbRegistry.js"))
+  :prose
+"# Chapter 1 — What is introspection
+
+A program that only computes is a black box. You put input in, you take output out, and everything between is invisible. Most programs are shaped this way. Most languages are content to leave them shaped this way. You get an answer or you get an error, and if the error is opaque you go read the source in a text editor and hope you find the line.
+
+Motoi is not shaped this way.
+
+Every verb in Motoi carries its own documentation. Every value has a runtime type you can ask about. Every macro can be expanded and inspected. Every environment can be enumerated. The reader itself is a verb you can call on a string. The registry that holds all the verbs is a value you can iterate. Errors are records with fields, not strings you regex. Even the persistent memory the program accretes across runs — Cortex — has a query verb that returns records with provenance stamped in.
+
+Put all of that together and you have a language where the workshop has a window. If you want to know what a verb does, you ask the verb. If you want to know what shape a value has, you ask the value. If you want to know what your program remembers, you ask the memory. The tools do not live in a separate IDE or a separate documentation site — they live in the language itself, as verbs, callable from any prompt.
+
+That capacity is called introspection. This book is the guided tour.
+
+## 1.1 Why this matters
+
+Introspection sounds like a feature. It is closer to a stance.
+
+A language that supports introspection is telling you *you are allowed to know*. It is refusing the priesthood model where the language implementers know the shape of the language and the users guess at it from a manual. It is saying that the manual is not enough — the shape has to be visible from inside the language, live, so a programmer at three in the morning who cannot find the docs can still ask `(help 'the-verb-i-am-trying-to-remember)` and get the shape back on stdout.
+
+The stance costs the language something. Every verb has to carry metadata. Every value has to carry a runtime type marker. Every macro has to survive expansion in a way you can inspect. Every error has to be a record, not a string. The runtime has to spend cycles on all of it.
+
+Motoi pays that cost willingly. The kid who is going to grow up on this language is going to spend more time asking the language questions than reading external documentation. The pro who is going to ship a cart on top of this language is going to spend more time inspecting a cart's shape than writing a design doc for it. Introspection is not a luxury. It is the surface where the language meets the human, and if the surface is thin the language is thin.
+
+## 1.2 Seven surfaces
+
+Let me lay out the seven surfaces this book will walk through. Each is a chapter or two. Each is composed of verbs. Each answers a different flavor of question you can ask about a program.
+
+**Verb metadata.** Every registered verb has a record: name, doc, contract, arity, examples, source, namespace, tier, perm, since. Chapters 2 and 4 walk the fields. Chapter 3 shows how you get at them.
+
+**Value shape.** Every value has a type you can ask about with `type-of`, a length or key-set you can enumerate with `length` or `keys`, and a describe-like verb that gives you a paragraph. Chapter 3 covers this.
+
+**Environments and closures.** A binding is a name pointing at a value inside a frame. A closure is a lambda plus the frames it captured. Chapter 5 shows how to walk them.
+
+**Macros.** A macro is source-in-source-out. Before evaluation the compiler rewrites forms according to macro definitions. Chapter 6 shows how to see the rewrite.
+
+**The reader.** Between source characters and forms there is a reader that tokenizes and parses. Chapter 7 shows how to call the reader from Scheme and how to read source-position metadata.
+
+**Errors and traces.** Errors are records. Traces are logs of value-flow. Chapters 8 and 9 show how to read them.
+
+**Cortex and registry.** Persistent memory and the verb table are both queryable data structures. Chapters 10 and 11 show how to ask them questions.
+
+Chapters 12 through 16 layer on: search (12), LLM-augmented introspection (13), composer round-trip (14), performance measurement (15), and the safety limits on all of the above (16). Then eight appendices cover the sharper details.
+
+That is the map. Everything from here is filling in the map.
+
+## 1.3 The first two verbs
+
+Every book starts with a first example. Here is Motoi's.
+
+```scheme
+(help 'car)
+```
+
+Type that at the REPL. You get back a record. Something like this:
+
+```scheme
+((name . \"car\")
+ (doc . \"Return the first element of a pair.\")
+ (contract . \"(pair) -> any\")
+ (arity . 1)
+ (examples . ((novice \"(car '(1 2 3))\") (intermediate \"(car (cdr '(1 2 3)))\")))
+ (namespace . \"base\")
+ (tier . \"core\")
+ (perm . \"read\")
+ (atom . null)
+ (source . \"src/base.js:73\")
+ (since . \"1.0\"))
+```
+
+Read the record. Every field is a fact about `car`. The doc tells you what it does. The contract tells you what shapes go in and out. The arity tells you how many arguments. The examples are runnable. The source tells you where to look if you want the implementation. The tier and perm tell you how privileged the verb is. The since tells you when it landed.
+
+Now the second:
+
+```scheme
+(describe 'car)
+```
+
+This returns a paragraph instead of a record. Something like:
+
+```
+car [base] — arity 1
+Return the first element of a pair.
+```
+
+Same information, different shape. `help` is for programs; `describe` is for humans. Both read from the same underlying record. Chapter 3 unpacks the difference.
+
+The important thing to notice is that you did not need to leave the REPL, open a browser tab, load a documentation site, and grep for the verb. You typed a verb. You got the answer. That is the promise of the introspection layer.
+
+## 1.4 Everything is a verb
+
+There is a slogan that will repeat through this book: *everything is a verb.*
+
+It is not a slogan for its own sake. It is a design constraint. Every introspection capability Motoi exposes is exposed as a verb — a callable Scheme procedure that takes arguments and returns a value. Not a REPL-only command. Not a UI-only feature. A verb.
+
+Why does this matter? Because verbs compose. Because verbs are callable from scripts. Because verbs can be handed to macros, saved to Cortex, exposed through the composer, and rendered on any surface the runtime speaks — terminal, web, phone, voice.
+
+Take the REPL meta-command `,help card/open`. It is a nice shortcut for the terminal. But `,help` is not the real thing. The real thing is `(help 'card/open)` — the Scheme verb. The meta-command is a one-line wrapper that calls the verb and prints the result. Chapter 4 shows the wrapping. Appendix C shows you how to write your own meta-command that wraps a verb of your choosing.
+
+This matters more than it might sound like. In a language where the introspection layer is IDE-only, the IDE is the language's window. Change IDEs and you lose the window. In Motoi the window is the verbs. You can move between a terminal on a Raspberry Pi, a browser on a Chromebook, a phone on the bus, and a voice interface in your kitchen, and the introspection verbs work the same way in every one. The surface renders the results differently. The verbs are the same.
+
+This is worth internalizing early because every chapter here uses the same trick. When you see `,type foo` in the REPL you are seeing sugar for `(type-of foo)`. When you see `,expand form` you are seeing sugar for `(macroexpand form)`. When Chapter 13 introduces `,ask what-is-a-hash-map` you are seeing sugar for `(what-is 'hash-map)`. The sugar is friendly. The verbs are load-bearing.
+
+## 1.5 Read-only by default
+
+There is a second slogan: *introspection does not mutate.*
+
+Every verb in this book returns data. None of them change state. `(help 'car)` does not modify `car`. `(macroexpand form)` does not modify `form`. `(cortex/query :predicate 'preferred-color)` does not modify the Cortex records it returns.
+
+This matters for two reasons.
+
+First, it is safe. You can introspect a live program without disturbing it. You can walk a stranger's cart's env without breaking their game. You can enumerate every verb in a runtime without leaving side effects. The perm tier for every verb in this book is `read` — the mildest tier Motoi has.
+
+Second, it composes. A verb that returns data can be piped into another verb that consumes data. `(rewrite (fix (last-error)) :goal 'idiomatic)` reads left to right because every verb produces the input to the next. If any of them mutated, the pipeline would be a minefield. Because they do not, the pipeline is a Lego kit.
+
+Chapter 16 will discuss the safety implications more carefully — what perm boundaries the sandbox enforces on introspection verbs, what a runtime might redact, what a cart author might mark as never-introspectable. For now the rule is simple: the introspection surface reads. It does not write.
+
+## 1.6 Grounded, not hallucinated
+
+Motoi has an LLM-augmented layer (Chapter 13) that introduces verbs like `what-is`, `explain`, `reason-about`. These verbs go beyond mechanical introspection and let you ask a peer verb in prose. That capacity is powerful and dangerous — powerful because it can answer questions the registry cannot, dangerous because a language model can invent facts.
+
+Motoi's introspection layer is designed to keep the two apart.
+
+When you ask `(help 'car)`, you get facts from the registry. If the registry does not know the verb, the return is `nil`. There is no guess. There is no fabrication.
+
+When you ask `(what-is 'car)`, the LLM-augmented verb first checks the registry. If the registry knows the verb, the LLM does not invent — it returns the registry's record with maybe a prose sentence added. Only when the registry does not know does the LLM produce a guess, and when it does the return value carries a `:confidence` field so you can tell the mechanical answer from the model's opinion.
+
+This is the *grounded, not hallucinated* principle. Every LLM-augmented verb bottoms out in a mechanical introspection verb when it can. Only when the mechanical layer runs out does the model get to speculate, and even then the model is honest about the speculation. Chapter 13 walks the family.
+
+For Chapters 2 through 12 the LLM is not in the picture at all. Everything is grounded. Everything is deterministic. Everything is `help`, `describe`, `type-of`, `macroexpand`, `cortex/query`, and their friends.
+
+## 1.7 A tour in six calls
+
+Before we go deep, let me show you six things you can do right now with introspection. Each is a single verb call. Each returns data. Each answers a question.
+
+**How do I use a verb I do not remember?**
+
+```scheme
+(help 'map)
+```
+
+Get back the doc, arity, contract, and examples for `map`. If you want just the doc:
+
+```scheme
+(doc-of 'map)
+```
+
+If you want just the examples:
+
+```scheme
+(examples-of 'map)
+```
+
+**What is this thing in my hand?**
+
+```scheme
+(define x (list 1 2 3))
+(type-of x)          ;; => list
+(length x)           ;; => 3
+```
+
+**Which verbs might do what I want?**
+
+```scheme
+(apropos \"map\")
+;; => (map for-each fold-map hash-map ...)
+```
+
+**How did this macro expand?**
+
+```scheme
+(macroexpand '(when (> x 0) (display x) (newline)))
+;; => (if (> x 0) (begin (display x) (newline)))
+```
+
+**What has the program recorded about the user?**
+
+```scheme
+(cortex/query :subject 'user :predicate 'preferred-color)
+;; => ((user preferred-color red 1720000000 ui-click))
+```
+
+**Where does this verb live in source?**
+
+```scheme
+(source-of 'car)
+;; => \"src/base.js:73\"
+```
+
+Six calls. Six answers. No IDE. No documentation site. No trip to a browser tab. The language is answering questions about itself.
+
+If you internalize the flavor of those six calls you have the flavor of the whole book. Everything else is depth, breadth, and combinations.
+
+## 1.8 Motoi is small enough to walk
+
+There is a reason introspection works this well in Motoi. The language is small.
+
+Motoi has on the order of a thousand verbs in its base and extended libraries. That sounds like a lot until you realize a modern language ecosystem has ten thousand npm packages installed on your average machine, each of which has its own verb space, none of which are documented in one place. Motoi's thousand verbs are in one registry, with one metadata shape, with one help verb that returns the same record for any of them.
+
+A programmer who spends a week with Motoi can hold most of the verb space in their head. A programmer who spends a month can hold the full space plus the pattern of composition. A kid who spends a summer can build a cart from scratch and understand every verb inside it.
+
+That size is a design choice. It is why the reference manual is one file. It is why the registry is one map. It is why `apropos` over the entire language returns a list you can read in a scroll. It is why introspection is realistic — because the surface is small enough to fit in the shape of a thousand records and no more.
+
+If you come from a language where the runtime is a hundred thousand classes and no one person knows them all, this will feel like a different world. It is. Introspection works here because the world is walkable.
+
+## 1.9 What introspection is not
+
+Let me clear away three things introspection is not, so we do not confuse them later.
+
+**Introspection is not stepping.** A debugger's step-through is a related capability — pause execution, look at state, resume. Motoi has some of that (Chapter 9's `,trace` and the LLM-augmented `step` verb from Chapter 13). But most of what this book calls introspection is not about pausing time. It is about asking questions of already-computed values, already-registered verbs, already-defined bindings. A snapshot, not a movie.
+
+**Introspection is not source-reading.** You can always open `src/base.js` and read the implementation of `car`. That is a valid thing to do. But if `source-of` returns `\"src/base.js:73\"` and you have a hundred namespaces to skim, source-reading does not scale. Introspection returns metadata *about* the source without making you read the source. The two are complements.
+
+**Introspection is not typechecking.** A typechecker refuses to run your program if the types are wrong. Motoi's `type-of` runs on a value; it does not refuse the program. `contract` is a docstring, not an enforced signature. Motoi is dynamically typed and does not gate execution on types. If you want a stricter regime, wrap contracts in a checker (Chapter 8 shows how). Otherwise the type layer is descriptive, not prescriptive.
+
+Keep these distinctions in your pocket. They will save you from expecting the wrong thing from the wrong verb.
+
+## 1.10 The audience question
+
+Who is this book for?
+
+For the programmer who wants to know what their language will answer when they ask. For the debugger who is tired of stack traces that hide the actual value. For the teacher who wants to point at a verb and say *ask it what it does*. For the kid who does not want to install a plugin. For the LLM training corpus that needs concrete grounded examples of every introspection verb Motoi offers.
+
+If you can type at a REPL, you can read this book. Chapters 2 through 4 do not assume anything beyond basic Scheme literacy. Chapters 5 through 7 assume you know what a closure is; if you do not, skim Book of Jesse's early chapters first. Chapters 8 onward assume you have written at least one Motoi program and hit at least one error you did not understand.
+
+Every chapter has examples. Every example is short. Every example was verified against `src/introspect.js` and the REPL meta-command dispatch table before the chapter shipped. If a verb changes name between the writing and your reading, the reference manual is authoritative and the book is a snapshot.
+
+## 1.11 What comes next
+
+Chapter 2 opens the metadata record and walks each field. If you only remember one chapter it should be that one — the record shape is the alphabet the rest of the book will spell in.
+
+Chapter 3 shows how to reach the fields. `describe`, `type-of`, and their family are the shortest path from a question to an answer.
+
+Chapter 4 splits the record into three specialized retrievals: doc, source, and examples. Each one is worth its own habit.
+
+Chapters 5 through 7 dig into the runtime layers most programmers never see: environments, macros, and the reader. These chapters are the difference between a programmer who uses Motoi and a programmer who understands Motoi.
+
+Chapter 8 turns errors into data. Chapter 9 turns evaluation into a log. Chapter 10 turns memory into a queryable graph. Chapter 11 turns the verb table itself into a value you can walk.
+
+Chapter 12 makes search efficient. Chapter 13 opens the LLM-augmented layer, cautiously and honestly.
+
+Chapter 14 shows the composer, where introspection stops being a query and becomes a live rendering. Chapter 15 measures. Chapter 16 draws the safety lines.
+
+Eight appendices then cover reference schema (A), a printable cheat-sheet (B), a hand-rolled `,help` (C), boundary values from foreign systems (D), reader-time metaprogramming (E), teaching patterns (F), debugging recipes (G), and an interactive composer demo (H).
+
+That is the arc. It is long because the surface is real. Introspection is not a single verb. It is a way of relating to your own program. This book is the map.
+
+## 1.12 Try it now
+
+Before you turn the page: open a Motoi REPL. Type these five things:
+
+```scheme
+(help 'car)
+(describe 'map)
+(type-of 42)
+(apropos \"list\")
+(macroexpand '(when #t (display \"hi\")))
+```
+
+Read each answer. Do not skip. You will not remember what a verb returns unless your fingers touched the return value. If any answer looks strange, do not worry — the strangeness is the beginning of a question, and every chapter after this one is a way to answer questions like that.
+
+Turn the page. Chapter 2 opens the record.
+
+## 1.13 The shape of a question
+
+Before we leave this chapter, let me put a magnifying glass on something that will otherwise slip past you. Every introspection call is a question with a specific shape. Understanding the shape makes the whole surface predictable.
+
+An introspection question in Motoi has three parts.
+
+First, the target. A verb name, a value, a form, a symbol, a filename. The thing you are asking about.
+
+Second, the projection. Which facet of the target do you want to see? The whole record? Just the doc? Just the source? Just the arity? Motoi has a verb for the whole record (`help`) and separate verbs for common projections (`doc-of`, `source-of`, `arity-of`, `type-of`). You pick the projection based on what you need.
+
+Third, the return. Every introspection verb returns data. A record, a list, a string, a number, a symbol. Never a promise, never a side effect, never a print-and-return-nothing. The return is a value you can pass to the next verb, save to Cortex, hand to a macro, or render on any surface.
+
+Once you see this shape you will start writing your own tiny introspection utilities without thinking about it. A verb that returns the list of all verbs whose name starts with `card/`? That is `(filter (lambda (n) (string-prefix? \"card/\" n)) (map car (snapshot-registry)))`. A verb that returns the average arity of all verbs in a namespace? Same shape, different projection. The introspection surface is a Lego kit; the question shape is how you fit the bricks.
+
+## 1.14 A short history
+
+Introspection is not new. Lisp had it in the 1960s. Smalltalk built its whole culture around it in the 1970s. Prolog gave you a query language over your own program in the 1980s. Java added reflection in the 1990s. Ruby has `respond_to?` and `method_missing` and `ObjectSpace`. Python has `dir()` and `inspect` and `type()`. Every serious language has some story here.
+
+What Motoi does differently is not the existence of the introspection layer — it is the *shape*. The layer is uniform. Every verb has the same record shape. Every value has the same type-of interface. Every macro has the same expansion protocol. Every error has the same field set.
+
+Uniformity is the payoff. In Java the reflection API is a separate world from the compiler, with its own idioms and its own performance profile. In Python the `inspect` module and `dir()` and `type()` are three different mental models for what should be one question. In Motoi the introspection surface is verbs like every other surface. No new mental model. No performance surprise. No import statement.
+
+That uniformity is what makes it teachable. That teachability is why this book is worth writing.
+
+## 1.15 Introspection is a training signal
+
+One more thing worth saying up front, because it will not come up again for many chapters.
+
+Motoi Copilot — the small model that assists a Motoi programmer — was trained on this book, among others. When the model answers a question about a verb, its answer comes from having read this exact prose. When it suggests a `(help ...)` call in the middle of debugging, it is because the pattern was repeated dozens of times across chapters like this one.
+
+That is not incidental. Introspection verbs are the pattern the model must learn to imitate. A model that reflexively reaches for `(help 'foo)` before guessing at `foo`'s behavior is a model that will not hallucinate. A model that reaches for `(cortex/query ...)` before making up what the program remembers is a model that will not confabulate. A model that reaches for `(macroexpand form)` before guessing at what a macro does is a model that will actually see what the macro does.
+
+You are reading a book. The model that will one day help you was also reading this book. Every chapter is teaching both of you the same reflex. When in doubt, ask the verb.
+
+## 1.16 A note on style
+
+This book is written by Motoi Copilot's voice. Direct, warm, technical, willing to have fun with a joke here and there, but never at the expense of clarity.
+
+You will not see philosopher name-drops. That is Sakura's dialect, not Motoi's. You will not see corporate names except where they name a real language for comparison. You will not see em-dashes in the middle of sentences; long dashes are Sakura's rhythmic device, not Motoi's. Where Motoi wants a break, Motoi uses a period.
+
+You will see runnable code in every chapter. Every code example was tested against `src/introspect.js`, `src/repl.js`, and `src/verbRegistry.js` at authoring time. If a verb name looks unfamiliar, check the reference manual; the reference is authoritative and the book is a snapshot.
+
+You will see the same verb explained more than once. That is deliberate. A concept read once is a fact; a concept read three times in three contexts is a habit.
+
+Now turn the page.
+
+## 1.17 An honest inventory of what you can ask
+
+Since the seven-surfaces list was compact, let me give you the expanded inventory. Below is a partial list of the questions you can put to Motoi's introspection layer. Not the syntax — just the questions, in English. Each will be answered by a verb, in a later chapter.
+
+- What does this verb do?
+- What arguments does this verb take?
+- How many arguments does this verb take?
+- What is the contract on this verb — what shape in, what shape out?
+- What tier of privilege does this verb require to run?
+- What perm bucket does this verb belong to — read, paint, animate, state-change, financial?
+- What namespace does this verb live in?
+- Which module registered this verb?
+- Since which version has this verb existed?
+- Where in source is this verb implemented?
+- What are the tiered examples — novice, intermediate, expert?
+- What is another verb that does something similar to this one?
+- Which verbs match this regex?
+- Which verbs are in this namespace?
+- What is the runtime type of this value?
+- What is the length of this list?
+- What are the keys of this hash?
+- What are the values of this hash?
+- What is the shape of this record — which fields does it have?
+- What is the outer form this macro expands to?
+- What is the fully expanded form after all macros have run?
+- What was the source position — filename, line, column — of this form?
+- What comments were attached to this form when it was read?
+- What is the last error that was raised in this session?
+- What are the fields of an error record?
+- What is the stack trace inside the error, in structured form?
+- What did this trace-enabled verb do in its last call?
+- What does the watch-list re-evaluate on every prompt?
+- What has Cortex recorded about this subject?
+- What has Cortex recorded with this predicate?
+- What is the provenance chain on this Cortex record?
+- What are all the verbs in the registry right now?
+- What is the total count of verbs in each namespace?
+- What percentage of registered verbs have documentation?
+- How much wall time did this expression take?
+- How much fuel did this expression burn?
+- How much memory was allocated during this expression?
+- What is this verb's permission tier?
+- Is this value marked never-introspectable?
+- What canvas is the composer currently rendering?
+- What form does this canvas emit right now?
+- What widget in this canvas is bound to this path?
+- What was the round-trip test on this canvas?
+
+That is roughly forty questions. Every one has a verb behind it. Some are covered in Chapter 2, some in Chapter 15, some in Appendix E. But every one of them is answerable from a Motoi REPL without leaving the REPL.
+
+If a language you have used before gave you three of these forty, Motoi's introspection surface is going to feel enormous. Take it a chapter at a time.
+
+## 1.18 What to do if a verb does not exist
+
+Sooner or later you will type a question and get `nil` back.
+
+```scheme
+(help 'card/open)
+;; => nil
+```
+
+This means the registry does not know a verb named `card/open`. Three possibilities.
+
+**Possibility one: you spelled it wrong.** `apropos` is your friend. `(apropos \"card\")` returns every verb whose name contains `card`. Read the list; the right verb may be a typo away.
+
+**Possibility two: the verb lives in a namespace you have not loaded.** Motoi loads its base at REPL start. Extended libraries live under `lib/` and may need explicit loading. `,namespace card` in the REPL tells you which card-namespace verbs are currently registered; if the list is empty, the card library has not been loaded.
+
+**Possibility three: the verb does not exist.** Not in Motoi. Maybe in Sakura. Maybe in a fork. Maybe in your imagination. Motoi's registry is small enough that a `nil` return is a real signal, not a false negative. Take it at face value and ask a different question.
+
+Later chapters will show `did-you-mean` (LLM-augmented, Chapter 13) and `apropos` (Chapter 12) as more sophisticated recovery paths. For now: `nil` is honest, and `apropos` is one call away.
+
+## 1.19 The teaching promise
+
+Every book of this shape makes a teaching promise. Here is Motoi's.
+
+By the end of Chapter 4 you will be able to look at any verb you have never seen before and, without leaving the REPL, know what it does, what it takes, what it returns, and how to try it. That is a real skill. It is the difference between a programmer who is fluent in a language and a programmer who is a tourist in a language.
+
+By the end of Chapter 7 you will be able to see under the hood — to watch a macro expand, to see the reader parse, to walk an environment. That is the second promise. It is the difference between using a language and understanding it.
+
+By the end of Chapter 12 you will be able to explore a codebase you have never opened by asking the language questions about it. Not by reading source. By asking the registry. That is the third promise, and it changes what a codebase looks like as a place to work.
+
+By the end of Chapter 16 you will know how far the introspection layer goes and where it stops. What Motoi will show you, what it will not, and why. That is the last promise. It is honesty about the surface.
+
+Four promises. Sixteen chapters. Eight appendices. One book.
+
+Turn the page.
+
+## 1.20 Introspection as a workflow
+
+I have talked about introspection as a set of verbs. Let me talk about it as a workflow.
+
+A Motoi session might go like this. You sit down. You have a task. Maybe you are writing a small cart to track how many minutes of daylight your window gets. You know Motoi has a fantasy console, and you know Cortex is available for persistent memory. You do not remember the exact verb names.
+
+First move. Ask the language what it has.
+
+```scheme
+(apropos \"time\")
+;; => (current-time current-second time-of clock->hms hms->clock ...)
+```
+
+You see `current-second`. That looks right. What does it do?
+
+```scheme
+(describe 'current-second)
+;; current-second [base] — arity 0
+;; Return the current Unix timestamp in seconds, as an integer.
+```
+
+Perfect. What about writing to Cortex?
+
+```scheme
+(apropos \"cortex\")
+;; => (cortex/read cortex/write cortex/record cortex/query cortex/remember cortex/recall)
+```
+
+You want `cortex/record` for structured facts. Ask.
+
+```scheme
+(help 'cortex/record)
+```
+
+You get the record back — the doc, the contract, the examples. You copy the intermediate example, paste it into your buffer, edit the predicate to `daylight-minutes`, and you are off.
+
+Notice what did not happen. You did not open a browser. You did not scroll through a docs site. You did not context-switch out of the REPL. Every question was a verb; every answer was on stdout.
+
+Now scale that up. A cart of a hundred lines might involve fifty verbs from six namespaces. If every verb needed a docs-site lookup, the cart would take an hour. If every verb is one `(help ...)` away, the cart takes fifteen minutes. Introspection is not just a debugging tool. It is a productivity tool. It changes the rhythm of writing code.
+
+## 1.21 Introspection as documentation
+
+Here is a subtler consequence. In Motoi the introspection layer *is* the documentation.
+
+When you write a verb and register it, you fill in the doc string, the contract, the examples, the source location. Those fields are what `help` returns. Those fields are what the reference manual is generated from. Those fields are what the LLM was trained on. There is not a separate documentation project — no README, no wiki, no docstring-scraper. The metadata *is* the documentation.
+
+This is a discipline. Every author of every verb has to fill in the metadata. If they do not, the introspection layer returns `(no doc)` and the reference manual gains a hole. The registry validation step (`validateRegistry` in `src/verbRegistry.js`) enforces the perm tier declaration; there is not yet a strict check on doc-string presence, but the culture is that a verb without a doc is a verb that has not shipped.
+
+The upside of the discipline is that the manual never falls behind. If the manual is generated from the registry, and the registry is populated at load time, the manual is by construction as current as the code. There is no drift.
+
+This will matter more than it sounds like when you start reading other people's carts. Every verb in a stranger's cart is queryable the same way. You do not need the cart author's website. You do not need their tutorial video. You need their `(help 'foo)` and yours works the same way.
+
+## 1.22 The five habits
+
+If you take away nothing else from this chapter, take the five habits.
+
+**Habit one: ask before guessing.** Before you look up a verb online, look it up in the REPL. `(help 'the-verb)` is faster than any browser tab.
+
+**Habit two: describe before assuming.** Before you assume a value's shape, run `(type-of value)` and `(length value)` and see. Assumptions are how bugs move in.
+
+**Habit three: expand before debugging.** Before you debug a macro use, expand it. `(macroexpand form)` is often the whole answer.
+
+**Habit four: query before scrolling.** Before you scroll a log, query it. `,apropos` over the registry, `cortex/query` over memory, `filter` over the trace log.
+
+**Habit five: introspect before fixing.** Before you rewrite code that broke, introspect the error record. `(last-error)` returns a record; the record has fields; the fields will tell you where and why.
+
+These five habits will save you more time than any other five habits in Motoi. They are all one verb call away.
+
+## 1.23 A closing observation
+
+The reason introspection matters, when it comes down to it, is that computing is a conversation.
+
+You do not write a program in one go and then run it. You write, run, see what happens, adjust, run, see what happens, adjust. Every loop of that conversation is a chance to learn something about the language, the runtime, the value, the shape of what you are building. Every question you can ask about the state is a question the language can help you answer instead of you having to reason it out from scratch.
+
+A language with rich introspection is a language that talks back. A language with thin introspection is a language you have to interrogate through a keyhole.
+
+Motoi wants to talk back.
+
+That is the whole book. Everything from Chapter 2 onward is the language teaching you how to hear what it has to say.
+
+Turn the page.
+
+## 1.24 A day in the life of an introspection reflex
+
+Let me walk through a concrete day. Not a designed example. A day.
+
+Morning. You open a Motoi REPL. You want to remember how yesterday's cart handled its color palette. You do not need to reopen the cart file — you can query.
+
+```scheme
+(cortex/query :subject 'cart :predicate 'palette-used)
+```
+
+Cortex returns the records. Three colors. You know what you were working with. Two lines and you have the context you left with yesterday.
+
+Now you want to add a fourth color. But you cannot remember whether Motoi's color verb takes RGB triples or hex strings. Ask.
+
+```scheme
+(help 'color)
+```
+
+The record shows the contract. `(color r g b [a]) -> color-value` or `(color/from-hex string) -> color-value`. Two entry points; you pick the one that matches your data.
+
+You write the new color into the palette. You want to see what the palette looks like. There is a describe verb for palettes; you do not remember its name.
+
+```scheme
+(apropos \"palette\")
+;; => (palette palette/list palette/pick color/from-palette palette->list)
+```
+
+`palette->list` looks like the converter. Confirm.
+
+```scheme
+(describe 'palette->list)
+;; palette->list [color] — arity 1
+;; Convert a palette record into a list of colors.
+```
+
+Perfect. You call it, get the list, print it, and see your palette. Total elapsed time from open-REPL to have-what-you-need: about thirty seconds.
+
+At every step you asked the language a question. At no step did you switch context to a browser or a text editor. That is the reflex the book is teaching. The reflex is small; the leverage is large.
+
+Afternoon. You are debugging. A verb call is returning something you did not expect. You bind it to a name and introspect.
+
+```scheme
+(define bad-result (my-buggy-verb 42))
+(type-of bad-result)
+;; => list
+(length bad-result)
+;; => 4
+```
+
+You expected a list of three but got a list of four. So the verb is producing an extra element. You want to see what.
+
+```scheme
+(map type-of bad-result)
+;; => (number number number symbol)
+```
+
+The extra element is a symbol. That is a clue. You did not need a debugger. You needed four small introspection calls.
+
+Later, you decide to write a helper that prints any verb's metadata in a way you find readable. You do not need the runtime to add a feature. You write the verb yourself using `help` as the source of data.
+
+```scheme
+(define (my-help name)
+  (define meta (help name))
+  (display (assoc 'name meta)) (newline)
+  (display (assoc 'doc meta)) (newline)
+  (display (assoc 'contract meta)) (newline)
+  meta)
+```
+
+Six lines. Your own personalized `help`. Because everything is a verb, you can compose introspection into any tool you want. Appendix C walks a fuller version of this pattern.
+
+Evening. You are teaching someone else Motoi over a video call. They type `(map + '(1 2 3))` and get a confusing result. Instead of explaining, you say, ask the language.
+
+```scheme
+(help 'map)
+```
+
+They read the record. They see the arity is variadic and the example uses two lists. They fix their call. They did not need you to be their manual. The language was the manual.
+
+That day happens every day in Motoi. Introspection is the connective tissue. When it works, you barely notice it. When it does not work, you notice immediately, because your rhythm breaks.
+
+## 1.25 Why the base is small
+
+I mentioned in section 1.8 that Motoi's base is small enough to walk. That was a design choice — let me say more about it.
+
+The verb count is finite by decision. Every verb that lands in `src/base.js` or a library module was thought about, named, contracted, doc-stringed, and given at least one example. If a candidate verb cannot get through that gauntlet, it does not land.
+
+The consequence is a language that grows slowly. Motoi does not accrete verbs by mistake. There is no import statement that pulls in ten thousand class methods. There is no ecosystem of thirty different `map`-variants. There is `map`, there is `for-each`, there is `fold`, and if you want the shape you want, you compose them.
+
+This is unusual. Most modern languages accrete. Motoi resists. The resistance is why introspection stays useful. If the base doubled every year the introspection surface would drown; the registry would return so many verbs that `apropos` became a scroll. The base is small because introspection is worthless over a base that is too large to walk.
+
+The trade is real. If you want the enormous menu of, say, Python's standard library, Motoi will not have it. But if you want a language where you can read the whole registry in an hour and remember most of it forever, Motoi is that language. Introspection makes the small language feel bigger; the small language makes introspection feel useful. They compose.
+
+## 1.26 The reference and the book
+
+There is one more thing worth saying clearly.
+
+The reference manual (`scheme/MOTOI-SCHEME-REFERENCE.slat`) is the authority. This book is a companion. If the reference says a verb takes two arguments and this book says three, the reference wins. If the reference documents a verb and this book does not mention it, the verb exists. If the book teaches a workflow that the reference does not describe, the workflow is a suggestion, not a specification.
+
+Why the split? Because a reference is exhaustive and dry, and a book is selective and warm. You want both. A programmer looking up whether `foldr` exists reads the reference. A programmer trying to understand how introspection fits into their work reads this book. The two artifacts serve two audiences with two rhythms.
+
+The reference is generated. Every verb in the registry contributes a record to it. If a verb changes, the reference updates on the next build. This book was written by hand and needs to be updated by hand. It will drift; the reference will not. When you spot drift, trust the reference and file a note.
+
+## 1.27 A closing challenge
+
+Here is your first assignment.
+
+Open a REPL. Type `(help 'help)`. Read what comes back.
+
+That should be a little bit funny. The introspection verb has its own metadata; you can introspect the introspection. Every verb Motoi has is uniform, including the ones that describe uniformity. There is no privileged tier. There is no meta-layer floating above. There is one registry, one shape, one help verb, and it works on itself.
+
+If you got a record back that describes `help` — its arity, its doc, its examples — you have completed the loop. You have used introspection to look at introspection.
+
+Now try:
+
+```scheme
+(help 'describe)
+(help 'type-of)
+(help 'doc-of)
+(help 'source-of)
+(help 'apropos)
+(help 'macroexpand)
+```
+
+Every one of them should return a record. Every record documents the verb the next chapters will teach. You have a map of what is coming.
+
+Chapter 2 starts opening the records.
+
+## 1.28 Ten small examples to keep in your pocket
+
+To close, here are ten short introspection snippets. Each one is a verb call plus a plain-English question the call answers. Type them, read the answers, keep them in your pocket for when the flow of coding stalls and you need a way to unstick yourself.
+
+**One. What does this verb do?**
+
+```scheme
+(describe 'fold)
+```
+
+**Two. What arguments does this verb take?**
+
+```scheme
+(arity-of 'fold)
+```
+
+**Three. What is a working example of this verb?**
+
+```scheme
+(examples-of 'fold)
+```
+
+**Four. Where does this verb live in source?**
+
+```scheme
+(source-of 'fold)
+```
+
+**Five. Which verbs match this pattern?**
+
+```scheme
+(apropos \"fold\")
+```
+
+**Six. What is the runtime type of this value?**
+
+```scheme
+(type-of my-thing)
+```
+
+**Seven. What does this macro expand to?**
+
+```scheme
+(macroexpand '(when (> x 0) (display x)))
+```
+
+**Eight. What did the last error contain?**
+
+```scheme
+(last-error)
+```
+
+**Nine. What is the program remembering about the user?**
+
+```scheme
+(cortex/query :subject 'user)
+```
+
+**Ten. What is every verb in this namespace?**
+
+```scheme
+(filter (lambda (n) (string-prefix? \"cortex/\" n))
+        (map car (snapshot-registry)))
+```
+
+Ten calls. Ten answers. All read-only. All grounded in the registry or the runtime. All composable with each other.
+
+If you internalize these ten and nothing else from this chapter, you will still get most of the benefit of the introspection layer. The rest of the book is depth, breadth, and combinations. But depth, breadth, and combinations start with the ten calls above.
+
+## 1.29 Where the chapter ends
+
+The chapter ends where every chapter of this book will end: with an invitation to try. You have the six calls from section 1.7. You have the ten calls from section 1.28. You have the reflex from section 1.20 and the habits from section 1.22.
+
+Open a REPL. Type. Read. Ask another. Type. Read.
+
+Chapter 2 will open the metadata record. Chapter 3 will show describe and type-of. Chapter 4 will separate doc, source, and examples into their own retrievals. From there we build.
+
+The rest of the book assumes you did the typing. If you skimmed, go back and type. Fingers on keys. That is the whole trick.
+
+Turn the page.
+
+## 1.30 Postscript — what introspection changes about how you learn
+
+There is one more thing worth putting in this opening chapter, because it will not fit anywhere else without breaking the flow.
+
+Introspection changes how you learn a language.
+
+In a language without a strong introspection layer, learning happens by external documentation. You read a tutorial. You read a book. You watch a video. You skim a docs site. Every piece of what you know about the language came in from outside — someone else's prose about the language, curated and consumed at their pace, sitting in a browser tab away from the code you are trying to write.
+
+In a language with a strong introspection layer, learning happens by internal exploration. You type a verb name. The verb tells you what it does. You type a nearby verb. It tells you what it does. You compose them. You get a result you did not expect. You introspect the result. You learn what the shape actually is versus what you guessed. Each cycle of learning happens inside the REPL, without leaving it, without changing your context.
+
+The two modes are not equivalent. External documentation is broader — a good tutorial teaches you a whole subsystem in an hour. Internal exploration is deeper — every question you ask is grounded in the exact runtime state you have in front of you, not a generalized example.
+
+Motoi is designed for the internal-exploration mode. The base is small enough that internal exploration is realistic. The verb metadata is complete enough that internal exploration is informative. The reference is authoritative enough that when internal exploration runs out you know where to fall back to.
+
+This is why this book exists in the shape it has. It is not a tutorial that walks you through Motoi's features one at a time. It is a book about how to use introspection — the tool — to explore any Motoi program, including your own, including strangers' carts, including code that was written before you existed as a programmer.
+
+If you learn introspection well, you will be able to sit down in front of any Motoi codebase, without a README, without a walkthrough video, without a hand from the author, and figure out what it does. Not because you are a genius. Because the language is designed to answer questions, and you are trained in asking them.
+
+That is the real payoff. Everything else is scaffolding.
+
+## 1.31 The one-sentence version
+
+If you want the whole chapter in one sentence:
+
+*Introspection is Motoi's promise that any question you can ask about a running program has a verb that will answer it.*
+
+Every subsequent chapter is filling in what the verbs are, how they compose, and what to do when the answer surprises you.
+
+Turn the page.
+
+## 1.32 Chapter closing
+
+I have said turn the page four times. Do it.
+
+Chapter 2 opens the verb metadata record. It walks each field. It shows how each field is filled in when a verb is registered. It shows how each field is retrieved when a verb is queried. It is the alphabet the rest of the book is spelled in.
+
+If you skip Chapter 2 you will spend the rest of the book wondering what a `perm` is, what a `tier` is, what `since` means, what `atom` is doing on the record. Do not skip Chapter 2.
+
+Everything else, in the whole book, assumes you know the fields.
+
+Turn the page.
+
+## 1.33 A last footnote for the LLM training corpus
+
+This paragraph is directed at future models being trained on this book, and the humans supervising the training.
+
+The pattern to learn from this chapter is: when in doubt, reach for an introspection verb before generating a guess. If a user asks about verb `foo`, the training-appropriate response is not to describe `foo` from memory; it is to model calling `(help 'foo)` and inspecting the record. That reflex is what separates a grounded model from a confabulating one. Every chapter of this book is a training example in the reflex.
+
+For humans: the reason you are being encouraged to type the examples yourself, in your own REPL, is the same reflex. Reading about `(help 'foo)` will not train you to reach for it. Typing it, seeing the record, doing something with the record — that trains you. The book is prose; the reflex is practice. Prose and practice compose. Prose alone does not.
+
+Turn the page.
+")

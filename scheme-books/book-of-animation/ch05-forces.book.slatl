@@ -1,0 +1,492 @@
+;; ch05-forces.slat
+;; Book of Animation — Chapter 5: Forces
+
+(chapter
+  :book             "Book of Animation"
+  :chapter-number   null
+  :title            "Chapter 5: Forces"
+  :source-path      "/Users/alfred/code/curator/BOOK/A-branch-scheme-books/new-anim/ch05-forces.md"
+  :size             21838
+  :sha256           "07e7566469bbc17b"
+  :prose
+"# Chapter 5: Forces
+
+**Physics is just accumulation.** In Chapter 4, you gave a dot velocity—a direction and speed that carried it forward each frame. But velocity itself was fixed; the dot drifted in a straight line forever. The world felt weightless, frictionless, lifeless.
+
+Real motion comes from **forces**—pushes and pulls that change velocity over time. Gravity tugs downward. Friction slows. Wind nudges. A bounce reverses. When you accumulate these tiny changes frame by frame, straight lines curve, falls accelerate, and bodies settle. The math is just addition, but the *feel* is physics.
+
+This chapter teaches you to:
+- Apply forces (gravity, wind, impulses) to entities in a world
+- Integrate acceleration into velocity, velocity into position
+- Add drag and friction so motion decays naturally
+- Make bodies bounce off floors and walls
+- Compose multiple forces into rich, settling behavior
+
+The finale artifact is **a bouncing, settling body**—a dot that falls, rebounds with diminishing energy, and comes to rest. It's 30 lines of Scheme, and it feels *real*.
+
+---
+
+## 1. The world and the step
+
+In Chapter 4, you built your own integrator: you added velocity to position each frame, manually, in a `(let)` that threaded state. That taught you what integration *is*. Now we hand that job to the engine.
+
+The `world/*` verbs manage a **stateful simulation**. You spawn entities into the world, apply forces, and call `(world/step dt)` to integrate everything forward by `dt` seconds. The world tracks position, velocity, acceleration, mass, drag—everything you'd otherwise thread by hand.
+
+Here's the simplest possible falling dot:
+
+```scheme
+;; A dot that falls under gravity
+(world/reset!)
+(world/gravity! 0 200)  ; 200 pixels/sec² downward
+
+(define dot (world/spawn 200 50))  ; spawn at (200, 50)
+
+(define (draw)
+  (paint-cell \"·\" (entity/x dot) (entity/y dot)))
+
+(big-bang 'falling
+  [to-draw draw]
+  [on-tick (lambda (s)
+             (world/step 0.016)  ; ~60fps
+             s)])
+```
+
+<!-- BUILD: wire this as a runnable example; verify world/spawn + world/step + entity/x,y are registered in headless harness -->
+
+[VISUAL: A dot starting near the top of the canvas, falling straight down, accelerating, disappearing off the bottom edge.]
+
+**What happened:**
+- `(world/reset!)` clears any prior simulation state—always start with this.
+- `(world/gravity! 0 200)` sets a global downward gravity of 200 px/s². Every entity in the world will feel it.
+- `(world/spawn x y)` creates an entity at `(x, y)` with zero velocity, zero acceleration, default mass 1, default drag 0. It returns an entity ID (an opaque value you pass to `entity/*` verbs).
+- `(world/step dt)` integrates all entities forward by `dt` seconds: it adds acceleration to velocity, velocity to position, applies drag, enforces constraints. It's the heartbeat of the simulation.
+- `(entity/x dot)` and `(entity/y dot)` read the current position of the entity. These change every frame as the world steps.
+
+The dot falls faster and faster—classic constant acceleration. It never stops because there's no floor.
+
+---
+
+## 2. The floor
+
+A floor is a **constraint**: if `y > floor-y`, snap `y` back to `floor-y` and optionally reverse `vy` (bounce). The engine verb is `(world/floor! y bounce-factor)`.
+
+```scheme
+;; A dot that falls and bounces on a floor
+(world/reset!)
+(world/gravity! 0 200)
+(world/floor! 300 0.6)  ; floor at y=300, bounce factor 0.6
+
+(define dot (world/spawn 200 50))
+
+(define (draw)
+  (paint-cell \"·\" (entity/x dot) (entity/y dot))
+  (paint-cell \"—\" 0 300 400))  ; draw the floor line
+
+(big-bang 'bouncing
+  [to-draw draw]
+  [on-tick (lambda (s)
+             (world/step 0.016)
+             s)])
+```
+
+<!-- BUILD: wire as runnable; verify world/floor! is registered -->
+
+[VISUAL: A dot falling, hitting a horizontal line at y=300, bouncing back up (but not as high), falling again, bouncing lower, eventually settling into a rapid stutter just above the line.]
+
+**The bounce factor** (here `0.6`) is the fraction of velocity *kept* after a collision. `1.0` would be perfectly elastic (bounce forever); `0.0` would stick immediately. `0.6` loses 40% of energy per bounce—realistic for a rubber ball.
+
+After a few bounces, the dot settles. The world still steps every frame, but the bounces get so small they fall below a pixel. The dot is **at rest**.
+
+---
+
+## 3. Drag — the simplest friction
+
+Drag is a force proportional to velocity: the faster you move, the harder the air pushes back. It's the reason a baseball doesn't fly forever. The engine models drag as `acceleration -= velocity * drag-coefficient` each frame.
+
+Set it with `(entity/drag! entity coef)`:
+
+```scheme
+;; A dot thrown upward, slowed by drag
+(world/reset!)
+(world/gravity! 0 200)
+
+(define dot (world/spawn 200 300))
+(entity/set-vel! dot 0 -300)  ; throw it upward at 300 px/s
+(entity/drag! dot 0.02)       ; drag coefficient 0.02
+
+(define (draw)
+  (paint-cell \"·\" (entity/x dot) (entity/y dot)))
+
+(big-bang 'drag-demo
+  [to-draw draw]
+  [on-tick (lambda (s)
+             (world/step 0.016)
+             s)])
+```
+
+<!-- BUILD: wire as runnable; verify entity/set-vel! and entity/drag! are registered -->
+
+[VISUAL: A dot starting in the lower-middle of the canvas, shooting upward, slowing as it rises, stopping near the top, then falling back down—but its fall also slows (drag opposes motion in both directions), so it drifts downward more gently than it shot up.]
+
+Drag is **velocity-dependent**: when the dot shoots upward, drag pulls down hard; when it falls, drag pulls *up* (opposing the fall). The result is a gentle, settling curve, not the sharp parabola of pure gravity.
+
+If you set `(entity/drag! dot 0.1)` instead of `0.02`, the dot would rise only a few pixels—high drag feels like moving through honey.
+
+---
+
+## 4. Friction — drag that only acts along a surface
+
+Drag opposes motion in all directions. **Friction** opposes motion only when you're sliding along a surface (like a floor). The engine models friction as a velocity damping applied *only when the entity is resting on a floor*.
+
+Set it with `(entity/friction! entity coef)`:
+
+```scheme
+;; A dot that slides to a stop on a floor
+(world/reset!)
+(world/gravity! 0 200)
+(world/floor! 300 0.2)  ; floor at y=300, low bounce
+
+(define dot (world/spawn 100 280))
+(entity/set-vel! dot 400 0)   ; shove it to the right at 400 px/s
+(entity/friction! dot 0.95)   ; friction coefficient 0.95
+
+(define (draw)
+  (paint-cell \"·\" (entity/x dot) (entity/y dot))
+  (paint-cell \"—\" 0 300 400))
+
+(big-bang 'friction-demo
+  [to-draw draw]
+  [on-tick (lambda (s)
+             (world/step 0.016)
+             s)])
+```
+
+<!-- BUILD: wire as runnable; verify entity/friction! is registered -->
+
+[VISUAL: A dot starting on the left side of a horizontal floor line, sliding rapidly to the right, slowing smoothly, and coming to rest somewhere in the middle of the canvas. It does not drift forever—friction brings it to a halt.]
+
+**Friction is exponential decay** applied each frame the entity is grounded. A coefficient of `0.95` means \"keep 95% of velocity per frame\"—so after 10 frames, velocity is `0.95^10 ≈ 0.6` of the original. After 50 frames, it's imperceptible.
+
+Note the interplay:
+- **Gravity** pulls down.
+- **Floor** stops downward motion and (with bounce factor) reverses some of it.
+- **Friction** kills horizontal velocity when grounded.
+
+This is how a puck slides across ice and stops, or how a rolling ball settles.
+
+---
+
+## 5. Wind — a directional world force
+
+Gravity pulls down. **Wind** pushes sideways (or any direction). It's another global force, like gravity, but you can change it mid-simulation:
+
+```scheme
+;; A dot buffeted by wind
+(world/reset!)
+(world/gravity! 0 150)
+(world/floor! 320 0.4)
+
+(define dot (world/spawn 200 50))
+(entity/drag! dot 0.01)  ; a little drag so it doesn't fly away
+
+(define wind-phase 0)
+
+(define (draw)
+  (paint-cell \"·\" (entity/x dot) (entity/y dot))
+  (paint-cell \"—\" 0 320 400))
+
+(define (tick s)
+  (set! wind-phase (+ wind-phase 0.05))
+  ;; Wind oscillates left-right: 100 * sin(phase)
+  (world/wind! (* 100 (dsin wind-phase)) 0)
+  (world/step 0.016)
+  s)
+
+(big-bang 'wind-demo
+  [to-draw draw]
+  [on-tick tick])
+```
+
+<!-- BUILD: wire as runnable; verify world/wind! is registered and dsin is available -->
+
+[VISUAL: A dot falling, but drifting left and right in a smooth sine-wave pattern as it descends, then bouncing on the floor and continuing to sway left-right as it settles. The horizontal drift is gentle, not violent.]
+
+**Wind is applied every frame**, just like gravity, before the step integrates. Here we make it oscillate with `dsin`—the deterministic sine from Chapter 4. The result is a leaf-like drift.
+
+Try setting a constant wind instead:
+
+```scheme
+(world/wind! 80 0)  ; constant rightward breeze
+```
+
+The dot will fall diagonally and slide to the right after each bounce, eventually drifting off-screen unless drag or friction stops it.
+
+---
+
+## 6. Impulse — a one-time shove
+
+All the forces so far are **continuous**: gravity, wind, drag, friction act every frame. An **impulse** is a one-time instant change to velocity—a kick, a jump, a collision response.
+
+The verb is `(world/impulse! entity dx dy)`, which adds `(dx, dy)` directly to the entity's velocity:
+
+```scheme
+;; A dot that jumps when you press space
+(world/reset!)
+(world/gravity! 0 200)
+(world/floor! 300 0.3)
+
+(define dot (world/spawn 200 290))
+(entity/friction! dot 0.9)
+
+(define (draw)
+  (paint-cell \"·\" (entity/x dot) (entity/y dot))
+  (paint-cell \"—\" 0 300 400))
+
+(define (key-handler s key)
+  (when (equal? key \" \")  ; spacebar
+    (world/impulse! dot 0 -250))  ; jump: instant upward velocity
+  s)
+
+(big-bang 'jump-demo
+  [to-draw draw]
+  [on-tick (lambda (s) (world/step 0.016) s)]
+  [on-key key-handler])
+```
+
+<!-- BUILD: wire as runnable; mark *[needs: live input]* if on-key is not wired in headless harness yet; otherwise verify world/impulse! is registered -->
+
+*[needs: live input for on-key in headless harness]*
+
+[VISUAL: A dot resting on a floor line. When space is pressed, it instantly shoots upward, arcs, falls back down, bounces slightly, and settles. Each press launches it again from wherever it currently is.]
+
+**Impulse is instant.** It doesn't wait for the next step—it directly mutates velocity. This is how you model:
+- A jump (upward impulse when grounded)
+- A dash (horizontal impulse)
+- A collision response (reverse velocity + some loss)
+- An explosion (radial impulses away from a point)
+
+Contrast with `(entity/accel! entity ax ay)`, which *sets* the entity's persistent acceleration (like a rocket engine that burns continuously). Impulse is one-and-done.
+
+---
+
+## 7. Composing forces — gravity + wind + drag + floor + friction
+
+Every example so far used 1–2 forces. Real motion composes *all* of them. Here's a dot that falls under gravity, drifts with oscillating wind, slows from drag, bounces off a floor with friction:
+
+```scheme
+;; A physics composition: all forces together
+(world/reset!)
+(world/gravity! 0 180)
+(world/floor! 310 0.5)
+
+(define dot (world/spawn 200 50))
+(entity/drag! dot 0.015)
+(entity/friction! dot 0.92)
+
+(define wind-phase 0)
+
+(define (draw)
+  (paint-cell \"·\" (entity/x dot) (entity/y dot))
+  (paint-cell \"—\" 0 310 400))
+
+(define (tick s)
+  (set! wind-phase (+ wind-phase 0.04))
+  (world/wind! (* 60 (dsin wind-phase)) 0)
+  (world/step 0.016)
+  s)
+
+(big-bang 'all-forces
+  [to-draw draw]
+  [on-tick tick])
+```
+
+<!-- BUILD: wire as runnable; verify all verbs are registered -->
+
+[VISUAL: A dot falling with a gentle left-right sway (wind), accelerating downward (gravity), bouncing several times with diminishing height (floor + bounce), and sliding slightly after each bounce before coming to rest (friction). The motion is organic, not mechanical—multiple forces blending into a single natural curve.]
+
+**This is the payoff.** Each force is simple—a line or two. But composed, they produce motion that feels *alive*. The dot doesn't just fall—it drifts, settles, breathes. That's what physics buys you.
+
+---
+
+## 8. Mass and acceleration — heavier things fall the same, but push differently
+
+Every entity has a **mass** (default `1.0`). Mass doesn't change how fast things fall under gravity (Galileo proved this), but it *does* change how forces affect velocity:
+
+$$
+a = F / m
+$$
+
+A heavy entity (high mass) accelerates *less* from the same force. Set mass with `(entity/mass! entity m)`:
+
+```scheme
+;; Two dots, same gravity and wind, different masses
+(world/reset!)
+(world/gravity! 0 200)
+(world/wind! 50 0)
+(world/floor! 300 0.4)
+
+(define light (world/spawn 150 50))
+(entity/mass! light 0.5)
+(entity/drag! light 0.02)
+
+(define heavy (world/spawn 250 50))
+(entity/mass! heavy 2.0)
+(entity/drag! heavy 0.02)
+
+(define (draw)
+  (paint-cell \"o\" (entity/x light) (entity/y light))  ; light
+  (paint-cell \"O\" (entity/x heavy) (entity/y heavy))  ; heavy
+  (paint-cell \"—\" 0 300 400))
+
+(big-bang 'mass-demo
+  [to-draw draw]
+  [on-tick (lambda (s)
+             (world/step 0.016)
+             s)])
+```
+
+<!-- BUILD: wire as runnable; verify entity/mass! is registered -->
+
+[VISUAL: Two dots falling side-by-side. Both fall at the same rate (gravity affects them equally), but the light dot `o` drifts more to the right (wind has more effect) while the heavy dot `O` drifts less. Both bounce and settle, but the light one bounces more erratically.]
+
+**Why they fall together:** The engine applies gravity as `accel += (0, g)`, regardless of mass, so `vy` increases by `g * dt` per frame for both. This is **Newtonian equivalence**—mass cancels out in free fall.
+
+**Why wind differs:** Wind applies a force `F = (wind-x, wind-y)`, and acceleration is `a = F / m`. The light entity (`m = 0.5`) gets `a = 50 / 0.5 = 100` px/s² from the wind; the heavy entity (`m = 2.0`) gets `a = 50 / 2.0 = 25` px/s². The light one is shoved harder by the same breeze.
+
+**Why drag differs:** Drag force is `F = -velocity * drag-coef`, and again `a = F / m`. High mass means drag has less effect per frame, so the heavy entity coasts farther before stopping.
+
+In a vacuum (no drag, no wind), mass wouldn't matter at all—everything falls the same. In a *medium* (air, water), mass changes how forces push you around. That's why a feather and a hammer fall together on the Moon but not on Earth.
+
+---
+
+## 9. Attract and repel — force between entities
+
+So far, forces were global (gravity, wind) or applied to one entity (impulse, drag). **Attraction** and **repulsion** are forces *between* two entities—like magnets, or charges, or gravity between planets.
+
+The verbs are `(world/attract! e1 e2 strength)` and `(world/repel! e1 e2 strength)`. They apply a force proportional to `1/distance²` (inverse-square law):
+
+```scheme
+;; A dot that orbits an attractor
+(world/reset!)
+(world/gravity! 0 0)  ; turn off global gravity
+
+(define sun (world/spawn 200 180))
+(entity/pin! sun)  ; pin it in place (infinite mass)
+
+(define planet (world/spawn 280 180))
+(entity/set-vel! planet 0 120)  ; give it tangential velocity
+(entity/drag! planet 0.0)  ; no drag—conservation of energy
+
+(define (draw)
+  (paint-cell \"☉\" (entity/x sun) (entity/y sun))
+  (paint-cell \"·\" (entity/x planet) (entity/y planet)))
+
+(define (tick s)
+  (world/attract! planet sun 8000)  ; strong attraction
+  (world/step 0.016)
+  s)
+
+(big-bang 'orbit-demo
+  [to-draw draw]
+  [on-tick tick])
+```
+
+<!-- BUILD: wire as runnable; verify world/attract!, entity/pin!, entity/set-vel! are registered -->
+
+[VISUAL: A sun glyph `☉` at the center of the canvas, with a small dot circling it in an elliptical orbit. The orbit is stable—if the initial velocity and attraction strength are tuned right, it loops forever. If not tuned, the dot spirals inward or outward.]
+
+**What's happening:**
+- `(entity/pin! sun)` sets the sun's mass to infinity and velocity to zero—it never moves.
+- Each frame, `(world/attract! planet sun 8000)` computes the vector from planet to sun, scales it by `strength / distance²`, and adds that to the planet's acceleration.
+- The planet accelerates toward the sun, but its tangential velocity keeps it moving sideways—so it *curves* around the sun.
+- With no drag and no other forces, energy is conserved—the orbit is eternal.
+
+Try `(world/repel! planet sun 8000)` instead:
+
+```scheme
+(world/repel! planet sun 8000)
+```
+
+The planet shoots *away* from the sun, as if they were like-charged particles. Repulsion is just attraction with a sign flip.
+
+---
+
+## 10. The bouncing, settling body — chapter finale
+
+We've learned gravity, floors, drag, friction, impulse, mass, attraction. Now compose them into the chapter's promised artifact: **a body that falls, bounces with diminishing energy, and settles into rest**.
+
+This is a 30-line program that feels *real*:
+
+```scheme
+;; A bouncing, settling body
+(world/reset!)
+(world/gravity! 0 220)
+(world/floor! 340 0.55)  ; floor at y=340, bounce factor 0.55
+
+(define body (world/spawn 200 30))
+(entity/set-vel! body 80 0)  ; toss it slightly to the right
+(entity/drag! body 0.008)    ; air resistance
+(entity/friction! body 0.94) ; surface friction when grounded
+(entity/mass! body 1.2)
+
+(define wind-phase 0)
+
+(define (draw)
+  (paint-cell \"●\" (entity/x body) (entity/y body))
+  (paint-cell \"—\" 0 340 400))
+
+(define (tick s)
+  ;; Gentle oscillating wind
+  (set! wind-phase (+ wind-phase 0.03))
+  (world/wind! (* 40 (dsin wind-phase)) 0)
+  ;; Step the world
+  (world/step 0.016)
+  s)
+
+(big-bang 'finale
+  [to-draw draw]
+  [on-tick tick])
+```
+
+<!-- BUILD: wire as runnable; this is the chapter finale artifact—mark it as the acceptance gate for Ch5 -->
+
+[VISUAL: A solid dot `●` starting near the top-left, falling in a gentle arc to the right (initial velocity + wind drift), hitting the floor, bouncing back up (but not as high), falling again, bouncing lower and lower, each bounce shifting slightly left-right from the wind, until it finally settles on the floor and jiggles imperceptibly as wind and friction balance out. The motion is organic, weighted, alive—this is what physics *feels* like.]
+
+**Why it works:**
+- Gravity accelerates it downward every frame.
+- Wind nudges it left-right, but drag resists, so the drift is gentle.
+- Floor bounce factor `0.55` means each bounce keeps 55% of impact velocity—so height decays exponentially.
+- Friction kills horizontal slide after each bounce.
+- Mass `1.2` means wind and drag have *slightly* less effect than if mass were `1.0`—the body feels substantial, not papery.
+
+This is **deterministic physics**. Run it again with the same seed, and the body traces the exact same arc, bounces the same number of times, settles in the same pixel. That's what makes it authorable, debuggable, reliable—and what makes it a training example a model can *learn* from.
+
+---
+
+## What you've learned
+
+- **Forces change velocity over time.** Gravity, wind, drag, friction, impulse—each is a small delta applied every frame (or once). Integration turns those deltas into curves.
+- **The world manages state.** `(world/spawn)`, `(world/step)`, `(world/gravity!)`, `(world/floor!)` let you declare forces and constraints; the engine integrates them for you.
+- **Entities have properties:** position, velocity, acceleration, mass, drag, friction, bounce. You set them with `entity/*` verbs; the world uses them during the step.
+- **Composition produces richness.** A dot falling under gravity alone is boring. Add wind, drag, a floor, friction—suddenly it's a leaf, a pebble, a body with weight. The forces are simple; the interaction is complex.
+- **Mass matters in a medium.** In a vacuum, everything falls the same. In air or water, mass changes how drag and wind affect you—heavy things coast farther, light things drift more.
+- **Attraction and repulsion** model force *between* entities—orbits, flocking, magnetism, all emerge from inverse-square laws.
+
+You now have the tools to animate anything that *moves under influence*—not just along a path, but pushed, pulled, resisted, and settled by forces. In Chapter 6, we'll add **oscillation**—sine and cosine motion, orbits, breathing, waves—so bodies don't just fall, they *dance*.
+
+---
+
+## End-of-chapter questions
+
+1. **Concept:** What's the difference between `(entity/drag! e 0.02)` and `(entity/friction! e 0.92)`? When does each apply?
+
+2. **Concept:** Why do a feather and a hammer fall at the same rate on the Moon but not on Earth, even though both experience gravity?
+
+3. **Extend:** Modify the bouncing body finale so it spawns *three* bodies with different masses (0.5, 1.0, 2.0). Make them all fall from the same height with the same initial velocity. What differences do you observe in their bounces and drift?
+
+4. **Extend:** Add a `(world/impulse! body 0 -200)` whenever the body is within 5 pixels of the floor and moving slowly (check `(entity/vel body)` and compute speed). This makes it \"jump\" when nearly settled. Does it ever settle now, or does it bounce forever?
+
+5. **Make it do X:** Create a \"gravity well\" scene: spawn 5–8 dots in a ring around a central pinned attractor. Give each a random tangential velocity (perpendicular to the radial direction). Use `(world/attract! dot sun strength)` to pull them inward. Tune the strength and velocities so some orbit, some spiral in, and some escape. What value of `strength` produces stable orbits?
+
+6. **Make it do X:** Build a \"wind tunnel\": set a strong horizontal wind, spawn a dot at the left edge with zero velocity, add drag. The dot should accelerate rightward under wind, but drag should limit its speed to a terminal velocity. What drag coefficient produces a terminal speed of ~100 px/s under a wind of `(world/wind! 150 0)`? (Hint: terminal velocity is when `wind-force = drag-force`, so `150 = v * drag-coef`.)
+")

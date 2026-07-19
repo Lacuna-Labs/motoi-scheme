@@ -1,0 +1,136 @@
+;; appendix-t-serialization.slat
+;; Book of Values — Appendix T — Serializing typed values
+
+(chapter
+  :book              "Book of Values"
+  :appendix-letter   "T"
+  :title             "Serializing typed values — the on-disk shape"
+  :audience          :engineer
+  :dialect           "motoi"
+  :training-eligible #t
+  :content-rating    :G
+  :provenance        "book-completion-orchestrator 2026-07-17"
+  :prose
+"# Appendix T — Serializing typed values
+
+A typed value in memory carries its kind, unit, and provenance. On disk or on the wire, all three have to travel with it or they die on the boundary. This appendix covers the shapes.
+
+## The one-line shape
+
+For a single value, the serialization is a tagged list.
+
+```
+(money :amount 1234 :currency USD :scale 2 :provenance user-input)
+(time :instant 1720000000)
+(distance :meters 1500 :precision 1)
+```
+
+Every field is named. No positional shorthand. Legibility matters more than compactness on disk.
+
+## Why not JSON
+
+JSON does not have a story for tagged values. `{\"amount\": 12.34, \"currency\": \"USD\"}` loses the type — is this a money object or a random dict that happens to have those keys? At best you get a convention; at worst, ambiguity that other programs can misread.
+
+If you must ship JSON to the outside world (which is often), embed the tag as a field:
+
+```
+{\"_type\": \"money\", \"amount\": 1234, \"currency\": \"USD\", \"scale\": 2, \"provenance\": \"user-input\"}
+```
+
+The `_type` field is enough to route to the right parser. It is a small tax and it prevents the *what kind of thing is this* question.
+
+## SLAT-native serialization
+
+Motoi's native format — SLAT — preserves types by design.
+
+```scheme
+(record money
+  :amount 1234
+  :currency USD
+  :scale 2
+  :provenance user-input)
+```
+
+`record money ...` is a form the SLAT reader recognizes. The reader produces a real `money` record, not a hash table that could be anything.
+
+Round-trip: `(slat/read (slat/write (money :amount 1234 :currency USD)))` returns an equal record. Bytes-in-and-out are stable.
+
+## Serializing lists of typed values
+
+```scheme
+(list-of money
+  (money :amount 1234 :currency USD)
+  (money :amount 999  :currency EUR)
+  (money :amount 500  :currency JPY))
+```
+
+The `list-of` form tells the reader all entries are `money` records. It refuses if any entry is not.
+
+Alternative when types vary:
+
+```scheme
+(list
+  (money :amount 1234 :currency USD)
+  (distance :meters 1500)
+  (time :instant 1720000000))
+```
+
+Plain `(list ...)` — heterogeneous.
+
+## Backward compatibility
+
+When you add a field to a typed value, old serializations without that field must still parse. The reader treats unknown fields as `nil`.
+
+```scheme
+(record money
+  :amount 1234
+  :currency USD)
+;; parses successfully; :scale defaults to 0; :provenance defaults to nil
+```
+
+When you remove a field, old serializations with that field must not crash. The reader ignores unknown fields, logging a warning.
+
+Never rename a field silently. Add the new name; keep the old name as an alias; deprecate; remove in a major version. This is the same discipline as chapter 5 (versioning modules).
+
+## Version tagging on records
+
+Complex records can carry their own version.
+
+```scheme
+(record money :v 2
+  :amount 1234
+  :currency USD
+  :scale 2
+  :precision-mode :bankers
+  :provenance user-input)
+```
+
+The `:v` field is the record schema version. The reader knows how to translate old versions to the current shape. Consumers of the record do not have to care about the version; they get whatever the current shape is, filled in from defaults where old data omitted.
+
+## Interop with other systems
+
+When you send typed values to systems that do not understand them, you have three choices.
+
+1. **Drop the type.** Send just the amount and currency. The receiver has to reassemble. Loses precision.
+2. **Send the tag string.** As above with `_type`. The receiver can route.
+3. **Send a schema alongside.** Once per session; the values themselves are lean. Fastest and safest, but requires cooperation.
+
+Which one is right depends on the receiver. Cooperate when you can; degrade gracefully when you cannot.
+
+## Cortex tracks serialization boundaries
+
+Every time a typed value crosses a boundary, Cortex can log the transition.
+
+```scheme
+(cortex/query :predicate 'value-serialized)
+;; ⇒ ((money :as :slat :direction :out :at ...)
+;;    (money :as :json :direction :out :at ...))
+```
+
+Useful for auditing where typed values are being reduced to untyped ones. The reduction is where meaning is often lost.
+
+## Try this
+
+Take one typed value from your program. Serialize it three ways: SLAT, JSON with tag, JSON without tag. Note the sizes. Note which round-trips losslessly. Note which the receiver could reconstruct without the schema.
+
+The choice you make is a trade of *fidelity vs simplicity*. Both matter. Both cost something.")

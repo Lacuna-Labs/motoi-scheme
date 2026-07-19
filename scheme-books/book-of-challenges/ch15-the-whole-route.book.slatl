@@ -1,0 +1,1371 @@
+;; ch15-the-whole-route.slat
+;; Book of Challenges — Chapter 15 — The Whole Route
+
+(chapter
+  :book             "Book of Challenges"
+  :chapter-number   null
+  :title            "Chapter 15 — The Whole Route"
+  :size             58592
+  :sha256           "71c86c5fad1ef981"
+  :prose
+"# Chapter 15 — The Whole Route
+
+There's a kind of program that feels less like a function and more like a journey: you start with a question or a request, you ask the world for context, you weigh what you found, you compute an answer, and you compose a reply that honors all of it. No single step is hard on its own, but the *orchestration*—the honest passing of data from stage to stage, the graceful handling of failure at each joint, the restraint to keep the route clean even as it grows—that's where mastery lives.
+
+This chapter teaches that orchestration. We'll build programs that run a complete route from end to end: read intent, recall context, compute over what we found, check the result, and compose a reply. Each stage feeds the next. Each stage can fail, and a masterful route handles that failure honestly—no pretending, no shortcuts, just clean escalation or a graceful null when the world says no.
+
+Why this matters in the runtime's world: a route like this is how she answers a customer's question by recalling past orders, or decides whether to restock by checking sales velocity and current inventory, or drafts a reply by grounding it in real conversation history. The technique is *composition across the wired surface*—stitching verbs and logic into a single, runnable flow that does something real.
+
+We'll start with a two-stage route you could run today, then ramp up: more stages, more verbs, deeper recursion, more honest failure handling. By the end, you'll have written a full read-weigh-orchestrate-reply program that a beginner could not.
+
+---
+
+## Two-Stage Route: Recall and Count
+
+Let's start simple. A two-stage route: recall some data, then compute over it. Here, we'll recall a list of past orders and count how many were placed in the last 30 days.
+
+The first stage asks `cortex/recall` for orders. The second stage filters by date and counts. If recall fails, we return an honest null. If it succeeds, we compute.
+
+```scheme
+;; Recall recent orders and count how many are from the last 30 days.
+(define (count-recent-orders)
+  (let* ((raw (cortex/recall \"orders\" \"recent\"))
+         (orders (if (or (eq? raw 'nan)
+                         (and (pair? raw) (eq? (car raw) 'escalate)))
+                     '()
+                     raw))
+         (cutoff (- (system/unix-now) (* 30 86400))))
+    (length
+     (filter
+      (lambda (order)
+        (let ((ts (cdr (assoc 'timestamp order))))
+          (and ts (>= ts cutoff))))
+      orders))))
+
+(count-recent-orders)
+;; => count of recent orders, or 0 if recall failed
+```
+
+**What's happening:** `cortex/recall` might return `'nan` or `(escalate ...)` if the key doesn't exist or the service is down. We check for both, and if either, we treat it as an empty list—a safe fallback. Then we filter orders by timestamp and count. The route is two stages: recall, then compute. Clean, honest, complete.
+
+---
+
+## Three-Stage Route: Recall, Compute, Decide
+
+Now we add a third stage: decision. We'll recall sales data, compute the weekly average, and decide whether to send a low-sales alert.
+
+```scheme
+;; Recall sales, compute weekly average, decide if alert is needed.
+(define (should-alert-low-sales? threshold)
+  (let* ((raw (cortex/recall \"sales\" \"weekly\"))
+         (sales (if (or (eq? raw 'nan)
+                        (and (pair? raw) (eq? (car raw) 'escalate)))
+                    '()
+                    raw))
+         (total (apply + (map (lambda (s) (cdr (assoc 'amount s))) sales)))
+         (count (length sales))
+         (avg (if (> count 0) (/ total count) 0)))
+    (< avg threshold)))
+
+(should-alert-low-sales? 500)
+;; => #t if avg weekly sales < 500, #f otherwise
+```
+
+**The route:** recall → compute average → compare to threshold. If recall fails, we get an empty list, total is 0, avg is 0, and we return `#t` (alert, because zero sales is definitely low). That's a *reasonable* fallback—better than crashing or pretending we have data we don't.
+
+---
+
+## Four-Stage Route: Fetch, Parse, Filter, Format
+
+Let's fetch live data from the web, parse it, filter it, and format the result. We'll use `web/fetch` to grab JSON, parse it into an association list, filter for items above a price threshold, and return a human-readable summary.
+
+```scheme
+;; Fetch product feed, filter by price, format summary.
+(define (fetch-expensive-products url min-price)
+  (let* ((response (web/fetch url '()))
+         (body (if (and (pair? response) (assoc 'body response))
+                   (cdr (assoc 'body response))
+                   'nan)))
+    (if (eq? body 'nan)
+        \"Could not fetch product feed.\"
+        (let* ((products (if (pair? body) body '()))
+               (expensive (filter
+                           (lambda (p)
+                             (let ((price (cdr (assoc 'price p))))
+                               (and price (>= price min-price))))
+                           products))
+               (count (length expensive))
+               (names (map (lambda (p) (cdr (assoc 'name p))) expensive)))
+          (if (= count 0)
+              \"No products above threshold.\"
+              (string-append
+               (number->string count)
+               \" products: \"
+               (apply string-append
+                      (map (lambda (n) (string-append n \", \")) names))))))))
+
+(fetch-expensive-products \"https://example.com/feed.json\" 100)
+;; => \"3 products: Widget A, Widget B, Gadget C, \" or \"Could not fetch...\"
+```
+
+**The route:** fetch → parse → filter → format. Each stage depends on the last. If fetch fails, we return a message. If parse yields nothing, we filter an empty list and report zero products. The route is *linear*—no backtracking, no side effects, just data flowing forward through transformations.
+
+---
+
+## Five-Stage Route: Intent → Recall → Enrich → Compute → Reply
+
+Now we build a realistic helper route. Imagine the runtime receives a customer question: \"How many orders did I place last month?\" She needs to:
+
+1. Parse the intent (extract the timeframe).
+2. Recall the customer's order history.
+3. Enrich each order with its item count.
+4. Filter by the timeframe.
+5. Compose a reply.
+
+Here's the full route:
+
+```scheme
+;; Answer \"how many orders last month?\" by recalling, filtering, and composing reply.
+(define (answer-order-count-question customer-id)
+  (let* (;; Stage 1: define intent (last month = last 30 days)
+         (cutoff (- (system/unix-now) (* 30 86400)))
+         
+         ;; Stage 2: recall order history
+         (raw (cortex/recall \"orders\" customer-id))
+         (orders (if (or (eq? raw 'nan)
+                         (and (pair? raw) (eq? (car raw) 'escalate)))
+                     '()
+                     raw))
+         
+         ;; Stage 3: enrich—add item count to each order
+         (enriched (map
+                    (lambda (order)
+                      (let ((items (cdr (assoc 'items order))))
+                        (cons (cons 'item-count (length items))
+                              order)))
+                    orders))
+         
+         ;; Stage 4: filter by timeframe
+         (recent (filter
+                  (lambda (order)
+                    (let ((ts (cdr (assoc 'timestamp order))))
+                      (and ts (>= ts cutoff))))
+                  enriched))
+         
+         ;; Stage 5: compute and compose reply
+         (count (length recent))
+         (total-items (apply + (map (lambda (o) (cdr (assoc 'item-count o))) recent))))
+    
+    (if (= count 0)
+        \"You haven't placed any orders in the last 30 days.\"
+        (string-append
+         \"You placed \"
+         (number->string count)
+         \" order\"
+         (if (= count 1) \"\" \"s\")
+         \" in the last 30 days, totaling \"
+         (number->string total-items)
+         \" item\"
+         (if (= total-items 1) \".\" \"s.\")))))
+
+(answer-order-count-question \"cust-12345\")
+;; => \"You placed 3 orders in the last 30 days, totaling 7 items.\"
+```
+
+**The route:** intent → recall → enrich → filter → reply. Notice how each `let*` binding is a stage, and each stage uses only the bindings above it—data flows *forward*. If recall fails, we get an empty list, filter yields nothing, count is 0, and we return a truthful \"no orders\" message. No crashes, no lies.
+
+---
+
+## Handling Failure at Each Joint
+
+A route is only as strong as its weakest joint. Let's build a route that checks for failure at *every* stage and escalates cleanly if any stage can't proceed.
+
+We'll fetch a product, look up its inventory, compute reorder quantity, and return a recommendation. If any stage fails, we escalate with context.
+
+```scheme
+;; Fetch product, check inventory, compute reorder, recommend action.
+(define (reorder-recommendation product-id)
+  (let* ((product-raw (cortex/recall \"products\" product-id))
+         (product (if (or (eq? product-raw 'nan)
+                          (and (pair? product-raw) (eq? (car product-raw) 'escalate)))
+                      'nan
+                      product-raw)))
+    (if (eq? product 'nan)
+        (list 'escalate \"product-not-found\" product-id)
+        (let* ((sku (cdr (assoc 'sku product)))
+               (inventory-raw (cortex/recall \"inventory\" sku))
+               (inventory (if (or (eq? inventory-raw 'nan)
+                                  (and (pair? inventory-raw) (eq? (car inventory-raw) 'escalate)))
+                              'nan
+                              inventory-raw)))
+          (if (eq? inventory 'nan)
+              (list 'escalate \"inventory-not-found\" sku)
+              (let* ((on-hand (cdr (assoc 'on-hand inventory)))
+                     (velocity (cdr (assoc 'velocity inventory)))
+                     (days-left (if (> velocity 0) (/ on-hand velocity) 999))
+                     (reorder-qty (if (< days-left 14)
+                                      (* velocity 30)
+                                      0)))
+                (if (> reorder-qty 0)
+                    (list 'recommend \"reorder\" sku reorder-qty)
+                    (list 'recommend \"sufficient\" sku on-hand))))))))
+
+(reorder-recommendation \"prod-999\")
+;; => (recommend \"reorder\" \"SKU-123\" 60) or (escalate \"product-not-found\" \"prod-999\")
+```
+
+**What's new:** we check the result of *each* recall and escalate immediately if it's `'nan` or `(escalate ...)`. This is **ESCAPE**—honest failure, no pretending. The route only proceeds if every stage succeeds. If you run this with a missing product or SKU, you get a clean escalation with context, not a crash.
+
+---
+
+## Recursive Route: Multi-Customer Summary
+
+Now let's add recursion. We'll fetch order counts for a *list* of customers, recursively, and summarize the results.
+
+We'll use **named let**—a tail-recursive loop—to walk the customer list, recall orders for each, and accumulate counts.
+
+```scheme
+;; Recursively fetch order counts for a list of customers and summarize.
+(define (multi-customer-summary customer-ids)
+  (let loop ((ids customer-ids)
+             (total-orders 0)
+             (total-customers 0))
+    (if (null? ids)
+        (list (cons 'total-customers total-customers)
+              (cons 'total-orders total-orders)
+              (cons 'avg-orders-per-customer
+                    (if (> total-customers 0)
+                        (/ total-orders total-customers)
+                        0)))
+        (let* ((id (car ids))
+               (raw (cortex/recall \"orders\" id))
+               (orders (if (or (eq? raw 'nan)
+                               (and (pair? raw) (eq? (car raw) 'escalate)))
+                           '()
+                           raw))
+               (count (length orders)))
+          (loop (cdr ids)
+                (+ total-orders count)
+                (+ total-customers 1))))))
+
+(multi-customer-summary '(\"cust-1\" \"cust-2\" \"cust-3\"))
+;; => ((total-customers . 3) (total-orders . 8) (avg-orders-per-customer . 2.666...))
+```
+
+**Technique:** named `let` with an accumulator. We walk the list tail-recursively, recalling orders for each customer, counting them, and accumulating. If a recall fails, we treat it as zero orders for that customer—graceful, not catastrophic. The route is now *recursive over a collection*.
+
+---
+
+## Six-Stage Route: Read, Recall, Match, Rank, Filter, Format
+
+Let's build a recommendation engine in miniature. Given a query, we'll:
+
+1. Read the query and extract keywords.
+2. Recall candidate products.
+3. Match each product against the keywords.
+4. Rank by match score.
+5. Filter to top 3.
+6. Format as a list.
+
+```scheme
+;; Recommend products by keyword match and ranking.
+(define (recommend-products query)
+  (let* (;; Stage 1: extract keywords (simplified: split on spaces)
+         (keywords (string-split query #\\space))
+         
+         ;; Stage 2: recall candidate products
+         (raw (cortex/recall \"products\" \"catalog\"))
+         (products (if (or (eq? raw 'nan)
+                           (and (pair? raw) (eq? (car raw) 'escalate)))
+                       '()
+                       raw))
+         
+         ;; Stage 3: match—score each product by keyword overlap
+         (scored (map
+                  (lambda (product)
+                    (let* ((name (cdr (assoc 'name product)))
+                           (desc (cdr (assoc 'description product)))
+                           (text (string-append name \" \" desc))
+                           (matches (length
+                                     (filter
+                                      (lambda (kw)
+                                        (string-contains text kw))
+                                      keywords))))
+                      (cons (cons 'score matches) product)))
+                  products))
+         
+         ;; Stage 4: rank by score descending
+         (ranked (sort scored
+                       (lambda (a b)
+                         (> (cdr (assoc 'score a))
+                            (cdr (assoc 'score b))))))
+         
+         ;; Stage 5: filter to top 3
+         (top3 (take ranked (min 3 (length ranked))))
+         
+         ;; Stage 6: format as list of names
+         (names (map (lambda (p) (cdr (assoc 'name p))) top3)))
+    
+    (if (null? names)
+        \"No matching products found.\"
+        (string-append
+         \"Top matches: \"
+         (apply string-append
+                (map (lambda (n) (string-append n \", \")) names))))))
+
+;; Helper: string-contains (simple substring check)
+(define (string-contains str substr)
+  (let ((str-len (string-length str))
+        (sub-len (string-length substr)))
+    (let loop ((i 0))
+      (cond
+        ((> (+ i sub-len) str-len) #f)
+        ((string=? (substring str i (+ i sub-len)) substr) #t)
+        (else (loop (+ i 1)))))))
+
+;; Helper: take first n elements of list
+(define (take lst n)
+  (if (or (null? lst) (<= n 0))
+      '()
+      (cons (car lst) (take (cdr lst) (- n 1)))))
+
+;; Helper: sort (simple insertion sort for clarity)
+(define (sort lst less?)
+  (if (null? lst)
+      '()
+      (insert (car lst) (sort (cdr lst) less?) less?)))
+
+(define (insert x lst less?)
+  (cond
+    ((null? lst) (list x))
+    ((less? x (car lst)) (cons x lst))
+    (else (cons (car lst) (insert x (cdr lst) less?)))))
+
+(recommend-products \"vintage ceramic\")
+;; => \"Top matches: Vintage Teapot, Ceramic Bowl, Rustic Mug, \"
+```
+
+**The route:** read → recall → match → rank → filter → format. Six stages, each transforming the data from the last. Notice we define helpers (`string-contains`, `take`, `sort`) because they're not wired verbs—this is the *restraint* of BACK. We write only what we need, and we write it simply.
+
+---
+
+## Seven-Stage Route: Fetch, Parse, Validate, Enrich, Filter, Aggregate, Reply
+
+Let's fetch external data, validate it, enrich it with local context, filter by criteria, aggregate stats, and compose a report. This is a realistic analytics route.
+
+We'll fetch sales from an external API, validate the response, enrich each sale with product category, filter for a specific category, compute totals, and return a summary.
+
+```scheme
+;; Fetch sales, validate, enrich with category, filter, aggregate, report.
+(define (category-sales-report category-filter)
+  (let* (;; Stage 1: fetch sales data
+         (response (web/fetch \"https://example.com/api/sales\" '()))
+         (body (if (and (pair? response) (assoc 'body response))
+                   (cdr (assoc 'body response))
+                   'nan))
+         
+         ;; Stage 2: validate response
+         (sales (if (or (eq? body 'nan) (not (pair? body)))
+                    '()
+                    body))
+         
+         ;; Stage 3: enrich with product category
+         (enriched (map
+                    (lambda (sale)
+                      (let* ((product-id (cdr (assoc 'product-id sale)))
+                             (product-raw (cortex/recall \"products\" product-id))
+                             (product (if (or (eq? product-raw 'nan)
+                                              (and (pair? product-raw)
+                                                   (eq? (car product-raw) 'escalate)))
+                                          '()
+                                          product-raw))
+                             (category (if (null? product)
+                                           \"unknown\"
+                                           (cdr (assoc 'category product)))))
+                        (cons (cons 'category category) sale)))
+                    sales))
+         
+         ;; Stage 4: filter by category
+         (filtered (filter
+                    (lambda (sale)
+                      (string=? (cdr (assoc 'category sale)) category-filter))
+                    enriched))
+         
+         ;; Stage 5: aggregate totals
+         (count (length filtered))
+         (total-revenue (apply + (map (lambda (s) (cdr (assoc 'amount s))) filtered)))
+         (avg-sale (if (> count 0) (/ total-revenue count) 0))
+         
+         ;; Stage 6: compose report
+         (report (list
+                  (cons 'category category-filter)
+                  (cons 'sale-count count)
+                  (cons 'total-revenue total-revenue)
+                  (cons 'avg-sale avg-sale))))
+    
+    ;; Stage 7: return or escalate
+    (if (= count 0)
+        (list 'escalate \"no-sales-in-category\" category-filter)
+        report)))
+
+(category-sales-report \"ceramics\")
+;; => ((category . \"ceramics\") (sale-count . 12) (total-revenue . 3400) (avg-sale . 283.33...))
+```
+
+**Seven stages:** fetch → validate → enrich → filter → aggregate → compose → return. Notice the *enrichment* stage calls `cortex/recall` *inside* a map—that's an inner route, nested in the outer one. Each sale gets its category looked up. If a product isn't found, we label it \"unknown\" and continue—graceful degradation, not failure.
+
+---
+
+## Route with Conditional Branching: Decision Tree
+
+Not every route is linear. Sometimes you need to branch based on intermediate results. Let's build a pricing recommendation engine that branches on inventory levels and velocity.
+
+```scheme
+;; Recommend pricing action based on inventory and sales velocity.
+(define (pricing-action product-id)
+  (let* ((product-raw (cortex/recall \"products\" product-id))
+         (product (if (or (eq? product-raw 'nan)
+                          (and (pair? product-raw) (eq? (car product-raw) 'escalate)))
+                      'nan
+                      product-raw)))
+    (if (eq? product 'nan)
+        (list 'escalate \"product-not-found\" product-id)
+        (let* ((sku (cdr (assoc 'sku product)))
+               (price (cdr (assoc 'price product)))
+               (inventory-raw (cortex/recall \"inventory\" sku))
+               (inventory (if (or (eq? inventory-raw 'nan)
+                                  (and (pair? inventory-raw)
+                                       (eq? (car inventory-raw) 'escalate)))
+                              'nan
+                              inventory-raw)))
+          (if (eq? inventory 'nan)
+              (list 'escalate \"inventory-not-found\" sku)
+              (let* ((on-hand (cdr (assoc 'on-hand inventory)))
+                     (velocity (cdr (assoc 'velocity inventory)))
+                     (days-left (if (> velocity 0) (/ on-hand velocity) 999)))
+                ;; Decision tree: branch on inventory and velocity
+                (cond
+                  ;; Low stock, high velocity: raise price
+                  ((and (< days-left 7) (> velocity 5))
+                   (list 'action \"raise-price\" sku (* price 1.1)))
+                  
+                  ;; High stock, low velocity: discount
+                  ((and (> days-left 60) (< velocity 2))
+                   (list 'action \"discount\" sku (* price 0.85)))
+                  
+                  ;; Moderate: hold
+                  (else
+                   (list 'action \"hold\" sku price)))))))))
+
+(pricing-action \"prod-567\")
+;; => (action \"raise-price\" \"SKU-567\" 22.0) or (action \"hold\" \"SKU-567\" 20.0)
+```
+
+**Branching route:** recall product → recall inventory → compute days-left → branch on conditions → return action. The `cond` ladder is the decision tree. Each branch returns a different action. This is how you encode business logic in a route—data flows forward, decisions branch, and the route converges on a result.
+
+---
+
+## Route with Mutual Recursion: Category Walk
+
+Let's build a route that walks a nested category tree recursively and counts products in each branch. We'll use **mutual recursion**—two functions that call each other.
+
+```scheme
+;; Count products in a nested category tree.
+(define (count-products-in-tree category-tree)
+  (count-category category-tree))
+
+(define (count-category category)
+  (let* ((products (cdr (assoc 'products category)))
+         (subcategories (cdr (assoc 'subcategories category)))
+         (product-count (length products))
+         (sub-count (count-subcategories subcategories)))
+    (+ product-count sub-count)))
+
+(define (count-subcategories subcats)
+  (if (null? subcats)
+      0
+      (+ (count-category (car subcats))
+         (count-subcategories (cdr subcats)))))
+
+;; Example tree
+(define example-tree
+  '((category . \"Home\")
+    (products . (p1 p2 p3))
+    (subcategories .
+     (((category . \"Kitchen\")
+       (products . (p4 p5))
+       (subcategories . ()))
+      ((category . \"Bath\")
+       (products . (p6))
+       (subcategories .
+        (((category . \"Towels\")
+          (products . (p7 p8 p9))
+          (subcategories . ())))))))))
+
+(count-products-in-tree example-tree)
+;; => 9
+```
+
+**Mutual recursion:** `count-category` calls `count-subcategories`, which calls `count-category` again on each subcategory. The route walks the tree depth-first, counting products at each level. This is a powerful pattern for hierarchical data.
+
+---
+
+## Route with Fold: Aggregation Pipeline
+
+Let's use `fold` (also called `reduce`) to aggregate data across a route. We'll fetch order history, compute lifetime value per customer, and fold across customers to find the top spender.
+
+```scheme
+;; Find the customer with the highest lifetime value.
+(define (top-customer customer-ids)
+  (let* ((customer-values
+          (map
+           (lambda (id)
+             (let* ((orders-raw (cortex/recall \"orders\" id))
+                    (orders (if (or (eq? orders-raw 'nan)
+                                    (and (pair? orders-raw)
+                                         (eq? (car orders-raw) 'escalate)))
+                                '()
+                                orders-raw))
+                    (total (apply + (map (lambda (o) (cdr (assoc 'amount o))) orders))))
+               (cons id total)))
+           customer-ids))
+         (top (fold
+               (lambda (customer best)
+                 (if (> (cdr customer) (cdr best))
+                     customer
+                     best))
+               (cons \"none\" 0)
+               customer-values)))
+    top))
+
+;; Helper: fold (left fold)
+(define (fold f init lst)
+  (if (null? lst)
+      init
+      (fold f (f (car lst) init) (cdr lst))))
+
+(top-customer '(\"cust-1\" \"cust-2\" \"cust-3\"))
+;; => (\"cust-2\" . 4500)
+```
+
+**Fold route:** map over customers to compute lifetime value, then fold to find the max. Fold is the *aggregator*—it reduces a list to a single value by repeatedly applying a function. Here, we compare each customer to the current best and keep the higher one. Clean, functional, powerful.
+
+---
+
+## Route with Higher-Order Composition: Function Factory
+
+Let's build a *function factory*—a function that returns a function, configured with data from a route.
+
+We'll create a discount calculator that fetches discount rules and returns a function that applies them.
+
+```scheme
+;; Create a discount calculator from fetched rules.
+(define (make-discount-calculator)
+  (let* ((rules-raw (cortex/recall \"discounts\" \"active\"))
+         (rules (if (or (eq? rules-raw 'nan)
+                        (and (pair? rules-raw) (eq? (car rules-raw) 'escalate)))
+                    '()
+                    rules-raw)))
+    ;; Return a function that applies the rules to a cart total
+    (lambda (cart-total)
+      (fold
+       (lambda (rule discounted-total)
+         (let* ((threshold (cdr (assoc 'threshold rule)))
+                (percent (cdr (assoc 'percent rule))))
+           (if (>= discounted-total threshold)
+               (* discounted-total (- 1 (/ percent 100)))
+               discounted-total)))
+       cart-total
+       rules))))
+
+;; Example: fetch calculator and use it
+(define calc (make-discount-calculator))
+(calc 150)
+;; => 127.5 (if rules apply 15% discount over $100)
+```
+
+**Higher-order route:** fetch rules → return a closure that captures them. The returned function *remembers* the rules and applies them to any cart total. This is **FORWARD** at the functional level—composition of behavior, not just data.
+
+---
+
+## Full Route: Read Intent, Recall, Compute, Check, Compose Reply
+
+Now we bring it all together. A full route that answers a customer question with grounded data and graceful failure handling.
+
+**Scenario:** Customer asks, \"Should I restock my bestseller?\" the runtime needs to:
+
+1. Parse the question to identify \"bestseller.\"
+2. Recall sales to find the top-selling product.
+3. Recall inventory for that product.
+4. Compute days-of-stock-left.
+5. Check if restock is needed.
+6. Compose a natural-language reply.
+
+```scheme
+;; Answer \"should I restock my bestseller?\" with full route.
+(define (restock-bestseller-advice)
+  (let* (;; Stage 1: intent is implicit—find bestseller
+         
+         ;; Stage 2: recall sales to find bestseller
+         (sales-raw (cortex/recall \"sales\" \"recent\"))
+         (sales (if (or (eq? sales-raw 'nan)
+                        (and (pair? sales-raw) (eq? (car sales-raw) 'escalate)))
+                    '()
+                    sales-raw))
+         
+         ;; Aggregate sales by product
+         (product-totals
+          (fold
+           (lambda (sale acc)
+             (let* ((product-id (cdr (assoc 'product-id sale)))
+                    (amount (cdr (assoc 'amount sale)))
+                    (existing (assoc product-id acc))
+                    (new-total (if existing
+                                   (+ (cdr existing) amount)
+                                   amount)))
+               (cons (cons product-id new-total)
+                     (if existing
+                         (filter (lambda (p) (not (equal? (car p) product-id))) acc)
+                         acc))))
+           '()
+           sales))
+         
+         ;; Find top product
+         (bestseller (fold
+                      (lambda (p best)
+                        (if (> (cdr p) (cdr best)) p best))
+                      (cons \"none\" 0)
+                      product-totals))
+         (bestseller-id (car bestseller)))
+    
+    (if (string=? bestseller-id \"none\")
+        \"No sales data available to identify bestseller.\"
+        (let* (;; Stage 3: recall inventory for bestseller
+               (inventory-raw (cortex/recall \"inventory\" bestseller-id))
+               (inventory (if (or (eq? inventory-raw 'nan)
+                                  (and (pair? inventory-raw)
+                                       (eq? (car inventory-raw) 'escalate)))
+                              'nan
+                              inventory-raw)))
+          (if (eq? inventory 'nan)
+              (string-append \"Bestseller identified (\" bestseller-id \"), but inventory data unavailable.\")
+              (let* (;; Stage 4: compute days-of-stock
+                     (on-hand (cdr (assoc 'on-hand inventory)))
+                     (velocity (cdr (assoc 'velocity inventory)))
+                     (days-left (if (> velocity 0) (/ on-hand velocity) 999))
+                     
+                     ;; Stage 5: check if restock needed
+                     (restock-needed? (< days-left 14))
+                     (reorder-qty (if restock-needed?
+                                      (* velocity 30)
+                                      0)))
+                
+                ;; Stage 6: compose reply
+                (if restock-needed?
+                    (string-append
+                     \"Yes, restock recommended. Your bestseller (\"
+                     bestseller-id
+                     \") has \"
+                     (number->string on-hand)
+                     \" units left, about \"
+                     (number->string (round days-left))
+                     \" days of stock. Suggest ordering \"
+                     (number->string (round reorder-qty))
+                     \" units.\")
+                    (string-append
+                     \"No restock needed yet. Your bestseller (\"
+                     bestseller-id
+                     \") has \"
+                     (number->string on-hand)
+                     \" units, about \"
+                     (number->string (round days-left))
+                     \" days of stock.\"))))))))
+
+;; Helper: round to nearest integer
+(define (round x)
+  (inexact->exact (floor (+ x 0.5))))
+
+(restock-bestseller-advice)
+;; => \"Yes, restock recommended. Your bestseller (prod-42) has 8 units left, about 5 days of stock. Suggest ordering 60 units.\"
+```
+
+**Six stages, fully orchestrated:** identify bestseller from sales → recall inventory → compute days-left → check threshold → compose reply. Every stage handles failure. If sales are missing, we say so. If inventory is missing, we say so. If everything works, we compute and reply truthfully. This is mastery—data flowing forward, failure handled honestly, reply grounded in real data.
+
+---
+
+## Route with Parallel Aggregation: Multi-Source Summary
+
+Let's fetch data from multiple sources in parallel (conceptually—Scheme doesn't have native parallelism, but we can structure the logic to handle independent fetches), aggregate the results, and summarize.
+
+We'll fetch sales from three channels, aggregate totals, and report.
+
+```scheme
+;; Aggregate sales from multiple channels and summarize.
+(define (multi-channel-summary)
+  (let* (;; Fetch from three sources
+         (etsy-raw (cortex/recall \"sales\" \"etsy\"))
+         (etsy (if (or (eq? etsy-raw 'nan)
+                       (and (pair? etsy-raw) (eq? (car etsy-raw) 'escalate)))
+                   '()
+                   etsy-raw))
+         (etsy-total (apply + (map (lambda (s) (cdr (assoc 'amount s))) etsy)))
+         
+         (shopify-raw (cortex/recall \"sales\" \"shopify\"))
+         (shopify (if (or (eq? shopify-raw 'nan)
+                          (and (pair? shopify-raw) (eq? (car shopify-raw) 'escalate)))
+                      '()
+                      shopify-raw))
+         (shopify-total (apply + (map (lambda (s) (cdr (assoc 'amount s))) shopify)))
+         
+         (ebay-raw (cortex/recall \"sales\" \"ebay\"))
+         (ebay (if (or (eq? ebay-raw 'nan)
+                       (and (pair? ebay-raw) (eq? (car ebay-raw) 'escalate)))
+                   '()
+                   ebay-raw))
+         (ebay-total (apply + (map (lambda (s) (cdr (assoc 'amount s))) ebay)))
+         
+         ;; Aggregate
+         (grand-total (+ etsy-total shopify-total ebay-total))
+         (channel-count (length (filter (lambda (t) (> t 0))
+                                         (list etsy-total shopify-total ebay-total)))))
+    
+    (list (cons 'etsy etsy-total)
+          (cons 'shopify shopify-total)
+          (cons 'ebay ebay-total)
+          (cons 'total grand-total)
+          (cons 'active-channels channel-count))))
+
+(multi-channel-summary)
+;; => ((etsy . 1200) (shopify . 3400) (ebay . 800) (total . 5400) (active-channels . 3))
+```
+
+**Multi-source route:** fetch from three sources, compute totals independently, aggregate. If any source fails, we treat it as zero and continue. The route is *resilient*—it doesn't fail completely if one source is down. This is real-world orchestration: you rarely get perfect data, so you handle what you have and report honestly.
+
+---
+
+## Route with Recursive Refinement: Iterative Search
+
+Let's build a route that refines a search iteratively until it finds a match or exhausts options.
+
+We'll search for a product by progressively relaxing the query—first exact match, then substring, then keyword.
+
+```scheme
+;; Search for product with iterative query relaxation.
+(define (search-product query)
+  (let ((products-raw (cortex/recall \"products\" \"catalog\")))
+    (if (or (eq? products-raw 'nan)
+            (and (pair? products-raw) (eq? (car products-raw) 'escalate)))
+        (list 'escalate \"catalog-unavailable\")
+        (let ((products products-raw))
+          ;; Try exact match
+          (let ((exact (filter
+                        (lambda (p)
+                          (string=? (cdr (assoc 'name p)) query))
+                        products)))
+            (if (not (null? exact))
+                (car exact)
+                ;; Try substring match
+                (let ((substring-matches (filter
+                                          (lambda (p)
+                                            (string-contains (cdr (assoc 'name p)) query))
+                                          products)))
+                  (if (not (null? substring-matches))
+                      (car substring-matches)
+                      ;; Try keyword match (split query)
+                      (let* ((keywords (string-split query #\\space))
+                             (keyword-matches (filter
+                                               (lambda (p)
+                                                 (let ((name (cdr (assoc 'name p))))
+                                                   (any (lambda (kw) (string-contains name kw))
+                                                        keywords)))
+                                               products)))
+                        (if (not (null? keyword-matches))
+                            (car keyword-matches)
+                            (list 'escalate \"no-match\" query)))))))))))
+
+;; Helper: any (returns #t if any element satisfies pred)
+(define (any pred lst)
+  (cond
+    ((null? lst) #f)
+    ((pred (car lst)) #t)
+    (else (any pred (cdr lst)))))
+
+(search-product \"vintage teapot\")
+;; => product record or (escalate \"no-match\" \"vintage teapot\")
+```
+
+**Iterative refinement:** try exact → try substring → try keyword → escalate. The route *refines* the search strategy at each step. This is a common pattern in real systems: start strict, relax progressively, fail gracefully if nothing works.
+
+---
+
+## Route with State Accumulation: Running Balance
+
+Let's build a route that processes a transaction history and computes a running balance, accumulating state as we go.
+
+```scheme
+;; Compute running balance from transaction history.
+(define (running-balance-report customer-id)
+  (let* ((txns-raw (cortex/recall \"transactions\" customer-id))
+         (txns (if (or (eq? txns-raw 'nan)
+                       (and (pair? txns-raw) (eq? (car txns-raw) 'escalate)))
+                   '()
+                   txns-raw)))
+    (if (null? txns)
+        '()
+        (let loop ((remaining txns)
+                   (balance 0)
+                   (report '()))
+          (if (null? remaining)
+              (reverse report)
+              (let* ((txn (car remaining))
+                     (amount (cdr (assoc 'amount txn)))
+                     (type (cdr (assoc 'type txn)))
+                     (delta (if (string=? type \"credit\") amount (- amount)))
+                     (new-balance (+ balance delta))
+                     (entry (list (cons 'timestamp (cdr (assoc 'timestamp txn)))
+                                  (cons 'type type)
+                                  (cons 'amount amount)
+                                  (cons 'balance new-balance))))
+                (loop (cdr remaining) new-balance (cons entry report))))))))
+
+(running-balance-report \"cust-789\")
+;; => list of entries with running balance
+```
+
+**State accumulation:** we walk the transaction list with a running balance, building a report as we go. Each entry includes the balance *after* that transaction. This is a **fold-like** pattern done with named let—tail recursion with an accumulator. The route *transforms* a flat list into an enriched, stateful report.
+
+---
+
+## Route with Error Recovery: Retry Logic
+
+Let's build a route that retries a failing operation with exponential backoff (simulated—real retry would involve delays, but we can structure the logic).
+
+```scheme
+;; Fetch with retry logic (simulated).
+(define (fetch-with-retry url max-retries)
+  (let loop ((attempt 1))
+    (let ((response (web/fetch url '())))
+      (if (and (pair? response) (assoc 'body response))
+          response
+          (if (< attempt max-retries)
+              (begin
+                ;; In real code, we'd delay here; for now, just retry
+                (loop (+ attempt 1)))
+              (list 'escalate \"fetch-failed-after-retries\" url max-retries))))))
+
+(fetch-with-retry \"https://example.com/api\" 3)
+;; => response or (escalate \"fetch-failed-after-retries\" ...)
+```
+
+**Retry route:** try fetch → if fails, retry up to max → escalate if all fail. This is **ESCAPE with persistence**—we try hard, but we don't lie. If we can't fetch after retries, we escalate honestly.
+
+---
+
+## Route with Dynamic Routing: Conditional Verb Selection
+
+Let's build a route that chooses which verb to call based on intermediate data.
+
+We'll route a customer message to different handlers based on sentiment.
+
+```scheme
+;; Route message to handler based on sentiment.
+(define (route-message message)
+  (let* ((sentiment-raw (sentiment/classify message))
+         (sentiment (if (or (eq? sentiment-raw 'nan)
+                            (and (pair? sentiment-raw) (eq? (car sentiment-raw) 'escalate)))
+                        \"neutral\"
+                        (cdr (assoc 'sentiment sentiment-raw)))))
+    (cond
+      ((string=? sentiment \"negative\")
+       ;; Route to high-priority queue
+       (list 'route \"urgent-queue\" message))
+      
+      ((string=? sentiment \"positive\")
+       ;; Auto-reply with thanks
+       (list 'reply \"Thank you for your message! We'll get back to you soon.\"))
+      
+      (else
+       ;; Standard queue
+       (list 'route \"standard-queue\" message)))))
+
+(route-message \"This product broke after one day!\")
+;; => (route \"urgent-queue\" \"This product broke after one day!\")
+```
+
+**Dynamic routing:** call a verb (sentiment classifier) → branch on result → choose action. The route's *path* depends on data. This is how you build smart dispatchers—the route itself is a decision engine.
+
+---
+
+## Route with Data Transformation Pipeline: Map-Filter-Reduce
+
+Let's build a classic map-filter-reduce pipeline over fetched data.
+
+We'll fetch orders, map to extract totals, filter for high-value orders, and reduce to sum.
+
+```scheme
+;; Compute total revenue from high-value orders.
+(define (high-value-revenue threshold)
+  (let* ((orders-raw (cortex/recall \"orders\" \"all\"))
+         (orders (if (or (eq? orders-raw 'nan)
+                         (and (pair? orders-raw) (eq? (car orders-raw) 'escalate)))
+                     '()
+                     orders-raw))
+         
+         ;; Map: extract total from each order
+         (totals (map (lambda (o) (cdr (assoc 'total o))) orders))
+         
+         ;; Filter: keep only high-value
+         (high-value (filter (lambda (t) (>= t threshold)) totals))
+         
+         ;; Reduce: sum
+         (revenue (fold + 0 high-value)))
+    
+    revenue))
+
+(high-value-revenue 500)
+;; => 12400
+```
+
+**Map-filter-reduce:** the canonical functional pipeline. Map transforms, filter selects, reduce aggregates. This is the *essence* of data flow—each stage is a pure function over a list. Clean, composable, powerful.
+
+---
+
+## Route with Nested Recursion: Tree Traversal
+
+Let's traverse a tree structure recursively and collect all leaf values.
+
+```scheme
+;; Collect all leaf values from a tree.
+(define (collect-leaves tree)
+  (cond
+    ((null? tree) '())
+    ((not (pair? tree)) (list tree))  ;; Leaf
+    (else
+     (append (collect-leaves (car tree))
+             (collect-leaves (cdr tree))))))
+
+(define example-tree '((a (b c)) (d (e (f g)))))
+(collect-leaves example-tree)
+;; => (a b c d e f g)
+```
+
+**Nested recursion:** we recur on both `car` and `cdr`, traversing the entire tree. This is a classic pattern for nested data. The route *flattens* the tree into a list of leaves.
+
+---
+
+## Route with Chained Transformations: Point-Free Style
+
+Let's build a route using point-free composition—functions composed without naming intermediate values.
+
+```scheme
+;; Point-free pipeline: fetch, extract, filter, count.
+(define (count-active-listings)
+  (let ((compose (lambda (f g) (lambda (x) (f (g x))))))
+    (let ((pipeline
+           (compose
+            length
+            (compose
+             (lambda (lst) (filter (lambda (l) (cdr (assoc 'active l))) lst))
+             (lambda (raw) (if (or (eq? raw 'nan)
+                                   (and (pair? raw) (eq? (car raw) 'escalate)))
+                               '()
+                               raw))))))
+      (pipeline (cortex/recall \"listings\" \"catalog\")))))
+
+(count-active-listings)
+;; => 42
+```
+
+**Point-free route:** we compose functions without naming intermediate values. `compose` creates a new function by chaining two functions. The pipeline is a single composed function applied to the result of `cortex/recall`. This is advanced functional style—elegant, but harder to debug. Use it when the flow is truly linear and the composition clarifies intent.
+
+---
+
+## Route with Lazy Evaluation: Generator Pattern
+
+Scheme doesn't have native lazy evaluation, but we can simulate a generator with closures.
+
+```scheme
+;; Create a generator that yields filtered products one at a time.
+(define (make-product-generator filter-pred)
+  (let* ((products-raw (cortex/recall \"products\" \"catalog\"))
+         (products (if (or (eq? products-raw 'nan)
+                           (and (pair? products-raw) (eq? (car products-raw) 'escalate)))
+                       '()
+                       products-raw))
+         (filtered (filter filter-pred products)))
+    (let ((remaining filtered))
+      (lambda ()
+        (if (null? remaining)
+            'done
+            (let ((next (car remaining)))
+              (set! remaining (cdr remaining))
+              next))))))
+
+;; Use the generator
+(define gen (make-product-generator (lambda (p) (> (cdr (assoc 'price p)) 50))))
+(gen)  ;; => first product
+(gen)  ;; => second product
+(gen)  ;; => 'done when exhausted
+```
+
+**Generator route:** we create a closure that *remembers* the remaining items and yields one per call. This is a **stateful route**—each call advances the state. Useful for processing large datasets incrementally.
+
+---
+
+## Route with Guard Clauses: Early Exit
+
+Let's build a route with multiple guard clauses that exit early if conditions aren't met.
+
+```scheme
+;; Process order with multiple validation guards.
+(define (process-order order-id)
+  (let* ((order-raw (cortex/recall \"orders\" order-id))
+         (order (if (or (eq? order-raw 'nan)
+                        (and (pair? order-raw) (eq? (car order-raw) 'escalate)))
+                    'nan
+                    order-raw)))
+    ;; Guard 1: order exists
+    (if (eq? order 'nan)
+        (list 'escalate \"order-not-found\" order-id)
+        (let ((status (cdr (assoc 'status order))))
+          ;; Guard 2: order is pending
+          (if (not (string=? status \"pending\"))
+              (list 'escalate \"order-not-pending\" order-id status)
+              (let ((total (cdr (assoc 'total order))))
+                ;; Guard 3: total is positive
+                (if (<= total 0)
+                    (list 'escalate \"invalid-total\" order-id total)
+                    ;; All guards passed, proceed
+                    (list 'success \"order-processed\" order-id total))))))))
+
+(process-order \"order-999\")
+;; => (success \"order-processed\" \"order-999\" 150) or escalate
+```
+
+**Guard route:** each `if` is a guard clause—if it fails, we exit early with escalation. Only if all guards pass do we proceed to the final action. This is defensive programming—check everything, fail fast, be honest.
+
+---
+
+## Route with Transactional Rollback: Compensating Actions
+
+Let's simulate a transactional route that tracks actions and can \"rollback\" by undoing them if a later stage fails.
+
+```scheme
+;; Process multi-stage transaction with rollback on failure.
+(define (process-transaction customer-id amount)
+  (let* ((actions '())
+         
+         ;; Stage 1: Reserve inventory
+         (reserve-result (stock/adjust \"prod-123\" (- amount)))
+         (reserve-ok? (not (or (eq? reserve-result 'nan)
+                               (and (pair? reserve-result)
+                                    (eq? (car reserve-result) 'escalate))))))
+    (if (not reserve-ok?)
+        (list 'escalate \"reserve-failed\")
+        (begin
+          (set! actions (cons 'reserved actions))
+          
+          ;; Stage 2: Charge customer (simulated)
+          (let ((charge-result (list 'success)))  ;; Simulate success
+            (if (eq? (car charge-result) 'escalate)
+                (begin
+                  ;; Rollback: unreserve inventory
+                  (stock/adjust \"prod-123\" amount)
+                  (list 'escalate \"charge-failed\"))
+                (begin
+                  (set! actions (cons 'charged actions))
+                  
+                  ;; Stage 3: Create order
+                  (let ((order-result (list 'success \"order-789\")))
+                    (if (eq? (car order-result) 'escalate)
+                        (begin
+                          ;; Rollback: unreserve, refund (simulated)
+                          (stock/adjust \"prod-123\" amount)
+                          (list 'escalate \"order-creation-failed\"))
+                        (list 'success \"transaction-complete\" (cadr order-result) actions))))))))))
+
+(process-transaction \"cust-555\" 2)
+;; => (success \"transaction-complete\" \"order-789\" (charged reserved))
+```
+
+**Transactional route:** we track actions in a list and undo them if a later stage fails. This is a *compensating transaction* pattern—common in distributed systems. Each stage has a rollback action. If any stage fails, we unwind. This is advanced orchestration—keeping state, handling partial failure, cleaning up.
+
+---
+
+## Route with Async Simulation: Callback Pattern
+
+Scheme doesn't have native async, but we can simulate a callback-based route where a function is called when data is ready.
+
+```scheme
+;; Simulate async fetch with callback.
+(define (fetch-async url callback)
+  ;; Simulate: in real code, this would be async
+  (let ((response (web/fetch url '())))
+    (callback response)))
+
+;; Use the async fetch
+(fetch-async \"https://example.com/data\"
+             (lambda (response)
+               (if (and (pair? response) (assoc 'body response))
+                   (let ((body (cdr (assoc 'body response))))
+                     (list 'success body))
+                   (list 'escalate \"fetch-failed\"))))
+;; => (success <body>) or (escalate \"fetch-failed\")
+```
+
+**Callback route:** we pass a function to be called when data is ready. The callback handles success or failure. This is the foundation of async programming—the route *continues* in the callback. Useful mental model even if the runtime's runtime is synchronous.
+
+---
+
+## Route with Memoization: Caching Results
+
+Let's add memoization to a route—caching results to avoid recomputation.
+
+```scheme
+;; Memoized product lookup.
+(define make-memoized-lookup
+  (let ((cache '()))
+    (lambda (product-id)
+      (let ((cached (assoc product-id cache)))
+        (if cached
+            (cdr cached)
+            (let* ((product-raw (cortex/recall \"products\" product-id))
+                   (product (if (or (eq? product-raw 'nan)
+                                    (and (pair? product-raw)
+                                         (eq? (car product-raw) 'escalate)))
+                                'nan
+                                product-raw)))
+              (if (not (eq? product 'nan))
+                  (set! cache (cons (cons product-id product) cache)))
+              product))))))
+
+(define lookup (make-memoized-lookup))
+(lookup \"prod-42\")  ;; Fetches from cortex
+(lookup \"prod-42\")  ;; Returns from cache
+```
+
+**Memoized route:** we keep a cache of results and return cached values on repeat calls. This is **BACK in performance**—don't recompute what you've already computed. The closure captures the cache and mutates it. Useful for expensive lookups in a route.
+
+---
+
+## Route with Speculative Execution: Prefetch Pattern
+
+Let's speculatively fetch data we *might* need, and use it if we do, discard if we don't.
+
+```scheme
+;; Speculatively fetch related products.
+(define (product-detail-with-related product-id)
+  (let* ((product-raw (cortex/recall \"products\" product-id))
+         (product (if (or (eq? product-raw 'nan)
+                          (and (pair? product-raw) (eq? (car product-raw) 'escalate)))
+                      'nan
+                      product-raw))
+         
+         ;; Speculatively fetch related products
+         (related-raw (cortex/recall \"products\" \"related\"))
+         (related (if (or (eq? related-raw 'nan)
+                          (and (pair? related-raw) (eq? (car related-raw) 'escalate)))
+                      '()
+                      related-raw)))
+    
+    (if (eq? product 'nan)
+        (list 'escalate \"product-not-found\" product-id)
+        (let ((category (cdr (assoc 'category product))))
+          (list
+           (cons 'product product)
+           (cons 'related (filter
+                           (lambda (p) (string=? (cdr (assoc 'category p)) category))
+                           related)))))))
+
+(product-detail-with-related \"prod-88\")
+;; => product with related in same category
+```
+
+**Speculative route:** we fetch related products *before* we know if we need them. If the main product fetch succeeds and we want to show related, we have them ready. If not, we discard. This is an optimization—trade bandwidth for latency. Use it when the speculative fetch is cheap and likely to be needed.
+
+---
+
+## Route with Event Sourcing: Replay Pattern
+
+Let's build a route that reconstructs state by replaying events.
+
+```scheme
+;; Reconstruct account balance by replaying transaction events.
+(define (replay-balance customer-id)
+  (let* ((events-raw (cortex/recall \"events\" customer-id))
+         (events (if (or (eq? events-raw 'nan)
+                         (and (pair? events-raw) (eq? (car events-raw) 'escalate)))
+                     '()
+                     events-raw)))
+    (fold
+     (lambda (event balance)
+       (let ((type (cdr (assoc 'type event)))
+             (amount (cdr (assoc 'amount event))))
+         (cond
+           ((string=? type \"deposit\") (+ balance amount))
+           ((string=? type \"withdraw\") (- balance amount))
+           (else balance))))
+     0
+     events)))
+
+(replay-balance \"cust-333\")
+;; => current balance reconstructed from events
+```
+
+**Event-sourcing route:** we don't store the balance—we store the *events* that changed it, and we reconstruct the balance by replaying them. This is a powerful pattern for audit trails and time-travel debugging. The route is a **fold over history**.
+
+---
+
+## Route with Circuit Breaker: Fail-Fast Pattern
+
+Let's add a circuit breaker—if a service fails repeatedly, stop calling it and fail fast.
+
+```scheme
+;; Circuit breaker for external service.
+(define make-circuit-breaker
+  (let ((failures 0)
+        (threshold 3))
+    (lambda (service-fn)
+      (if (>= failures threshold)
+          (list 'escalate \"circuit-open\" \"service-unavailable\")
+          (let ((result (service-fn)))
+            (if (or (eq? result 'nan)
+                    (and (pair? result) (eq? (car result) 'escalate)))
+                (begin
+                  (set! failures (+ failures 1))
+                  result)
+                (begin
+                  (set! failures 0)  ;; Reset on success
+                  result)))))))
+
+(define breaker (make-circuit-breaker))
+(breaker (lambda () (web/fetch \"https://flaky-api.com\" '())))
+;; => response or (escalate \"circuit-open\" ...) after 3 failures
+```
+
+**Circuit-breaker route:** track failures, stop calling the service after a threshold. This is **ESCAPE at the system level**—don't keep hammering a failing service. The route *protects* the system from cascading failure.
+
+---
+
+## Route with Saga Pattern: Distributed Transaction
+
+Let's orchestrate a multi-step transaction across services, with compensation if any step fails.
+
+```scheme
+;; Saga: book order across inventory, payment, shipping.
+(define (book-order order-data)
+  (let* (;; Step 1: Reserve inventory
+         (reserve-result (stock/adjust (cdr (assoc 'sku order-data)) -1))
+         (reserve-ok? (not (or (eq? reserve-result 'nan)
+                               (and (pair? reserve-result)
+                                    (eq? (car reserve-result) 'escalate))))))
+    (if (not reserve-ok?)
+        (list 'escalate \"inventory-unavailable\")
+        ;; Step 2: Charge payment (simulated)
+        (let ((charge-result (list 'success \"charge-id-123\")))
+          (if (eq? (car charge-result) 'escalate)
+              (begin
+                ;; Compensate: unreserve inventory
+                (stock/adjust (cdr (assoc 'sku order-data)) 1)
+                (list 'escalate \"payment-failed\"))
+              ;; Step 3: Create shipping label (simulated)
+              (let ((ship-result (list 'success \"label-456\")))
+                (if (eq? (car ship-result) 'escalate)
+                    (begin
+                      ;; Compensate: unreserve, refund
+                      (stock/adjust (cdr (assoc 'sku order-data)) 1)
+                      ;; (refund charge-id) -- simulated
+                      (list 'escalate \"shipping-failed\"))
+                    (list 'success \"order-complete\"
+                          (cadr charge-result)
+                          (cadr ship-result)))))))))
+
+(book-order '((sku . \"SKU-999\") (amount . 100)))
+;; => (success \"order-complete\" \"charge-id-123\" \"label-456\")
+```
+
+**Saga route:** multi-step transaction with compensation. Each step has a compensating action if a later step fails. This is how you orchestrate distributed transactions without a global lock. The route is a **state machine** with rollback edges.
+
+---
+
+## Route with Policy Enforcement: Guard Middleware
+
+Let's add policy checks as middleware in a route—each policy is a guard that can block or allow.
+
+```scheme
+;; Enforce policies before processing order.
+(define (enforce-policies order-data)
+  (let* (;; Policy 1: check customer credit limit
+         (customer-id (cdr (assoc 'customer-id order-data)))
+         (credit-raw (cortex/recall \"credit\" customer-id))
+         (credit (if (or (eq? credit-raw 'nan)
+                         (and (pair? credit-raw) (eq? (car credit-raw) 'escalate)))
+                     0
+                     (cdr (assoc 'limit credit-raw))))
+         (amount (cdr (assoc 'amount order-data))))
+    (if (> amount credit)
+        (list 'deny \"credit-limit-exceeded\" amount credit)
+        ;; Policy 2: check inventory availability
+        (let* ((sku (cdr (assoc 'sku order-data)))
+               (stock-raw (stock/on-hand sku))
+               (stock (if (or (eq? stock-raw 'nan)
+                              (and (pair? stock-raw) (eq? (car stock-raw) 'escalate)))
+                          0
+                          stock-raw)))
+          (if (<= stock 0)
+              (list 'deny \"out-of-stock\" sku)
+              ;; Policy 3: check fraud score (simulated)
+              (let ((fraud-score 0.2))  ;; Simulate
+                (if (> fraud-score 0.5)
+                    (list 'deny \"fraud-risk\" customer-id fraud-score)
+                    (list 'allow \"policies-passed\"))))))))
+
+(enforce-policies '((customer-id . \"cust-777\") (amount . 200) (sku . \"SKU-888\")))
+;; => (allow \"policies-passed\") or (deny ...)
+```
+
+**Policy route:** each policy is a guard. We check them in sequence. If any denies, we stop and return the denial. If all pass, we allow. This is **middleware**—cross-cutting concerns applied uniformly. The route is a **filter chain**.
+
+---
+
+## Route with Data Lineage: Provenance Tracking
+
+Let's track *where* data came from as it flows through the route.
+
+```scheme
+;; Track data provenance through route.
+(define (fetch-with-provenance url)
+  (let* ((response (web/fetch url '()))
+         (body (if (and (pair? response) (assoc 'body response))
+                   (cdr (assoc 'body response))
+                   'nan)))
+    (if (eq? body 'nan)
+        (list 'escalate \"fetch-failed\" url)
+        (list (cons 'data body)
+              (cons 'source url)
+              (cons 'timestamp (system/unix-now))))))
+
+(define (enrich-with-local data)
+  (let* ((local-raw (cortex/recall \"local-context\" \"default\"))
+         (local (if (or (eq? local-raw 'nan)
+                        (and (pair? local-raw) (eq? (car local-raw) 'escalate)))
+                    '()
+                    local-raw)))
+    (cons (cons 'enriched-with 'local-context) data)))
+
+(define (process-with-lineage url)
+  (let ((fetched (fetch-with-provenance url)))
+    (if (eq? (car fetched) 'escalate)
+        fetched
+        (enrich-with-local fetched))))
+
+(process-with-lineage \"https://example.com/api/data\")
+;; => data with provenance: source, timestamp, enrichment steps
+```
+
+**Lineage route:** we tag data with its source and transformations. Each stage adds metadata. At the end, you can see the full provenance—where the data came from, when, and what was done to it. Useful for debugging and compliance.
+
+---
+
+## Route with Schema Validation: Type Guards
+")

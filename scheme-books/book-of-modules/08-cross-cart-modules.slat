@@ -1,0 +1,159 @@
+(chapter
+  :book "Book of Modules"
+  :chapter-number 8
+  :title "Cross-cart modules"
+  :audience "programmer-fluent-in-other-languages"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-completion-orchestrator")
+  :prose
+"# Chapter 8 — Cross-cart modules
+
+In Motoi, a **cart** is a self-contained program — usually a game, a shop, a widget, or a small tool that runs to completion. Carts are the unit of distribution: you publish carts, other people run them.
+
+Modules live at a different layer. A module is not owned by any one cart; a module is a bag of verbs that any cart can import. This chapter is about the relationship between carts and modules — what it means for a module to be shared across carts, and how the module system handles reuse without letting carts trample each other.
+
+## 8.1 Cart and module — different scopes
+
+Every cart is a program. Every program imports modules. So every cart imports modules. This part is easy.
+
+The trick is: two different carts on the same machine can import the same module. When they do, they each get their own view — their own bindings, their own state.
+
+```scheme
+;; cart-a.scm
+(import counter :as c)
+(c/increment!)
+(c/increment!)
+(c/count)   ;; ⇒ 2
+
+;; cart-b.scm — on the same machine, run at the same time
+(import counter :as c)
+(c/increment!)
+(c/count)   ;; ⇒ 1
+```
+
+The counter is not shared. Cart A has its counter at 2. Cart B has its counter at 1. They imported the same module, but each cart has its own instance.
+
+This is the sane default. If sharing were the default, every cart would step on every other cart's state. The default is *isolation*, and sharing is opt-in.
+
+## 8.2 Explicit shared modules
+
+If you *want* two carts to share a module's state — for example, a shared music player that both carts control — you use a shared module.
+
+```scheme
+(module music-player
+  :shared #t
+  ...)
+```
+
+The `:shared #t` header says *every importer sees the same instance*. First cart to load initializes; subsequent carts get bindings pointing to the same state.
+
+Shared modules are useful and dangerous in equal measure. Useful, because they let carts cooperate. Dangerous, because they create implicit coupling — cart A's actions can affect cart B without cart B knowing why.
+
+A responsible shared module documents its shared nature in its README and offers verbs that make coordination explicit — `music-player/subscribe`, `music-player/announce`, that sort of thing.
+
+## 8.3 Cart-scoped modules
+
+The default — one instance per cart — is called **cart-scoped**. If you want to spell that out explicitly:
+
+```scheme
+(module counter
+  :shared #f  ;; default, but explicit
+  ...)
+```
+
+Cart-scoped modules feel like the module belongs to the cart. It doesn't — the source lives one place, and every cart imports it — but the behavior is *as if* each cart had its own copy.
+
+## 8.4 System-scoped modules
+
+Some modules exist once per system. The clock, the filesystem, the network — these are single instances shared by everyone. In Motoi, these live under `motoi/system/*`:
+
+```scheme
+(import motoi/system/clock :as clock)
+(import motoi/system/fs :as fs)
+```
+
+You cannot have two clocks. You cannot have two filesystems. These modules are `:shared #t` by nature and always behave the same across carts.
+
+## 8.5 A shared module in practice
+
+Say two carts on the same machine both want to play music, and they want to coordinate: when one starts a song, the other should quiet down.
+
+The shared module:
+
+```scheme
+(module music-player
+  :shared #t
+  (export play stop subscribe volume)
+
+  (define current-song (make-parameter #f))
+  (define subscribers (make-parameter '()))
+
+  (define (play song)
+    (current-song song)
+    (for-each (lambda (sub) (sub 'now-playing song))
+              (subscribers)))
+
+  (define (stop)
+    (current-song #f)
+    (for-each (lambda (sub) (sub 'stopped))
+              (subscribers)))
+
+  (define (subscribe callback)
+    (subscribers (cons callback (subscribers))))
+
+  (define (volume level)
+    (system-set-volume! level)))
+```
+
+Cart A:
+
+```scheme
+(import music-player :as m)
+
+(m/subscribe
+  (lambda (event . rest)
+    (case event
+      ((now-playing) (m/volume 0.3))    ;; someone else is playing, quiet down
+      ((stopped)     (m/volume 1.0)))))  ;; they stopped, back to normal
+```
+
+Cart B does the same. Now both carts cooperate: whichever plays a song is loud; the other quiets. Because `music-player` is shared, the subscribe list is one list, seen by both.
+
+## 8.6 The isolation guarantee
+
+Non-shared modules give you a strong isolation guarantee: no matter what cart A does with `counter`, cart B's `counter` is unaffected. This is worth naming, because it means you can reason about a cart's behavior in isolation.
+
+The guarantee holds even when carts are running simultaneously in the same process. Motoi's module system tracks which cart is calling, and dispatches to the cart-scoped instance for that cart.
+
+If a bug in one cart corrupts its `counter`, it does not corrupt any other cart's `counter`. This is one of the reasons Curator can run many carts at once without them interfering.
+
+## 8.7 When to make a module shared
+
+Rules of thumb.
+
+- **Share** if the module represents a single resource that only one thing should exist for — a hardware device, a network connection, an audio output.
+- **Do not share** if the module represents a piece of logic each cart uses independently — a counter, a validator, a text formatter.
+- **Do not share** if in doubt. Isolation is safer; you can add sharing later; you cannot remove sharing without breaking every cart that came to depend on it.
+
+## 8.8 Cortex and cross-cart
+
+Cortex knows about the cart boundary. When it logs a module-loaded event, it names the cart that loaded it:
+
+```scheme
+(cortex/query :predicate 'module-loaded)
+;; ⇒ ((:cart cart-a :module counter :hash abc123 :at ...)
+;;    (:cart cart-b :module counter :hash abc123 :at ...))
+```
+
+This is how an auditor sees who is using what. Two carts loading the same counter is fine — they each have their own. A shared module loaded by five carts is one shared instance being used by five callers.
+
+## 8.9 Try it
+
+If you have a Motoi environment with Curator, start two small carts that both import a shared module. Verify they cooperate. Restart one of them; verify the shared state persists. Turn off sharing (change `:shared #t` to `:shared #f`); verify the carts stop cooperating.
+
+Chapter 9 covers module hygiene — the rules about what modules can and cannot see. Turn the page.")

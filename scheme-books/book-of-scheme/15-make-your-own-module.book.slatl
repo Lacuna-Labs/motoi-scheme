@@ -1,0 +1,292 @@
+;; 15-make-your-own-module.book.slatl
+;; The Book of Motoi Scheme — Chapter 15 — Making Your Own Module
+
+(chapter
+  :book             "The Book of Motoi Scheme"
+  :chapter-number   15
+  :title            "Chapter 15 — Making Your Own Module"
+  :audience         :any
+  :dialect          "motoi"
+  :book-version     "1.0"
+  :provenance       "book-of-scheme-author-2026-07-17"
+  :training-eligible #t
+  :content-rating   :G
+  :prose
+"# Chapter 15 — Making Your Own Module
+
+Fourteen chapters in, you know enough Scheme to write your own reusable pieces. This chapter shows you how to *package* those pieces so they can be shared, reused, and gradually promoted into first-class Motoi modules.
+
+We'll do it in three passes. First: a Scheme file that other Scheme files can pull in. Second: a folder with a proper `MANIFEST.slat`. Third: how the formal module protocol will work once the `import` verb lands.
+
+## Pass 1 — a file of definitions
+
+The simplest reusable unit is a file — a `.scm` file of top-level definitions. Save one as `my-utils.scm`:
+
+```
+;; my-utils.scm — shared helpers
+
+(define (square x) (* x x))
+
+(define (avg . nums)
+  (/ (apply + nums) (length nums)))
+
+(define (clamp x lo hi)
+  (cond ((< x lo) lo)
+        ((> x hi) hi)
+        (else x)))
+
+(define (make-beat frequencies)
+  (for-each (lambda (f) (audio/play 'tone f 0.15)) frequencies))
+```
+
+Today, the practical way to \"pull it in\" is to concatenate. Your driver program starts with those definitions:
+
+```
+;; main.scm
+
+;; ── my-utils.scm imported by copy ──
+(define (square x) (* x x))
+(define (avg . nums) (/ (apply + nums) (length nums)))
+(define (clamp x lo hi)
+  (cond ((< x lo) lo)
+        ((> x hi) hi)
+        (else x)))
+(define (make-beat frequencies)
+  (for-each (lambda (f) (audio/play 'tone f 0.15)) frequencies))
+;; ── end my-utils.scm ──
+
+(display (square 7)) (newline)
+(display (avg 1 2 3 4 5)) (newline)
+(display (clamp 15 0 10)) (newline)
+(make-beat '(262 330 392))
+```
+
+Run it:
+
+```
+$ motoi run main.scm
+49
+3
+10
+ok
+ok
+ok
+```
+
+At the shell level, you can concatenate on demand:
+
+```
+$ cat my-utils.scm main.scm > _build.scm && motoi run _build.scm
+```
+
+That's the pragmatic pattern until `import`/`load` is fully wired. Not pretty, but it works, and it gets you to a reusable file today.
+
+## When one file grows into many
+
+As your library grows, keep the source split into files by topic, then concatenate them for the build:
+
+```
+my-library/
+  math.scm       ← square, cube, clamp
+  music.scm      ← make-beat, transpose, chord
+  graphics.scm   ← draw-shape, fill-rect
+  README.slat    ← what this library does
+```
+
+Build:
+
+```
+$ cat my-library/math.scm my-library/music.scm my-library/graphics.scm main.scm > _build.scm
+$ motoi run _build.scm
+```
+
+Nothing formal. Just files and shell. But now you have a *structure* — a place to put the piece of a program that belongs to the piece it belongs to. When `import` lands you'll swap the `cat` command for `(import ...)` lines and delete the manual concatenation.
+
+## Pass 2 — add a MANIFEST
+
+Motoi modules distinguish themselves with a `MANIFEST.slat`. It's a small SLAT record naming the module and describing what it holds.
+
+```
+;; my-library/MANIFEST.slat
+(manifest
+  :name          \"(my-library core)\"
+  :folder        \"my-library/\"
+  :version       \"0.1.0\"
+  :verb-count    4
+  :libraries     [\"math\" \"music\" \"graphics\"]
+  :depends-on    []
+  :entry-modules [\"math.scm\" \"music.scm\" \"graphics.scm\"]
+
+  :reasoning
+  \"Personal helpers for a small game.\"
+
+  :composes-with
+  (\"motoi CORE\"))
+```
+
+This is the same shape Motoi's built-in modules use. It documents:
+- The name others will use to refer to your module.
+- The version (semver — bump when you make breaking changes).
+- The list of files that make up the module.
+- What it depends on.
+
+Even before the `import` verb lands, a MANIFEST is worth writing — it's a *contract*. Someone reading your library can look at the manifest and know what they're getting.
+
+## Pass 3 — the formal module shape (future)
+
+When Motoi's `import` verb lands, this is what the shape will look like:
+
+```
+(import (my-library core))
+
+(square 7)
+(make-beat '(262 330 392))
+```
+
+The runtime will:
+1. Resolve `(my-library core)` to a folder — `my-library/`.
+2. Read `MANIFEST.slat`.
+3. Load each file in `:entry-modules`.
+4. Register the definitions in the current environment.
+5. Return.
+
+Idempotent — importing twice is the same as importing once.
+
+That's the interface. Until `import` is wired, use `load` (see Pass 1) — the *effect* is the same, just less structured.
+
+## Publishing a module (once the ecosystem exists)
+
+The eventual plan is for Motoi modules to be discoverable through some kind of registry — pick a name, upload the folder, `import` from anywhere. That's a whole engineering effort still to come. In the meantime:
+
+**For personal use** — keep your library in your project folder. Load with `load`.
+
+**For sharing** — put your library on GitHub with a clear README and a version number. Ask people to clone and use `load`. Rough, but it works.
+
+**For teams** — designate a shared folder, everyone `load`s from it. Version-control the folder.
+
+## A worked example — a tiny fantasy console
+
+Let's build a small game library. It'll hold a `screen`, some `sprite` helpers, and a `game-loop` macro. Save as `console/screen.scm`:
+
+```
+;; screen.scm — screen setup + clear
+(define (screen-init cols rows)
+  (grid-init cols rows))
+
+(define (screen-clear)
+  (grid/clear))
+```
+
+`console/sprite.scm`:
+
+```
+;; sprite.scm — helpers on top of grid/dot
+(define (sprite-put col row color)
+  (grid/dot col row color))
+
+(define (sprite-line c1 r c2 color)
+  (let loop ((c c1))
+    (when (<= c c2)
+      (grid/dot c r color)
+      (loop (+ c 1)))))
+```
+
+`console/game.scm`:
+
+```
+;; game.scm — game loop
+(define-syntax game-loop
+  (syntax-rules ()
+    ((_ n body ...)
+     (let loop ((frame 0))
+       (when (< frame n)
+         (screen-clear)
+         body ...
+         (loop (+ frame 1)))))))
+```
+
+`console/MANIFEST.slat`:
+
+```
+(manifest
+  :name          \"(console core)\"
+  :folder        \"console/\"
+  :version       \"0.1.0\"
+  :verb-count    5
+  :libraries     [\"screen\" \"sprite\" \"game\"]
+  :entry-modules [\"screen.scm\" \"sprite.scm\" \"game.scm\"]
+  :reasoning     \"A tiny fantasy console for kid-scale games.\")
+```
+
+Now a game using it — `pong.scm`. Today we still concatenate:
+
+```
+$ cat console/screen.scm console/sprite.scm console/game.scm pong.scm > _pong-build.scm
+$ motoi run _pong-build.scm
+```
+
+Where `pong.scm` is:
+
+```
+(screen-init 20 12)
+
+;; A ball that walks across.
+(define ball-x 0)
+
+(game-loop 15
+  (sprite-line 0 6 20 8)         ;; the ground
+  (sprite-put ball-x 5 12)       ;; the ball
+  (set! ball-x (+ ball-x 1)))
+```
+
+Fifteen frames. Each frame: clear, draw the ground line, draw the ball at its current x, advance ball-x. A tiny animation from your own library.
+
+That's a module. Written by you. Used by you. When `import` lands, one `(import (console core))` line will replace the whole concatenation.
+
+## Rules of thumb for module design
+
+**One purpose per file.** `screen.scm` sets up the screen. `sprite.scm` handles sprites. `game.scm` runs the loop. Don't cram everything into one file.
+
+**Prefixes are your namespaces.** Motoi has `math/`, `audio/`, `entity/`. Your library should have `console/`, `pong/`, whatever. If your library's verbs might collide with something else, prefix them.
+
+**Predicates end in `?`, mutation ends in `!`, conversions use `->`.** Follow the language's naming conventions. Your library will feel native.
+
+**MANIFEST at the root of the folder.** Even if `import` isn't reading it yet, humans reading your library benefit.
+
+**Version early.** Start at `0.1.0`. Bump the middle number for backward-compatible additions. Bump the first for breaking changes. Users appreciate the discipline.
+
+## When you *don't* need a module
+
+Sometimes people over-engineer. If your project is 100 lines and never grows, you don't need a folder-with-manifest. A single file is fine. Reach for modules when you have:
+
+- More than one file's worth of code, or
+- Code you want to reuse in more than one project, or
+- Code you want to share with someone else.
+
+Otherwise, keep it simple. A `.scm` file with your functions is a library. Ceremony can wait until it's earned.
+
+## What you know now
+
+- The simplest reusable unit is a `.scm` file loaded with `(load \"path\")`.
+- As your library grows, split it into a folder with one file per topic.
+- Add a `MANIFEST.slat` naming your module and listing its files.
+- Future syntax `(import (my-library core))` will replace multiple `load` calls once the loader lands.
+- Naming conventions: `?` for predicates, `!` for mutations, `->` for conversions, `/` for module namespace.
+- Version early: start at `0.1.0`, bump appropriately.
+- Don't over-engineer. Reach for modules only when the code earns them.
+
+## Try before you turn the page
+
+1. Split your Chapter 10 beat DSL into a file `beats/kits.scm` (with `kick`, `snare`, `hat` macros) and `beats/step.scm` (with `step`, `pattern`). Load both in a driver file. Play a pattern.
+
+2. Write a small `sprites/` module: `sprite-square col row size color` (draws a filled square), `sprite-line c r len color` (draws a horizontal line). MANIFEST it. Use it in a demo.
+
+3. Design a `words/` module that maps common named colors to color numbers: `(color-of 'red)` returns 8, `(color-of 'blue)` returns 12. Provide 6-8 named colors. Use `assoc` internally.
+
+4. Take a favorite CORE verb and *wrap* it in your own module with a friendlier name. For example, `(paint c r)` inside `paint/simple.scm` should call `(grid/dot c r 10)` under the hood.
+
+5. Package your best animation from any earlier chapter as a loadable module. Name the file. Write a MANIFEST. Ship it (mentally, if not literally).
+
+## What's next
+
+Chapter 16: **show and tell**. The final chapter — a full demo scene that pulls everything together. Music, motion, entities, physics, cortex, macros. The kind of thing you can send to a friend and say *here — I made this in Motoi Scheme, and I understand every line*.")

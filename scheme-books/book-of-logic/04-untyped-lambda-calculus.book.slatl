@@ -1,0 +1,452 @@
+(dialect :applies ("motoi" "sakura") :note "Default: applies to both dialects.")
+
+(chapter
+  :book "Book of Logic"
+  :chapter-number 4
+  :title "Untyped Lambda Calculus"
+  :dialect "sakura"
+  :audience :adult
+  :content-rating :G
+  :author-lane "the-engineer-book-of-logic-2026-07-16"
+  :training-eligible #t
+  :confidentiality "public"
+  :voice "sakura-teaching + gentle-formalist"
+  :classical-anchors ("Barendregt — The Lambda Calculus: Its Syntax and Semantics"
+                      "Church — The Calculi of Lambda Conversion (1941)"
+                      "Hindley-Seldin — Lambda-Calculus and Combinators")
+  :prose
+"# Chapter 4 — Untyped Lambda Calculus
+
+Where we build the smallest possible programming language — three forms,
+one reduction rule — and discover that it can compute anything a computer
+can.
+
+Alonzo Church invented the lambda calculus in the 1930s as a foundation
+for mathematics. That plan did not survive — Kleene and Rosser found a
+paradox in the strongest version — but a piece of it survived
+gloriously. The lambda calculus itself, as a *theory of computation*,
+turned out to be equivalent to Turing machines: everything one can
+compute, the other can compute. This is the *Church-Turing thesis*, and
+it is why the lambda calculus is not a historical curiosity but the
+theoretical spine of every functional language ever written.
+
+Scheme *is* essentially the lambda calculus with syntactic sugar and
+some primitive operators. When you write `(lambda (x) (+ x 1))` in Scheme
+you are writing lambda calculus. What we will build in this chapter is a
+tiny lambda-calculus interpreter *inside* Scheme, and by watching it work
+we will understand what our host language is doing behind the scenes.
+
+> **the runtime says**
+>
+> *There are two ways to enter functional programming. One is to learn a
+> big language — full Scheme, full ML, full Haskell — and infer the
+> underlying model from the language's shape. The other is to learn the
+> underlying model first — the lambda calculus, in twenty lines — and
+> then watch big languages fall out of it as sugar. This chapter is the
+> second way. It is faster and it makes the second half of the book
+> possible.*
+
+## The three forms
+
+The lambda calculus has exactly three syntactic categories.
+
+1. **Variable.** A name: `x`, `y`, `f`.
+2. **Abstraction.** A function taking one parameter: `(λx. body)`. In
+   Scheme syntax: `(lam x body)`.
+3. **Application.** Applying one term to another: `(f x)`. In our
+   Scheme representation: `(app f x)`.
+
+That is it. No numbers, no booleans, no lists, no if-then-else, no loops,
+no assignment. Just names, one-parameter functions, and applications. It
+looks pathologically weak. It is not.
+
+```scheme
+;; A term is one of:
+;;   symbol             ; variable
+;;   (lam symbol term)  ; abstraction
+;;   (app term term)    ; application
+
+;; The identity function:
+;;   (lam x x)
+;;
+;; A constant function returning y:
+;;   (lam x y)
+;;
+;; A function taking two arguments (curried):
+;;   (lam x (lam y x))
+;;
+;; Applying a function to itself (yes, allowed):
+;;   (app (lam x (app x x)) (lam x (app x x)))
+```
+
+The last one — self-application — is the hairy one. In the untyped lambda
+calculus it is perfectly legal syntactically, and as we will see it lets
+us encode recursion and, unfortunately, also lets us encode divergent
+computations that run forever.
+
+## Beta reduction: the one rule
+
+There is exactly one computation rule in the pure lambda calculus. It is
+called *beta reduction*. When you see an application whose function part
+is an abstraction, you may replace the whole application with the body of
+the abstraction, substituting the argument for the parameter.
+
+    (app (lam x body) arg)  →  body[x := arg]
+
+That is called a *beta redex* (reducible expression) and its result is
+its *beta reduct*.
+
+```scheme
+;; capture-avoiding substitution: substitute `arg` for free `x` in `body`
+(define (subst body x arg)
+  (cond
+    ((symbol? body)
+     (if (eq? body x) arg body))
+    ((eq? (car body) 'lam)
+     (let ((param (cadr body))
+           (inner (caddr body)))
+       (cond
+         ((eq? param x)                             ; shadowed; leave alone
+          body)
+         ((member param (free-vars arg))            ; would capture; rename
+          (let* ((fresh (fresh-name param
+                                    (append (free-vars inner)
+                                            (free-vars arg))))
+                 (renamed (subst inner param fresh)))
+            (list 'lam fresh (subst renamed x arg))))
+         (else
+          (list 'lam param (subst inner x arg))))))
+    ((eq? (car body) 'app)
+     (list 'app (subst (cadr body)  x arg)
+                (subst (caddr body) x arg)))))
+
+(define (free-vars term)
+  (cond
+    ((symbol? term) (list term))
+    ((eq? (car term) 'lam)
+     (filter (lambda (v) (not (eq? v (cadr term))))
+             (free-vars (caddr term))))
+    ((eq? (car term) 'app)
+     (dedupe (append (free-vars (cadr term))
+                     (free-vars (caddr term)))))))
+
+(define (fresh-name base used)
+  (let loop ((n 0))
+    (let ((candidate (string->symbol
+                       (string-append (symbol->string base)
+                                      \"_\" (number->string n)))))
+      (if (member candidate used)
+          (loop (+ n 1))
+          candidate))))
+```
+
+This is the same capture-avoiding substitution we saw in chapter 2, now
+applied to lambda terms. The reason it matters here is the same: without
+alpha-renaming, `(lam x (lam y x))` applied to `y` would collapse into
+`(lam y y)` — the identity function — rather than the constant function
+returning the *outer* y that the programmer meant. Alpha-conversion is
+what keeps `(lam y x)` faithful to *this particular y* even after
+substitution moves in a fresh y.
+
+## Reduction strategies
+
+`subst` is the machinery. Now we need to *drive* it. Given a term with
+possibly many redexes, which one do we reduce first? This is called a
+*reduction strategy* and the two most important are:
+
+- **Call-by-value (applicative order, eager evaluation).** Reduce the
+  argument to a value first, then substitute.
+- **Call-by-name (normal order, lazy evaluation).** Substitute the
+  argument in unreduced, then reduce afterward.
+
+Scheme uses call-by-value. Haskell uses call-by-name (well, call-by-need,
+which is call-by-name plus memoisation). Both compute the same *terminating*
+values. They can differ on non-terminating computations: call-by-name
+sometimes terminates where call-by-value diverges, but never the reverse
+(this is a corollary of the *standardisation theorem*).
+
+Let us write call-by-value first.
+
+```scheme
+(define (value? t)
+  ;; A value is a lambda abstraction (or, if we had them, a numeral).
+  (and (pair? t) (eq? (car t) 'lam)))
+
+(define (reduce-cbv term)
+  ;; One step of call-by-value reduction, or 'stuck if no redex reducible.
+  (cond
+    ((symbol? term) 'stuck)                          ; free variable
+    ((eq? (car term) 'lam) 'stuck)                   ; value; nothing to do
+    ((eq? (car term) 'app)
+     (let ((fn  (cadr term))
+           (arg (caddr term)))
+       (cond
+         ;; reduce the function to a value first
+         ((not (value? fn))
+          (let ((fn-step (reduce-cbv fn)))
+            (if (eq? fn-step 'stuck)
+                'stuck
+                (list 'app fn-step arg))))
+         ;; then reduce the argument
+         ((not (value? arg))
+          (let ((arg-step (reduce-cbv arg)))
+            (if (eq? arg-step 'stuck)
+                'stuck
+                (list 'app fn arg-step))))
+         ;; both are values; do the beta step
+         (else
+          (subst (caddr fn) (cadr fn) arg)))))))
+
+(define (run-cbv term)
+  (let loop ((t term))
+    (let ((next (reduce-cbv t)))
+      (if (eq? next 'stuck) t (loop next)))))
+```
+
+Two clauses: first reduce the function, then reduce the argument, then
+perform the beta step. `run-cbv` keeps going until no more reductions
+are possible.
+
+```scheme
+;; identity applied to identity:
+(run-cbv '(app (lam x x) (lam y y)))
+;; => (lam y y)
+
+;; a longer chain: ((λf. (λx. (f x))) (λy. y)) z  should reduce to z.
+(run-cbv '(app (app (lam f (lam x (app f x)))
+                    (lam y y))
+               z))
+;; => z
+```
+
+Notice the second example got stuck at `z` — a free variable — because
+we cannot reduce further. In a real language `z` would be looked up in
+the environment; here we simply say the term is in normal form.
+
+## Church encodings — computing without built-ins
+
+The lambda calculus has no built-in numbers. Church discovered you can
+*encode* numbers as lambda terms.
+
+    0 = (λf. λx. x)
+    1 = (λf. λx. (f x))
+    2 = (λf. λx. (f (f x)))
+    3 = (λf. λx. (f (f (f x))))
+
+The *Church numeral n* is the function that, given `f` and `x`, applies
+`f` to `x` exactly `n` times. Arithmetic follows.
+
+    succ = (λn. λf. λx. (f (n f x)))
+    add  = (λm. λn. λf. λx. (m f (n f x)))
+    mul  = (λm. λn. λf. (m (n f)))
+
+```scheme
+(define zero  '(lam f (lam x x)))
+(define one   '(lam f (lam x (app f x))))
+(define two   '(lam f (lam x (app f (app f x)))))
+
+(define succ  '(lam n (lam f (lam x (app f (app (app n f) x))))))
+(define add   '(lam m (lam n (lam f (lam x (app (app m f) (app (app n f) x)))))))
+
+;; (succ zero) should reduce to a term equivalent to one
+(run-cbv (list 'app succ zero))
+;; => (lam f (lam x (app f (app (app (lam f (lam x x)) f) x))))
+;; which further reduces to (lam f (lam x (app f x))) — i.e., one.
+```
+
+The reduction is not always in the most compact form — that requires
+what is called *eta-conversion* — but the term computed is equivalent
+in every functional way to what we expect.
+
+Booleans are also encoded.
+
+    true  = (λt. λf. t)
+    false = (λt. λf. f)
+    if    = (λb. λt. λf. (b t f))
+
+```scheme
+(define true-t   '(lam t (lam f t)))
+(define false-t  '(lam t (lam f f)))
+(define if-t     '(lam b (lam t (lam f (app (app b t) f)))))
+```
+
+A boolean is a function that selects between two things. That is
+essentially what `if` does anyway, so encoding it as a two-argument
+selector loses nothing. Pairs, lists, trees — every data structure of
+functional programming has a Church encoding. Barendregt chapter 6 is a
+full catalogue.
+
+## The Y combinator: recursion without recursion
+
+Here is a puzzle. The lambda calculus has no `define`. There is no way
+to name a term and reference the name inside itself. So how do we write
+a recursive function like factorial? *Every* function you write in the
+pure lambda calculus must be anonymous.
+
+The answer is a beautiful trick called the *fixed-point combinator*, or
+Y combinator.
+
+    Y = (λf. (λx. (f (x x))) (λx. (f (x x))))
+
+For any function `F`, the term `(Y F)` reduces to `(F (Y F))`, which means
+`(Y F)` is a *fixed point* of `F` — a value equal to `F` applied to
+itself. This is exactly what you need for recursion.
+
+```scheme
+(define Y '(lam f
+             (app (lam x (app f (app x x)))
+                  (lam x (app f (app x x))))))
+
+;; Factorial. We assume Church numerals and multiplication defined.
+;; fact = Y (λg. λn. (if (iszero n) 1 (mul n (g (pred n)))))
+```
+
+In our call-by-value interpreter this actually diverges — because `(x x)`
+tries to reduce eagerly. The lazy (call-by-name) interpreter handles it.
+Or one can use a *call-by-value* variant of Y known as the *Z combinator*:
+
+    Z = (λf. (λx. (f (λv. (x x v)))) (λx. (f (λv. (x x v)))))
+
+The extra `(λv. ...)` wrapping delays the recursive call so it does not
+fire until the argument arrives. This is one of the most common tricks
+in constructing recursion in strict languages.
+
+The important fact is: recursion is *not primitive* in the lambda
+calculus. It is derivable from three forms and one reduction rule. That
+was Church's most surprising discovery.
+
+## Church-Turing: what the lambda calculus can compute
+
+We can now sketch what should feel like an astonishing result. *Every*
+computable function on natural numbers is expressible as a lambda term.
+Not most, not many — *every*.
+
+The proof involves showing that:
+
+1. Every primitive-recursive function (successor, addition, multiplication,
+   ...) is lambda-definable. This is straightforward Church-numeral
+   arithmetic.
+2. General recursion — including functions that might not terminate — is
+   captured by the Y combinator.
+3. Boolean logic and conditionals are captured by Church booleans.
+4. Data structures (pairs, lists, trees) are captured by Church
+   encodings.
+
+Turing did the parallel result for Turing machines. Church and Turing
+proved the two systems compute the same functions. Kleene had a third
+formalism (mu-recursive functions) that also computed the same functions.
+Three independent formalisations all landed on the same class of
+functions. That is why we believe the *Church-Turing thesis*: what is
+intuitively computable coincides with what these formal systems capture.
+It is a thesis, not a theorem, because *intuitively computable* is not
+a formal notion — but it has resisted every attempt at counterexample
+for ninety years.
+
+## The problem the untyped calculus has
+
+The untyped lambda calculus is too permissive. It allows:
+
+    Ω = (λx. (x x)) (λx. (x x))
+
+Watch this term reduce. One beta step gives us `((λx. (x x)) (λx. (x x)))`
+— exactly what we started with. Ω reduces to itself, forever. It has
+*no normal form*.
+
+That is not, in itself, a fatal problem — a general-purpose language
+should allow non-termination, otherwise recursion is fake. But
+consider what Ω *means* if we try to interpret lambda terms as
+mathematical objects. The term Ω is a well-formed lambda expression that
+denotes no value. It has no *meaning* in the semantic sense.
+
+In the 1970s Dana Scott showed how to give the lambda calculus a
+semantics anyway — the Scott domain, ordered by information content, in
+which Ω denotes the *bottom* element (⊥) that carries no information at
+all. This *domain-theoretic semantics* is the way modern language theory
+usually reads the lambda calculus. But it is delicate machinery.
+
+A different response — and the one we will explore in the next few
+chapters — is to *restrict* the lambda calculus so that Ω is not even
+syntactically expressible. This is what *typed* lambda calculi do. In
+the simply-typed lambda calculus (chapter 5), every well-typed term
+terminates. Full stop, no exceptions. The Y combinator is not typeable;
+Ω is not typeable; every well-typed term has a normal form and reaches it
+in finite time. That gain — *termination* — is what typing buys you.
+The loss is that you cannot write arbitrary programs — general recursion
+is gone. You have to add it back with special features, and how you add
+it back is the story of a lot of twentieth-century language design.
+
+## Alpha, beta, eta — the three equivalences
+
+Two lambda terms may look different but be *the same function*. The
+lambda calculus recognises three equivalences.
+
+- **Alpha equivalence.** Renaming bound variables. `(lam x x)` and
+  `(lam y y)` are alpha-equivalent — they are the identity function
+  either way.
+- **Beta equivalence.** Reduction. `(app (lam x x) t)` is beta-equivalent
+  to `t`.
+- **Eta equivalence.** `(lam x (app f x))` is eta-equivalent to `f`,
+  when `x` does not appear free in `f`. This is the *extensional*
+  equivalence: two functions are the same if they behave the same on all
+  inputs.
+
+Eta equivalence is not universally adopted. Some presentations use it
+(most classical lambda-calculus texts do); some do not (Scheme's `equal?`
+does not identify eta-equivalent procedures, because Scheme thinks of a
+function as its code, not its extension). We will use it sparingly.
+
+## Variations to try
+
+Implement call-by-name and compare. Take the term
+`(app (lam x y) (Y-loop))` where `Y-loop` is a divergent term. Call-by-
+value hangs; call-by-name returns `y` in one step. This is a small but
+striking demonstration of why lazy evaluation matters.
+
+Add a *pretty-printer* that reprints lambda terms in Church's original
+notation — `(λx. body)` with the Greek letter and the period. It makes
+your interpreter's output far more readable.
+
+Extend the language with numeric literals and primitive `+` / `*` /
+`iszero`. Rewrite factorial without Church numerals. Compare the number
+of reduction steps. Church numerals are elegant and slow; a numeric
+literal is ugly and fast. That is the pattern of every practical
+language decision.
+
+## Try this
+
+Reduce, by hand, the term `(add 2 3)` where `add`, `2`, and `3` are
+their Church encodings. Track every beta step. You will find it takes
+about a dozen steps and produces a term that, after eta-reduction,
+equals `5`. Then feed the same computation to your interpreter and
+watch it match, step for step. This is the moment the abstraction
+becomes real.
+
+## Closing
+
+We built the lambda calculus. Three forms, one reduction rule, and out
+of that we got numbers, booleans, pairs, recursion, and the full sweep
+of computable functions. Nothing else in the history of computing has
+achieved so much from so little.
+
+Its untyped variant has one flaw: it admits terms with no normal form,
+and — related but distinct — it admits terms of no clear meaning. The
+next three chapters explore *typing* as a discipline that eliminates
+these problems, at the cost of some expressive power we must add back
+carefully.
+
+Chapter 5: simply-typed lambda calculus. Terms wear their types on their
+sleeves. Ω becomes unwriteable. Every well-typed program halts. And a
+door opens to the Curry-Howard correspondence, which will occupy
+chapters 7 and 8.
+"
+  :cross-refs
+    (:book-of-scheme :chapters (5 8 11)
+     :book-of-reason :chapters (4 5)
+     :book-of-reason-code :chapters (5 6 7))
+  :verbs-used ("cond" "eq?" "cons" "car" "cdr" "cadr" "caddr" "list"
+               "map" "filter" "member" "append" "null?" "pair?" "not"
+               "and" "or" "symbol?" "symbol->string" "string->symbol"
+               "string-append" "number->string" "define" "lambda" "let"
+               "let*" "letrec")
+  :word-count-estimate 5900
+)

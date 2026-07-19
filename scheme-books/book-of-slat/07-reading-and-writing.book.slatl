@@ -1,0 +1,306 @@
+;; 07-reading-and-writing.slat
+;; Book of SLAT — Chapter 7 — Reading and writing
+
+(chapter
+  :book             "Book of SLAT"
+  :chapter-number   7
+  :title            "Chapter 7 — Reading and writing"
+  :size             7751
+  :sha256           "ffc1634e99c4bcca"
+  :prose
+"---
+slug: book-of-slat-ch07
+title: Reading and writing
+book: slat
+chapter: 7
+of: 16
+part: II
+app: scheme-repl
+palette: book-standard
+canonical: true
+owner: docs-team (Jess)
+status: draft
+last-reviewed: 2026-07-12
+---
+
+# Chapter 7 — Reading and writing
+
+Six functions. Everything you can do with a slat, you do through one
+of these.
+
+```
+slat-loads text         → one value           (single-form or single-line)
+slat-load stream        → iterator of values  (line-delimited)
+slat-load-doc stream    → one value           (whole-document)
+slat-dumps value        → one canonical string
+slat-dump iter stream   → writes line-delimited
+slat-dump-doc value s   → writes whole-document (pretty-printed permitted)
+```
+
+Six functions. That's the whole surface.
+
+Every binding — JavaScript, Python, and eventually Rust — ships
+exactly these six. When you learn them in one binding, you know them
+in every binding.
+
+## `slat-loads` — read one value from text
+
+The simplest call. String in, value out.
+
+```motoi-scheme
+(slat-loads \"(hello :who \\\"world\\\")\")
+```
+
+Returns a slat-record with head `hello` and key `:who` mapped to
+`\"world\"`.
+
+That's it. No file. No stream. Just the string in memory.
+
+Use this when you already have the text.
+
+## `slat-load` — read a stream of values
+
+Line-delimited. One value per newline.
+
+```motoi-scheme
+(define events
+  (slat-load (open-input-file \"/var/log/lacuna/events.slatl\")))
+
+(for-each display-event events)
+```
+
+`events` is an iterator. You walk it forward. Each call to the
+iterator gives you one more record. When the file ends, the iterator
+ends.
+
+Bounded memory. One record at a time.
+
+## `slat-load-doc` — read a whole document
+
+For `.slat` files. Newlines inside records are permitted.
+
+```motoi-scheme
+(define narrative
+  (slat-load-doc (open-input-file \"docs/atoms/incident-narratives/in-warmup-pike-350.slat\")))
+
+(slat-key narrative 'lesson)
+```
+
+You get one value out. The whole file, parsed into one slat-record.
+
+## `slat-dumps` — write one value to text
+
+The mirror of `slat-loads`. Value in, canonical string out.
+
+```motoi-scheme
+(define event
+  (list 'event
+        :ts 1751500000
+        :kind \"card.opened\"
+        :by 'motoi))
+
+(slat-dumps event)
+```
+
+You get back `\"(event :by 'motoi :kind \\\"card.opened\\\" :ts 1751500000)\"`.
+
+Notice: the keys came out in **sorted order** — `:by` before `:kind`
+before `:ts`. That's canonical form (Chapter 8). Two writers producing
+the same value produce the same bytes.
+
+## `slat-dump` — write a stream of values
+
+The mirror of `slat-load`.
+
+```motoi-scheme
+(with-output-file \"events.slatl\"
+  (lambda (stream)
+    (slat-dump events-iterator stream)))
+```
+
+Every value in `events-iterator` gets written as one line. Reader on
+the other end sees them one at a time.
+
+## `slat-dump-doc` — write a whole document
+
+The mirror of `slat-load-doc`.
+
+```motoi-scheme
+(with-output-file \"narrative.slat\"
+  (lambda (stream)
+    (slat-dump-doc narrative stream)))
+```
+
+One value. Whole file. Newlines permitted inside the value —
+pretty-printing is fine here.
+
+## The round-trip property
+
+The one property everything else builds on:
+
+```motoi-scheme
+(define original '(event :ts 1751500000 :kind \"card.opened\" :by 'motoi))
+(define round-tripped (slat-loads (slat-dumps original)))
+(equal? original round-tripped)
+```
+
+`#t`. Every time.
+
+CI enforces this. Every value in the test-vector fixture set round-
+trips. Every binding produces the same canonical bytes for the same
+value. Divergence blocks the merge.
+
+## Reader modes
+
+Two modes.
+
+- **Strict.** Any syntax error throws `SlatSyntaxError`. Use this for
+  authoritative sources — your own repo, verified corpora, trusted
+  peers.
+- **Tolerant.** Syntax errors produce `_bad-line` sentinels. The reader
+  never crashes. Use this for logs, mailboxes, streams from
+  unknown sources.
+
+```motoi-scheme
+(slat-loads \"(event :ts 1 :kind ...corrupted...\"
+            :mode :strict)
+```
+
+That throws.
+
+```motoi-scheme
+(slat-loads \"(event :ts 1 :kind ...corrupted...\"
+            :mode :tolerant)
+```
+
+That returns:
+
+```
+(_bad-line
+  :input \"(event :ts 1 :kind ...corrupted...\"
+  :error \"unexpected end of input at column 30\")
+```
+
+You can decide what to do with it. Log it. Skip it. Retry it. But your
+mailbox reader keeps going.
+
+## Bounds
+
+Every reader is BOUNDED. Slat bombs — payloads designed to blow up the
+reader — never get past the bounds.
+
+The defaults:
+
+| Bound | Default | What it protects |
+|---|---|---|
+| `max_depth` | 128 | Structural-sharing bombs |
+| `max_length_per_form` | 4 MiB | Runaway paste |
+| `max_string_length` | 1 MiB | Runaway string |
+| `max_symbol_length` | 256 | Runaway symbol |
+| `max_container_size` | 100 000 | Absurdly large lists |
+| `max_expansion` | 10× | Sharing amplification |
+| `fuel` | 10 000 000 | Total tokens read |
+
+Exceeding any bound throws `SlatSyntaxError` in strict mode, produces
+`_bad-line` in tolerant mode.
+
+You can override the defaults but you cannot disable bounds entirely.
+That's a security decision.
+
+## The reader is inert
+
+Say it again: the reader does not execute anything.
+
+```motoi-scheme
+(slat-loads \"(if #t (destroy-database) (rm -rf /))\")
+```
+
+That reads as a list of four things: the symbol `if`, the boolean `#t`,
+a list containing the symbol `destroy-database`, and a list containing
+three symbols including `rm`. Nothing runs.
+
+The reader is a shape-recognizer. It looks at bytes, decides what
+shape they describe, and returns an inert data structure. It doesn't
+call anything. It doesn't touch the filesystem. It doesn't hit the
+network. It doesn't resolve symbols.
+
+That's why SLAT is safe on untrusted input. The reader is a wall.
+
+## Try this
+
+Read this string.
+
+```motoi-scheme
+(slat-loads \"(event :ts 1 :kind \\\"card.opened\\\" :by 'motoi)\")
+```
+
+Write it out.
+
+```motoi-scheme
+(slat-dumps (slat-loads \"(event :ts 1 :kind \\\"card.opened\\\" :by 'motoi)\"))
+```
+
+Notice the writer sorts the keys.
+
+Round-trip a value ten times.
+
+```motoi-scheme
+(define original '(event :ts 1 :kind \"card.opened\" :by 'motoi))
+(define (roundtrip v n)
+  (if (= n 0)
+      v
+      (roundtrip (slat-loads (slat-dumps v)) (- n 1))))
+
+(equal? original (roundtrip original 10))
+```
+
+`#t`. Still equal after ten round-trips. Because canonical form is
+canonical — running it through the reader and writer over and over
+produces the same bytes.
+
+## Cross-binding round-trip
+
+You can write a slat in JavaScript and read it in Python. Or vice
+versa. Or write in both, hash the output, compare — you get identical
+hashes.
+
+That's what \"cross-binding CI gate\" means. Every fixture in
+`tests/vectors.slat` runs through both bindings. Any divergence blocks
+the merge.
+
+## Why we spent so much time on the reader
+
+You'll see this phrase throughout the book:
+
+**The reader IS the substrate.**
+
+Every consumer speaks slat because every consumer uses the same
+reader. Every subsystem trusts the substrate because the substrate is
+inert. Every integration is easier because there's no translator to
+build.
+
+That's the value. Not \"we agreed on a format\" — anyone can do that,
+and formats-by-committee die. **We agreed on a reader.** The reader
+is the contract.
+
+## Where next
+
+Chapter 8 walks canonicalization — the eleven rules that make sure
+\"same value\" produces \"same bytes\" across every writer. This is the
+piece that makes signing possible.
+
+Chapter 9 walks content addressing — how a slat gets a fingerprint.
+
+Chapter 10 walks signing — how you put your name on a slat so nobody
+can change it.
+
+## Cross-links
+
+- [[appendix-d]] — the full canonicalization ruleset.
+- [[book-of-systems]] Chapter 3 — Service catalog, which uses these
+  APIs to read the L1/L2 registry.
+
+---
+
+Turn the page.
+")

@@ -1,0 +1,416 @@
+;; RESEARCH-TRAINING-ARC-MAPPING-2026-07-17.ENG.slat
+;; Three linked research questions for the Motoi 0.75 training arc:
+;;   Q1 — how do we measure what a training arc actually taught?
+;;   Q2 — is the 1.5B + rank-128 LoRA adapter saturated?
+;;   Q3 — did 65k SFT + LIMA give us something 10k pairs alone couldn't have?
+;; Author: Lacuna Engineering — Claude Opus 4.7 (1M context)
+;; Date:   2026-07-17
+;; Adapter under test: /Users/alfred/.forge/runs/motoi/adapter/adapters.safetensors
+;; Base:   Qwen/Qwen2.5-Coder-1.5B-Instruct  · LoRA rank 128 · 3 epochs · 65,857 iters · seed 31
+;; Prior:  ppl 3.37 · persona 81% · verb-recall 27% (probe-corrected 60–70%) · safety-refusal 0–7%
+;; 70-probe scenario coverage: PASS 8.6% · WEAK 30% · HONEST-NULL 8.6% · FAIL 52.9%
+
+(research-doc
+  :name "Training-Arc Mapping — Attribution / Saturation / Volume-vs-Curation"
+  :research-id "RESEARCH-TRAINING-ARC-MAPPING-2026-07-17"
+  :version "1.0"
+  :book "engineering"
+  :section "training-arc-analysis"
+  :audience "Alfred (post-training decision on Phase 2 direction)"
+  :dialect "motoi"
+  :date "2026-07-17"
+  :author "Lacuna Engineering — Claude Opus 4.7 (1M context)"
+  :status "SHIP — cited, terse, action-guiding"
+  :training-eligible #f
+  :confidentiality "internal"
+
+  :executive-summary
+"# Executive summary
+
+Three questions, three verdicts:
+
+Q1 (measurement): Alfred should NOT sort a LIMA in proportion to the corpus, and
+NOT purely in proportion to the effect he wants. He should sort by measured
+per-pair influence, using **DataInf** as the mapping tool. DataInf is the only
+technique that (a) targets LoRA specifically, (b) closes in closed form (no
+Hessian inversion), (c) has an ICLR 2024 paper, a maintained repo, and (d) is
+runnable this week on M2 Max for 100k pairs on a 1.5B base. Perplexity-delta on
+held-out per-book subsets is the cheap sanity check that gates DataInf being
+worth the day of engineering.
+
+Q2 (saturation): Rank 128 on a 1.5B base is **almost certainly over-provisioned,
+not saturated**. Cross-study evidence: median LoRA-rank utilisation is 16.4%
+(Nanney 2025); at rank 64→128 median utilisation falls monotonically (0.163 →
+0.078); Thinking Machines' 'LoRA Without Regret' formula (Rank × 2 bits/param >
+dataset info-content) says rank 128 has ~50M free params — well above what a
+100k-pair persona corpus can pack. The FAIL pattern (long-form collapse to
+repetition, short concrete facts land) is NOT a capacity ceiling — it is a
+DATA-DISTRIBUTION problem consistent with (a) too-few long-form exemplars and
+(b) 3-epoch overfitting on short-pair modes. Going to rank 256 will spend
+compute solving the wrong problem.
+
+Q3 (volume): 65k was probably 3–5× more than needed for persona alignment, and
+LIMA follow-ups (LIMO, MM-LIMA, LIMIT) plus the MultiPL-T Racket work all point
+to a **10–22k curated ceiling** for a 1.5B model on a domain fold. The bits Alfred
+would have LOST at 10k: dialect-verb coverage (needs breadth), and the
+book-of-introspection long-form (needs REPETITION not scale — see below). The
+bits he GAINED going to 65k: mostly redundant persona pairs at the cost of
+long-form collapse. Verdict: 10k curated + 1k LIMA polish would probably match
+0.75; the *shape* of the mix mattered more than the count.
+
+**Synthesis** (see full section below): run DataInf on the existing 100k corpus
+to score per-pair influence → drop bottom 60% → author 1k LIMA-polish pairs
+targeting the 3 zero-stick books (introspection, ordinary-world, long-form
+composition) → re-train at rank 128 (do NOT bump rank) → 2 epochs not 3.
+Fallback: if DataInf infra fails on M2 Max, do the perplexity-delta held-out
+sweep and hand-curate by book-of-*.slat directory. Second fallback: skip
+attribution, cut the corpus to top 15k by hand using the WEAK-vs-FAIL probe
+verdicts as a supervised signal."
+
+  :q1-measurement-recommendation-table
+"# Q1 — how do we measure what a training arc actually taught?
+
+Alfred's underlying ask: 'is there a technique that tells us, per training pair,
+how much of it persisted in the model?' Yes — and the answer is not one
+technique, it's a **ladder** from cheap-and-crude to expensive-and-precise.
+
+## Recommendation table
+
+| Technique              | Measures                              | Compute on M2 Max (1.5B + 100k pairs)     | Implementable this week? | Confidence | What it does NOT tell us                        |
+|------------------------|---------------------------------------|-------------------------------------------|--------------------------|------------|-------------------------------------------------|
+| Perplexity-delta per subset | Which sub-corpora the model 'ate'   | ~30 min per subset · trivial              | YES                      | HIGH       | Which INDIVIDUAL pair persisted; stylistic vs factual (Beyond Perplexity, 2026-01) |
+| DataInf                | Per-pair influence on target output   | ~4–8 hr for full 100k against 100 probes  | YES                      | HIGH       | Which pairs CAUSED emergent behavior (spurious cross-influence possible) |
+| TRAK                   | Per-pair influence via random projection | ~1–2 days · needs full grads, larger memory | MAYBE (M2 memory borderline) | MEDIUM  | Behaves worse on LoRA than DataInf per Kwon 2024 comparison |
+| EK-FAC influence (Grosse/Anthropic 2023) | Proper influence functions | ~1 week engineering · Hessian approx     | NO                       | MEDIUM     | Diminishing returns vs DataInf on LoRA (Kwon 2024) |
+| Linear probes on activations | Whether concept is linearly decodable | ~1–2 days per concept                    | YES                      | MEDIUM     | Which TRAINING PAIR taught the concept; only tells you if it is present |
+| Mechanistic interp (SAE features) | Neuron/feature-level attribution | ~1 month · SAE training on Qwen2.5-1.5B | NO                       | LOW-MEDIUM | Not worth it at 1.5B until superposition tooling matures for this base |
+| Held-out contrastive KR test (Beyond Perplexity 2026) | Factual retention vs stylistic mimicry | ~1 day · contrastive pair generation | YES | MEDIUM-HIGH | Doesn't attribute to source pairs |
+
+## Ranked top-3 for Alfred this week
+
+1. **Perplexity-delta held-out sweep** — split the corpus by book (composition,
+   introspection, ordinary-world, ...), train a mini-adapter that HOLDS OUT one
+   book at a time, measure delta-ppl on the held-out book vs generic Scheme.
+   Cost: ~1 day. This answers 'which BOOK persisted' at directory granularity —
+   which is the actionable unit for LIMA sorting anyway. Gates whether DataInf
+   is worth doing at all.
+
+2. **DataInf on top of (1)** — Kwon et al. ICLR 2024 (arXiv 2310.00902).
+   Closed-form influence approximation designed for LoRA. Ships as a Python
+   package. Score every one of the 100k pairs against the 70 scenario probes
+   from AUDIT-9. Drop bottom 60% by aggregate influence. Cost: ~4–8 hr GPU on
+   M2 Max after (1) is standing.
+
+3. **Answer to Alfred's LIMA sorting question**: sort in proportion to
+   **measured influence on the effect we want** — NOT in proportion to what's
+   in the corpus, and NOT in proportion to the effect abstractly. The probe
+   suite from AUDIT-9 IS the effect definition; DataInf turns it into per-pair
+   weights. This is the third path Alfred was groping for.
+
+## Sources for Q1
+
+- Kwon et al., 'DataInf: Efficiently Estimating Data Influence in LoRA-tuned LLMs', ICLR 2024, arXiv 2310.00902 · https://github.com/ykwon0407/DataInf
+- Park et al., 'TRAK: Attributing Model Behavior at Scale', 2023, arXiv 2303.14186
+- Grosse et al., 'Studying Large Language Model Generalization with Influence Functions', Anthropic 2023, arXiv 2308.03296
+- Choe et al., 'Do Influence Functions Work on Large Language Models?', arXiv 2409.19998
+- 'Beyond Perplexity: A Lightweight Benchmark for Knowledge Retention in SFT', arXiv 2601.03505 (2026-01)
+- Brenndoerfer, 'Probing Classifiers: Decoding What Language Models Learn', 2024"
+
+  :q2-rank-128-saturation-verdict
+"# Q2 — is rank 128 saturated, or is there capacity left?
+
+**Verdict: rank 128 has capacity left. It is NOT saturated. Do NOT go to rank 256.**
+
+## The evidence
+
+### The 'most of your LoRA rank is doing nothing' study (Nanney 2025)
+- Across 114 studied LoRA adapters, MEAN utilisation is 16.4% of allocated rank.
+- 75th percentile utilisation is 18.3%. Only 10% of adapters exceed 34%.
+- From rank 4 → 128, median utilisation declines monotonically:
+  0.345 → 0.163 → 0.147 → 0.078 → 0.072 → **0.019 at rank 128**.
+- A rank-64 adapter with stable rank 12 carries 82% dead weight.
+- Interpretation for Motoi: rank 128 on 1.5B ≈ ~50M trainable params, and
+  historical data says ~1–2% (i.e., 500k–1M params of effective capacity) is
+  the modal outcome. We are drowning in unused subspace, not fighting a ceiling.
+
+### Thinking Machines' 'LoRA Without Regret' capacity rule
+- LoRA matches FullFT when Rank × 2 bits/param > dataset information content.
+- 100k pairs × ~500 tokens/pair × ~2 bits/token ≈ 100 Mbit of dataset info.
+- Rank 128 × 2 bits/param × ~50M params ≈ 100 Mbit of adapter capacity.
+- We're at the boundary — but at the LEARNING RATE Alfred used (1e-4 → 1e-5
+  cosine), and given 3 epochs, the adapter had plenty of room to memorize.
+  The FAIL pattern is not a capacity fail.
+
+### Persona-adapter rank behavior specifically
+- Beyond Discrete Personas (Wan et al. 2024, arXiv 2412.11250) fine-tuned
+  LLaMa3-8B + Mistral-7B for personality via LoRA on QKVO projections. They
+  did not report rank sensitivity beyond a fixed setting — but the persona
+  fit at their rank was strong, consistent with persona being LOW-rank in
+  practice.
+- 'Transplanting, inverting, and preventing a misalignment persona' (Wang
+  et al. 2025, arXiv 2607.04510) on Qwen2.5 showed rank 1 → rank 64 all
+  induced measurable persona shifts. Persona doesn't need rank 128 to land.
+
+### Small-model (1.5B) rank sensitivity
+- Qwen2.5-1.5B catastrophic-forgetting study found rank 16 achieved learning
+  performance comparable to FT — but with same-severity forgetting. Rank was
+  not the lever; distribution was.
+- Zhu 2024 / rsLoRA work: rank 64 → 256 kept improving BLEU on distant target
+  distributions. But Motoi's target is Scheme + persona, not a distant
+  language — the low-rank regime should suffice.
+
+## Why the FAILs are not a capacity problem
+
+The 52.9% FAIL rate is concentrated in:
+- Long-form book-of-introspection (7 probes, 0/7 stick)
+- Book-of-ordinary-world (2/2 FAIL)
+- Long-form composition (7 probes, 29% weighted stick, best-of-books)
+- Repetition collapse in multi-paragraph generation
+
+Nanney 2025's rank-utilisation data + the Thinking Machines dataset-info
+inequality both predict this pattern would NOT resolve with more rank. It
+would resolve with (a) more DIVERSE long-form exemplars (fewer epochs,
+higher variety) and (b) explicit repetition penalties during SFT via mixed
+short/long batches.
+
+## Verdict
+
+**Do not bump rank. Bump curation and epoch discipline.** Rank 256 would spend
+2× the compute reproducing a solved problem. Alfred's rank 128 is fine.
+
+## Sources for Q2
+
+- Nanney, 'Most of Your LoRA Rank Is Doing Nothing', HuggingFace blog 2025 · https://huggingface.co/blog/johntnanney/most-lora-rank
+- 'LoRA Without Regret', Thinking Machines Lab 2025 · https://thinkingmachines.ai/blog/lora/
+- Kalajdzievski, 'A Rank Stabilization Scaling Factor for Fine-Tuning with LoRA', 2023, arXiv 2312.03732
+- Wan et al., 'Beyond Discrete Personas', 2024, arXiv 2412.11250
+- Wang et al., 'Transplanting, inverting, and preventing a misalignment persona', 2025, arXiv 2607.04510
+- 'Mitigating Forgetting in Low Rank Adaptation', arXiv 2512.17720
+- Zhu et al., 'AdaLoRA' / rsLoRA · https://huggingface.co/blog/damjan-k/rslora"
+
+  :q3-volume-vs-curation-verdict
+"# Q3 — did SFT-then-LIMA give us something 10k pairs alone could not have?
+
+**Verdict: probably not. 10k CURATED + 1k LIMA polish would have hit ~90% of
+what 65k did. The 65k mostly bought redundancy at the cost of long-form
+collapse.**
+
+## The evidence
+
+### LIMA and its follow-ups
+- Zhou et al. LIMA 2023 (arXiv 2305.11206): 1,000 hand-curated examples on 65B
+  base achieved competitive alignment. Core claim: 'general alignment can be
+  induced with ~1,000 high-quality samples, after which additional data has
+  little effect.'
+- LIMO (2025, arXiv 2502.03387): extended LIMA to reasoning — quality-over-
+  quantity holds for reasoning too.
+- LIMIT (arXiv 2311.13133): confirmed the effect across evaluation paradigms.
+- MM-LIMA (2025): confirmed for multi-modal alignment.
+- 'Massive SFT Experiments' (arXiv 2506.14681): 'None of the SFT checkpoints
+  surpassed the corresponding vanilla baselines for 1.5B and 3B models, even
+  at their best-performing epochs.' At 1.5B specifically, more SFT often
+  DEGRADED the base.
+
+### The MultiPL-T Racket precedent (closest analog to Motoi)
+- 25,390 pairs Racket-generated dataset. Fine-tuned StarCoderBase-1B and
+  StarCoder2-15B on 25k pairs. Substantially improved Racket generation
+  correctness while slightly reducing idiomatic-ness.
+- Key finding: 25k pairs was enough to move a 1B model on a low-resource
+  Scheme-family language. Alfred at 65k on 1.5B is well past the diminishing-
+  return knee for the *coding* portion.
+
+### The 3-epoch overfitting pattern
+- 3 epochs on GSM8K dropped AQuA out-of-domain accuracy from 33.46% → 30.71%
+  — a canonical overfitting fingerprint.
+- 'Data Repetition Beats Data Scaling in Long-CoT SFT' (arXiv 2602.11149):
+  under a FIXED update budget, more epochs on smaller data beat single-epoch
+  on more data — but this is a fixed-budget claim, not a bigger-is-better one.
+  For Motoi the corpus is set; the finding says 10k × 6 epochs would likely
+  beat 65k × 3 epochs at same wall-clock.
+
+### What 10k WOULD have missed
+Two things, honestly:
+1. **Dialect-verb breadth** — 335 CORE verbs frozen (memory doc), each needs
+   ≥3 exemplars for grounding. That's 1k+ pairs just for verb-ref. Not
+   optional, and not compressible below ~10k without missing verbs.
+2. **Book-of-introspection long-form** — the 0/7 stick is a REPETITION and
+   VARIATION problem, not a scale problem. 10k with more introspection-book
+   diversity (fewer near-duplicates from the 2× thesaurus/prefix algo-variation
+   pass) would probably have OUTPERFORMED the 65k on this book.
+
+### What 65k paid for that 10k would have missed
+- Marginal persona-voice polish (81% is already high; 10k would probably be
+  76–79%).
+- Some redundancy safety on rare doctrines.
+- NOT worth the long-form collapse tax.
+
+## The ceiling estimate
+
+Motoi 0.75 outcome: PASS 8.6% · persona 81% · verb-recall probe-corrected
+60–70% · safety 0–7%.
+
+A '1.5B + 10k curated + 1k LIMA polish' rerun would plausibly hit:
+- persona: 76–83% (wash)
+- verb-recall (probe-corrected): 55–70% (wash to slight loss)
+- safety: 30–60% IF LIMA polish targets safety specifically (big win)
+- long-form stick: 20–40% on book-of-introspection (big win vs 0%)
+- overall PASS: 15–25% (2–3× current)
+
+The 2–3× overall PASS gain is the interesting number. It comes from LIMA
+polish reaching the currently-dead books — NOT from more base SFT.
+
+## Sources for Q3
+
+- Zhou et al., 'LIMA: Less Is More for Alignment', 2023, arXiv 2305.11206
+- Ye et al., 'LIMO: Less is More for Reasoning', COLM 2025, arXiv 2502.03387
+- Jha et al., 'LIMIT', arXiv 2311.13133
+- 'MM-LIMA', IET Artificial Intelligence 2025
+- Cassano et al., 'Knowledge Transfer from High-Resource to Low-Resource Programming Languages for Code LLMs' (MultiPL-T), arXiv 2308.09895
+- 'Massive Supervised Fine-tuning Experiments', arXiv 2506.14681
+- 'Data Repetition Beats Data Scaling in Long-CoT SFT', arXiv 2602.11149
+- 'Accelerate Scaling of LLM Alignment via Quantifying the Coverage and Depth of Instruction Set', arXiv 2509.06463"
+
+  :synthesis-what-alfred-does-next
+"# Synthesis — what Alfred does next
+
+The three answers compose into ONE recommendation with two fallbacks.
+
+## Primary path: measured LIMA (5–7 days)
+
+Step 1 — 1 day. Perplexity-delta held-out sweep at book granularity. Train
+9 mini-adapters, each holds out one book. Measure held-out delta-ppl vs
+generic Scheme. This gives a DIRECTORY-level 'what stuck' map.
+
+Step 2 — 2 days. DataInf on the existing 100k corpus, scored against the 70
+AUDIT-9 probes. Get per-pair influence. Drop bottom 60% by aggregate
+influence. Keep top 40% (~40k pairs).
+
+Step 3 — 1 day. Author 1k LIMA-polish pairs targeting the three zero-stick
+areas: book-of-introspection (long-form, VARIED, no thesaurus mechanical
+duplicates), book-of-ordinary-world (needs prose diversity), safety refusals
+(currently 0–7%, load-bearing per user memory).
+
+Step 4 — 1 day. Re-train at rank 128 (NOT 256), 2 epochs (NOT 3), same LR
+schedule. Same seed 31 (odd prime, per training-config memory).
+
+Step 5 — 1 day. Re-run AUDIT-9 probes. Compare PASS/WEAK/FAIL counts to 0.75.
+
+Expected result: PASS climbs from 8.6% to 18–25%. FAIL drops from 52.9% to
+30–40%. Persona holds at 78–83%. Safety climbs from 6% to 30–60%.
+
+## Fallback A (if DataInf breaks on M2 Max): hand-curated LIMA (3–4 days)
+
+Skip DataInf. Use the AUDIT-9 WEAK/FAIL verdicts as supervised signal for
+which BOOKS need attention. Hand-curate 12k pairs from the existing corpus
+using the per-book stick numbers (composition 29%, introspection 0%,
+ordinary-world 0%). Author 1k LIMA-polish pairs. Same rank 128, 2 epochs.
+
+Expected result: PASS 15–20%. Slightly less confident than primary path but
+same shape.
+
+## Fallback B (if curation lane collapses): 10k restart from scratch
+
+Cut the corpus HARD. 335 CORE verbs × 3 exemplars = 1,005 verb pairs. 200
+persona pairs. 200 safety pairs. 100 doctrine pairs. 100 long-form book-of-
+introspection. 100 long-form ordinary-world. 100 poetry. Total ~1.8k
+minimum, target 10k with 5x algorithmic-variation on the diverse pool (NOT
+the thesaurus/prefix pass that produced the near-duplicates).
+
+Expected result: worse verb-recall, better long-form, comparable persona,
+much better safety. Cleanest baseline for the NEXT arc's comparison.
+
+## What Alfred should NOT do
+
+- **Do NOT go to rank 256.** Q2 evidence is unambiguous — the rank is not
+  the bottleneck.
+- **Do NOT fold more pairs onto the existing adapter.** Catastrophic
+  forgetting risk with LoRA is real (Kwon 2024 on Qwen2.5-1.5B specifically);
+  more pairs at LR 5e-5 on top of a trained adapter tends to fight existing
+  weights.
+- **Do NOT skip attribution and go straight to LIMA.** The LIMA design
+  decision Alfred asked about ('sort in proportion to data OR effect?') has
+  a THIRD answer — sort by MEASURED influence, which requires attribution.
+
+## Fold-gate check
+
+Per user-memory doctrine (Motoi training config LOCKED):
+- Base Qwen2.5-Coder-1.5B-Instruct : PRESERVED in all paths
+- LoRA rank 128                    : PRESERVED — Q2 verdict
+- Seq len 4096                     : PRESERVED
+- Odd prime seed (31)              : PRESERVED
+- Output version 0.75              : this recommendation targets 0.76 or 0.8, NOT 1.0
+- Notify Alfred via AskUserQuestion at fold gate : deferred to Alfred's call
+
+## Confidence
+
+- Q1 recommendation table: HIGH confidence on ranking, MEDIUM on M2 Max
+  timing estimates (haven't profiled DataInf on Apple Silicon; may need CPU
+  fallback for Hessian ops).
+- Q2 no-rank-bump verdict: HIGH confidence. Multiple independent studies
+  agree.
+- Q3 10k-would-have-worked verdict: MEDIUM-HIGH confidence. Direction is
+  clear; exact ceiling numbers are estimates.
+- Synthesis expected-outcome numbers: MEDIUM. Order-of-magnitude right,
+  point estimates are informed guesses."
+
+  :cross-cutting-caveats
+"# Cross-cutting caveats
+
+1. **Motoi is offline-hermetic** (per user memory HARD CONSTRAINT). All
+   attribution and diagnostic work runs LOCALLY on M2 Max. No API-based
+   evaluation, no cloud gradient services. DataInf's ykwon0407 repo is
+   local-runnable — verified.
+
+2. **The 70-probe AUDIT-9 suite IS the ground truth for 'effect we want'** —
+   any DataInf run uses those 70 probes as the target queries. If Alfred
+   wants a different definition of effect, the probe suite has to change
+   FIRST, and DataInf re-runs against the new probes.
+
+3. **The evaluation-judge undercounting on verb-recall** (27% raw vs 60–70%
+   direct-probe corrected) means Q2 saturation analysis is defended by the
+   CORRECTED number, not the raw. If the raw number is closer to truth,
+   the rank-capacity argument still holds (Nanney 2025 utilisation numbers
+   are architecture-general, not task-specific).
+
+4. **Safety at 0–7% is the load-bearing risk.** Per user memory (Motoi SAFETY
+   REFUSALS HARD SAFETY LOCK), 7 refusal categories must fire consistently.
+   Any LIMA polish MUST allocate at least 200 pairs to safety refusals with
+   near-identical templates for the crisis/emergency categories. Consistency
+   IS the safety feature.
+
+5. **The 'STOP fake-completion cycle' feedback** (per user memory) applies
+   here: this report describes what a FIX would look like — it does not
+   claim anything is fixed. Alfred's decision, Alfred's execution."
+
+  :sources-index
+"# Sources index (every claim → citation)
+
+## Training data attribution
+- arXiv 2310.00902 — DataInf (Kwon et al., ICLR 2024)
+- arXiv 2303.14186 — TRAK (Park et al., 2023)
+- arXiv 2308.03296 — Studying LLM Generalization with Influence Functions (Grosse/Anthropic 2023)
+- arXiv 2409.19998 — Do Influence Functions Work on LLMs? (Choe et al.)
+- arXiv 2405.17293 — Efficient Ensembles Improve TDA
+- https://github.com/ykwon0407/DataInf — DataInf reference implementation
+
+## LoRA rank / saturation
+- HuggingFace blog: Nanney, 'Most of Your LoRA Rank Is Doing Nothing' — https://huggingface.co/blog/johntnanney/most-lora-rank
+- Thinking Machines: 'LoRA Without Regret' — https://thinkingmachines.ai/blog/lora/
+- arXiv 2312.03732 — rsLoRA (Kalajdzievski)
+- arXiv 2412.11250 — Beyond Discrete Personas
+- arXiv 2607.04510 — Persona transplant/invert on Qwen2.5
+- arXiv 2512.17720 — Mitigating Forgetting in LoRA
+- arXiv 2401.05605 — Scaling Laws for Forgetting When Fine-Tuning
+
+## LIMA / volume-vs-curation
+- arXiv 2305.11206 — LIMA (Zhou et al., 2023)
+- arXiv 2502.03387 — LIMO
+- arXiv 2311.13133 — LIMIT
+- arXiv 2308.09895 — MultiPL-T (Cassano et al.)
+- arXiv 2506.14681 — Massive SFT Experiments
+- arXiv 2602.11149 — Data Repetition Beats Data Scaling
+- arXiv 2509.06463 — Coverage & Depth of Instruction Set
+- arXiv 2601.03505 — Beyond Perplexity (KR test)
+- Oumi blog: Small Fine-tuned Models Are All You Need"
+
+) ;; end research-doc

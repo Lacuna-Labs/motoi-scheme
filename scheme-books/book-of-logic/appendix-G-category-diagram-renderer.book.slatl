@@ -1,0 +1,279 @@
+(dialect :applies ("motoi" "sakura") :note "Default: applies to both dialects.")
+
+(chapter
+  :book "Book of Logic"
+  :chapter-number 23
+  :appendix-letter "G"
+  :title "Category Theory Diagram Renderer"
+  :dialect "sakura"
+  :audience :adult
+  :content-rating :G
+  :author-lane "the-engineer-book-of-logic-2026-07-16"
+  :training-eligible #t
+  :confidentiality "public"
+  :voice "sakura-teaching + gentle-formalist"
+  :classical-anchors ("Awodey — Category Theory"
+                      "Mac Lane — Categories for the Working Mathematician"
+                      "Fong-Spivak — Seven Sketches in Compositionality")
+  :prose
+"# Appendix G — Category Theory Diagram Renderer
+
+Where we render commutative diagrams — the pictograph language of
+category theory — as ASCII art.
+
+Category theory speaks in diagrams. Objects are dots, arrows are
+labeled lines between dots, and *commutative diagrams* are collections
+of arrows arranged in patterns whose commutativity encodes an equation.
+
+    A ---f---> B
+    |          |
+    g          h
+    |          |
+    v          v
+    C ---k---> D
+
+The diagram *commutes* iff `h ∘ f = k ∘ g`. Category-theory papers
+are full of diagrams like this; being able to render them in code is
+useful for both documentation and interactive exploration.
+
+## The data structure
+
+A diagram is:
+
+    - a set of objects, each with a *position* on a 2D grid;
+    - a set of arrows, each with a source object, target object, and
+      label.
+
+```scheme
+;; Object: (list :name symbol :row int :col int)
+;; Arrow:  (list :src symbol :tgt symbol :label string)
+;; Diagram: (list :objects (obj ...) :arrows (arrow ...))
+
+(define example-square
+  '(:objects
+    ((:name A :row 0 :col 0)
+     (:name B :row 0 :col 1)
+     (:name C :row 1 :col 0)
+     (:name D :row 1 :col 1))
+    :arrows
+    ((:src A :tgt B :label \"f\")
+     (:src A :tgt C :label \"g\")
+     (:src B :tgt D :label \"h\")
+     (:src C :tgt D :label \"k\"))))
+```
+
+Four objects in a square; four arrows around the sides. A textbook
+commutative square.
+
+## The rendering strategy
+
+Given the objects on a grid, we allocate ASCII cells:
+
+- Each object occupies a cell of a chosen width (say 8 characters).
+- Adjacent cells have horizontal or vertical arrow lanes between them.
+- Diagonal arrows are the tricky case; we usually route them along an
+  L-shape rather than actually drawing diagonals.
+
+```scheme
+(define cell-width 12)
+(define cell-height 4)
+
+(define (render-diagram diagram)
+  (let* ((objects (cdr (assq :objects diagram)))
+         (arrows  (cdr (assq :arrows diagram)))
+         (max-row (apply max (map (lambda (o) (cadr (memq :row o))) objects)))
+         (max-col (apply max (map (lambda (o) (cadr (memq :col o))) objects)))
+         (grid-w  (* (+ max-col 1) cell-width))
+         (grid-h  (* (+ max-row 1) cell-height))
+         (grid    (make-grid grid-h grid-w #\\space)))
+    (for-each (lambda (o) (place-object grid o)) objects)
+    (for-each (lambda (a) (route-arrow grid a objects)) arrows)
+    (grid->string grid)))
+```
+
+`make-grid` allocates a 2D character array. `place-object` writes the
+object's name at its cell. `route-arrow` draws the arrow line and its
+label.
+
+```scheme
+(define (make-grid h w fill)
+  (let loop ((row 0) (rows '()))
+    (if (>= row h)
+        (list->vector (reverse rows))
+        (loop (+ row 1)
+              (cons (make-vector w fill) rows)))))
+
+(define (grid->string grid)
+  (apply string-append
+    (map (lambda (row)
+           (string-append (vector->string row) \"\\n\"))
+         (vector->list grid))))
+
+(define (grid-set! grid r c ch)
+  (let ((row (vector-ref grid r)))
+    (vector-set! row c ch)))
+
+(define (place-object grid obj)
+  (let* ((row (cadr (memq :row obj)))
+         (col (cadr (memq :col obj)))
+         (name (symbol->string (cadr (memq :name obj))))
+         (r (+ (* row cell-height) 1))
+         (c (+ (* col cell-width) 1))
+         (n (string-length name)))
+    (let loop ((i 0))
+      (when (< i n)
+        (grid-set! grid r (+ c i) (string-ref name i))
+        (loop (+ i 1))))))
+```
+
+`route-arrow` handles the four cases: horizontal, vertical, and the
+two diagonals (rendered as L-shapes).
+
+```scheme
+(define (route-arrow grid arrow objects)
+  (let* ((src (find-object (cadr (memq :src arrow)) objects))
+         (tgt (find-object (cadr (memq :tgt arrow)) objects))
+         (label (cadr (memq :label arrow)))
+         (src-row (cadr (memq :row src)))
+         (src-col (cadr (memq :col src)))
+         (tgt-row (cadr (memq :row tgt)))
+         (tgt-col (cadr (memq :col tgt))))
+    (cond
+      ((and (= src-row tgt-row) (< src-col tgt-col))
+       (draw-horizontal-arrow grid src-row src-col tgt-col label))
+      ((and (= src-col tgt-col) (< src-row tgt-row))
+       (draw-vertical-arrow grid src-row tgt-row src-col label))
+      (else
+       (draw-diagonal-arrow grid src-row src-col tgt-row tgt-col label)))))
+
+(define (draw-horizontal-arrow grid row src-col tgt-col label)
+  (let* ((r (+ (* row cell-height) 1))
+         (start-c (+ (* src-col cell-width) 3))
+         (end-c   (+ (* tgt-col cell-width) 0)))
+    (let loop ((c start-c))
+      (when (< c end-c)
+        (grid-set! grid r c #\\-)
+        (loop (+ c 1))))
+    (grid-set! grid r end-c #\\>)
+    ;; label above the arrow
+    (place-label-at grid (- r 1) (quotient (+ start-c end-c) 2) label)))
+```
+
+The other two arrow directions are similar. The diagonal case routes
+through an intermediate corner: from (src-row, src-col) horizontally
+to (src-row, tgt-col), then vertically to (tgt-row, tgt-col). Not
+ideal for aesthetics but readable.
+
+## Rendering the commutative square
+
+```
+   A ---f---> B
+   |          |
+   g          h
+   v          v
+   C ---k---> D
+```
+
+Actual ASCII output from our renderer (with cell-width 12):
+
+```
+    A       -----f-----> B
+    |                    |
+    g                    h
+    |                    |
+    v                    v
+    C       -----k-----> D
+```
+
+Not beautiful but functional. Suitable for terminal display, comments
+in code, or plain-text documentation.
+
+## Commutativity check
+
+The renderer draws diagrams; it does not verify commutativity. That
+would require evaluating the arrows and comparing the composites — the
+category evaluator from chapter 12. A separate procedure can walk the
+diagram, find all pairs of paths from a source object to a target
+object, compute both composites, and check equality.
+
+```scheme
+(define (check-commutativity diagram category)
+  ;; For every pair of objects (A, B) with more than one path from A
+  ;; to B, verify that all paths compose to the same arrow in category.
+  ...)
+```
+
+This is a graph algorithm plus category-theory evaluation. In our
+generic diagram framework it must be parametric in the underlying
+category — we cannot check commutativity without knowing how arrows
+compose in the target category.
+
+## Extensions
+
+**Cell layout via graph algorithms.** Auto-position objects using a
+graph-drawing algorithm (Sugiyama, force-directed, hierarchical). Our
+renderer requires the user to place objects manually; auto-layout would
+let you draw diagrams from just a list of arrows.
+
+**Multi-line labels.** Label texts longer than a few characters need
+line-breaking or offset.
+
+**Arrows with multiple heads.** In category theory, `⇒` denotes a
+natural transformation and `↣` denotes a mono. The character set can
+express these; the renderer just needs to know what character to draw
+at the arrow head.
+
+**LaTeX output.** For publication, emit `tikz-cd` commands. Category-
+theory papers use `tikz-cd` almost universally; a Scheme frontend
+producing `tikz-cd` code is straightforward.
+
+## Application
+
+Diagram-rendering is useful when explaining category-theoretic
+patterns in code documentation. A function that operates on functors
+can carry a diagram in its docstring showing the type transformations.
+A tutorial for a library can render the categorical structure it
+implements. These are small wins but real ones.
+
+The primary use, though, is for you: rendering a diagram forces you to
+lay it out carefully, and often the layout process itself reveals
+symmetries or asymmetries you had not noticed. Category theory
+diagrams are semantic; drawing them is thinking about them.
+
+## What to try
+
+Render a *triangle* diagram: three objects with three arrows forming a
+triangle. The triangle commutes iff the two paths from the top vertex
+to the bottom-right vertex compose to the same arrow.
+
+Render a *pullback* square. In Set, a pullback is the subset of the
+product that agrees on projections into a common codomain. Drawing the
+diagram is the first step in explaining what a pullback is.
+
+Render the *snake lemma* diagram from homological algebra. This is a
+notoriously intricate diagram with two rows of objects and connecting
+arrows; drawing it in ASCII is a good stress test for the renderer.
+
+## Closing
+
+A diagram renderer is a small tool with disproportionate pedagogical
+value. Being able to draw a commutative diagram in code lets you talk
+about category theory in the medium you code in.
+
+This appendix's implementation is minimal; scaling it up gives you
+`tikz-cd`, or a graphical diagram editor, or an interactive
+diagrammatic reasoning tool. Category theory is a diagrammatic
+subject; a renderer is the point at which the code and the diagrams
+speak the same language.
+"
+  :cross-refs
+    (:book-of-scheme :chapters (5 8))
+  :verbs-used ("cond" "eq?" "cons" "car" "cdr" "cadr" "list" "map"
+               "for-each" "apply" "assq" "memq" "reverse" "vector"
+               "make-vector" "vector-ref" "vector-set!" "list->vector"
+               "vector->list" "vector->string" "string->symbol"
+               "symbol->string" "string-length" "string-ref"
+               "string-append" "define" "lambda" "let" "let*" "when"
+               "cond" "max" "min" "quotient" "*" "+" "-" ">=" "<" "=")
+  :word-count-estimate 2400
+)

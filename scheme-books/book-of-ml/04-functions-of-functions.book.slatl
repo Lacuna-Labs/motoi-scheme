@@ -1,0 +1,236 @@
+(chapter
+  :book "Book of ML"
+  :chapter-number 4
+  :title "Functions of functions — the composition is the network"
+  :audience "kid-and-adult operators"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-19"
+     :sources ((:reference "MOTOI-SCHEME-REFERENCE.slat" :section "core, list")
+               (:verbs (map filter reduce fold lambda define))))
+  :prose
+"# Chapter 4 — Functions of functions
+
+Every neural network you will ever meet is a composition of functions.
+A layer takes an input, does something, produces an output. The next
+layer takes THAT output and does something more. Add ten layers and
+you get a function that is the composition of ten layers. That is
+literally what a neural network is.
+
+Scheme is the ideal language for this framing because functions are
+values. You can pass them around, store them, return them from other
+functions. Motoi inherits this. Once you see a network as a function
+of functions, the code writes itself.
+
+## The three higher-order verbs you already know
+
+`map`, `filter`, and `reduce`. Every ML pipeline in this book uses
+them. Let's re-see them through an ML lens.
+
+**`map`** — apply a function to every element of a list, returning
+a new list of the results. This is how every fully-connected layer
+computes its output vector: map the row-dot-product over the rows.
+
+**`filter`** — keep only the elements that pass a predicate. We use
+this rarely in the network itself, but constantly in data preparation:
+filter out short sentences, filter out mixed-language rows.
+
+**`reduce`** — collapse a list to a single value. Sum is a reduce.
+Product is a reduce. The output of the softmax is a reduce.
+Training a model is a very long reduce over batches of data.
+
+## Problem 1 — Map a function over a list
+
+```
+(define (square x) (* x x))
+(display (map square (list 1 2 3 4)))
+;; => (1 4 9 16)
+```
+
+`square` is a function. `map` takes that function and applies it four
+times, once per element. If you swap `square` for another function,
+the pipeline stays the same.
+
+## Problem 2 — A function that returns a function
+
+This is the trick that makes composition ergonomic.
+
+```
+(define (scaler k)
+  (lambda (x) (* x k)))
+
+(define double (scaler 2))
+(define triple (scaler 3))
+
+(display (double 5))
+;; => 10
+(display (triple 5))
+;; => 15
+
+(display (map double (list 1 2 3)))
+;; => (2 4 6)
+```
+
+`scaler` is a factory. Given a `k`, it returns a function that scales
+by `k`. The returned function remembers its `k`. That memory is called
+a closure — the lambda captured `k` when it was created, and holds
+onto it forever.
+
+Every layer in a neural network is a closure. It captures its weights
+when it is built, and holds them for the life of the network.
+Retraining changes the weights inside the closure. The shape of the
+function does not change.
+
+## Problem 3 — Function composition
+
+Two functions, one after the other.
+
+```
+(define (compose f g)
+  (lambda (x) (f (g x))))
+
+(define add1 (lambda (x) (+ x 1)))
+(define mul2 (lambda (x) (* x 2)))
+
+(define add1-then-mul2 (compose mul2 add1))
+;; note the order: (compose f g) means apply g first, then f
+
+(display (add1-then-mul2 5))
+;; => 12    (because add1(5) = 6, then mul2(6) = 12)
+```
+
+The order matters. `(compose f g)` means 'apply g first, then f' —
+the same order you'd read `f∘g` in math. When we chain layers, layer
+2 is `f`, layer 1 is `g`, and their composition is `layer2 ∘ layer1`.
+
+## Problem 4 — Compose a list of functions
+
+Now generalize. Given a list of functions, apply them in sequence.
+
+```
+(define (chain fs)
+  (lambda (x)
+    (if (null? fs)
+        x
+        ((chain (cdr fs)) ((car fs) x)))))
+
+(define pipeline
+  (chain (list (lambda (x) (+ x 1))
+               (lambda (x) (* x 2))
+               (lambda (x) (- x 3)))))
+
+(display (pipeline 5))
+;; => 9      ((5 + 1) * 2 - 3 = 12 - 3 = 9)
+```
+
+`chain` takes a list of functions and returns a function that runs
+them in order. This is EXACTLY the shape of a multi-layer neural
+network. Each function is a layer. The input flows through them one
+at a time.
+
+## Problem 5 — A three-layer network sketch
+
+Not the final form (we lack a nonlinearity and we lack real weights),
+but the structure.
+
+```
+(define (make-layer weights)
+  (lambda (input)
+    (map (lambda (row) (vec/dot row input)) weights)))
+
+(define layer1
+  (make-layer
+    (list (list 0.1 0.2))
+          (list 0.3 0.4))
+          (list 0.5 0.6)))))
+;; 3x2 — takes a 2-vector, returns a 3-vector
+
+(define layer2
+  (make-layer
+    (list (list 0.1 0.2 0.3))
+          (list 0.4 0.5 0.6)))))
+;; 2x3 — takes a 3-vector, returns a 2-vector
+
+(define layer3
+  (make-layer
+    (list (list 0.7 0.8)))))
+;; 1x2 — takes a 2-vector, returns a 1-vector
+
+(define (network x)
+  (layer3 (vec/make (layer2 (vec/make (layer1 x))))))
+
+(display (network (list 1 2))))
+;; => a single-number output
+```
+
+Read the shape. Every layer is a closure over its weights. The
+network is the sequential application of those closures. The inputs
+and outputs have to match dimensions — 2 in, 3 hidden, 2 hidden
+again, 1 out.
+
+Real networks (chapter 8) add a nonlinearity between each layer.
+Real transformers (chapter 13) add residual connections and layernorm.
+The overall shape — layers composed in sequence — is the same.
+
+## Capstone — A parameterized network builder
+
+Build a function that, given a list of weight matrices, returns a
+runnable network.
+
+```
+(define (make-net weight-matrices)
+  (define (matvec rows v)
+    (map (lambda (r) (vec/dot r v)) rows))
+  (define (as-vecs rows)
+    (map (lambda (r) (if (list? r) (vec/make r) r)) rows))
+  (define layers
+    (map (lambda (W)
+           (let ((rows (as-vecs W)))
+             (lambda (v) (vec/make (matvec rows v)))))
+         weight-matrices))
+  (lambda (x)
+    (fold (lambda (layer acc) (layer acc))
+          (vec/make x)
+          layers)))
+
+(define net
+  (make-net
+    (list (list (list 1 0) (list 0 1) (list 1 1))
+          (list (list 1 0 0) (list 0 1 0))
+          (list (list 1 1)))))
+
+(display (net (list 3 4)))
+;; => a vector with one component, ~7
+```
+
+Read the shape:
+
+- `make-net` takes a list of weight matrices (each a list of rows).
+- It builds a layer closure for each.
+- It uses `fold` to chain them.
+- The returned value is a function you can call.
+
+This IS the skeleton of a fully-connected network. In chapter 7 we add
+a bias and a nonlinearity. In chapter 8 we compose them. In chapter 10
+we run a training loop. The composition pattern from this chapter is
+the frame around all of it.
+
+## Why this matters
+
+Neural networks are function composition. The particular functions
+happen to be big matrix multiplies wrapped in nonlinearities, but the
+composition is the whole shape. Once you can hold a network in your
+head as `layer3 ∘ layer2 ∘ layer1`, the transformer stops looking
+alien. It is more of the same, arranged differently.
+
+## What's next
+
+In chapter 5 we ask what a model actually IS. What are we trying to
+do when we train one? The answer is fitting: adjusting parameters
+so the model's output matches the desired output as closely as
+possible. That is what neural networks do. Everything else is
+mechanism.
+")

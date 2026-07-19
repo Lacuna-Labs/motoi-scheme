@@ -1,0 +1,305 @@
+(dialect :applies ("motoi") :note "Motoi Book of Code.")
+
+(chapter
+  :book             "Book of Code"
+  :chapter-number   -3
+  :appendix         "C"
+  :title            "Appendix C — State machine deep dive"
+  :audience         :any
+  :dialect          "motoi"
+  :book-version     "1.0"
+  :content-rating   :G
+  :training-eligible #t
+  :confidentiality  :public
+  :provenance       ((:authored-by "book-of-code-author-agent")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Transmission_Control_Protocol")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/UML_state_machine")
+                     (:source "rfc" :citation "RFC 793 — Transmission Control Protocol (1981)"))
+  :prose
+"# Appendix C — State machine deep dive
+
+Chapter 10 introduced Mealy and Moore. This appendix is the deeper
+tour: UML notation, hierarchical states, and four real-world state
+machines you can find running in code you use every day.
+
+## UML state notation
+
+The Unified Modeling Language (UML) formalises a diagramming convention
+for state machines. You see it in engineering documents, protocol
+specs, and academic papers. Here are the pieces.
+
+**States** are drawn as rounded rectangles or circles. UML also has an
+initial state (a solid black dot) and a final state (a black dot with
+a ring around it).
+
+```
+   (o)-----> INITIAL --> ... --> FINAL -->(*)
+```
+
+**Transitions** are labelled arrows between states. The label has the
+form:
+
+```
+   trigger [ guard ] / action
+```
+
+- **trigger:** the event or input that causes the transition.
+- **guard:** an optional Boolean condition that must be true.
+- **action:** an optional side effect that fires on the transition.
+
+Any of the three parts can be omitted. `tick` alone is a plain
+transition on the `tick` event. `[error]/log-and-halt` is a
+transition with no trigger, guarded on `error`, doing an action.
+
+**Entry and exit actions** — some states have `entry / do-something`
+or `exit / do-something` blocks that run whenever you enter or leave
+the state, regardless of which transition brought you.
+
+**Hierarchical states** — a state can contain sub-states. UML lets
+you nest state machines inside states, which is very useful for
+modeling behaviour with a lot of sub-modes. A CPU's `execute` state,
+for example, might contain sub-states for `arithmetic`, `memory-op`,
+`branch`, `system-call`.
+
+## Real state machine 1 — TCP
+
+TCP is the transport-layer protocol for most of the internet. Every
+TCP connection walks through a state machine defined in RFC 793
+(1981) by Jon Postel.
+
+### The states
+
+- **CLOSED** — no connection.
+- **LISTEN** — the server is waiting for a client to arrive.
+- **SYN-SENT** — the client sent a SYN, waiting for the server's
+  SYN-ACK.
+- **SYN-RECEIVED** — the server got a SYN, sent its own SYN-ACK,
+  waiting for the client's ACK.
+- **ESTABLISHED** — the three-way handshake is done. Data can flow.
+- **FIN-WAIT-1**, **FIN-WAIT-2**, **CLOSE-WAIT**, **CLOSING**,
+  **LAST-ACK**, **TIME-WAIT** — the various closing states.
+
+That is eleven states total. The full state diagram is famously
+diamond-shaped and includes shortcuts for various error paths.
+
+### The three-way handshake
+
+Opening a TCP connection is:
+
+```
+   client                                    server
+     |                                         |
+     |----- SYN (seq=X) ----------------------->|
+     |                                         |
+     |<---- SYN-ACK (seq=Y, ack=X+1) ----------|
+     |                                         |
+     |----- ACK (ack=Y+1) --------------------->|
+     |                                         |
+     |=== both now in ESTABLISHED ============|
+```
+
+Three packets. Both sides pick a random sequence number, tell the
+other, and acknowledge. From then on, every byte gets a sequence
+number so out-of-order or lost packets can be detected and resent.
+
+### TCP in Motoi Scheme (sketch)
+
+```
+(define (make-tcp-endpoint)
+  (let ((state 'CLOSED))
+    (lambda (event)
+      (set! state
+            (case state
+              ((CLOSED)
+               (case event
+                 ((passive-open) 'LISTEN)
+                 ((active-open)  'SYN-SENT)
+                 (else state)))
+              ((LISTEN)
+               (case event
+                 ((got-syn) 'SYN-RECEIVED)
+                 (else state)))
+              ((SYN-SENT)
+               (case event
+                 ((got-syn-ack) 'ESTABLISHED)
+                 (else state)))
+              ((SYN-RECEIVED)
+               (case event
+                 ((got-ack) 'ESTABLISHED)
+                 (else state)))
+              ((ESTABLISHED)
+               (case event
+                 ((close) 'FIN-WAIT-1)
+                 (else state)))
+              ;; ... more states omitted for brevity
+              (else state)))
+      state)))
+
+(define tcp (make-tcp-endpoint))
+(tcp 'active-open)     ;; => SYN-SENT
+(tcp 'got-syn-ack)     ;; => ESTABLISHED
+(tcp 'close)           ;; => FIN-WAIT-1
+```
+
+Real TCP has timeouts, retransmissions, congestion control, and the
+data-transfer sub-states. But the shape is a state machine, and
+Jon Postel drew it in 1981.
+
+## Real state machine 2 — HTTP session
+
+HTTP itself is stateless — each request stands alone — but a browser
+session with a server usually maintains state via cookies. That
+session is a state machine you can draw.
+
+States:
+- **anonymous** — no cookie, no logged-in user.
+- **logged-in** — user has authenticated, cookie is valid.
+- **admin** — user has elevated privileges.
+- **locked-out** — too many failed logins, session revoked.
+
+Transitions include `login-success`, `login-failure` (with a counter
+guard), `logout`, `session-timeout`, `admin-elevation`, etc.
+
+Every web app you have ever used has a state machine somewhere in
+the auth layer. Sometimes it is drawn explicitly. Sometimes it is
+implicit in a hundred `if` statements. The bugs usually live where
+somebody forgot to add an `else` branch — an unhandled state
+transition.
+
+## Real state machine 3 — Elevator control
+
+An elevator is a physical Mealy machine.
+
+States:
+- **idle-at-floor-N** for each floor N.
+- **moving-up**, **moving-down**.
+- **door-open**, **door-closing**.
+- **out-of-service**.
+
+Inputs:
+- Button pressed on a floor.
+- Button pressed inside the car.
+- Door sensor triggered.
+- Weight sensor triggered.
+- Emergency stop.
+
+Outputs:
+- Motor direction, motor speed.
+- Door state.
+- Floor indicator.
+
+Elevators are famous for having subtle state machines. Building them
+correctly is hard because a bug can literally injure people. That is
+why elevator control software is heavily verified — often with
+formal methods.
+
+## Real state machine 4 — Pac-Man ghost AI
+
+The 1980 Pac-Man arcade game gave each ghost a state machine with
+three main states:
+
+- **chase** — pursue Pac-Man according to the ghost's personality.
+  (Each ghost had different chase logic: Blinky chases directly,
+  Pinky targets four tiles ahead of Pac-Man, etc.)
+- **scatter** — retreat to a specific home corner of the maze.
+- **frightened** — Pac-Man ate a power pellet; ghosts flee
+  randomly and are edible.
+
+The ghost cycles between chase and scatter on timers (typical
+alternation: 7 seconds scatter, 20 seconds chase, repeated). When
+Pac-Man eats a power pellet, all ghosts jump to frightened for a
+few seconds, then return to whatever they were doing.
+
+This tiny state machine is arguably one of the most influential game
+AI designs in history. Its simplicity and its emergent complexity —
+because the four ghosts have subtly different chase policies — made
+Pac-Man feel alive without complex algorithms.
+
+In Motoi Scheme:
+
+```
+(define (make-ghost personality)
+  (let ((state 'scatter)
+        (timer 7))
+    (lambda (event)
+      (cond
+        ((eq? event 'tick)
+         (set! timer (- timer 1))
+         (when (zero? timer)
+           (case state
+             ((scatter) (set! state 'chase)   (set! timer 20))
+             ((chase)   (set! state 'scatter) (set! timer 7))
+             ((frightened) (set! state 'chase) (set! timer 20)))))
+        ((eq? event 'power-pellet)
+         (set! state 'frightened)
+         (set! timer 10)))
+      (list 'state state 'timer timer 'personality personality))))
+
+(define blinky (make-ghost 'aggressive-direct-chaser))
+(blinky 'tick)              ;; scatter, timer 6
+;; ... repeat 6 times ...
+(blinky 'power-pellet)      ;; frightened, timer 10
+```
+
+That is the shape. Add the maze grid and the movement code and you
+have a ghost.
+
+## Nested state machines
+
+Chapter 12's CPU is a state machine with sub-states inside `execute`:
+one for each instruction type. That is a hierarchical state machine.
+UML lets you draw them as boxes inside boxes.
+
+Another common example is a game character's animation state. The
+top-level machine has `idle`, `walking`, `jumping`, `attacking`.
+Each of those has sub-states for specific animation frames. A hit
+in `attacking` can transition to a `hurt` state which has its own
+sub-states for the reaction animation.
+
+Nested state machines let you factor out common transitions.
+`emergency-stop` at the top level can be a single transition that
+overrides everything below. Without nesting, you would have to
+add the transition to every sub-state.
+
+## When to use a state machine
+
+Any time you have a system where:
+
+- The behaviour depends on history, not just current inputs.
+- There is a finite set of distinct \"modes\" the system can be in.
+- Certain transitions are legal and others are not.
+
+That is a state machine. Draw it before you code it. Name the
+states. Enumerate the transitions. **The states and transitions are
+the design.**
+
+## When not to use a state machine
+
+If your system has a truly infinite or open-ended state space, a
+finite state machine is the wrong tool. Full programming languages
+are more expressive. A CPU is a Turing machine, not a finite state
+machine (technically), because it has unbounded memory.
+
+But most subsystems inside a program are finite. UI widgets. Auth
+flows. Protocol handshakes. Game character AI. Physical device
+drivers. All finite. All state machines.
+
+## What Motoi wants you to take from this
+
+- State machines are everywhere in real code.
+- The formal notation (UML, or just circles and arrows) lets you
+  design and communicate without ambiguity.
+- Mealy and Moore are equivalent in power; pick whichever presents
+  more clearly for your system.
+- Hierarchical states let you factor common transitions and keep
+  diagrams readable.
+- If you draw the state machine before you code, you catch bugs
+  the diagram exposes.
+
+## The loop appears
+
+Every state machine has an outer driver loop: read event, transition,
+emit, loop. TCP has it. HTTP session has it. Elevator has it. Pac-Man
+ghost has it. CPU has it. Chapter 10 named it. Every appendix example
+here embodies it.
+")

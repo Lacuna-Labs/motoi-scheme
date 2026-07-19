@@ -1,0 +1,236 @@
+;; appendix-f-input-timing-windows.book.slatl
+
+(dialect :applies ("motoi" "sakura"))
+
+(appendix
+  :book "Book of Arcade Games"
+  :letter "F"
+  :title "Input Timing Windows"
+  :dialect "motoi"
+  :audience :kid
+  :also-for :adult
+  :content-rating :G
+  :author-lane "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible #t
+  :confidentiality "public"
+  :book-version "1.0.0"
+  :prose
+"Feel is timing. The player perceives a game as fair when their
+input has a small window of forgiveness. Impossible-to-fail feels
+cheap; frame-perfect-or-die feels punishing. The sweet spot is
+usually 4-10 frames of slack, invisible to conscious thought but
+felt in the thumbs.
+
+This appendix catalogs the timing windows used in real arcade games
+and gives you `world/after`-based skeletons for each.
+
+## Coyote time
+
+After walking off a ledge, still-airborne player can jump for N
+frames.
+
+```scheme
+;; 6-frame coyote time.
+(define grounded? #t) (define was-grounded? #t) (define coyote 0)
+(when (and was-grounded? (not grounded?)) (set! coyote 6))
+(when (> coyote 0) (set! coyote (- coyote 1)))
+(when (input/pressed? 'a)
+  (when (or grounded? (> coyote 0))
+    (entity/set-vel! p (car (entity/vel p)) -12)
+    (set! coyote 0)))
+(set! was-grounded? grounded?)
+```
+
+Recommended: 4-8 frames (0.07-0.13 seconds). Below 4 = harsh. Above
+8 = feels like cheating.
+
+## Jump buffer
+
+Pressed jump before landing? Fire on land.
+
+```scheme
+;; 8-frame jump buffer.
+(define buffer 0)
+(when (input/pressed? 'a)
+  (if grounded?
+      (entity/set-vel! p (car (entity/vel p)) -12)
+      (set! buffer 8)))
+(when (and grounded? (> buffer 0))
+  (entity/set-vel! p (car (entity/vel p)) -12)
+  (set! buffer 0))
+(when (> buffer 0) (set! buffer (- buffer 1)))
+```
+
+Recommended: 6-10 frames. Feels responsive without misfiring.
+
+## Dash cancel
+
+After a dash, N frames of immunity to certain inputs.
+
+```scheme
+(define dashing 0)
+(define dash-cd 0)   ;; cooldown
+(when (input/pressed? 'b)
+  (when (= dash-cd 0)
+    (entity/set-vel! p (* 8 heading-x) 0)
+    (set! dashing 6)
+    (set! dash-cd 30)))
+(when (> dashing 0) (set! dashing (- dashing 1)))
+(when (> dash-cd 0) (set! dash-cd (- dash-cd 1)))
+```
+
+6 frames of dash (0.1 sec), 30 frames cooldown (0.5 sec). Player
+can't spam dash, but the dash itself is snappy.
+
+## Attack window / combo timing
+
+Chained attacks link if the next input arrives within N frames of
+the previous attack's animation start.
+
+```scheme
+(define last-attack 0)
+(define combo-count 0)
+(when (input/pressed? 'a)
+  (if (< (- (world/frame) last-attack) 30)
+      (set! combo-count (+ combo-count 1))
+      (set! combo-count 1))
+  (set! last-attack (world/frame))
+  (audio/play (case combo-count
+                ((1) 'attack-1) ((2) 'attack-2) ((3) 'attack-3)
+                (else 'attack-finish))))
+```
+
+30 frames = 0.5 sec. If player presses attack again within half a
+second, they chain. Combo 4+ triggers finisher.
+
+## Grace period after damage
+
+After taking damage, player is briefly invulnerable.
+
+```scheme
+(define invuln 0)
+;; On damage:
+(when (and enemy-hit? (= invuln 0))
+  (entity/damage! p 1)
+  (set! invuln 60)   ;; 1 second invincibility
+  (world/camera-shake! 5 0.9))
+(when (> invuln 0) (set! invuln (- invuln 1)))
+```
+
+60 frames (1 sec) is standard 'i-frames' in fighting games. Prevents
+combo death after one mistake.
+
+## Input echo / hold detection
+
+Distinguish a tap (short press) from a hold (long press).
+
+```scheme
+(define press-frame 0)
+(define press-active? #f)
+(when (input/pressed? 'a)
+  (set! press-frame (world/frame))
+  (set! press-active? #t))
+(when (and press-active? (not (input/down? 'a)))
+  ;; Just released.
+  (let ((hold-duration (- (world/frame) press-frame)))
+    (cond
+      ((< hold-duration 6)  (do-tap))
+      ((< hold-duration 30) (do-hold))
+      (else                 (do-long-hold))))
+  (set! press-active? #f))
+```
+
+Under 6 frames = tap. 6-30 = hold. Above = long-hold. Three
+distinct actions from one button by measuring release time.
+
+## Double-tap detection
+
+Two taps within N frames.
+
+```scheme
+(define last-tap 0)
+(when (input/pressed? 'a)
+  (if (< (- (world/frame) last-tap) 15)
+      (do-double-tap)
+      (do-single-tap))
+  (set! last-tap (world/frame)))
+```
+
+15 frames (0.25 sec) is a reasonable double-click window. Adjustable.
+
+## Charge attack
+
+Hold button N frames for a stronger attack.
+
+```scheme
+(define charge 0)
+(when (input/down? 'a) (set! charge (+ charge 1)))
+(when (and (not (input/down? 'a)) (> charge 0))
+  (let ((strength (min 5 (quotient charge 20))))
+    (fire-with-strength strength))
+  (set! charge 0))
+```
+
+Every 20 held frames adds one strength level, capped at 5.
+
+## Rhythm-game timing
+
+Precise beat-locked input windows.
+
+```scheme
+;; Beat every 30 frames (2 beats/sec). Window is ±4 frames.
+(define (rhythm-hit?)
+  (let ((phase (modulo (world/frame) 30)))
+    (or (< phase 4) (> phase 26))))
+
+(when (input/pressed? 'a)
+  (if (rhythm-hit?)
+      (score-hit)
+      (score-miss)))
+```
+
+4-frame window at 60 FPS = 66 ms — tight but forgiving.
+
+## Common desktop tasks
+
+**Long-press-to-confirm.** A shop's 'delete order' button requires
+a hold to fire — prevents accidental clicks. Use hold-detection
+above with `hold-duration > 60`.
+
+**Double-click-to-fave.** A shop item can be favorited by double-
+clicking. Use double-tap detection.
+
+## Pitfalls
+
+**Coyote fires on stairs.** Every frame the player might briefly
+un-ground (stepping between tiles). Add a MINIMUM airborne-frames
+check before starting coyote.
+
+**Buffer replays after death.** Clear all input buffers on death
+and respawn.
+
+**Charge counter runs during pause menu.** Freeze charge counting
+during any state that isn't 'play.
+
+**Combo drops on ONE-frame miss.** Extend combo window by a
+frame or two if playtest reveals combo drops too easily.
+
+## The universal window sizes
+
+Committed to memory:
+
+- Frame-perfect (1 frame): only for expert-mode games. Bad default.
+- Twitchy (2-3): responsive shooters.
+- Comfortable (4-8): most action games. Default.
+- Forgiving (9-15): family-friendly. Kids under 10.
+- Cinematic (16+): narrative games where input is less about
+  precision.
+
+Every timing window in your game should be in one of these bands.
+Playtest to pick the band for your audience.
+
+## The one-line test
+
+If your game feels bad, add 4 frames to your coyote and buffer
+windows. Play again. Better? Keep. Worse? Revert. Almost every
+feel bug is a timing window that's too tight.")

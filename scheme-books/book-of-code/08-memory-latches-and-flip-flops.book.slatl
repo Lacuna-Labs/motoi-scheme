@@ -1,0 +1,269 @@
+(dialect :applies ("motoi") :note "Motoi Book of Code.")
+
+(chapter
+  :book             "Book of Code"
+  :chapter-number   8
+  :title            "Chapter 8 — Memory: latches and flip-flops"
+  :audience         :any
+  :dialect          "motoi"
+  :book-version     "1.0"
+  :content-rating   :G
+  :training-eligible #t
+  :confidentiality  :public
+  :provenance       ((:authored-by "book-of-code-author-agent")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Flip-flop_(electronics)")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Latch_(electronics)")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Static_random-access_memory"))
+  :prose
+"# Chapter 8 — Memory: latches and flip-flops
+
+Everything we have built so far is **combinational**. Give the gates the
+same inputs, get the same outputs. No memory. No state. No sense of
+before-and-after.
+
+That is not enough to build a computer. A computer must remember. It
+must remember an intermediate result. It must remember what the next
+instruction is. It must remember whether the mouse is currently pressed.
+
+This chapter introduces the first memory cell: a wire that remembers.
+
+## The trick: feedback
+
+Take two NAND gates. Wire the output of each into an input of the
+other. That is called **cross-coupling** and it is the mechanical
+heart of the entire memory hierarchy.
+
+**ASCII diagram of an SR latch (cross-coupled NANDs):**
+
+```
+   S ---+---\\
+        |    )-o---+------- Q
+        |   /       |
+        +--/        |
+                    |
+        +----+------+ (feedback)
+        |
+   +---/         (feedback)
+   |   \\    +----+
+   +----)-o-+---+---- Q-bar
+       /        |
+   R --+        |
+                +---- (feedback into left NAND)
+```
+
+The two NANDs each depend on the other's output. There are two stable
+states:
+
+- **Set state:** Q = 1, Q-bar = 0.
+- **Reset state:** Q = 0, Q-bar = 1.
+
+Which state it sits in depends on which of the two inputs (S or R) was
+last pulsed. **This is memory.** The wire remembers what happened.
+
+## The SR latch, worked out
+
+The full name is **Set-Reset latch**, or SR latch. Its inputs are S
+(Set) and R (Reset). Its outputs are Q and Q-bar (Q inverted).
+
+Behaviour:
+
+- Pulse S: Q becomes 1, Q-bar becomes 0. Latch is set.
+- Pulse R: Q becomes 0, Q-bar becomes 1. Latch is reset.
+- Both S and R held low (well, high, in the NAND version — the
+  quiescent state): the latch holds whatever value it last had.
+- Both S and R low at once: forbidden. The output goes weird. Real
+  latches have a rule that says \"don't do that.\"
+
+The important part: with S and R idle, the latch **remembers**. That
+remembered value is one bit. The world's simplest memory cell.
+
+## Modeling the SR latch in Scheme
+
+Because a latch depends on its own previous state, we need a Scheme
+closure that holds state:
+
+```
+(define (make-sr-latch)
+  (let ((q    #f)
+        (qbar #t))
+    (lambda (msg . args)
+      (cond
+        ((eq? msg 'set)
+         (set! q    #t)
+         (set! qbar #f)
+         (list q qbar))
+        ((eq? msg 'reset)
+         (set! q    #f)
+         (set! qbar #t)
+         (list q qbar))
+        ((eq? msg 'state)
+         (list q qbar))))))
+
+(define L (make-sr-latch))
+(L 'state)   ;; => (#f #t)   ;; initial: reset
+(L 'set)     ;; => (#t #f)   ;; now set
+(L 'state)   ;; => (#t #f)   ;; still set, remembers
+(L 'reset)   ;; => (#f #t)
+(L 'state)   ;; => (#f #t)   ;; reset, remembers
+```
+
+That is a bit of memory. Set it. Reset it. Query it. In between, it
+remembers. That is what a flip-flop does at the wire level.
+
+## The D flip-flop — a better memory cell
+
+The SR latch has that awkward \"both inputs at once is forbidden\"
+rule. In practice, chip designers use a slightly more polished cell
+called a **D flip-flop.** The D stands for **data.** It has:
+
+- One data input, D.
+- One clock input, CLK.
+- One output, Q.
+
+Behaviour: **on the rising edge of the clock, Q takes the value of D.
+Otherwise, Q holds its previous value.**
+
+That is exactly what you want for a register: a bit that samples its
+input at the clock edge and holds it steady between edges. Every
+register in every CPU is built from D flip-flops.
+
+**ASCII diagram of a D flip-flop:**
+
+```
+   D ------+---> D flip-flop ---+---> Q
+           |                    |
+   CLK --->+  (samples D on     +---> Q-bar
+              rising edge)
+```
+
+The internal wiring is roughly two SR latches in series, gated by the
+clock — the first samples D while CLK is low, the second locks the
+sample when CLK goes high. That construction is called a
+**master-slave** flip-flop. We don't need to reproduce the internal
+gates here; we just need the behaviour.
+
+## Modeling the D flip-flop in Scheme
+
+We simulate the clock as an explicit `tick` message:
+
+```
+(define (make-d-flip-flop)
+  (let ((q  #f)
+        (d  #f))       ;; the input we sampled at last tick
+    (lambda (msg . args)
+      (cond
+        ((eq? msg 'set-d)
+         ;; setting the data input does NOT change Q. It arms the flip-flop.
+         (set! d (car args))
+         q)
+        ((eq? msg 'tick)
+         ;; on tick (rising edge), Q takes the value of D.
+         (set! q d)
+         q)
+        ((eq? msg 'q)      q)
+        ((eq? msg 'qbar)   (not q))))))
+
+(define ff (make-d-flip-flop))
+(ff 'q)              ;; => #f
+(ff 'set-d #t)       ;; arm with 1; Q not yet 1
+(ff 'q)              ;; => #f   (still old value)
+(ff 'tick)           ;; now Q samples D
+(ff 'q)              ;; => #t
+
+(ff 'set-d #f)       ;; arm with 0
+(ff 'q)              ;; => #t   (still 1, waiting for tick)
+(ff 'tick)
+(ff 'q)              ;; => #f   (now sampled)
+```
+
+That is a D flip-flop. It stores one bit. It samples on the clock edge.
+Chain eight of them and you get an 8-bit register (chapter 9). Chain a
+million of them and you get… well, actually, you use SRAM cells for
+that, which are the same idea packaged differently. But conceptually,
+a register file in a CPU is a bank of D flip-flops.
+
+## The clock — a heartbeat for the whole machine
+
+Every real CPU has a **clock** — a signal that oscillates between high
+and low, usually at some enormous rate like 3 GHz (3 billion times per
+second). All the flip-flops in the CPU sample their inputs on the same
+edge of the same clock. That synchronises the whole machine.
+
+Between clock edges, gates in the CPU are computing new values. When
+the clock edge arrives, all the flip-flops snap in the new values at
+once. Then the cycle repeats.
+
+The clock is the CPU's heartbeat. It is also, importantly, a **loop**.
+The whole computer is a big state machine driven by a repeating clock.
+Chapter 10 formalises this. Chapter 12 shows the CPU version.
+
+Motoi Scheme in this book simulates the clock with explicit `tick`
+messages. Real chips do it with an oscillator crystal.
+
+## SRAM — a chip full of flip-flops
+
+**SRAM** stands for Static Random-Access Memory. It is called static
+because it holds its value as long as it has power (in contrast to
+DRAM, which needs to be refreshed every few milliseconds because the
+value leaks away). SRAM is what CPU caches are made of.
+
+An SRAM cell is essentially a pair of cross-coupled NANDs (or NORs)
+plus a couple of access transistors. Six transistors per bit. Fast.
+Not too dense.
+
+A modern CPU L1 cache might be 64 kilobytes of SRAM. That is 512,000
+bits, times 6 transistors per bit, gives about 3 million transistors
+just for the L1 cache. And a modern CPU has 40 to 50 billion transistors
+total. So the L1 cache is a tiny fraction of the transistor budget.
+
+We care about this in chapter 13 when we talk about the memory
+hierarchy. For now: SRAM cell = 6-transistor circuit that holds one
+bit for as long as it has power. Made from the same NAND cross-coupling
+we just built.
+
+## The JK flip-flop and the T flip-flop
+
+Two variants worth naming. Not going to derive them; just naming.
+
+- **JK flip-flop:** like SR but the \"both inputs high\" state
+  toggles instead of being forbidden. Named after Jack Kilby (yes,
+  the same one — chapter 4), though the credit is disputed.
+- **T flip-flop:** \"toggle\" — one input. Every rising clock edge,
+  the output flips. Useful for building counters.
+
+You can build a T from a JK by tying the J and K together. You can
+build a JK from a D with some extra logic. Chip designers pick
+whichever is cheapest to lay out in their process.
+
+## What Motoi wants you to take from this
+
+Feedback creates memory. Two cross-coupled NANDs give you one bit of
+storage. Package it with a clock input and you get a D flip-flop. Chain
+D flip-flops and you get registers. Bank registers with an address
+decoder and you get RAM.
+
+Every layer is just more feedback and more selection. Every layer is
+built from the gates in chapter 5. Every layer is Boolean algebra on
+different substrates.
+
+**Memory is a wire that goes in a loop.** Hold that image. It comes
+back forever.
+
+## The loop appears — literally
+
+For the first time in this book, the loop is not a metaphor. It is
+literal. The output of one NAND feeds back into the input of another.
+The wire goes in a circle. That circle is where the bit lives.
+
+Every bit of memory in every computer ever built is somewhere sitting
+on a loop of wire. Fast SRAM: two-NAND loop, holds while powered. DRAM:
+capacitor loop that leaks and must be refreshed. Flash memory: a
+trapped-charge loop that survives power-off for years. Disk: a
+magnetised domain that survives power-off nearly forever. Different
+substrates. All loops. All memory.
+
+## Next
+
+Chapter 9: chain flip-flops to build registers and counters. The birth
+of sequential logic and, therefore, the birth of the timeline.
+")

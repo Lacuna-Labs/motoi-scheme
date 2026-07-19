@@ -1,0 +1,303 @@
+(dialect :applies ("motoi" "sakura") :note "Default: applies to both dialects.")
+
+(chapter
+  :book "Book of Logic"
+  :chapter-number 22
+  :appendix-letter "F"
+  :title "Natural Deduction Tree Renderer"
+  :dialect "sakura"
+  :audience :adult
+  :content-rating :G
+  :author-lane "the-engineer-book-of-logic-2026-07-16"
+  :training-eligible #t
+  :confidentiality "public"
+  :voice "sakura-teaching + gentle-formalist"
+  :classical-anchors ("Gentzen — Untersuchungen über das logische Schliessen (1935)"
+                      "Prawitz — Natural Deduction: A Proof-Theoretical Study")
+  :prose
+"# Appendix F — Natural Deduction Tree Renderer
+
+Where we pretty-print a proof so it looks the way it does in a logic
+textbook.
+
+Gentzen's original notation for natural deduction is a *tree* of
+inference lines. Each inference step draws a horizontal bar with the
+premises above and the conclusion below; the rule name goes to the
+right. Discharged assumptions are indicated by brackets around the
+formula and a marker linking the discharge to the introducing rule.
+
+Chapter 3 built proofs as nested lists. This appendix renders those
+nested lists in Gentzen notation. The output is ASCII art suitable for
+inspection in a terminal or a documentation string.
+
+## The target format
+
+A proof of `(implies (and P Q) P)`:
+
+    [(and P Q)]¹
+    ---------- conj-elim-l
+        P
+    ---------- impl-intro¹
+    (implies (and P Q) P)
+
+Read from top to bottom. The assumption `(and P Q)` is discharged by
+the impl-intro rule (marked with matching superscript numbers). The
+bar-and-name is drawn between premises and conclusion; the whole tree
+grows downward.
+
+For nested inferences, the tree branches:
+
+         P₁    P₂
+         ------- conj-intro
+    P_3   (and P₁ P₂)
+    ------------------ some-rule
+          conclusion
+
+Aligning these takes some care with widths.
+
+## Rendering strategy
+
+We compute, for each subtree, three things:
+
+1. A list of lines (strings) representing the rendered subtree.
+2. The *width* of the subtree (the max line length).
+3. The *center* column of the subtree's conclusion.
+
+Rendering the whole tree is then a matter of pasting side-by-side
+subtrees with padding, drawing the inference bar, and centering the
+conclusion.
+
+```scheme
+;; Rendered proof node: (lines width center-col)
+(define (rendered-lines  r) (car   r))
+(define (rendered-width  r) (cadr  r))
+(define (rendered-center r) (caddr r))
+
+(define (make-rendered lines width center)
+  (list lines width center))
+
+(define (render-proof proof)
+  ;; Dispatch on rule; each rule has its own layout.
+  (let* ((rule (proof-rule proof))
+         (concl (proof-concl proof))
+         (kids  (proof-children proof)))
+    (case rule
+      ((assumption) (render-assumption concl))
+      (else (render-inference rule concl (map render-proof kids))))))
+```
+
+The assumption case is the simplest.
+
+```scheme
+(define (render-assumption formula)
+  (let* ((text (formula->string formula))
+         (bracketed (string-append \"[\" text \"]\"))
+         (w (string-length bracketed)))
+    (make-rendered (list bracketed) w (quotient w 2))))
+
+(define (formula->string f)
+  ;; Very crude: use Scheme's write on a string port.
+  (cond
+    ((symbol? f) (symbol->string f))
+    ((pair? f)
+     (string-append \"(\"
+                    (formula->string (car f))
+                    (apply string-append
+                           (map (lambda (x)
+                                  (string-append \" \" (formula->string x)))
+                                (cdr f)))
+                    \")\"))))
+```
+
+The inference case is where the layout work happens.
+
+```scheme
+(define (render-inference rule concl rendered-kids)
+  (let* ((concl-str (formula->string concl))
+         (concl-width (string-length concl-str))
+         (rule-name (symbol->string rule))
+         ;; Paste children side by side with two spaces between.
+         (children-block (paste-side-by-side rendered-kids 2))
+         (children-width (rendered-width children-block))
+         (block-width (max children-width concl-width))
+         (bar-string (make-string block-width #\\-))
+         (bar-line (string-append bar-string \"  \" rule-name))
+         (concl-line (center-in concl-str block-width))
+         (all-lines (append (rendered-lines children-block)
+                            (list bar-line)
+                            (list concl-line))))
+    (make-rendered all-lines
+                   (max (string-length bar-line) block-width)
+                   (quotient block-width 2))))
+
+(define (paste-side-by-side rendered-list gap)
+  ;; Take a list of rendered blocks and paste them left-to-right.
+  (cond
+    ((null? rendered-list)
+     (make-rendered '() 0 0))
+    ((null? (cdr rendered-list))
+     (car rendered-list))
+    (else
+     (paste-two (car rendered-list)
+                (paste-side-by-side (cdr rendered-list) gap)
+                gap))))
+
+(define (paste-two left right gap)
+  ;; Pad both to same height, join line by line with `gap` spaces.
+  (let* ((left-lines  (rendered-lines left))
+         (right-lines (rendered-lines right))
+         (h (max (length left-lines) (length right-lines)))
+         (l-padded (pad-lines-to-height left-lines  h (rendered-width left)))
+         (r-padded (pad-lines-to-height right-lines h (rendered-width right)))
+         (spacer   (make-string gap #\\space))
+         (joined   (map (lambda (l r)
+                          (string-append l spacer r))
+                        l-padded r-padded))
+         (total-w  (+ (rendered-width left) gap (rendered-width right)))
+         (center   (quotient total-w 2)))
+    (make-rendered joined total-w center)))
+
+(define (pad-lines-to-height lines target-h width)
+  ;; Pad each existing line to `width`, then add blank lines above to reach `target-h`.
+  (let* ((padded (map (lambda (l) (pad-line-to-width l width)) lines))
+         (needed-blanks (- target-h (length padded))))
+    (if (<= needed-blanks 0)
+        padded
+        (append (make-list needed-blanks (make-string width #\\space))
+                padded))))
+
+(define (pad-line-to-width line w)
+  (let ((delta (- w (string-length line))))
+    (if (<= delta 0)
+        line
+        (string-append line (make-string delta #\\space)))))
+
+(define (center-in text width)
+  (let* ((delta (- width (string-length text)))
+         (left  (quotient delta 2))
+         (right (- delta left)))
+    (string-append (make-string left #\\space)
+                   text
+                   (make-string right #\\space))))
+```
+
+## Rendering the modus tollens proof
+
+Recall from chapter 3:
+
+    From (implies P Q) and (not Q), derive (not P).
+
+The proof tree:
+
+```
+[(implies P Q)]²  [P]¹
+------------------- impl-elim
+       Q               [(not Q)]³
+       -------------------- neg-elim
+              false
+              --------- neg-intro¹
+                (not P)
+```
+
+The renderer produces roughly this shape (with actual spacing
+computed on the fly). Discharge annotations (the superscript numbers)
+are handled by a separate pass that walks the proof and matches each
+discharge rule with its introducing assumption.
+
+## Discharge annotation
+
+Extending the renderer to handle discharge annotations:
+
+- Assign a unique number to each discharge.
+- Mark the discharging inference (impl-intro, neg-intro) with the number.
+- Mark the corresponding assumption(s) with the same number.
+
+```scheme
+(define (annotate-discharges proof)
+  ;; Walk the proof; every impl-intro or neg-intro allocates a fresh
+  ;; number and applies it to the matching assumption in its subproof.
+  ;; We track a mutable counter for freshness.
+  (let ((counter 0))
+    (define (fresh!) (set! counter (+ counter 1)) counter)
+    (define (walk p current-mark)
+      (case (proof-rule p)
+        ((assumption)
+         (if current-mark
+             (list 'assumption-marked (proof-concl p) current-mark)
+             p))
+        ((impl-intro neg-intro)
+         (let ((n (fresh!)))
+           (list (proof-rule p)
+                 (proof-concl p)
+                 (list 'rule-mark n)
+                 (map (lambda (c) (walk c n)) (proof-children p)))))
+        (else
+         (list (proof-rule p) (proof-concl p) #f
+               (map (lambda (c) (walk c current-mark)) (proof-children p))))))
+    (walk proof #f)))
+```
+
+The rendered output includes the superscript numbers in brackets after
+the discharged assumption and after the discharging rule name. This
+matches Gentzen's original convention.
+
+## Extensions
+
+**Colorized output.** Terminals with ANSI support can highlight the
+rule names, the conclusions, or the discharge markings. This dramatically
+improves readability for large proofs.
+
+**LaTeX output.** Instead of ASCII, emit `\\deduce` or `bussproofs`
+commands. This is what proof-theory papers use in their published
+figures.
+
+**Interactive collapse/expand.** In a rich-text environment (a Jupyter
+notebook, a web page), the tree can be interactive — click a subproof to
+collapse or expand it. This is essential for proofs that span many
+screens.
+
+## Application
+
+The renderer is not just for reading proofs; it is for *debugging*
+them. When a proof fails to check, the visualization shows where in
+the tree the failure occurred. When a proof is unfamiliar, the tree
+lets you follow the logical flow at a glance.
+
+Proof assistants like Coq have their own display machinery, but
+having a tiny renderer in your working language means you can debug
+proofs without leaving the environment you built them in. This is a
+small comfort but a real one.
+
+## What to try
+
+Extend the renderer to handle multi-argument rules (rules taking
+three or more premises). The layout generalises: paste all premises
+side-by-side, then bar, then conclusion.
+
+Add *proof size* annotations: each subtree carries its own node count,
+displayed at the right of the conclusion. Large proofs get a size
+sanity-check this way.
+
+Try rendering one of your own proofs. Compare the output to
+Gentzen's presentation of the same proof in his original paper (which
+is available online in translation). The layouts should agree up to
+formatting choices.
+
+## Closing
+
+A proof-tree renderer is a small piece of code with outsized
+usefulness. It lets you inspect proofs, debug proofs, and communicate
+about proofs in a form that matches the standard notation of the
+field. This appendix's implementation is basic but complete; scaling
+it up produces the pretty-printer of any modern proof assistant.
+"
+  :cross-refs
+    (:book-of-scheme :chapters (8 11))
+  :verbs-used ("cond" "eq?" "cons" "car" "cdr" "cadr" "caddr" "list"
+               "map" "append" "null?" "pair?" "not" "and" "or"
+               "case" "define" "lambda" "let" "let*" "set!"
+               "symbol->string" "string->symbol" "string-length"
+               "string-append" "make-string" "make-list" "length"
+               "max" "min" "quotient" "+" "-" "<=")
+  :word-count-estimate 2500
+)

@@ -1,0 +1,265 @@
+;; ch04-orbits-two-body-to-three-body.book.slatl
+;; Book of Simulation Games — Chapter 4: Orbits: Two-Body to Three-Body
+;; Authored 2026-07-16 by simulation-games-engineer-lane.
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Simulation Games"
+  :chapter-number      4
+  :title               "Orbits: Two-Body to Three-Body"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "simulation-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + physics-simulation-emergent"
+  :book-version        "1.0.0"
+  :provenance          ((:authored-by "Engineer") (:date "2026-07-16"))
+  :prose
+"The two-body problem is solved. Kepler and Newton did it. Given a
+planet and a sun, we can write down where the planet will be at any
+future time using conic sections — ellipses, parabolas, hyperbolas.
+The math is beautiful and the answer is exact.
+
+The three-body problem is not solved. There is no general closed-form
+solution. There are special solutions — Lagrange points, figure-eight
+orbits — but for a generic three-body system the only way to know
+where the bodies will be in a year is to simulate them, step by step,
+and even then rounding errors accumulate. This is a startling gap in
+our understanding of the universe. And it is exactly the point where
+'physics is the game' becomes 'physics is the surprise.'
+
+This chapter builds a two-body orbit that returns to its starting
+position, a three-body system that sometimes stays and sometimes flies
+apart, and an eight-body toy solar system you can perturb. Along the
+way we introduce `topo/knot` to detect knotted orbits and
+`topo/writhe` to measure how tangled they are.
+
+---
+
+## 4.1 The two-body orbit
+
+```scheme
+(define (two-body-orbit)
+  (world/reset!)
+  (world/gravity! 0 0)               ;; no external gravity
+  (let ((sun    (world/spawn 'sun    240 180))
+        (planet (world/spawn 'planet 340 180)))
+    (entity/mass!    sun    100000)
+    (entity/mass!    planet 100)
+    (entity/pin!     sun)             ;; treat sun as fixed
+    (entity/set-vel! planet 0 1.6)    ;; tangential velocity
+    (world/attract!  planet sun 1.0)  ;; planet feels sun's pull
+    (list sun planet)))
+
+(two-body-orbit)
+(on-frame
+  (lambda (t)
+    (world/step)
+    (let ((p (entity/pos (world/find 'planet)))
+          (s (entity/pos (world/find 'sun))))
+      (paint-circle (car s) (cdr s) 6 yellow)
+      (paint-circle (car p) (cdr p) 3 white))))
+```
+
+Pin the sun so it doesn't drift. Give the planet a tangential
+velocity. It orbits. Try different velocities: too slow, it spirals
+in; too fast, it escapes on a hyperbola. In between, ellipses. There
+is a magic velocity — `v = sqrt(G*M/r)` — that gives a perfect
+circle. Below that, ellipse tilting inward; above, ellipse tilting
+outward. This is one of those places where a formula and a running
+simulation teach the same thing at once.
+
+## 4.2 Trace the orbit as a curve
+
+Every N frames, save the planet's position. Reconstruct the orbit as
+a Bezier or Catmull-Rom curve for a smooth trail.
+
+```scheme
+(define trail '())
+
+(on-frame
+  (lambda (t)
+    (world/step)
+    (let ((p (entity/pos (world/find 'planet))))
+      (when (= 0 (modulo t 3))
+        (set! trail (cons p trail))
+        (when (> (length trail) 200)
+          (set! trail (take trail 200))))
+      ;; Draw the trail as a smooth curve.
+      (let ((curve (curve/catmull-rom trail)))
+        (curve/paint! curve 1 green)))))
+```
+
+The trail closes on itself if you have a bound orbit. For a bound
+orbit, it eventually completes and the ellipse begins to overwrite
+itself perfectly — every point on the ellipse is on top of every
+previous point. That is Kepler.
+
+## 4.3 The three-body: add a moon
+
+```scheme
+(define (three-body)
+  (world/reset!)
+  (let ((sun    (world/spawn 'sun    240 180))
+        (planet (world/spawn 'planet 340 180))
+        (moon   (world/spawn 'moon   358 180)))
+    (entity/mass!    sun    100000)
+    (entity/mass!    planet 100)
+    (entity/mass!    moon   1)
+    (entity/pin!     sun)
+    (entity/set-vel! planet 0 1.6)
+    (entity/set-vel! moon   0 2.2)
+    (world/attract!  planet sun    1.0)
+    (world/attract!  moon   sun    1.0)
+    (world/attract!  moon   planet 1.0)
+    (world/attract!  planet moon   1.0)))
+
+(three-body)
+```
+
+Sometimes the moon stays. Sometimes it gets slingshot away on a
+hyperbola after a close encounter. Sometimes the planet's orbit is
+perturbed just enough that everything gradually drifts. The outcome
+depends acutely on the moon's initial velocity — change 2.2 to 2.1
+and the moon stays for hundreds of orbits; change it to 2.4 and it
+escapes on the first pass.
+
+This is the difference between two-body and three-body. Two-body has
+answers. Three-body has behaviors.
+
+## 4.4 Detecting knots in orbits
+
+If we sample the moon's trajectory and connect the samples, we get a
+closed curve in space (or in the plane, for our 2D sim). Is this
+curve knotted? For 2D it can't be — real knots live in 3D — but the
+`topo/knot` verb also gives us WRITHE, which measures how tangled a
+2D curve is with itself.
+
+```scheme
+(define (writhe-of-moon-orbit T)
+  (world/reset!)
+  (three-body)
+  (let loop ((n T) (pts '()))
+    (if (<= n 0)
+        (let ((curve (reverse pts)))
+          (topo/writhe curve))
+        (begin
+          (world/step)
+          (let ((p (entity/pos (world/find 'moon))))
+            (loop (- n 1) (cons p pts)))))))
+
+(writhe-of-moon-orbit 2000)
+;; => a real number. Higher = more self-crossings.
+```
+
+Simple orbits: writhe near zero. Moon-loops-around-planet-while-planet-
+orbits-sun: writhe grows steadily. Escape trajectory: writhe stops
+growing at the moment of escape. This is a topological signature of
+what the sim is doing.
+
+## 4.5 An eight-planet toy solar system
+
+`phys/nbody` handles the boilerplate.
+
+```scheme
+(define (toy-solar)
+  (world/reset!)
+  (let ((sun (world/spawn 'sun 240 180)))
+    (entity/mass! sun 100000)
+    (entity/pin!  sun)
+    (let loop ((i 1) (planets '()))
+      (if (> i 8)
+          planets
+          (let* ((r  (+ 40 (* i 22)))
+                 (p  (world/spawn (string->symbol
+                                    (string-append \"planet-\" (number->string i)))
+                                  (+ 240 r) 180))
+                 (v  (sqrt (/ 1.0 r))))    ;; circular-orbit velocity
+            (entity/mass!    p (+ 10 (* i 5)))
+            (entity/set-vel! p 0 v)
+            (world/attract!  p sun 1.0)
+            (loop (+ i 1) (cons p planets)))))))
+
+(toy-solar)
+```
+
+Eight planets, near-circular orbits, no mutual gravity (yet). Add
+mutual attractions and watch the outer planets slowly perturb the
+inner ones. This is how real solar-system simulations work — the
+'unperturbed' motion is Keplerian around the sun, and the mutual
+attractions are treated as small corrections that accumulate.
+
+Appendix I has realistic masses and distances for our own solar
+system, in units suitable for `phys/nbody`.
+
+---
+
+## 4.6 The four routing patterns in orbital sim
+
+**Composition.** `three-body` composes four `world/attract!` calls;
+`toy-solar` composes eight (or twenty-eight with mutual). We can
+compose 'add a Trojan asteroid at Sun-Jupiter L4' as a small extra
+function.
+
+**Orchestration.** The trail update, the writhe computation each 2000
+frames, the tape record for later reproducibility — this is
+orchestration across time.
+
+**In-routing.** When two planets collide (rare but possible), the
+engine routes to a collision handler that either merges them
+(`world/on-collision! 'planet 'planet ...`) or just marks the event.
+
+**Routing.** The orbit trail routes to a Bezier renderer. The writhe
+value routes to a plot. The 'moon escaped at frame 1234' event routes
+to Cortex: 'in scenario three-body-A, moon escapes when initial
+velocity > 2.3.' That kind of memory is exactly what makes the runtime
+useful — she can tell an operator 'last time you tried this
+configuration it escaped after 15 orbits.'
+
+---
+
+## 4.7 Common desktop tasks
+
+An estate-sale operator asked: 'we have a heavy chandelier and a
+side-table clock swinging near each other. Can the vibrations from
+the clock disturb the chandelier?' A two-body coupled-oscillator sim
+answers this. Set the two masses, link them very weakly (they're
+coupled via floor vibration), start one swinging, watch the other
+pick up amplitude. This is not exactly the three-body problem, but
+it's the same coupling story.
+
+## 4.8 Try this
+
+1. Change the planet's initial velocity by 0.01 each run. Where does
+   the orbit type change from ellipse to escape?
+2. Add a second planet with different mass. Do their orbits interfere?
+3. Move the sun off-pin (`(entity/unpin! sun)`, `(entity/mass! sun 10)`).
+   Does the sun start moving? Where does the center of mass end up?
+4. Start the moon with velocity 0 (relative to planet). Does it fall
+   into the planet?
+5. Feed the moon's trajectory to `topo/persistence` (from chapter 13).
+   Do stable orbits and escape trajectories have different topological
+   signatures?
+
+## 4.9 Pitfalls
+
+**Energy drift.** Long simulations of orbits with plain Euler slowly
+gain energy. Verlet or RK4 is much better. See Appendix A.
+
+**Close encounters.** When two bodies pass VERY close, the force spike
+can send one flying at speed-of-light-relative velocities. Use
+`entity/max-speed!` or a softened potential (`world/attract!` with an
+epsilon distance) to avoid.
+
+**Pinning distortion.** Pinning the sun is a simplification — really,
+the sun would move a bit in response to planets. For most solar-system
+sims this is fine; for a two-body-of-equal-mass system it's wrong.
+
+---
+
+Next: boids. One hundred agents. Three rules. And a flock so life-
+like you'll swear the agents are talking.")

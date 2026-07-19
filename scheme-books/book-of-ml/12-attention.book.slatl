@@ -1,0 +1,322 @@
+(chapter
+  :book "Book of ML"
+  :chapter-number 12
+  :title "Attention as a soft-lookup"
+  :audience "kid-and-adult operators"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-19"
+     :sources ((:paper "Vaswani et al. 2017 — Attention Is All You Need, NeurIPS"
+                :arxiv "1706.03762"
+                :used-for "the scaled dot-product attention formulation this chapter derives")
+               (:concept "Bahdanau et al. 2014 — additive attention, first attention mechanism in NMT"
+                :arxiv "1409.0473")))
+  :prose
+"# Chapter 12 — Attention as a soft-lookup
+
+Here we are. Attention is the mechanism that let language models get
+big. Transformers use it. GPT uses it. Every modern LLM uses it. The
+math is not that hard. The intuition is even simpler.
+
+Attention is a soft-lookup in a table. You have a question (a query)
+and a bunch of table rows (each with a key and a value). You compare
+the query to every key. Rows whose key is more similar to the query
+get more of their value in the answer. Rows whose key is dissimilar
+contribute little.
+
+Note: 'soft' means every row contributes at least a little, weighted
+by similarity. A 'hard' lookup (like `list-ref`) picks exactly one
+row. Attention is soft because gradient descent needs a smooth
+function, not a discrete pick.
+
+## The recipe
+
+Given a query `q` (a vector), a list of keys `k1, k2, ..., kn` (also
+vectors), and a list of values `v1, v2, ..., vn` (also vectors):
+
+1. **Score** — compute `q · k1`, `q · k2`, ..., `q · kn`. These are
+   the raw similarity scores. Larger score = more similar.
+2. **Scale** — divide each score by `sqrt(d_k)` where `d_k` is the
+   dimension of the key vectors. This keeps the softmax stable when
+   the dimension is large.
+3. **Softmax** — convert scores into positive weights that sum to 1.
+4. **Weighted sum** — the output is `w1 * v1 + w2 * v2 + ... + wn * vn`.
+
+That is scaled dot-product attention. Vaswani et al. 2017.
+
+## Problem 1 — Softmax
+
+Softmax turns a list of any numbers into a list of positive numbers
+that sum to 1. It emphasizes the largest inputs. It is smooth (has a
+gradient everywhere), which is why we can backprop through it.
+
+```
+softmax(x)[i] = exp(x[i]) / sum(exp(x[j]))
+```
+
+A subtle point: `exp` can overflow for large inputs. Standard
+practice is to subtract the max before exponentiating. Same result,
+no overflow.
+
+```
+(define (softmax xs)
+  (define m (fold (lambda (a b) (if (> a b) a b)) (car xs) (cdr xs)))
+  (define exps (map (lambda (x) (math/exp (- x m))) xs))
+  (define s (reduce + 0 exps))
+  (map (lambda (e) (/ e s)) exps))
+
+(display (softmax (list 1 2 3)))
+;; => (0.0900... 0.2447... 0.6652...)
+;; sum = 1.0
+```
+
+The largest input (3) gets the largest weight (0.66). The smallest
+(1) gets the smallest weight (0.09). All weights are positive, and
+they sum to 1. That is what softmax buys you: a probability
+distribution over the inputs.
+
+## Problem 2 — Attention on tiny hand-picked vectors
+
+Let's do one full attention step by hand. Three tokens. Each has a
+query, a key, and a value. We take the query of token 0 and use it
+to attend over the keys and values of all three.
+
+```
+;; Three tokens, each with query, key, value. All 2-dimensional.
+(define q0 (list 1.0 0.0))
+(define k0 (list 1.0 0.0))
+(define k1 (list 0.9 0.1))
+(define k2 (list 0.0 1.0))
+(define v0 (list 10 20))
+(define v1 (list 30 40))
+(define v2 (list 50 60))
+
+;; Step 1: scores. Query dot each key.
+(define scores
+  (list (vec/dot q0 k0) (vec/dot q0 k1) (vec/dot q0 k2)))
+;; scores = (1.0, 0.9, 0.0)
+
+;; Step 2: scale by sqrt(d_k). Here d_k = 2, so divide by sqrt(2).
+(define scaled (map (lambda (s) (/ s (math/sqrt 2))) scores))
+;; ~ (0.707, 0.636, 0.0)
+
+;; Step 3: softmax.
+(define (softmax xs)
+  (define m (fold (lambda (a b) (if (> a b) a b)) (car xs) (cdr xs)))
+  (define exps (map (lambda (x) (math/exp (- x m))) xs))
+  (define s (reduce + 0 exps))
+  (map (lambda (e) (/ e s)) exps))
+
+(define weights (softmax scaled))
+;; e.g. (0.421, 0.393, 0.186)
+
+;; Step 4: weighted sum of values.
+(define output
+  (vec/add (vec/scale v0 (car weights))
+    (vec/add (vec/scale v1 (cadr weights))
+             (vec/scale v2 (caddr weights)))))
+
+(display weights)
+(display output)
+;; weights: (0.421 0.393 0.186)
+;; output: mostly a mix of v0 and v1 (their keys aligned with q0),
+;;         plus a smaller mix of v2 (its key was orthogonal to q0).
+```
+
+That is scaled dot-product attention on one query. The output is
+NOT a copy of any single value vector. It is a MIX, weighted by how
+similar each key was to the query. That is what 'soft' means.
+
+## Problem 3 — Attention as a function
+
+Wrap it up. Given a query vector, a list of key vectors, and a list
+of value vectors (all same length), return the attention output.
+
+```
+(define (softmax xs)
+  (define m (fold (lambda (a b) (if (> a b) a b)) (car xs) (cdr xs)))
+  (define exps (map (lambda (x) (math/exp (- x m))) xs))
+  (define s (reduce + 0 exps))
+  (map (lambda (e) (/ e s)) exps))
+
+(define (attention q keys values)
+  (define d-k (vec/dim (car keys)))
+  (define scale (math/sqrt d-k))
+  (define scores
+    (map (lambda (k) (/ (vec/dot q k) scale)) keys))
+  (define weights (softmax scores))
+  ;; weighted sum: fold vec/add over the scaled values
+  (fold vec/add
+        (vec/scale (car values) 0)   ;; start with zero vector of same dim
+        (map (lambda (w v) (vec/scale v w)) weights values)))
+
+(define q (list 1 0))
+(define keys (list (list 1 0)) (list 0 1))))
+(define values (list (list 100 0)) (list 0 100))))
+
+(display (attention q keys values))
+;; q is aligned with keys[0], so output is close to values[0].
+;; Something like a vector near (85, 15) or similar.
+```
+
+`attention` in one call. Reusable. The transformer will call this
+once per query, once per position, once per attention head. Many
+times over. But each individual call is just this.
+
+## Problem 4 — Multi-query attention
+
+In a real transformer, you don't attend from one query — you attend
+from EVERY position at once. Each token's query attends over every
+other token's key and value. That is a matrix of queries times a
+matrix of keys.
+
+```
+;; queries: list of query vectors (one per position)
+;; keys, values: same
+(define (multi-attention queries keys values)
+  (map (lambda (q) (attention q keys values)) queries))
+
+(define qs (list (list 1 0))
+                 (list 0 1))))
+(define ks (list (list 1 0))
+                 (list 0 1))))
+(define vs (list (list 10 20))
+                 (list 30 40))))
+
+(display (multi-attention qs ks vs))
+;; Two output vectors, one per query.
+;; Query 0 attends mostly to k0, so its output is mostly v0 -> (10, 20).
+;; Query 1 attends mostly to k1, so its output is mostly v1 -> (30, 40).
+;; Actual numbers are close to but not exactly those (softmax spreads a little).
+```
+
+Same attention verb, called once per query. In real transformers this
+is done with matrix multiplications for speed, but the semantics is
+exactly the loop above.
+
+## Problem 5 — Where do the queries, keys, values come from?
+
+Not from thin air. Each is a linear projection of the token's
+embedding.
+
+```
+;; For each position i:
+;;   x[i] = embedding of token at position i
+;;   q[i] = W_q * x[i]     (Q projection)
+;;   k[i] = W_k * x[i]     (K projection)
+;;   v[i] = W_v * x[i]     (V projection)
+```
+
+`W_q`, `W_k`, `W_v` are learned matrices. They are what the model
+trains. Given the token embeddings and the three matrices, you
+produce the queries, keys, and values, then run scaled dot-product
+attention.
+
+```
+(define (matvec rows v)
+  (map (lambda (r) (vec/dot r v)) rows))
+
+;; Assume x is a token embedding (vector).
+;; W-q, W-k, W-v are lists of vectors (rows) — the projection matrices.
+(define (project-qkv W-q W-k W-v x)
+  (list
+    (vec/make (matvec W-q x))
+    (vec/make (matvec W-k x))
+    (vec/make (matvec W-v x))))
+
+;; Given a list of embeddings, produce lists of queries, keys, values.
+(define (all-qkv W-q W-k W-v embeddings)
+  (define triples (map (lambda (x) (project-qkv W-q W-k W-v x))
+                       embeddings))
+  (list (map car triples)
+        (map cadr triples)
+        (map caddr triples)))
+```
+
+Three learned matrices per attention head. Times many heads. Times
+many layers. That is where a lot of the parameters in a transformer
+come from.
+
+## Problem 6 — Multi-head attention (concept)
+
+One attention head learns one 'kind' of relationship — maybe
+subject-to-verb, or noun-to-adjective. Real transformers have many
+heads working in parallel, each with its own Q/K/V matrices. Their
+outputs are concatenated and re-projected.
+
+```
+;; For H heads, run attention H times, each with its own W_q, W_k, W_v.
+;; Concatenate the H output vectors per position.
+;; Project through a final W_o matrix back to the model dimension.
+```
+
+In chapter 16 our tiny LLM has ONE head to keep things readable. Real
+GPT models have anywhere from 12 to 128 heads per layer. Same
+attention verb, just called more times.
+
+## Capstone — A one-head attention block that runs
+
+Full attention block. Take a list of token embeddings. Project to
+queries, keys, values. Run attention. Return a list of output vectors.
+
+```
+(define (softmax xs)
+  (define m (fold (lambda (a b) (if (> a b) a b)) (car xs) (cdr xs)))
+  (define exps (map (lambda (x) (math/exp (- x m))) xs))
+  (define s (reduce + 0 exps))
+  (map (lambda (e) (/ e s)) exps))
+
+(define (matvec rows v) (map (lambda (r) (vec/dot r v)) rows))
+
+(define (attention q keys values)
+  (define d-k (vec/dim (car keys)))
+  (define scale (math/sqrt d-k))
+  (define scores (map (lambda (k) (/ (vec/dot q k) scale)) keys))
+  (define weights (softmax scores))
+  (fold vec/add
+        (vec/scale (car values) 0)
+        (map (lambda (w v) (vec/scale v w)) weights values)))
+
+(define (attention-block W-q W-k W-v embeddings)
+  (define qs (map (lambda (x) (vec/make (matvec W-q x))) embeddings))
+  (define ks (map (lambda (x) (vec/make (matvec W-k x))) embeddings))
+  (define vs (map (lambda (x) (vec/make (matvec W-v x))) embeddings))
+  (map (lambda (q) (attention q ks vs)) qs))
+
+;; Try it: 3 tokens, 2-dim embeddings, W_q W_k W_v are identity-like
+(define embs (list (list 1 0))
+                   (list 0 1))
+                   (list 1 1))))
+(define I2 (list (list 1 0)) (list 0 1))))
+
+(display (attention-block I2 I2 I2 embs))
+;; Three output vectors, each a soft mix of the three inputs weighted
+;; by how similar their key (input) is to the query (input).
+```
+
+You just built a scaled dot-product attention block. Feed it token
+embeddings, and it produces a new sequence where each position is a
+soft mixture of all positions weighted by learned similarity. That is
+attention. That is the transformer's magic ingredient. There is no
+more. It's just a soft lookup.
+
+## Why this matters
+
+Attention is what gave language models their scaling behavior.
+Recurrent networks (RNNs) processed tokens one at a time — you had
+to wait for token 999 before you could look at token 1000. Attention
+compares every token to every other token in ONE step (per layer).
+That parallelism is why transformers train fast on GPUs. That
+parallelism is what made GPT-3 possible.
+
+## What's next
+
+Chapter 13 wraps attention into a transformer block. Attention plus a
+feed-forward network plus skip connections plus layer normalization.
+That block, stacked N times, is a transformer. Then in chapter 14 we
+handle position (attention has no notion of order) and masking (the
+model shouldn't peek at the future during training).
+")

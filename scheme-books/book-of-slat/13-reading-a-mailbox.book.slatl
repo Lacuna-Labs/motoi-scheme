@@ -1,0 +1,324 @@
+;; 13-reading-a-mailbox.slat
+;; Book of SLAT — Chapter 13 — Reading a mailbox
+
+(chapter
+  :book             "Book of SLAT"
+  :chapter-number   13
+  :title            "Chapter 13 — Reading a mailbox"
+  :size             9007
+  :sha256           "975d74c45dd3fc14"
+  :prose
+"---
+slug: book-of-slat-ch13
+title: Reading a mailbox
+book: slat
+chapter: 13
+of: 16
+part: IV
+app: scheme-repl
+palette: book-standard
+canonical: true
+owner: docs-team (Jess)
+status: draft
+last-reviewed: 2026-07-12
+---
+
+# Chapter 13 — Reading a mailbox
+
+Everything you've learned in Chapters 1 through 12 comes together
+here.
+
+A mailbox is a `.slatl` file. It lives on disk. One process writes to
+it. Another process tails it. Every line is one message. Every message
+is a slat-record.
+
+That's the whole design. No shared memory. No message broker. No
+protocol library. Two processes, one file, one grammar.
+
+## The shape of a mailbox message
+
+```motoi-scheme
+(slat-loads \"
+(message
+  :v 1
+  :from 'foreman
+  :to 'worker/mlx-1
+  :ts #inst \\\"2026-07-11T18:22:00Z\\\"
+  :detail (start-training-run :seed 4137 :max-iter 68520))\")
+```
+
+Six fields.
+
+- `:v` — protocol version. Bump when the shape changes.
+- `:from` — who sent it. A symbol.
+- `:to` — who it's for. A symbol.
+- `:ts` — when it was sent. An instant.
+- `:detail` — the payload. A nested slat-record.
+
+## Sending a message
+
+Sender's process:
+
+```motoi-scheme
+(define (send to detail)
+  (let ([msg (list 'message
+                   :v 1
+                   :from 'foreman
+                   :to to
+                   :ts (now)
+                   :detail detail)])
+    (with-append-file (mailbox-path to)
+      (lambda (stream)
+        (slat-dump msg stream)
+        (newline stream)))))
+
+(send 'worker/mlx-1
+      '(start-training-run :seed 4137 :max-iter 68520))
+```
+
+The sender opens the recipient's mailbox in append mode, writes the
+message as one line, closes the file. That's it. Atomic on any
+POSIX-y filesystem.
+
+## Tailing the mailbox
+
+Receiver's process:
+
+```motoi-scheme
+(define (tail-mailbox path handler)
+  (let loop ([last-line 0])
+    (let ([new-lines (read-lines-after path last-line)])
+      (for-each
+        (lambda (line)
+          (let ([msg (slat-loads line :mode :tolerant)])
+            (handler msg)))
+        new-lines)
+      (sleep 100)
+      (loop (+ last-line (length new-lines))))))
+
+(tail-mailbox \"/var/lacuna/mailboxes/worker-mlx-1.slatl\"
+              (lambda (msg)
+                (case (car (slat-key msg 'detail))
+                  ((start-training-run)  (kick-off-training msg))
+                  ((stop-training-run)   (stop-training msg))
+                  ((pause)               (pause msg)))))
+```
+
+The receiver polls for new lines every 100ms. For each new line, it
+reads the message with `:mode :tolerant` (so a bad line doesn't crash
+the receiver), pulls out the detail, dispatches on its head.
+
+`:mode :tolerant` is key. If a line is corrupted — network glitch,
+partial write, an editor tab that snuck in — the reader returns a
+`_bad-line` sentinel instead of throwing. The receiver logs it, moves
+on, keeps working.
+
+## What the mailbox file looks like
+
+```
+;;;slat 1.0
+(message :v 1 :from 'foreman :to 'worker/mlx-1 :ts #inst \"2026-07-11T18:22:00Z\" :detail (start-training-run :seed 4137))
+(message :v 1 :from 'foreman :to 'worker/mlx-1 :ts #inst \"2026-07-11T18:23:00Z\" :detail (checkpoint :iter 1000))
+(message :v 1 :from 'foreman :to 'worker/mlx-1 :ts #inst \"2026-07-11T18:24:00Z\" :detail (pause))
+(message :v 1 :from 'foreman :to 'worker/mlx-1 :ts #inst \"2026-07-11T18:25:00Z\" :detail (resume))
+```
+
+One shebang. Four messages. Each on its own line. Human-readable.
+Grep-able. Diff-able. `tail -f`-able.
+
+## Dispatching on the detail head
+
+The idiom is:
+
+```motoi-scheme
+(let ([detail (slat-key msg 'detail)])
+  (case (car detail)
+    ((start-training-run)
+       (kick-off-training (slat-key detail 'seed)
+                          (slat-key detail 'max-iter)))
+    ((checkpoint)
+       (write-checkpoint (slat-key detail 'iter)))
+    ((pause)
+       (pause-training))
+    ((resume)
+       (resume-training))
+    (else
+       (log 'unknown-detail detail))))
+```
+
+Every message has a `:detail` field. Every `:detail` is a slat-record.
+The head of the detail is the operation. The consumer dispatches.
+
+This is the substrate at work. The receiver doesn't know all the
+message types in advance. It knows how to READ, how to DISPATCH, how
+to LOG UNKNOWNS. The set of message types grows over time. Old
+receivers see new types and log them; new receivers handle them
+natively.
+
+## Reply messages
+
+The reply is another message, with `:from` and `:to` swapped:
+
+```motoi-scheme
+(define (reply-to msg detail)
+  (send (slat-key msg 'from)
+        detail))
+
+(reply-to msg
+          '(training-started :iter 0 :cid #b64 \"...\"))
+```
+
+The recipient's mailbox is where the reply goes. Every process has
+one mailbox. Every process tails its own mailbox and writes to
+others.
+
+## Bounded readers
+
+Every mailbox reader is bounded. The default bounds from Chapter 7:
+
+- Max 4 MiB per message.
+- Max 100 000 elements in any container.
+- Max 128 levels of nesting.
+- Fuel limit at 10 000 000 tokens.
+
+A malformed message can't blow up the receiver. A slat bomb — a
+deliberately crafted payload designed to exhaust memory — hits a
+bound and gets rejected.
+
+That's why mailboxes on untrusted networks are safe. The reader is a
+wall.
+
+## Signed messages
+
+When the sender and receiver are on different trust boundaries,
+messages get signed:
+
+```motoi-scheme
+(define signed-msg
+  (slat-sign
+    '(message :v 1
+              :from 'external-service
+              :to 'motoi
+              :ts #inst \"2026-07-11T18:22:00Z\"
+              :detail (request-training-data :corpus \"public\"))
+    :signer 'external-service@vendor
+    :key private-key))
+
+(send 'motoi signed-msg)
+```
+
+The message body is wrapped in a `(signed :body … :signature … …)`
+envelope. The receiver verifies the signature before dispatching. If
+verification fails, the message is dropped.
+
+Any message from an untrusted source should be signed. Any receiver
+that trusts the sender's key should verify before acting.
+
+## Deduplication
+
+Because every slat has a content ID (Chapter 9), the receiver can
+dedupe replay attacks:
+
+```motoi-scheme
+(define seen-cids (make-set))
+
+(define (handle-with-dedup msg)
+  (let ([cid (slat-cid msg)])
+    (unless (set-contains? seen-cids cid)
+      (set-add! seen-cids cid)
+      (dispatch msg))))
+```
+
+The receiver tracks CIDs it's seen. Duplicate messages are ignored.
+Combined with signed nonces, this closes the replay attack surface.
+
+## Rotation and archival
+
+Mailboxes rotate daily. `worker-mlx-1.slatl` becomes
+`worker-mlx-1.slatl.2026-07-11.zst` when the day ends. The compressed
+archive keeps the whole day's messages, at ~5-10% of original size.
+
+Rotation is a rename plus a fresh empty file. Cheap. The tailing
+receiver sees the file it's tracking rename away, opens the new empty
+one, keeps reading.
+
+For queries against past days, decompress on demand:
+
+```motoi-scheme
+(with-slat-stream \"/var/lacuna/mailboxes/archive/worker-mlx-1.slatl.2026-07-10.zst\"
+  (lambda (stream)
+    (for-each display-if-interesting stream)))
+```
+
+The stream reader handles zstd decompression transparently.
+
+## What the mailbox story gets you
+
+**Simplicity.** One file. No broker. No protocol library. No
+serialization step (SLAT is the serialization).
+
+**Debuggability.** Every message is human-readable. Grep, less, tail.
+An engineer can see exactly what's flowing.
+
+**Auditability.** Every message has a timestamp, a from, a to, a
+detail. Every message can be signed. Every message has a content ID.
+Full provenance.
+
+**Fault tolerance.** Bad lines don't crash the receiver. Slat bombs
+hit bounds. Signed messages verify. Deduplication catches replays.
+
+**Extensibility.** New message types are just new head symbols in
+`:detail`. Old receivers see them and log them. New receivers dispatch
+on them.
+
+## Try this
+
+Write a small mailbox that echoes back.
+
+```motoi-scheme
+(define (echo-mailbox path)
+  (tail-mailbox path
+    (lambda (msg)
+      (case (car (slat-key msg 'detail))
+        ((echo)
+           (reply-to msg (list 'echoed (slat-key (slat-key msg 'detail) 'text))))
+        (else
+           (log 'ignoring msg))))))
+
+(echo-mailbox \"/tmp/echo.slatl\")
+```
+
+Now send a message:
+
+```motoi-scheme
+(send 'echo (list 'echo :text \"hello\"))
+```
+
+You should see an echoed message in the sender's mailbox.
+
+## The mailbox pattern in one line
+
+**Every process has a `.slatl` mailbox. One writes, one tails. Every
+line is a slat. Every slat is a message. Dispatch on the detail
+head.**
+
+That's every message-passing system in Lacuna. From foreman-to-worker,
+from cortex-to-motoi, from artifact-to-artifact.
+
+## Where next
+
+Chapter 14 walks cortex slices. the runtime's memory is slats. Every fact
+she remembers, every mood snapshot, every conversation history — all
+slats. That's the persistence side of the substrate.
+
+## Cross-links
+
+- [[book-of-systems]] Chapter 4 — Fake-shop probing, which uses
+  mailbox signaling for service-discovery tests.
+- [[book-of-systems]] Chapter 6 — Graceful reconnect, which handles
+  mailbox continuity across restarts.
+
+---
+
+Turn the page.
+")

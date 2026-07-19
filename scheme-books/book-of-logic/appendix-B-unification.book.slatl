@@ -1,0 +1,285 @@
+(dialect :applies ("motoi" "sakura") :note "Default: applies to both dialects.")
+
+(chapter
+  :book "Book of Logic"
+  :chapter-number 18
+  :appendix-letter "B"
+  :title "Unification — Robinson and Martelli-Montanari"
+  :dialect "sakura"
+  :audience :adult
+  :content-rating :G
+  :author-lane "the-engineer-book-of-logic-2026-07-16"
+  :training-eligible #t
+  :confidentiality "public"
+  :voice "sakura-teaching + gentle-formalist"
+  :classical-anchors ("Robinson — A Machine-Oriented Logic Based on the Resolution Principle (JACM 1965)"
+                      "Martelli-Montanari — An Efficient Unification Algorithm (TOPLAS 1982)"
+                      "Baader-Snyder — Unification Theory (Handbook of Automated Reasoning)")
+  :prose
+"# Appendix B — Unification: Robinson and Martelli-Montanari
+
+Where two terms with variables meet, and a substitution is computed
+that makes them equal. The workhorse of logic programming, of type
+inference, and of every automated theorem prover.
+
+*Unification* is: given two terms `t₁` and `t₂` containing variables,
+find a substitution σ such that `σ(t₁) = σ(t₂)`, or report that no
+such substitution exists.
+
+A *substitution* is a mapping from variables to terms. Applying a
+substitution to a term replaces every variable with its mapped-to
+term (or leaves it alone if unmapped).
+
+## Examples
+
+    (f X 2)   unified with   (f 1 Y)     →  σ = {X → 1, Y → 2}
+    (g X X)   unified with   (g 1 2)     →  fails  (X cannot equal both)
+    (h X)     unified with   (h (f X))   →  fails  (occurs check)
+    (g X Y)   unified with   (g (f Y) 3) →  σ = {X → (f 3), Y → 3}
+
+The last example shows that unification is *transitive*: once we bind
+Y to 3, the term `(f Y)` becomes `(f 3)`, and that is what X binds to.
+
+## Robinson's algorithm (1965)
+
+The classical formulation. Walk two terms structurally; when you hit a
+variable, bind it; when you hit two mismatched constants, fail.
+
+```scheme
+;; A substitution is an association list: '((var1 . term1) (var2 . term2) ...)
+
+(define (variable? t)
+  (and (symbol? t)
+       (let ((s (symbol->string t)))
+         (and (positive? (string-length s))
+              (char=? (string-ref s 0) #\\?)))))
+
+(define (constant? t)
+  (or (number? t)
+      (and (symbol? t) (not (variable? t)))))
+
+(define (apply-subst subst t)
+  ;; Recursively substitute according to subst.
+  (cond
+    ((variable? t)
+     (let ((binding (assq t subst)))
+       (if binding
+           (apply-subst subst (cdr binding))    ; follow the chain
+           t)))
+    ((pair? t)
+     (cons (apply-subst subst (car t))
+           (apply-subst subst (cdr t))))
+    (else t)))
+
+(define (occurs? var term subst)
+  ;; Does var occur anywhere in term (after applying subst)?
+  (let ((t (apply-subst subst term)))
+    (cond
+      ((variable? t) (eq? var t))
+      ((pair? t)     (or (occurs? var (car t) subst)
+                          (occurs? var (cdr t) subst)))
+      (else #f))))
+
+(define (unify t1 t2 subst)
+  ;; Return the extended substitution, or 'fail.
+  (let ((a (apply-subst subst t1))
+        (b (apply-subst subst t2)))
+    (cond
+      ((equal? a b) subst)                            ; already equal
+      ((variable? a)
+       (if (occurs? a b subst)
+           'fail
+           (cons (cons a b) subst)))
+      ((variable? b)
+       (if (occurs? b a subst)
+           'fail
+           (cons (cons b a) subst)))
+      ((and (pair? a) (pair? b))
+       (let ((s1 (unify (car a) (car b) subst)))
+         (if (eq? s1 'fail)
+             'fail
+             (unify (cdr a) (cdr b) s1))))
+      (else 'fail))))
+```
+
+Run it.
+
+```scheme
+(unify '(f ?X 2) '(f 1 ?Y) '())
+;; => ((?Y . 2) (?X . 1))
+
+(unify '(g ?X ?X) '(g 1 2) '())
+;; => fail
+
+(unify '(h ?X) '(h (f ?X)) '())
+;; => fail  (occurs check)
+```
+
+## The occurs check
+
+The subtle detail. In the last example, `(h ?X)` would unify with
+`(h (f ?X))` only if `?X = (f ?X)` — an *infinite* term. Some Prolog
+implementations skip the occurs check for speed and get *cyclic
+structures*, which cause them to loop on further operations. Others
+include it (at O(n) cost per unification step) and stay honest.
+
+Robinson's original algorithm included the occurs check. Some later
+formulations dropped it and added it back only when needed. Our
+implementation includes it always; the cost is trivial for the term
+sizes we care about.
+
+## Complexity
+
+Robinson's algorithm is exponential in the worst case — because
+`apply-subst` can duplicate substructures many times as it walks the
+substitution chain. A pathological case:
+
+    Term 1: (f X1 X1)
+    Term 2: (f (f X0 X0) (f X0 X0))
+
+Each unification level doubles the term size. The resulting
+substitution has exponentially many nodes if you serialize it.
+
+## Martelli-Montanari (1982)
+
+A dramatically better algorithm. Represent the problem as a *set of
+equations* to solve, and repeatedly apply *transformation rules* until
+the set is in a solved form.
+
+Rules:
+
+1. **Delete.** `(t = t)` is removed. (Trivially satisfied.)
+2. **Decompose.** `(f(s1, ..., sn) = f(t1, ..., tn))` is replaced by
+   n equations `(si = ti)`.
+3. **Conflict.** `(f(...) = g(...))` with different heads: fail.
+4. **Swap.** `(t = x)` where t is not a variable and x is: rewrite as
+   `(x = t)`.
+5. **Eliminate.** `(x = t)` where x does not occur in t (occurs check):
+   substitute t for x in all other equations *and* record `x = t` in
+   the substitution.
+6. **Occurs check.** `(x = t)` where x *does* occur in t and t is not
+   x itself: fail.
+
+Apply these rules exhaustively; when no rule applies, the remaining
+equations form the *most general unifier* in solved form.
+
+```scheme
+(define (mm-unify equations)
+  ;; equations: list of (t1 . t2) pairs. Returns solved form or 'fail.
+  (let loop ((eqs equations) (result '()))
+    (cond
+      ((null? eqs) result)
+      (else
+       (let* ((eq (car eqs))
+              (t1 (car eq))
+              (t2 (cdr eq))
+              (rest (cdr eqs)))
+         (cond
+           ;; delete
+           ((equal? t1 t2) (loop rest result))
+           ;; swap
+           ((and (not (variable? t1)) (variable? t2))
+            (loop (cons (cons t2 t1) rest) result))
+           ;; eliminate
+           ((variable? t1)
+            (if (occurs? t1 t2 result)
+                'fail
+                (let ((new-subst (cons (cons t1 t2) result)))
+                  (loop (map (lambda (e)
+                               (cons (subst-once t1 t2 (car e))
+                                     (subst-once t1 t2 (cdr e))))
+                             rest)
+                        new-subst))))
+           ;; decompose
+           ((and (pair? t1) (pair? t2))
+            (cond
+              ((not (equal? (length t1) (length t2))) 'fail)
+              (else
+               (loop (append (map cons t1 t2) rest) result))))
+           (else 'fail)))))))
+
+(define (subst-once var val term)
+  (cond
+    ((eq? term var) val)
+    ((pair? term)
+     (cons (subst-once var val (car term))
+           (subst-once var val (cdr term))))
+    (else term)))
+```
+
+The Martelli-Montanari algorithm runs in *linear time* when the
+equations are represented as a graph (union-find style). Our list
+representation is quadratic — still much better than Robinson's
+exponential worst case, and much easier to read.
+
+## Most general unifier (MGU)
+
+Both algorithms compute the *most general unifier*: any other unifier
+of the same two terms is an instance of the MGU. This is a uniqueness
+property: unifiable terms have a canonical solution, not just some
+solution.
+
+The MGU is what makes unification useful. Every user of unification —
+Prolog, Hindley-Milner type inference, resolution theorem proving —
+depends on the MGU being computed correctly and being the most general
+solution.
+
+## Applications
+
+**Prolog.** Every Prolog step is a unification. `member(X, [1, 2, 3])`
+is solved by unifying `X` with each element of the list. The MGU
+propagates through the proof search.
+
+**Type inference (Hindley-Milner).** Every application constraint is a
+unification: the function's argument type must match the actual
+argument's type. When they contain type variables, unification finds
+the substitution that satisfies all constraints simultaneously.
+
+**Term rewriting.** A rewrite rule `l → r` fires when we can unify `l`
+with a subterm of the target; the substitution says what to replace
+where.
+
+**Resolution.** The next appendix uses unification pervasively: two
+clauses resolve when their literals can be unified.
+
+**Automated theorem proving.** Most modern first-order provers use
+unification to combine facts and derive consequences. It is the primary
+mechanism of forward inference.
+
+## What to try
+
+Extend the algorithm to *higher-order unification*, where variables
+can be bound to functions (not just first-order terms). Higher-order
+unification is *undecidable* in general — but *higher-order pattern
+unification* (Miller 1991) is decidable and covers most practical
+cases. This is what tools like Coq and Isabelle use for term matching.
+
+Implement the *union-find* representation of substitution: each
+variable points to its representative, and equivalence-class merging is
+O(α(n)) amortized. This is what real production unifiers use.
+
+Try unifying two terms of the same structure repeatedly with different
+variable names and observe how the MGU is preserved up to renaming.
+
+## Closing
+
+Unification is a small algorithm with enormous consequences. Robinson's
+1965 formulation is readable and correct but exponential. Martelli-
+Montanari (1982) reformulates as a set of rewriting rules and achieves
+linear time.
+
+Every logic tool that manipulates terms with variables uses
+unification. This appendix's implementations are the seed; production
+systems scale them by orders of magnitude but preserve the essential
+shape.
+"
+  :cross-refs
+    (:book-of-scheme :chapters (5 8)
+     :book-of-reason :chapters (5))
+  :verbs-used ("cond" "eq?" "cons" "car" "cdr" "list" "map" "append"
+               "assq" "member" "null?" "pair?" "not" "and" "or"
+               "equal?" "define" "lambda" "let" "let*" "length" "symbol?"
+               "number?" "positive?" "string-length" "string-ref" "char=?"
+               "symbol->string")
+  :word-count-estimate 2600
+)

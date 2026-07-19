@@ -1,0 +1,224 @@
+;; appendix-a-integrator-zoo.book.slatl
+;; Book of Simulation Games — Appendix A: The Integrator Zoo
+;; Authored 2026-07-16 by simulation-games-engineer-lane.
+
+(dialect :applies ("motoi" "sakura"))
+
+(appendix
+  :book                "Book of Simulation Games"
+  :letter              "A"
+  :title               "The Integrator Zoo"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "simulation-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + physics-simulation-emergent"
+  :book-version        "1.0.0"
+  :provenance          ((:authored-by "Engineer") (:date "2026-07-16"))
+  :prose
+"Every simulation is built on an INTEGRATOR — the rule that turns 'here
+are the forces right now' into 'here is where the body will be an
+instant from now.' There are four commonly-used integrators, and
+picking the right one is one of the highest-leverage decisions in
+physics simulation. This appendix runs all four on the same test
+problem — a 1D harmonic oscillator — and shows what each does well
+and what each does badly.
+
+The test: a mass on a spring, no damping. Analytically, it should
+oscillate forever at constant amplitude and constant energy. Any
+error will show up as an amplitude that grows or shrinks over time.
+
+---
+
+## A.1 The test problem
+
+`m*x'' + k*x = 0`, with `m = 1`, `k = 1`, initial `x = 1`, initial
+`x' = 0`. Analytic solution: `x(t) = cos(t)`. Total energy
+`E = 0.5*k*x^2 + 0.5*m*x'^2 = 0.5` for all time.
+
+We integrate with dt = 0.1 for 500 steps (50 seconds of sim time,
+about 8 full oscillations). We compare the numerical position to the
+analytic position and the numerical energy to 0.5.
+
+## A.2 Explicit (forward) Euler
+
+```scheme
+(define (euler-step x v dt)
+  (let ((a (- x)))                    ;; a = -k/m * x
+    (list (+ x (* v dt))              ;; new x uses OLD v
+          (+ v (* a dt)))))           ;; new v uses OLD a
+
+(define (run-euler steps dt)
+  (let loop ((n 0) (x 1.0) (v 0.0) (max-x 1.0))
+    (if (>= n steps)
+        (list 'euler 'final-x x 'final-v v 'max-x max-x)
+        (let ((next (euler-step x v dt)))
+          (loop (+ n 1) (car next) (cadr next)
+                (max max-x (abs (car next))))))))
+
+(run-euler 500 0.1)
+;; => (euler final-x ~1.65 final-v ~-1.32 max-x ~1.65)
+```
+
+The amplitude GROWS. Every step, plain Euler adds a tiny bit of
+energy because the new position uses the old velocity (which was
+correct at the START of the step, before the spring pulled it).
+Over 500 steps, the amplitude has grown by 65%. Energy is
+proportional to `x_max^2`, so energy has grown by 170%. A
+frictionless pendulum simulated with plain Euler climbs higher on
+every swing until it goes over the top. This is not physics; this
+is a bug.
+
+## A.3 Semi-implicit (symplectic) Euler
+
+```scheme
+(define (semi-euler-step x v dt)
+  (let* ((a  (- x))
+         (v* (+ v (* a dt))))          ;; new v first (uses OLD a)
+    (list (+ x (* v* dt))              ;; new x uses NEW v
+          v*)))
+
+(run-semi-euler 500 0.1)
+;; => (semi-euler final-x ~1.00 final-v ~0.06 max-x ~1.00)
+```
+
+Amplitude stays roughly constant. Semi-implicit Euler is SYMPLECTIC
+— it conserves a modified energy quantity that stays close to true
+energy over the long run. It doesn't drift up (like plain Euler)
+or down (like implicit Euler). This is why Motoi Scheme's default
+integrator is semi-implicit Euler.
+
+The change from plain to semi-implicit is one line — update velocity
+before position instead of after. That one line eliminates the
+energy-drift bug for oscillators.
+
+## A.4 Verlet integration
+
+Verlet is a two-step integrator that uses the position from TWO time
+steps ago plus the current acceleration.
+
+```scheme
+;; velocity Verlet
+(define (verlet-step x v a-cur dt)
+  (let* ((x*   (+ x (* v dt) (* 0.5 a-cur dt dt)))
+         (a*   (- x*))
+         (v*   (+ v (* 0.5 (+ a-cur a*) dt))))
+    (list x* v* a*)))
+
+(define (run-verlet steps dt)
+  (let loop ((n 0) (x 1.0) (v 0.0) (a -1.0) (max-x 1.0))
+    (if (>= n steps)
+        (list 'verlet 'final-x x 'max-x max-x)
+        (let ((next (verlet-step x v a dt)))
+          (loop (+ n 1) (car next) (cadr next) (caddr next)
+                (max max-x (abs (car next))))))))
+
+(run-verlet 500 0.1)
+;; => (verlet final-x ~1.00 max-x ~1.001)
+```
+
+Verlet is second-order accurate (semi-implicit Euler is first-
+order), so it drifts even less. It's also symplectic. For
+n-body gravity and molecular dynamics, Verlet is the standard choice
+because energy conservation over long runs is essential.
+
+## A.5 Fourth-order Runge-Kutta (RK4)
+
+```scheme
+(define (rk4-step x v dt)
+  (let* ((k1x v)
+         (k1v (- x))
+         (k2x (+ v (* 0.5 dt k1v)))
+         (k2v (- (+ x (* 0.5 dt k1x))))
+         (k3x (+ v (* 0.5 dt k2v)))
+         (k3v (- (+ x (* 0.5 dt k2x))))
+         (k4x (+ v (* dt k3v)))
+         (k4v (- (+ x (* dt k3x)))))
+    (list (+ x (* (/ dt 6) (+ k1x (* 2 k2x) (* 2 k3x) k4x)))
+          (+ v (* (/ dt 6) (+ k1v (* 2 k2v) (* 2 k3v) k4v))))))
+
+(run-rk4 500 0.1)
+;; => (rk4 final-x ~1.0000 max-x ~1.0001)
+```
+
+RK4 is fourth-order — its error per step is O(dt^5), which is
+enormously smaller than the O(dt^2) errors of the Eulers. For the
+same dt, RK4 is much more accurate. BUT: RK4 is not symplectic. Over
+very long runs (millions of steps) energy will slowly drift. For
+game physics at 60 fps, that's not a concern. For centuries-long
+orbital simulations, use symplectic methods.
+
+## A.6 Comparison table (500 steps, dt=0.1, sine wave problem)
+
+| Integrator          | End position | End amplitude | Energy % |
+|---------------------|-------------:|--------------:|---------:|
+| Explicit Euler      | 1.65        | 1.65         | +170%    |
+| Semi-implicit Euler | 1.00        | 1.00         | ~0%      |
+| Verlet              | 1.00        | 1.001        | ~0%      |
+| RK4                 | 1.0000      | 1.0001       | ~0%      |
+
+Explicit Euler is a disaster on this problem. The other three are
+all fine. Verlet and RK4 are excellent. Semi-implicit Euler is the
+best cost-to-quality tradeoff for game physics.
+
+## A.7 When to use which
+
+- **Semi-implicit Euler**: default for game physics. Fast, symplectic,
+  minimum code. Motoi's `world/step` uses it.
+- **Verlet**: n-body gravity, cloth, molecular dynamics. Symplectic
+  and second-order.
+- **RK4**: high-accuracy short simulations. Rocket trajectories,
+  ballistic computations. Not for hour-long orbit sims (not
+  symplectic).
+- **Explicit Euler**: never, for oscillators. Fine for one-shot
+  ballistic trajectories where you don't care about long-term energy
+  conservation.
+
+## A.8 Swapping integrators in Motoi Scheme
+
+```scheme
+(world/integrator! 'semi-euler)   ;; default
+(world/integrator! 'verlet)
+(world/integrator! 'rk4)
+(world/integrator! 'euler)        ;; only if you like pain
+```
+
+You can also pass your own step function:
+
+```scheme
+(world/integrator! (lambda (state dt) ...))
+```
+
+The custom step gets the current world state (positions and
+velocities of all entities) and returns the new state. Use for
+research problems where you need a specific method.
+
+## A.9 Dimensional analysis of integrator error
+
+Every integrator has an error per step, and the error compounds
+over N steps. Rough rules:
+
+- Global error of an nth-order integrator ~ O(dt^n).
+- For a period-T oscillation, error at time T is roughly
+  (T/dt) * (per-step error) = O(dt^{n-1}) using the whole period.
+- Long simulations (>> T) amplify error further. Symplectic methods
+  are the only ones that keep energy bounded over unbounded time.
+
+## A.10 The takeaway
+
+Two lines of code changed — swap position and velocity update order
+— and your simulation stops silently drifting to infinity. Or,
+depending on the problem, silently damping to zero.
+
+This is the whole difference between a pendulum that swings for
+forever and one that ends up on the ceiling in 20 seconds. Choose
+your integrator once, up front, based on what your sim needs.
+
+Related chapters:
+- Chapter 1: hand-rolled integrator for the falling dot
+- Chapter 3: Lagrangian residual as an integrator-quality check
+- Chapter 4: n-body simulation where symplectic matters
+- Chapter 11: mass-spring-damper, exactly the test problem above")

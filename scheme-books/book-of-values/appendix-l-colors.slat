@@ -1,0 +1,331 @@
+;; appendix-l-colors.slat
+;; Book of Values — Appendix L
+
+(chapter
+  :book              "Book of Values"
+  :chapter-number    "L"
+  :title             "Appendix L — Colors Are Values"
+  :audience          :engineer
+  :dialect           "motoi"
+  :book-version      "1.1"
+  :provenance        "book-of-values-expander-2026-07-17"
+  :training-eligible #t
+  :content-rating    :G
+  :prose
+"# Appendix L — Colors Are Values
+
+A color looks like three numbers. It is not three numbers. Same
+story as the whole book: what you write is `(255 128 0)` and what
+you mean is *bright orange in the sRGB color space, at full alpha*.
+The digits alone don't say that. The shape does.
+
+This appendix covers RGB, HSL, alpha, and the traps that catch every
+programmer the first time they lerp two colors and get mud.
+
+## RGB, the naive form
+
+Red, green, blue. Each in the range 0–255 in most systems. Motoi's
+frozen core does not define a color type — you build one out of
+lists like every other shaped value in the book.
+
+```
+(begin
+  (define (rgb r g b) (list 'rgb r g b))
+  (rgb 255 128 0))
+;; -> (rgb 255 128 0)
+```
+
+Orange. Tagged. Any function downstream that expects `(rgb r g b)`
+can pattern-match on the shape.
+
+For accessors:
+
+```
+(begin
+  (define (rgb-r c) (list-ref c 1))
+  (define (rgb-g c) (list-ref c 2))
+  (define (rgb-b c) (list-ref c 3))
+  (define c (list 'rgb 255 128 0))
+  (rgb-g c))
+;; -> 128
+```
+
+## Int vs float: the first trap
+
+Two conventions coexist for RGB values, and mixing them is the same
+class of bug as MB vs MiB.
+
+- **Integer 0–255.** One byte per channel. What image files store.
+  What CSS says. What every hex code you've ever pasted means.
+- **Float 0.0–1.0.** What color-math libraries want. What sRGB-to-
+  linear conversion produces. What graphics APIs expect at the
+  shader level.
+
+Same red, two numbers: `(rgb 255 0 0)` in integer land, `(rgb 1.0 0
+0)` in float land. Multiply an integer red by an integer alpha and
+you get a huge number. Multiply a float red by a float alpha and
+you get another float in `[0, 1]`.
+
+```
+(* 255 128)
+;; -> 32640
+```
+
+That is *not* a valid RGB channel. Somebody expected a number in
+`[0, 255]`; they got 32640. The receiving code either clamps
+(losing detail), truncates (losing detail differently), or renders
+as whatever `32640` looks like when cast to a byte (mystery mud).
+
+Pick one convention. Convert at the boundary.
+
+```
+(begin
+  (define (byte->float b) (/ b 255))
+  (define (float->byte f) (math/round (* f 255)))
+  (list (byte->float 128) (float->byte 0.5)))
+;; -> (0.5019607843137255 128)
+```
+
+Round trip. Byte 128 becomes float ~0.502. Float 0.5 becomes byte
+128. Notice the asymmetry: 128 out of 255 isn't exactly 0.5 — it's
+50.19% — because you can't hit 0.5 exactly with 256 evenly spaced
+byte values (there's no 127.5 in the byte world). If you want exact
+0.5, remember the byte you rounded from was already an approximation.
+
+Cast to float explicitly whenever you multiply by an integer that
+was really meant as a float:
+
+```
+(/ (* 128 1.0) 255)
+;; -> 0.5019607843137255
+```
+
+DO: pick a convention per module; convert at the boundary; never
+sprinkle both through the same file.
+DON'T: assume the color library returns the same convention you
+give it.
+WHY: doubling a color's channels because you used `* 255` on
+already-byte values is the most common color bug in the world.
+
+## Alpha: the fourth channel
+
+RGB is three channels. RGBA is four. Alpha is *opacity* — 0 means
+fully transparent, 1 (or 255) means fully opaque. Everything in
+between is a blend factor.
+
+```
+(begin
+  (define (rgba r g b a) (list 'rgba r g b a))
+  (rgba 255 128 0 200))
+;; -> (rgba 255 128 0 200)
+```
+
+Alpha in the 0–255 world. Alpha 200 is roughly 78% opaque.
+
+**The premultiplied alpha trap.** Many graphics pipelines store
+colors with their channels *already multiplied by alpha*. So `(rgba
+255 0 0 128)` stored premultiplied is `(rgba 128 0 0 128)`. When
+you blend, you use different formulas depending on whether the
+input is premultiplied. Get this wrong and semi-transparent pixels
+darken or lighten oddly at edges.
+
+If you're not writing your own blending, don't worry. If you are,
+pick a convention and document it. And test with a red rectangle
+on a white background.
+
+## Blending colors
+
+To blend two colors A and B with a mix factor `t` in `[0, 1]`:
+
+```
+result = (1 - t) * A + t * B
+```
+
+Applied per channel. That's linear interpolation — `vec/lerp`
+handles it if you treat the colors as vectors.
+
+```
+(vec/lerp (vec/make 255 0 0) (vec/make 0 0 255) 0.5)
+;; -> (127.5 0 127.5)
+```
+
+Halfway between red and blue is purple. Fractional values — round
+before rendering:
+
+```
+(math/round 127.5)
+;; -> 128
+```
+
+`(128 0 128)` is a valid RGB. Purple, drawn.
+
+DO: use `vec/lerp` for two-color blends.
+DON'T: hand-write the formula three times, once per channel — you
+will typo one.
+WHY: `vec/lerp` handles any dimension including 3 (RGB) and 4 (RGBA).
+
+## Gamma and linear space: the deep trap
+
+Here's the one that trips professionals.
+
+Screens display in *sRGB* — a color space with a nonlinear transfer
+function. When you write `(rgb 128 128 128)` you don't get *half as
+much light* as `(rgb 255 255 255)`. You get about 22% as much,
+because the sRGB curve compresses low values (to match human
+perceptual sensitivity).
+
+For *display*, this is fine. Your eyes are also nonlinear; sRGB
+matches them.
+
+For *math* — blending, resizing, filtering, rendering — this is a
+disaster. Adding two sRGB values doesn't add the physical light
+they represent. Averaging two sRGB colors gives you a perceptual
+darkening at midtones.
+
+The fix: convert sRGB to *linear* before math, do the math, then
+convert back to sRGB for display.
+
+The transfer function, approximated: `linear = sRGB^2.2` and `sRGB
+= linear^(1/2.2)`. (The exact function has a small linear segment
+near zero; the pow-2.2 approximation is fine for most work.)
+
+```
+(math/pow (/ 128 255) 2.2)
+;; -> 0.2195197180748679
+```
+
+sRGB 128 (mid-gray) is only 22% of full linear brightness. If you
+average `(sRGB 0)` and `(sRGB 255)` naively:
+
+```
+(/ (+ 0 255) 2)
+;; -> 127.5
+```
+
+You get `sRGB 127.5`, which displays at about 21% linear. But the
+physically correct average of *no light* and *full light* is 50%
+linear — which is `sRGB 186`, not `sRGB 128`.
+
+```
+(math/round (* 255 (math/pow 0.5 (/ 1 2.2))))
+;; -> 186
+```
+
+That's a 46-unit gap between the naive average and the perceptually
+correct average. Every kid who blends two colors and gets *muddy
+grey in the middle* is hitting this bug.
+
+DO: for correct blending, convert sRGB → linear, blend, convert
+back.
+DON'T: average sRGB colors and expect physical accuracy.
+WHY: the sRGB curve is *perceptual*, not *physical*. Physics happens
+in linear space.
+
+## HSL and HSV — a different frame
+
+HSL (hue, saturation, lightness) and HSV (hue, saturation, value)
+are alternative color spaces designed for human intuition.
+
+- **Hue**: which color it is, as an angle 0–360°. 0 = red, 120 =
+  green, 240 = blue.
+- **Saturation**: how vivid, 0–100% (or 0–1). 0 is gray.
+- **Lightness (HSL) / Value (HSV)**: how bright, 0–100%.
+
+HSL is what you want when a designer says *make it the same color,
+slightly darker*. Move lightness; leave hue and saturation.
+
+The conversion from HSL to RGB is a page of code — piecewise
+function of hue. Not going to reproduce it here; if you need it,
+copy from a canonical source and test with known values (red at hue
+0, lightness 0.5, saturation 1.0 → `rgb 255 0 0`).
+
+DO: reach for HSL when a user is picking a color scheme or a
+darker/lighter variant.
+DON'T: use HSL for physics/rendering math. Convert to RGB first,
+then to linear.
+WHY: HSL is a *perceptual* frame, even more abstracted than sRGB.
+Physics in HSL is nonsense.
+
+## Hex codes and web colors
+
+CSS spells RGB as `#RRGGBB` — two hex digits per channel. `#FF8000`
+is orange. `#000000` is black. `#FFFFFF` is white. Shorthand
+`#FFF` expands to `#FFFFFF`, one hex digit per channel.
+
+If you parse hex codes, watch the byte order. Some formats are
+`#RRGGBB` (web, most images), some are `0xAARRGGBB` (some
+graphics APIs), some are `0xAABBGGRR` (some file formats). Same
+number, different meaning. Chapter 15 (interop) says the same
+about all byte-order questions.
+
+## Color as a value with meaning
+
+The tag matters. `(color-role 'background \"#181818\")` is more
+useful than a bare `\"#181818\"` scattered through your UI code —
+because when the theme changes, you find `color-role` values, not
+raw hex.
+
+```
+(begin
+  (define (color-role role hex) (list 'color-role role hex))
+  (color-role 'accent \"#00A8FF\"))
+;; -> (color-role accent \"#00A8FF\")
+```
+
+That's the same shape as everything else in the book. Meaning first,
+number second.
+
+## Recap
+
+- RGB is three numbers, in `[0, 255]` or `[0, 1]`. Pick one; convert
+  at the boundary.
+- Alpha is opacity, fourth channel. Premultiplied vs not is a
+  convention — pick one.
+- Blend with `vec/lerp` — but not in sRGB space if you want the
+  physics right.
+- Gamma: sRGB is perceptual; do math in linear space (`^2.2`),
+  convert back at display.
+- HSL/HSV are for human-intuitive color picking, not for physics.
+- Hex codes and byte order: same value, different formats.
+- Wrap colors with role tags so the theme can change without a
+  hex-code hunt.
+
+Next: rates and ratios — how to shape *A per B* values.")
+
+(example :ref "app-l-rgb-ctor"
+         :code "(begin (define (rgb r g b) (list 'rgb r g b)) (rgb 255 128 0))"
+         :expected "(rgb 255 128 0)")
+(example :ref "app-l-rgb-accessor"
+         :code "(begin (define c (list 'rgb 255 128 0)) (list-ref c 2))"
+         :expected 128)
+(example :ref "app-l-int-times-int"
+         :code "(* 255 128)"
+         :expected 32640
+         :teaching "Multiplying two byte-range channels overflows the byte range. The bug that produces mystery-mud pixels.")
+(example :ref "app-l-int-to-float"
+         :code "(/ (* 128 1.0) 255)"
+         :expected 0.5019607843137255)
+(example :ref "app-l-rgba"
+         :code "(begin (define (rgba r g b a) (list 'rgba r g b a)) (rgba 255 128 0 200))"
+         :expected "(rgba 255 128 0 200)")
+(example :ref "app-l-lerp-red-blue"
+         :code "(vec/lerp (vec/make 255 0 0) (vec/make 0 0 255) 0.5)"
+         :expected "(127.5 0 127.5)")
+(example :ref "app-l-round-half"
+         :code "(math/round 127.5)"
+         :expected 128)
+(example :ref "app-l-srgb-to-linear-mid"
+         :code "(math/pow (/ 128 255) 2.2)"
+         :expected 0.2195197180748679
+         :teaching "sRGB 128 (mid-gray) is only 22% of full linear brightness. That's the gamma curve.")
+(example :ref "app-l-naive-avg"
+         :code "(/ (+ 0 255) 2)"
+         :expected 127.5
+         :teaching "Naive average of black and white is sRGB 127.5 — perceptually about 21%, not the physical 50%.")
+(example :ref "app-l-linear-half-to-srgb"
+         :code "(math/round (* 255 (math/pow 0.5 (/ 1 2.2))))"
+         :expected 186
+         :teaching "50% linear brightness renders as sRGB 186. This is why linear-space blending matters.")
+(example :ref "app-l-color-role"
+         :code "(begin (define (color-role role hex) (list 'color-role role hex)) (color-role 'accent \"#00A8FF\"))"
+         :expected "(color-role accent \"#00A8FF\")")

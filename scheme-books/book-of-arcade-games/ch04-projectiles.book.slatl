@@ -1,0 +1,377 @@
+;; ch04-projectiles.book.slatl
+;; Book of Arcade Games — Chapter 4: Projectiles
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Arcade Games"
+  :chapter-number      4
+  :title               "Projectiles"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + game-design"
+  :book-version        "1.0.0"
+  :prose
+"A cannon on the ground. An angle you dial in. A power number that
+scales your shot. Pull the trigger — an arc rises against the sky,
+peaks, and falls back down. If your aim is true, the shell lands on the
+target. If not, you turn a small knob and try again.
+
+That is the projectile family. Artillery games. Angry-birds-shape
+physics puzzles. Trebuchet toys on the phone in the airport gate. Every
+one of them is `phys/kinematics` — the equation of motion for constant
+acceleration — with a paint call each frame.
+
+This chapter builds the whole family from one primitive: a cannon that
+spawns a ball with initial velocity `(cos angle * power, sin angle *
+power)` and lets gravity do the rest. Then we compare the ball's actual
+path to the closed-form kinematics equation and prove they agree. Then
+we knock over three cans.
+
+---
+
+## 4.1 The cannon
+
+Aim, fire, watch the arc.
+
+```scheme
+;; A cannon at the bottom-left. Dial angle with up/down; fire with 'a'.
+(define angle-deg 45)          ;; degrees, 0=flat right, 90=straight up
+(define power 6)               ;; initial speed of the projectile
+
+(define (cannon)
+  (world/reset!)
+  (world/gravity! 0 0.3)
+  (world/floor! 220)
+  (on-frame
+   (lambda ()
+     (when (input/down? 'up)   (set! angle-deg (min 89 (+ angle-deg 1))))
+     (when (input/down? 'down) (set! angle-deg (max  1 (- angle-deg 1))))
+     (when (input/pressed? 'a)
+       (let* ((rad (* angle-deg (/ 3.14159 180)))
+              (vx  (* power (geom/cos rad)))
+              (vy  (* -1 power (geom/sin rad)))
+              (b   (world/spawn 'shell 30 210)))
+         (entity/shape! b 'circle 3)
+         (entity/bounce! b 0.4)
+         (entity/set-vel! b vx vy)))
+     (world/step)
+     (paint-clear)
+     (paint-cell 'cannon 30 210 20 10)
+     ;; Aim line — show where the barrel points.
+     (let ((rad (* angle-deg (/ 3.14159 180))))
+       (paint-arrow 30 210
+                    (+ 30 (* 40 (geom/cos rad)))
+                    (- 210 (* 40 (geom/sin rad)))))
+     (world/each 'shell
+                 (lambda (s)
+                   (paint-cell 'shell (entity/x s) (entity/y s) 3 3)))
+     (paint-text (string-append \"Angle: \" (number->string angle-deg))
+                 10 10))))
+
+(big-bang cannon)
+```
+
+Note the sign flip on `vy`. In screen space y grows down, but 'up' on
+a real trajectory is y-negative. `(* -1 power (geom/sin rad))` gives us
+a launch that goes UP the screen.
+
+Note `let*` versus `let`. `let*` allows each binding to reference the
+previous — `vx` uses `rad`, `vy` uses `rad`. Regular `let` binds all
+names in parallel and would not let `vx` see `rad`.
+
+Hold 'up' — the aim line rotates skyward. Hit 'a' — a shell fires along
+that line. Gravity curves it. It lands somewhere down-range. Play with
+`power = 4` (short range) and `power = 10` (over-the-horizon).
+
+---
+
+## 4.2 The range formula
+
+Physics 101: for a projectile launched with speed `v` at angle `a` on
+flat ground under gravity `g`, the range is `v*v * sin(2a) / g`.
+Maximum range at `a = 45 degrees`. Range zero at 0 or 90.
+
+Let's verify. We spawn a shell, wait for it to land, and measure how far
+it went. Then compare to the formula.
+
+```scheme
+;; Fire a shell, wait for landing, print actual range vs predicted.
+(define (verify-range)
+  (world/reset!)
+  (world/gravity! 0 0.3)
+  (world/floor! 220)
+  (let* ((angle-deg 45)
+         (power 8)
+         (rad (* angle-deg (/ 3.14159 180)))
+         (vx  (* power (geom/cos rad)))
+         (vy  (* -1 power (geom/sin rad)))
+         (b   (world/spawn 'shell 30 210)))
+    (entity/shape! b 'circle 3)
+    (entity/bounce! b 0)
+    (entity/set-vel! b vx vy)
+    ;; Step until the shell rests on the floor.
+    (let loop ((n 300))
+      (world/step)
+      (if (and (> n 0) (< (- (cadr (entity/vel b))) 0.05))
+          (loop (- n 1))
+          (let* ((actual (- (entity/x b) 30))
+                 (predicted (/ (* power power
+                                  (* 2 (geom/sin rad) (geom/cos rad)))
+                               0.3)))
+            (display \"Actual: \")    (display actual)   (newline)
+            (display \"Predicted: \") (display predicted) (newline))))))
+
+(verify-range)
+;; Actual and predicted should agree within a few percent (integration
+;; error). If they disagree by more than ~5%, gravity in the runtime
+;; differs from what you asked for, and the reference has drifted.
+```
+
+We are RUNNING the physics and CHECKING it against the theory. That is
+the pedagogical superpower of a physics-first game engine: the code
+does not just LOOK physical, it IS. When kids get to trigonometry in
+school, they have already touched sin and cos. When they get to
+integration, they have already accumulated velocity into position.
+
+---
+
+## 4.3 Draw the trajectory
+
+We can visualize the arc by remembering every position the shell
+occupies and painting them all.
+
+```scheme
+;; A shell fires; we remember its trail and paint it as a dotted arc.
+(define trail '())
+(define (trailed-cannon)
+  (world/reset!)
+  (world/gravity! 0 0.3)
+  (world/floor! 220)
+  (let* ((rad (* 55 (/ 3.14159 180)))
+         (b   (world/spawn 'shell 30 210)))
+    (entity/shape! b 'circle 3)
+    (entity/bounce! b 0.3)
+    (entity/set-vel! b (* 8 (geom/cos rad)) (* -8 (geom/sin rad)))
+    (on-frame
+     (lambda ()
+       (world/step)
+       ;; Every 3rd frame, remember the shell's position.
+       (when (= (modulo (world/frame) 3) 0)
+         (set! trail (cons (list (entity/x b) (entity/y b)) trail)))
+       (paint-clear)
+       (paint-cell 'cannon 30 210 20 10)
+       ;; Paint each trail point as a small dot.
+       (for-each (lambda (pt)
+                   (paint-cell 'dot (car pt) (cadr pt) 2 2))
+                 trail)
+       (paint-cell 'shell (entity/x b) (entity/y b) 4 4)))))
+
+(big-bang trailed-cannon)
+```
+
+`cons` prepends to the list; the trail grows head-first, most recent
+first. We paint every point. The dotted arc appears, curves under
+gravity, hits the floor, bounces, arcs lower, and so on. The kid
+literally SEES the parabola.
+
+Warning: the trail grows forever. For a real game, cap it —
+`(when (> (length trail) 100) (set! trail (take trail 100)))` — to
+avoid unbounded memory. Or clear it every fire.
+
+---
+
+## 4.4 Target practice
+
+Now put three cans on the floor. Knock them over.
+
+```scheme
+;; Three cans down-range. Hit all three with three shots.
+(define angle-deg 60)
+(define power 7)
+(define shells-fired 0)
+(define cans-hit 0)
+
+(define (target-practice)
+  (world/reset!)
+  (world/gravity! 0 0.3)
+  (world/floor! 220)
+  ;; Cans as short vertical rects.
+  (let ((can1 (world/spawn 'can 200 205))
+        (can2 (world/spawn 'can 240 205))
+        (can3 (world/spawn 'can 280 205)))
+    (for-each (lambda (c)
+                (entity/shape! c 'rect 12 30)
+                (entity/solid! c #t))
+              (list can1 can2 can3)))
+  (on-frame
+   (lambda ()
+     (when (input/down? 'up)   (set! angle-deg (min 89 (+ angle-deg 1))))
+     (when (input/down? 'down) (set! angle-deg (max  1 (- angle-deg 1))))
+     (when (input/pressed? 'a)
+       (set! shells-fired (+ shells-fired 1))
+       (let* ((rad (* angle-deg (/ 3.14159 180)))
+              (b (world/spawn 'shell 30 210)))
+         (entity/shape! b 'circle 3)
+         (entity/set-vel! b (* power (geom/cos rad))
+                            (* -1 power (geom/sin rad)))))
+     (world/step)
+     ;; Any (shell, can) collision knocks the can down.
+     (for-each
+      (lambda (pair)
+        (let ((a (car pair)) (b (cadr pair)))
+          (cond
+            ((and (eq? (entity/kind a) 'shell) (eq? (entity/kind b) 'can))
+             (entity/despawn! b) (entity/despawn! a)
+             (set! cans-hit (+ cans-hit 1))
+             (world/camera-shake! 5 0.9))
+            ((and (eq? (entity/kind b) 'shell) (eq? (entity/kind a) 'can))
+             (entity/despawn! a) (entity/despawn! b)
+             (set! cans-hit (+ cans-hit 1))
+             (world/camera-shake! 5 0.9)))))
+      (world/collisions))
+     (paint-clear)
+     (paint-cell 'cannon 30 210 20 10)
+     (world/each 'can (lambda (c)
+                        (paint-cell 'can (entity/x c) (entity/y c) 12 30)))
+     (world/each 'shell (lambda (s)
+                          (paint-cell 'shell (entity/x s) (entity/y s) 3 3)))
+     (paint-text (string-append \"Fired: \" (number->string shells-fired)
+                                \" Hit: \" (number->string cans-hit)) 10 10)
+     (when (= cans-hit 3)
+       (paint-text \"YOU WIN!\" 120 60)))))
+
+(big-bang target-practice)
+```
+
+`world/camera-shake! 5 0.9` shakes the whole screen by 5 pixels max
+with 0.9 decay per frame. Impact feedback. Chapter 6 covers this in
+depth as FEEL; here we use it because a hit without shake feels
+weightless.
+
+`cond` handles the case where the collision-pair list orders the two
+entities either way — sometimes shell first, sometimes can first. We
+handle both.
+
+---
+
+## 4.5 The four patterns
+
+**Composition.** A projectile is composed: shape, initial velocity,
+bounce coefficient, tag (`'shell`). A cannon is composed: aim state
+(angle), power state, spawn-position. The target (can) is composed: a
+rect shape, solid flag, tag.
+
+**Orchestration.** The frame loop orchestrates poll (angle
+adjustment), poll (fire), physics update, collision walk, draw. Fire
+happens BEFORE `world/step` so the new shell has a chance to move this
+frame — spawning after step means one frame of visual stillness at the
+cannon's mouth.
+
+**In-routing.** Angle-adjust routes to a mutation of `angle-deg`; fire
+routes to a spawn. Two buttons, two handlers, cleanly separated.
+
+**Routing.** Collision pairs route through the `for-each
+world/collisions` walk to handlers per kind-combination. Shell-and-can
+routes to despawn-both + shake + increment. If we added shell-and-shell
+(bullets deflecting bullets), it would be another `cond` arm.
+
+---
+
+## 4.6 Common desktop tasks
+
+**Balloon-pop unlock.** A shop hides discounts inside virtual
+balloons floating across the item page. Customer aims a cannon
+(one button = aim, one button = fire) and pops balloons. Each popped
+balloon reveals a discount code. Uses this chapter's cannon +
+projectile primitives with `entity/sensor!` balloons (so shells pass
+through them but register a hit).
+
+**Delivery-arc animation.** After purchase, a small package projectile
+arcs from the shop's icon to the shopper's cart icon, following
+`phys/kinematics`. The physics IS the delivery-in-progress feedback.
+Runs in about 1.5 seconds — enough for the kid to notice and smile.
+
+---
+
+## 4.7 Pitfalls
+
+**Shells fall through the cans.** The can was not `entity/solid! c #t`.
+Or the shell's velocity is so high that it tunnels past in one frame.
+For high velocities, use `entity/sensor! can #t` and check overlap
+manually in `on-frame` via `entity/overlaps?`.
+
+**Cans register two hits.** Your collision walk fires both cond arms.
+Add `(entity/alive? b)` guards, or dedupe collision pairs. Appendix I
+covers this.
+
+**Range formula disagrees with actual by 20%+.** Integration error.
+For visible-scale gravity constants (0.1 to 0.5), the runtime's
+integrator is close but not exact. That is fine for a game and honest.
+Use the formula for design; use the sim for play.
+
+**Trail memory blows up.** Cap the list length or clear on each fire.
+
+**Cannon fires off-screen.** Check that shell spawn-position (30,
+210) is on-screen and below the floor. If you spawn AT the floor line
+(220), the shell instantly registers a floor collision.
+
+---
+
+## 4.8 Try this yourself
+
+1. Add wind: `world/wind! 0.05 0`. The shell drifts down-range. Now
+   the range formula is wrong; only the sim tells you where to aim.
+2. Move the cannon up onto a platform (spawn at y=100). The range
+   equation gains a term for launch height. Derive it.
+3. Add a moving target — a can that slides left-right via
+   `entity/set-vel!`. Now you must lead the shot.
+4. Fire multiple shells in a spread: on 'a' press, spawn three shells
+   at angles `angle-deg - 5`, `angle-deg`, `angle-deg + 5`. Shotgun.
+5. Add a `paint-arrow` from cannon showing PREDICTED landing spot
+   (compute range formula each frame). The kid learns aim visually.
+6. Turn on `entity/bounce! shell 0.6` and give cans a health value.
+   Now each shell may hit multiple cans as it bounces along.
+
+---
+
+## 4.9 What we built
+
+A cannon, a projectile, an arc, a target, and a hit-counter. The
+range formula, verified in-sim. The trail visualization. Camera-shake
+as feedback.
+
+Next chapter: turn the cannon vertical, put the player at the bottom,
+enemies at the top. That is the shoot-em-up, and it is where entity
+pooling and collision layers earn their keep.")
+
+(code-block :chapter 4 :lang "scheme" :source
+"(define angle-deg 45)
+(define power 6)
+(define (projectiles-anchor)
+  (world/reset!)
+  (world/gravity! 0 0.3)
+  (world/floor! 220)
+  (on-frame
+   (lambda ()
+     (when (input/down? 'up)   (set! angle-deg (min 89 (+ angle-deg 1))))
+     (when (input/down? 'down) (set! angle-deg (max  1 (- angle-deg 1))))
+     (when (input/pressed? 'a)
+       (let* ((rad (* angle-deg (/ 3.14159 180)))
+              (b   (world/spawn 'shell 30 210)))
+         (entity/shape! b 'circle 3)
+         (entity/bounce! b 0.4)
+         (entity/set-vel! b (* power (geom/cos rad))
+                            (* -1 power (geom/sin rad)))))
+     (world/step)
+     (paint-clear)
+     (paint-cell 'cannon 30 210 20 10)
+     (world/each 'shell
+                 (lambda (s)
+                   (paint-cell 'shell (entity/x s) (entity/y s) 3 3))))))
+(big-bang projectiles-anchor)")

@@ -1,0 +1,269 @@
+(dialect :applies ("motoi") :note "Motoi Book of Code.")
+
+(chapter
+  :book             "Book of Code"
+  :chapter-number   9
+  :title            "Chapter 9 — Registers, counters, and the birth of state"
+  :audience         :any
+  :dialect          "motoi"
+  :book-version     "1.0"
+  :content-rating   :G
+  :training-eligible #t
+  :confidentiality  :public
+  :provenance       ((:authored-by "book-of-code-author-agent")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Processor_register")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Counter_(digital)")
+                     (:source "wikipedia" :url "https://en.wikipedia.org/wiki/Sequential_logic"))
+  :prose
+"# Chapter 9 — Registers, counters, and the birth of state
+
+One D flip-flop stores one bit. Line up eight of them and you get an
+8-bit register — a place to keep a byte between clock ticks. Wire the
+output of a register through an adder and back into the register's
+input, and you get a **counter** that increments every clock. Now you
+have a machine that not only remembers, but remembers **something
+that changes on purpose.**
+
+This is the moment computing gets a **timeline.** Combinational logic
+lives in a single frozen instant. Sequential logic — flip-flops plus
+combinational logic plus a clock — lives across ticks. Before-and-after
+becomes real.
+
+## An 8-bit register
+
+Eight D flip-flops, all sharing the same clock:
+
+```
+             CLK ---+----+----+----+----+----+----+----+----+
+                    |    |    |    |    |    |    |    |    |
+                    v    v    v    v    v    v    v    v    v
+   D0 ------------> [FF] [FF] [FF] [FF] [FF] [FF] [FF] [FF]
+   D1 ------------->
+   ...
+   D7 ---------------------------------->
+                    |    |    |    |    |    |    |    |    |
+                    v    v    v    v    v    v    v    v    v
+                    Q0   Q1   Q2   Q3   Q4   Q5   Q6   Q7
+```
+
+Give the register eight data bits and pulse the clock. It samples them
+all simultaneously and holds them until the next clock pulse. That is a
+one-byte storage cell.
+
+In Scheme, since we already have `make-d-flip-flop` from chapter 8, we
+can chain eight:
+
+```
+(define (make-register width)
+  (let ((flops (map (lambda (_) (make-d-flip-flop))
+                    (iota width))))
+    (lambda (msg . args)
+      (cond
+        ((eq? msg 'load)
+         ;; args: (list of bits)
+         (for-each (lambda (ff b) (ff 'set-d b)) flops (car args))
+         'loaded)
+        ((eq? msg 'tick)
+         (for-each (lambda (ff) (ff 'tick)) flops)
+         'ticked)
+        ((eq? msg 'read)
+         (map (lambda (ff) (ff 'q)) flops))))))
+
+(define R (make-register 8))
+(R 'load (list #t #f #t #f #f #f #f #f))   ;; low bit first: 5
+(R 'tick)
+(R 'read)   ;; => (#t #f #t #f #f #f #f #f)
+```
+
+That is an 8-bit register. Every CPU has a bunch of these. The 6502
+had A, X, and Y (each 8-bit). The 80386 had EAX, EBX, ECX, EDX, ESI,
+EDI (each 32-bit). A modern ARM has R0 through R30 (each 64-bit). All
+the same shape as our little Scheme register.
+
+## The program counter
+
+There is one register in every CPU that has a special name: the
+**program counter** (PC). It holds the address of the next instruction
+to fetch. Every instruction cycle, the PC gets incremented. When there
+is a jump or branch, the PC gets overwritten.
+
+The PC is a register plus an adder plus a mux. When the CPU is
+executing normally, the PC = PC + 1 each cycle. When the CPU jumps,
+the PC = target address instead.
+
+That is a **counter with a load input.** Which brings us to counters.
+
+## A 4-bit ripple counter
+
+The simplest counter is a chain of toggle flip-flops. On every clock
+edge, bit 0 flips. Whenever bit 0 falls from 1 to 0, bit 1 flips.
+Whenever bit 1 falls from 1 to 0, bit 2 flips. And so on.
+
+Counts: 0000, 0001, 0010, 0011, 0100, 0101, ..., 1111, then wraps
+back to 0000. Four bits gives you sixteen states.
+
+**ASCII diagram of a 4-bit ripple counter:**
+
+```
+   CLK --->[T]--- Q0 ---+--->[T]--- Q1 ---+--->[T]--- Q2 ---+--->[T]--- Q3
+           |            |    |            |    |            |    |
+           |            +----+ (Q0 acts   +----+ (Q1 acts   +----+ (Q2 acts
+           |                    as clock       as clock       as clock
+           +------ ...           for [T]1)      for [T]2)      for [T]3)
+```
+
+Each T flip-flop toggles on the falling edge of its clock. The first
+one's clock is the system clock. The next one's clock is the previous
+one's output. Cascading.
+
+In Motoi Scheme, let us just implement it as a plain counter register
+(we don't need to fake toggle-flip-flops if we have modulo):
+
+```
+(define (make-counter width)
+  (let ((count 0)
+        (max   (expt 2 width)))
+    (lambda (msg)
+      (cond
+        ((eq? msg 'tick)
+         (set! count (modulo (+ count 1) max))
+         count)
+        ((eq? msg 'read) count)
+        ((eq? msg 'reset) (set! count 0) count)))))
+
+(define c (make-counter 4))
+(c 'tick)   ;; => 1
+(c 'tick)   ;; => 2
+(c 'tick)   ;; => 3
+(c 'tick)   ;; => 4
+;; ...
+(let loop ((i 0)) (if (< i 15) (begin (c 'tick) (loop (+ i 1)))))
+(c 'read)   ;; => 3   ;; wrapped: 4 + 15 = 19, mod 16 = 3
+```
+
+Every tick, up by one. Wraps at 16. That is a 4-bit counter.
+
+If you want a wide range of values without wrapping, just use a wider
+counter. A 32-bit counter can count to 4 billion before wrapping. That
+is enough for most program counters.
+
+## Watch the loop
+
+The counter is our first honest software loop. Every tick, we
+increment. Same as a hardware counter, every clock edge, it
+increments. Same as a `for` loop:
+
+```
+(let loop ((i 0))
+  (if (< i 10)
+      (begin
+        (display i) (newline)
+        (loop (+ i 1)))))
+```
+
+`i` is a counter. Each recursion is a clock tick. Each `+ 1` is an
+adder. When the loop exits, `i` holds a specific value.
+
+Every `for` loop you have ever written is a counter driving a piece of
+work. In hardware, the counter is a chain of T flip-flops. In software,
+the counter is an integer variable in a register that increments each
+iteration. Same shape.
+
+## The birth of state
+
+State is what makes computers useful. A stateless computer would give
+you the same output every time. Boring. A stateful computer remembers
+what happened, changes based on it, and produces new behaviour.
+
+Every computer is a big pile of state — registers, cache lines, RAM
+pages, disk sectors, network buffers, GPU frame buffers — being
+transformed by combinational logic between clock edges. That is the
+whole game.
+
+Sequential logic = combinational logic + memory + a clock. Every
+higher structure — CPU, GPU, operating system, database, game,
+compiler, LLM — is a sequential-logic machine at heart, wrapped in
+enough abstraction that you can forget about the clock.
+
+## Registers vs. RAM
+
+Registers and RAM are both memory. The difference is speed and cost.
+
+- **Register:** ~1 ns access, ~10 to 100 registers in a CPU, made of
+  flip-flops or SRAM cells with dedicated wiring. Extremely fast because
+  they are right next to the ALU.
+- **SRAM (cache):** ~1 to 10 ns access, ~megabytes total, made of
+  six-transistor cells. Fast, but has to go through address decoding.
+- **DRAM (main memory):** ~100 ns access, ~gigabytes, made of
+  one-transistor + one-capacitor cells. Cheap, dense, slow. Needs
+  refreshing.
+- **SSD:** ~microseconds access, ~terabytes, made of flash memory
+  cells. Non-volatile.
+- **Disk:** ~10 ms access, ~terabytes to petabytes, spinning platters.
+  Cheap, huge, slow.
+
+Ratios in speed: a modern register access is about a million times
+faster than a disk access. Chapter 13 explains why this matters and
+what programmers do about it.
+
+## Modeling a small register file
+
+Real CPUs have a **register file** — a small memory that holds a
+handful of registers, addressed by number. Let us model one.
+
+```
+(define (make-register-file count width)
+  (let ((registers (map (lambda (_) (make-register width))
+                        (iota count))))
+    (lambda (msg . args)
+      (cond
+        ((eq? msg 'write)   ;; args: idx bits
+         (let ((idx  (car args))
+               (bits (cadr args)))
+           ((list-ref registers idx) 'load bits)
+           ((list-ref registers idx) 'tick)
+           'wrote))
+        ((eq? msg 'read)    ;; args: idx
+         ((list-ref registers (car args)) 'read))))))
+
+(define rf (make-register-file 4 8))
+(rf 'write 0 (list #t #f #t #f #f #f #f #f))    ;; R0 = 5
+(rf 'write 1 (list #t #t #t #f #f #f #f #f))    ;; R1 = 7
+(rf 'read 0)   ;; => (#t #f #t #f #f #f #f #f)
+(rf 'read 1)   ;; => (#t #t #t #f #f #f #f #f)
+```
+
+Four registers, each 8 bits. Read by index, write by index. That is
+essentially what a CPU register file looks like from the outside.
+Chapter 12 wires one of these into a tiny CPU.
+
+## What Motoi wants you to take from this
+
+- A flip-flop stores one bit.
+- A register is a bank of flip-flops, sampled together on the clock.
+- A counter is a register that increments each tick.
+- The program counter is a counter that can also be loaded.
+- The register file is a small addressable bank of registers.
+- All of this runs on the same substrate as chapter 5: Boolean gates
+  with feedback.
+
+Once you have registers and a clock, you have a **timeline**. Once you
+have a timeline, the machine can plan. It can hold intermediate results.
+It can execute one instruction after another.
+
+Chapter 10 gives that timeline a name: state machines. Chapter 12 wraps
+it all into a CPU.
+
+## The loop appears
+
+The counter is a loop made of hardware. The program counter is a loop
+made of hardware. The clock itself is a loop — a signal that oscillates
+high-low-high-low forever. Loops inside loops inside loops. And every
+one of them is a place where a wire ate its own tail (chapter 8's
+feedback) plus a rule for what to do next.
+
+## Next
+
+Chapter 10: state machines. Mealy and Moore. We name the timeline and
+give it grammar.
+")

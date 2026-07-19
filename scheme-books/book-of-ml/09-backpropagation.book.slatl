@@ -1,0 +1,420 @@
+(chapter
+  :book "Book of ML"
+  :chapter-number 9
+  :title "Backpropagation from calculus first-principles"
+  :audience "kid-and-adult operators"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-19"
+     :sources ((:paper "Rumelhart, Hinton, Williams 1986 — Learning representations by back-propagating errors, Nature 323"
+                :used-for "the algorithm this chapter derives")
+               (:concept "Leibniz 1676 — chain rule of calculus")
+               (:reference "MOTOI-SCHEME-REFERENCE.slat" :section "math/, calc/")))
+  :prose
+"# Chapter 9 — Backpropagation from calculus first-principles
+
+We know how to compute the loss for a network (chapter 5). We know
+how to descend the loss by adjusting parameters (chapter 6). What we
+have been dodging is: how do we get the gradient of the loss with
+respect to all the parameters, when the network has thousands or
+millions of them?
+
+Finite difference (chapter 6) works but is slow. For each parameter
+you have to evaluate the whole loss twice. A million-parameter
+network needs two million forward passes per step. That is not
+feasible.
+
+Backpropagation computes all the gradients in ONE backward pass. Cost:
+about the same as one forward pass. For a million parameters, that
+is a million-fold speedup. This is the algorithm that made deep
+learning practical.
+
+## The chain rule, plainly
+
+If `y = f(g(x))`, then `dy/dx = f'(g(x)) * g'(x)`. In words: to
+differentiate a composed function, differentiate each function
+independently and multiply.
+
+That is Leibniz's chain rule from 1676. Every backprop derivation is
+this rule, applied over and over.
+
+If the composition is deeper — `y = f(g(h(x)))` — then
+`dy/dx = f'(g(h(x))) * g'(h(x)) * h'(x)`. One factor per layer.
+Multiplied together, left to right, from the output back to the input.
+
+## Toy example — a chain of squarings
+
+Let `y = ((x^2)^2)^2 = x^8`. Compute `dy/dx` by chain rule.
+
+At each layer, `f(u) = u^2` and `f'(u) = 2u`.
+
+- Layer 1: `u1 = x^2`, `u1' = 2x`.
+- Layer 2: `u2 = u1^2`, `du2/du1 = 2*u1 = 2x^2`.
+- Layer 3: `u3 = u2^2 = y`, `du3/du2 = 2*u2 = 2x^4`.
+
+Chain: `dy/dx = (2x^4) * (2x^2) * (2x) = 8*x^7`.
+
+Sanity check: `y = x^8`, so `dy/dx = 8*x^7`. Matches. The chain rule
+gave the right answer by multiplying three per-layer gradients.
+
+## Backward pass in code — the chain rule mechanized
+
+Here is the entire idea of backprop, in one function.
+
+```
+(define (forward-pass x)
+  ;; f(x) = ((x^2)^2)^2
+  (define u1 (* x x))
+  (define u2 (* u1 u1))
+  (define u3 (* u2 u2))
+  (list x u1 u2 u3))
+
+(define (backward-pass activations dL-du3)
+  ;; dL-du3 is the gradient of the loss with respect to the output u3.
+  ;; We walk the graph BACKWARDS, multiplying by each local derivative.
+  (define x (car activations))
+  (define u1 (cadr activations))
+  (define u2 (caddr activations))
+  (define u3 (cadddr activations))
+  (define dL-du2 (* dL-du3 (* 2 u2)))    ;; du3/du2 = 2*u2
+  (define dL-du1 (* dL-du2 (* 2 u1)))    ;; du2/du1 = 2*u1
+  (define dL-dx  (* dL-du1 (* 2 x)))     ;; du1/dx  = 2*x
+  dL-dx)
+
+(define x 2.0)
+(define acts (forward-pass x))
+;; loss L = u3 = x^8 = 256 when x=2
+;; dL/du3 = 1  (since L is u3 itself)
+(display (backward-pass acts 1.0))
+;; => 1024   (should equal 8*x^7 = 8*128 = 1024 at x=2) ✓
+```
+
+Backprop is a forward pass that saves intermediate activations, and a
+backward pass that multiplies gradients through the saved chain. The
+backward pass is O(layers) not O(parameters). That is the speed win.
+
+## The two rules you need
+
+For a network of layers, backprop requires knowing the local
+gradient of each operation. For our networks we need two:
+
+**Matrix-vector.** Given `y = W x`, the gradient of the loss with
+respect to `x` is `W^T dL/dy`. The gradient with respect to `W` is
+`dL/dy ⊗ x^T` (an outer product — a rank-1 matrix).
+
+**Activation.** Given `y = act(u)`, the gradient with respect to `u`
+is `dL/dy * act'(u)`. For ReLU, `act'(u) = 1 if u > 0, else 0`. For
+sigmoid, `act'(u) = act(u) * (1 - act(u))`. For linear, `act'(u) = 1`.
+
+Those two rules, plus the chain rule, are all of backprop.
+
+## Problem 1 — Backprop for one neuron
+
+One neuron, one input, one weight. Almost trivial but complete.
+
+```
+;; Model:  y_pred = relu(w * x + b)
+;; Loss:   L = (y_pred - y_true)^2
+
+(define (forward-neuron w b x)
+  (define u (+ (* w x) b))
+  (define y (if (> u 0) u 0))     ;; ReLU
+  (list u y))
+
+(define (loss-and-grads w b x y-true)
+  (define fwd (forward-neuron w b x))
+  (define u (car fwd))
+  (define y-pred (cadr fwd))
+  (define L (* (- y-pred y-true) (- y-pred y-true)))
+  ;; dL/dy_pred = 2 * (y_pred - y_true)
+  (define dL-dy (* 2 (- y-pred y-true)))
+  ;; dy/du = 1 if u > 0 else 0     (ReLU derivative)
+  (define dy-du (if (> u 0) 1 0))
+  ;; du/dw = x     (the derivative of w*x+b with respect to w)
+  (define du-dw x)
+  ;; du/db = 1
+  (define du-db 1)
+  ;; chain them
+  (define dL-dw (* dL-dy dy-du du-dw))
+  (define dL-db (* dL-dy dy-du du-db))
+  (list L dL-dw dL-db))
+
+(display (loss-and-grads 2 0 3 5))
+;; forward: u = 2*3+0 = 6, y_pred = 6
+;; loss = (6-5)^2 = 1
+;; dL/dy = 2*(6-5) = 2
+;; dy/du = 1 (u > 0)
+;; dL/dw = 2 * 1 * 3 = 6
+;; dL/db = 2 * 1 * 1 = 2
+;; => (1 6 2)
+```
+
+Three lines of chain rule got us the gradient. No finite difference.
+The gradient tells us: to reduce the loss, decrease w by lr*6 and
+decrease b by lr*2. That is one step of training on one example.
+
+## Problem 2 — Backprop through a two-layer network by hand
+
+The same technique, more layers. Save activations on the way forward.
+Multiply gradients on the way back.
+
+```
+;; A tiny network:
+;;   h = relu(w1 * x + b1)   (one hidden neuron)
+;;   y = w2 * h + b2         (linear output)
+;;   L = (y - target)^2
+
+(define (forward-pass w1 b1 w2 b2 x)
+  (define u1 (+ (* w1 x) b1))
+  (define h (if (> u1 0) u1 0))
+  (define y (+ (* w2 h) b2))
+  (list u1 h y))
+
+(define (loss-and-grads w1 b1 w2 b2 x target)
+  (define fwd (forward-pass w1 b1 w2 b2 x))
+  (define u1 (car fwd))
+  (define h (cadr fwd))
+  (define y (caddr fwd))
+  (define L (* (- y target) (- y target)))
+  ;; Backward:
+  (define dL-dy (* 2 (- y target)))
+  ;; y = w2*h + b2, so:
+  (define dL-dw2 (* dL-dy h))
+  (define dL-db2 dL-dy)
+  (define dL-dh (* dL-dy w2))
+  ;; h = relu(u1), so:
+  (define dL-du1 (* dL-dh (if (> u1 0) 1 0)))
+  ;; u1 = w1*x + b1, so:
+  (define dL-dw1 (* dL-du1 x))
+  (define dL-db1 dL-du1)
+  (list L dL-dw1 dL-db1 dL-dw2 dL-db2))
+
+(display (loss-and-grads 0.5 0 1.0 0 2.0 3.0))
+;; Forward: u1 = 0.5*2+0 = 1, h = 1 (ReLU passes), y = 1*1+0 = 1
+;; Loss: (1-3)^2 = 4
+;; Backward:
+;;   dL/dy = 2*(1-3) = -4
+;;   dL/dw2 = -4 * 1 = -4
+;;   dL/db2 = -4
+;;   dL/dh = -4 * 1 = -4
+;;   dL/du1 = -4 * 1 = -4    (ReLU on, so derivative is 1)
+;;   dL/dw1 = -4 * 2 = -8
+;;   dL/db1 = -4
+;; => (4 -8 -4 -4 -4)
+```
+
+The gradients tell us all four parameters need to INCREASE (all
+gradients negative, so the update `param - lr*grad` adds a positive
+amount). That is because the current prediction 1 is BELOW the
+target 3 — everything needs to go up.
+
+## Problem 3 — Backprop for a vector-valued layer
+
+Now with actual vectors. Layer is `y = W x + b`, with `W` a matrix
+and `x`, `y`, `b` vectors.
+
+The gradient rules extend naturally:
+
+- `dL/db = dL/dy` (the bias gets the output-gradient directly).
+- `dL/dW = dL/dy * x^T` (outer product — each entry (i,j) is dL/dy[i] * x[j]).
+- `dL/dx = W^T * dL/dy` (transpose the weights and multiply).
+
+Let's implement.
+
+```
+(define (matvec rows v)
+  (map (lambda (r) (vec/dot r v)) rows))
+
+(define (transpose rows)
+  ;; input: list of vectors (rows); output: list of vectors (columns as vectors).
+  (define n (vec/dim (car rows)))
+  (map (lambda (i)
+         (vec/make
+           (map (lambda (row) (vec/ref row i)) rows)))
+       (iota n)))
+
+(define (outer-product a b)
+  ;; a, b as lists of numbers. Returns list of vectors, one per element of a.
+  (map (lambda (ai)
+         (vec/make (map (lambda (bj) (* ai bj)) b)))
+       a))
+
+(define (linear-layer-backward W x dL-dy)
+  ;; W: list of vectors (rows). x, dL-dy: vectors. Returns (dL-dW dL-dx dL-db).
+  (define dL-db (map (lambda (i) i) dL-dy))
+  (define dL-dW (outer-product dL-dy (map (lambda (i) (vec/ref x i))
+                                          (iota (vec/dim x)))))
+  (define dL-dx (matvec (transpose W) dL-dy))
+  (list dL-dW dL-dx dL-db))
+
+;; Example: a 2-in, 3-out layer
+(define W
+  (list (list 1 2)
+        (list 3 4)
+        (list 5 6)))
+(define x (list 1 1))
+(define dL-dy (list 1 2 3))
+
+(display (linear-layer-backward W x dL-dy))
+;; dL/db = (1 2 3)
+;; dL/dW = outer((1 2 3), (1 1)) = ((1 1) (2 2) (3 3)) — three rows
+;; dL/dx = W^T * (1 2 3)
+;;   W^T rows: (1 3 5) (2 4 6)
+;;   W^T (1,2,3) = (1+6+15, 2+8+18) = (22, 28)
+```
+
+That is a full linear-layer backward. Notice the structure: three
+gradients — one for the weights, one for the input (to pass to the
+previous layer), one for the bias. This function is the building
+block; wire many together and you have backprop for a whole network.
+
+## Problem 4 — Backprop through a two-layer MLP
+
+Now compose two `linear-layer-backward` calls with a ReLU-derivative
+step between them.
+
+```
+(define (matvec rows v) (map (lambda (r) (vec/dot r v)) rows))
+
+(define (relu-vec v)
+  (vec/make (map (lambda (i)
+                   (let ((x (vec/ref v i)))
+                     (if (> x 0) x 0)))
+                 (iota (vec/dim v)))))
+
+(define (relu-mask u)
+  (map (lambda (i) (if (> (vec/ref u i) 0) 1 0))
+       (iota (vec/dim u))))
+
+;; Forward pass, saving activations
+(define (forward W1 b1 W2 b2 x)
+  (define u1 (vec/make (map + (matvec W1 x) b1)))
+  (define h  (relu-vec u1))
+  (define y  (vec/make (map + (matvec W2 h) b2)))
+  (list u1 h y))
+
+;; Backward pass, given a loss-gradient dL/dy
+(define (backward W1 b1 W2 b2 x dL-dy activations)
+  (define u1 (car activations))
+  (define h  (cadr activations))
+  (define y  (caddr activations))
+
+  ;; Second layer: y = W2 h + b2
+  (define dL-db2 (map (lambda (i) (vec/ref dL-dy i)) (iota (vec/dim dL-dy))))
+  (define dL-dh  (matvec (transpose W2)
+                         (vec/make dL-db2)))
+  (define dL-dW2 (outer-product dL-db2
+                                (map (lambda (i) (vec/ref h i))
+                                     (iota (vec/dim h)))))
+
+  ;; ReLU: h = relu(u1), so dL/du1 = dL/dh * mask
+  (define mask (relu-mask u1))
+  (define dL-du1
+    (map (lambda (i)
+           (* (list-ref dL-dh i) (list-ref mask i)))
+         (iota (length dL-dh))))
+
+  ;; First layer: u1 = W1 x + b1
+  (define dL-db1 dL-du1)
+  (define dL-dW1 (outer-product dL-du1
+                                (map (lambda (i) (vec/ref x i))
+                                     (iota (vec/dim x)))))
+  (define dL-dx  (matvec (transpose W1) (vec/make dL-du1)))
+
+  (list dL-dW1 dL-db1 dL-dW2 dL-db2 dL-dx))
+```
+
+Read the structure. Each layer contributes THREE gradient outputs:
+its weight gradient, its bias gradient, and the gradient to pass
+backward to the previous layer. Chain them. That is all of backprop.
+
+## Problem 5 — Automate: the recursive backward pass
+
+If you have a list of layers, the backward pass can be written as a
+right-fold. Each layer takes the gradient coming in, produces its own
+weight gradients, and produces the gradient going out (to the previous
+layer).
+
+```
+;; Pseudocode structure — not for compilation, for reading.
+(define (backward-net layers activations dL-dy)
+  ;; layers: list of (W b activation-info)
+  ;; activations: list of (u h) pairs, one per layer, saved during forward
+  ;; dL-dy: gradient at output
+  (fold-right
+    (lambda (layer act gradient-in)
+      ;; produce (this-layer's weight gradients, gradient to pass back)
+      (let* ((mask (relu-mask (car act)))
+             (dL-du (map * gradient-in mask))
+             (dL-dW (outer-product dL-du (activation-input act)))
+             (dL-dx (matvec (transpose (layer-W layer)) (vec/make dL-du))))
+        (record-gradient! layer dL-dW dL-du)
+        dL-dx))
+    dL-dy
+    (zip layers activations)))
+```
+
+The real implementation is more careful about what to record and how,
+but the SHAPE is exactly this: walk the layers backward, feed each
+one the gradient coming in, record its weight update, produce the
+gradient going out. Modern autograd frameworks (PyTorch, JAX,
+TensorFlow) automate this. Under the hood: this fold.
+
+## Capstone — Sanity-check gradients against finite differences
+
+Backprop is fast but error-prone to write. Finite differences are
+slow but obviously correct. A best practice is to check backprop
+against finite differences on a small example.
+
+```
+;; Given w, compute forward loss and backprop dL/dw. Compare with
+;; finite-difference estimate of dL/dw. They should match.
+
+(define target 3.0)
+(define x 2.0)
+
+(define (fwd-loss w b)
+  (define u (+ (* w x) b))
+  (define y (if (> u 0) u 0))
+  (* (- y target) (- y target)))
+
+(define w 0.5)
+(define b 0.0)
+
+;; Backprop
+(define u (+ (* w x) b))
+(define y (if (> u 0) u 0))
+(define dL-dy (* 2 (- y target)))
+(define dy-du (if (> u 0) 1 0))
+(define dL-dw-analytic (* dL-dy dy-du x))
+
+;; Finite difference
+(define h 0.0001)
+(define dL-dw-fd (/ (- (fwd-loss (+ w h) b) (fwd-loss w b)) h))
+
+(display dL-dw-analytic)   ;; e.g., -4.0
+(display dL-dw-fd)          ;; e.g., -3.9998 (close but not exact — h effect)
+```
+
+The analytic gradient from backprop should match the finite-difference
+gradient to about 4 or 5 digits. If they don't, you have a bug in
+your backprop. This check has saved more researcher-hours than any
+other single technique.
+
+## Why this matters
+
+Backprop is the mechanism by which every neural network in existence
+was trained. The chain rule from 1676, applied mechanically to a
+network of nested functions. The result: gradients for millions of
+parameters in one backward pass, at the cost of a forward pass. Deep
+learning as a field would not exist without this algorithm working.
+
+## What's next
+
+Chapter 10 wires it all together into a training loop. Forward pass,
+loss, backward pass, parameter update. Do that many times on many
+examples. That is training. That is how a language model learns.
+")

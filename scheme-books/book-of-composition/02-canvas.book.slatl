@@ -1,0 +1,308 @@
+(chapter
+  :book "Book of Composition"
+  :chapter-number 2
+  :title "composer/canvas — the container and its binding paths"
+  :audience "programmer-fluent-in-other-languages"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-of-composition-author-agent"
+     :cli-verified #t)
+  :prose
+"# Chapter 2 — composer/canvas, the container and its binding paths
+
+Every widget in Motoi lives inside a canvas. A canvas is a Scheme value — a record with a kind, a bind path, an options object, a body of raw forms, and a list of child widgets. That is all. There is no window, no frame, no rectangle on a screen. The canvas is the noun that groups widgets and marks a root binding path into a target form. Surfaces render canvases visually; the value itself is a plain record.
+
+This chapter walks the canvas end to end. By the end you will know how to build canvases, how bindings resolve, how children get discovered, how to nest canvases inside canvases, how the emitted form is structured, and where the boundaries lie between what the canvas cares about and what the widgets inside it care about.
+
+## 2.1 The verb signature
+
+The signature the reference documents:
+
+```
+(composer/canvas ((:bind path) body ...))
+```
+
+You call `composer/canvas` with a plist-clause first and body forms after. The composer accepts two ways to write the plist-clause, and both parse to the same record.
+
+Form A — the leading list:
+
+```scheme
+(composer/canvas (list :bind '(cart/main))
+  (composer/slider :label \"BPM\" :bind '(cart/main :bpm) :min 60 :max 240 :step 1))
+```
+
+Form B — inline keywords:
+
+```scheme
+(composer/canvas :bind '(cart/main)
+  (composer/slider :label \"BPM\" :bind '(cart/main :bpm) :min 60 :max 240 :step 1))
+```
+
+Both produce identical canvases. Form A is what the examples in this book use because it visually separates the canvas options from the widget children. Form B is shorter and both are legal. Pick the one you prefer; the runtime treats them identically.
+
+## 2.2 A minimal canvas
+
+The smallest useful canvas is one that binds a path and holds one child:
+
+```scheme
+(composer/canvas (list :bind '(cart/main))
+  (composer/slider :label \"BPM\" :bind '(cart/main :bpm)
+                   :min 60 :max 240 :step 1))
+```
+
+`composer/emit` on this returns:
+
+```
+(composer/canvas (:bind (quote (cart/main)))
+  (composer/slider :label \"BPM\" :bind (quote (cart/main :bpm))
+                   :min 60 :max 240 :step 1 :value 60))
+```
+
+The canvas is empty of state of its own — its emit is a straightforward reproduction of the input, with the slider's `:value` baked in. That is what the round-trip does: it captures the runtime state of each child and includes it in the emitted declaration.
+
+## 2.3 A canvas is not a window
+
+Repeat with me: a canvas is not a window. It has no size in pixels. It has no color. It has no border. It has no title bar. Those are surface concerns.
+
+When Curator renders a canvas visually, it decides how to lay out the children based on the surface's real-estate budget. On desktop it might stack them vertically in a card. On a phone it might scroll them. In a TUI it prints them in a text list. In an HTTP response it emits an HTML shell. The canvas value contains no layout hint. That is on purpose; a value that dictated its own layout could not render well on surfaces the author never anticipated.
+
+Some widgets have visual affordances (a slider is horizontal-by-default, a piano-roll is a grid, a sprite-grid is a checkerboard). Those affordances are the widget's affair. The canvas cares about grouping and binding, not appearance.
+
+## 2.4 Bind path — the whole grammar
+
+Every canvas carries a `:bind` path. A bind path is a Scheme list. Each element is either a symbol (the name of a top-level form, or a symbol slot inside one) or a keyword (a slot name inside a form). The composer treats the path as a Trail of names — no evaluation, no lookup, no reflection. The path is data.
+
+A path of length one, `'(cart/main)`, points at the top-level form named `cart/main`. A path of length two, `'(cart/main :bpm)`, points at the `:bpm` slot inside `cart/main`. A path of length three, `'(synth :env :attack)`, points at the `:attack` slot inside the `:env` slot inside `synth`.
+
+Paths do not carry types. A path might resolve to a number, a list, a symbol, or nothing at all. The widget at the far end owns the shape. If a slider is bound to a path, and the value at that path is a string, the slider will not know what to do — but this is a programmer error the composer flags rather than silently drops.
+
+The canvas's own bind path is the root of the tree the children collectively write. If the canvas is bound to `'(cart/main)`, and a child is bound to `'(cart/main :bpm)`, the child is contributing to a form that begins at `cart/main` and holds a `:bpm` slot. Conventionally the child's bind path starts with the canvas's own bind path; nothing enforces this rule and there are legitimate reasons to break it (a widget in one canvas can bind into a form owned by another canvas if you know what you're doing), but for tidy round-trips you generally want the child paths to nest inside the parent's.
+
+## 2.5 The body is anything
+
+Anything after the `:bind` clause becomes a body form. The canvas keeps a copy of the raw body in its record — you can read `canvas.body` if you need to inspect what was passed — and filters the widget-shaped values out into `canvas.children`.
+
+Widget-shaped means: the value is a JS object (a Scheme record) whose `kind` field is set. Slider records have `kind: 'slider'`, button records have `kind: 'button'`, and so on. Anything that isn't a widget record is preserved in `body` but not in `children`. This lets you interleave documentation strings, comments, or other Scheme values in a canvas body without polluting the child list.
+
+In practice you rarely put non-widgets in a canvas body. But the option exists.
+
+## 2.6 A canvas with several children
+
+Let's grow the canvas. Here is one that binds a synth patch's four ADSR sliders and a wave picker:
+
+```scheme
+(composer/canvas (list :bind '(synth))
+  (composer/slider :label \"Attack\"  :bind '(synth :a) :min 0.0 :max 2.0 :step 0.01)
+  (composer/slider :label \"Decay\"   :bind '(synth :d) :min 0.0 :max 2.0 :step 0.01)
+  (composer/slider :label \"Sustain\" :bind '(synth :s) :min 0.0 :max 1.0 :step 0.01)
+  (composer/slider :label \"Release\" :bind '(synth :r) :min 0.0 :max 3.0 :step 0.01)
+  (composer/instrument-picker :bind '(synth :wave)
+                              :choices '(sine square triangle saw noise)))
+```
+
+`composer/emit` on this returns a `(composer/canvas ...)` form whose body lists all five children, each with `:value` (or `:chosen` for the picker) baked in. Save the emit to disk, reload, and all five widgets sit where they were.
+
+Visually the canvas is a group. Nothing here says the sliders should be stacked or the picker should sit at the bottom. That is Curator's business. On a terminal (see Chapter 14), the same canvas prints as five ASCII slider bars followed by an instrument-picker row.
+
+## 2.7 Ascii mockup — the ADSR canvas
+
+Since a canvas has no visual identity of its own, the ASCII mockup below shows the DEFAULT Curator layout — a vertical stack of widgets under a canvas header. If you render this canvas in a different surface the layout will differ; the SEMANTICS stay the same.
+
+```
++------------------------------------------+
+| synth (canvas bound to '(synth))         |
++------------------------------------------+
+| Attack   [==|-----------------] 0.05     |
+| Decay    [====|---------------] 0.10     |
+| Sustain  [==================|-] 0.70     |
+| Release  [======|-------------] 0.30     |
+| Wave     [sine|square|triangle|saw|noise]|
+|                    ^chosen: sine          |
++------------------------------------------+
+```
+
+Five widgets, one canvas, one bind root. The values shown match what `composer/emit` would produce after you moved each slider to its labeled value and clicked `sine` in the picker.
+
+## 2.8 Nested canvases
+
+A canvas can contain another canvas as a child. The inner canvas's bind path can be relative to the outer bind path or independent of it; both work.
+
+```scheme
+(composer/canvas (list :bind '(cart/main))
+  (composer/slider :label \"BPM\" :bind '(cart/main :bpm) :min 60 :max 240 :step 1)
+  (composer/canvas (list :bind '(cart/main :synth))
+    (composer/slider :label \"Attack\" :bind '(cart/main :synth :a) :min 0.0 :max 2.0 :step 0.01)
+    (composer/slider :label \"Decay\"  :bind '(cart/main :synth :d) :min 0.0 :max 2.0 :step 0.01)))
+```
+
+The outer canvas holds one BPM slider and one nested canvas. The nested canvas is bound to `'(cart/main :synth)` and holds two sliders bound below that. Emit the outer canvas, and you get a nested `(composer/canvas ...)` form inside the outer form. Save that. Load it. Both canvases reconstruct, each with its own children.
+
+Why nest canvases? Because groups are useful for cognitive reasons — you may want the synth's four sliders visually together, distinct from the master BPM. Because bind paths can share a common prefix and the nested canvas advertises that fact. Because a surface may choose to render nested canvases in a collapsible pane on desktop and a scroll-section on mobile.
+
+## 2.9 What happens if you pass no bind
+
+The canvas requires no bind. If you omit it:
+
+```scheme
+(composer/canvas
+  (composer/slider :label \"loose\" :bind '(loose :val) :min 0 :max 100 :step 1))
+```
+
+You get a canvas with an empty bind (`bind: []`). The children still have their own bind paths, so they still know where to write. The canvas emits as:
+
+```
+(composer/canvas (:bind (quote ()))
+  (composer/slider :label \"loose\" :bind (quote (loose :val))
+                   :min 0 :max 100 :step 1 :value 0))
+```
+
+You can call this an unbound canvas. It is legal. It is useful when you want a canvas for grouping only, not as the root of a coherent target form. In practice most canvases have a bind because most canvases have a purpose — but nothing in the runtime forces you.
+
+## 2.10 The children list and the body list
+
+The canvas record contains two related lists: `body` and `children`. Both come from what you passed after the bind clause.
+
+`body` is the raw sequence of forms passed. If you pass a slider, a text string, and a button, the body has three entries in that order.
+
+`children` is the filtered subset of `body` that consists of widget records. If a body entry doesn't have a `kind` field, it doesn't appear in children.
+
+`composer/emit` walks `children`, not `body`. This means non-widget forms in the body are silently dropped from the emit. If you want a comment in your composer file, use Scheme's own comment syntax (`;;`) at the file level — the composer's emit will not preserve it because the composer doesn't see it, but the file will have the comment. If you want a documentation label inside a canvas, use a text-field widget (see Chapter 11).
+
+## 2.11 The apply side of canvases
+
+When `composer/apply` receives a form, it looks for a head symbol of `composer/canvas`. If found, it walks the children in the form (skipping the bind clause and any inline keywords) and updates each canvas child in turn.
+
+The apply DOES NOT create or destroy children. It only updates the widgets that already exist. If the form has more children than the canvas, the extras are ignored. If the canvas has more children than the form, the extras keep their old state.
+
+This has a practical consequence: if you hand-edit a saved canvas file to add a new widget declaration, and then call `composer/apply` on an in-memory canvas with fewer children, the new widget is not created. You need to reload the file (`composer/load`) to reconstruct the widget tree from scratch. Apply is a state-transfer operation on an existing tree.
+
+`composer/load` is the operation to use when the file's widget graph should replace what's in memory. `composer/apply` is the operation to use when you have a canvas and you want to reset all its children's states to what the form says.
+
+## 2.12 A verified round-trip demonstration
+
+Here is a canvas that I have actually run through the runtime to prove the round-trip closes. The commands are `bin/motoi eval` calls; the output shown is what the runtime printed.
+
+Build the canvas:
+
+```scheme
+(define c
+  (composer/canvas (list :bind '(cart/main))
+    (composer/slider :label \"BPM\" :bind '(cart/main :bpm) :min 60 :max 240 :step 1)
+    (composer/toggle :bind '(cart/opts :muted) :label \"Muted\")))
+```
+
+Emit it once:
+
+```scheme
+(composer/emit c)
+;; => (composer/canvas (:bind (quote (cart/main)))
+;;      (composer/slider :label \"BPM\" :bind (quote (cart/main :bpm))
+;;                       :min 60 :max 240 :step 1 :value 60)
+;;      (composer/toggle :bind (quote (cart/opts :muted))
+;;                       :label \"Muted\" :value #f))
+```
+
+Apply the emit to the canvas:
+
+```scheme
+(composer/apply c (composer/emit c))
+;; returns the canvas (unchanged in state — apply is idempotent when the form matches)
+```
+
+Emit again:
+
+```scheme
+(composer/emit c)
+;; => same form as above
+```
+
+Two emits, one apply between them, and the second emit is identical to the first. That is the round-trip guarantee, verified against the runtime.
+
+## 2.13 Canvas is a value that can travel
+
+Because a canvas is a plain record, you can pass it to any function that takes a canvas. `composer/emit` takes one. `composer/apply` takes one. `composer/save` takes one. A helper you write yourself can take one.
+
+Here is a helper that changes the max value of every slider in a canvas:
+
+```scheme
+(define (bump-slider-maxes canvas new-max)
+  (for-each
+    (lambda (child)
+      (when (equal? (child :kind) 'slider)
+        (child :max new-max)))
+    (canvas :children))
+  canvas)
+```
+
+That is pseudo-Scheme; the concrete accessors depend on how your dialect exposes the record fields. But the shape is unremarkable: a function that walks children and mutates a subset. Because widgets are values, mutation is just field assignment.
+
+## 2.14 What lives on disk when you save a canvas
+
+`composer/save` writes the emitted form as text to a file. That file is a valid `.slat` cart. Load it into any Motoi runtime and you can call `composer/load` on it to reconstruct the canvas.
+
+Watch it work:
+
+```scheme
+(composer/save c \"/tmp/my-canvas.slat\")
+;; => \"/tmp/my-canvas.slat\"
+```
+
+The file at `/tmp/my-canvas.slat` now contains one line:
+
+```
+(composer/canvas (:bind (quote (cart/main))) (composer/slider :label \"BPM\" :bind (quote (cart/main :bpm)) :min 60 :max 240 :step 1 :value 60) (composer/toggle :bind (quote (cart/opts :muted)) :label \"Muted\" :value #f))
+```
+
+Reload:
+
+```scheme
+(define c2 (composer/load \"/tmp/my-canvas.slat\"))
+(composer/emit c2)
+;; => same form as `(composer/emit c)`
+```
+
+The reloaded canvas emits the same form the original emitted. Round-trip closed over disk.
+
+## 2.15 The canvas as a namespace for children
+
+Because children carry independent bind paths, the canvas is functionally a namespace for grouping. Two canvases can hold sliders with identical labels bound to different paths; the slider labels are UI hints, not identifiers. The bind path is the identifier. The label is what the human reads.
+
+This means you can build a library of canvases that describe common groupings — an ADSR canvas, a pitch-shifter canvas, a color-picker-plus-preview canvas — and combine them by nesting. The canvas is the composition operator. Widgets are the primitives.
+
+## 2.16 The canvas emits its widgets in declaration order
+
+The order of children in the emit is the order they were passed to `composer/canvas`. If you build a canvas with a BPM slider first and a mute toggle second, the emit has the slider first and the toggle second. Reload the file and reconstruct — same order.
+
+Order matters for UI on some surfaces (a vertical stack shows the first child on top). Order does not matter for the round-trip closure. `composer/apply` walks children by position, so if you reorder the file by hand and reload, the widgets will be in the new order. Apply against an old canvas whose children are in the old order and you might update the wrong widget with the wrong data. Avoid reordering hand-edits if you want to keep an in-memory canvas around; reload from disk after reordering.
+
+## 2.17 Widgets do not know their parent canvas
+
+A widget record does not carry a reference back to the canvas that contains it. This is deliberate. It means a widget can move between canvases (though the round-trip doesn't do this automatically), it means the widget's emit does not depend on the canvas's state, and it means testing a widget in isolation is trivial.
+
+If you need context around a widget (say, its parent canvas's bind path), you look at the canvas's bind and the widget's bind together — the widget's bind is the whole path from the top-level form, so it already contains any prefix the canvas would tell you about.
+
+## 2.18 The canvas is where composer/save writes
+
+`composer/save` operates on a canvas. It calls `composer/emit` to get the form, then writes the form as Scheme text to a file. There is no way to save a widget alone — a widget's emit is its declaration inside a canvas context. You save canvases; you emit widgets as part of a canvas emit.
+
+If you want to serialize a single widget for testing, you can construct a canvas with just that widget and save it. Practical.
+
+## 2.19 What to remember from this chapter
+
+- A canvas is a record with a kind, a bind path, an options object, a body of raw forms, and a list of child widgets.
+- The bind path is a Scheme list. Symbols and keywords in it identify slots in the target form.
+- The canvas has no visual identity. Surfaces render it however they like.
+- `composer/canvas` accepts the bind clause either as a leading list `(list :bind '(...))` or as inline keywords `:bind '(...)`. Both parse identically.
+- The body of a canvas is everything after the bind clause. Widget-shaped body entries become children; others are preserved in `body` but not walked by emit.
+- Canvases can nest. An inner canvas is a child of an outer canvas and emits as a nested `(composer/canvas ...)` form.
+- `composer/apply` transfers state from a form to an existing canvas's children. It does not create or destroy children.
+- `composer/load` reconstructs a canvas from disk. Use it when the file's widget graph should replace an in-memory canvas.
+- Children emit in declaration order. Do not reorder hand-edits if you want to keep an in-memory canvas synchronized.
+- Widgets do not know their parent canvas. The widget's bind carries the full path from the top-level form.
+
+Chapter 3 goes deep on the slider — how numeric input works in the composer, how to use log scale, how to quantize, and what an emitted slider form actually contains.
+")

@@ -1,0 +1,324 @@
+;; ch01-one-body-two-bodies-many.book.slatl
+;; Book of Simulation Games — Chapter 1: One Body, Two Bodies, Many
+;; Authored 2026-07-16 by simulation-games-engineer-lane from architect design.
+
+(dialect :applies ("motoi" "sakura")
+         :note "Base-language simulation. Applies to both dialects.")
+
+(chapter
+  :book                "Book of Simulation Games"
+  :chapter-number      1
+  :title               "One Body, Two Bodies, Many"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "simulation-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + physics-simulation-emergent"
+  :book-version        "1.0.0"
+  :draws-from-preserved (:book "book-of-games-preserved" :ch 12)
+  :provenance          ((:source-path "simulation-games-engineer-lane")
+                        (:authored-by "Engineer")
+                        (:date "2026-07-16"))
+  :prose
+"There are three books on your shelf that could teach you Newton. One is
+a textbook and has proofs; one is a picture book and has apples; and
+one is this chapter, which has neither and instead runs a small program
+sixty times a second until the program's behavior BECOMES Newton's
+second law.
+
+Force equals mass times acceleration is not a slogan. It is an
+algorithm. It says: given the forces on a thing, compute its
+acceleration. Given the acceleration and a slice of time, compute the
+change in velocity. Given the velocity and the same slice of time,
+compute the change in position. Then start over. This is what
+`(world/step)` does under the hood — thirty times a second by default,
+sixty if we ask nicely. There is nothing mysterious about the loop.
+The loop IS the physics.
+
+We are going to build this loop three times. First for one body,
+falling. Then for two bodies pulling on each other. Then for fifty
+bodies pulling on ALL the other bodies, at which point structure will
+emerge that nobody wrote down — no line of our code will say 'form a
+cluster,' but a cluster will form anyway. That is emergence, and it is
+the surprise this whole book is about.
+
+---
+
+## 1.1 One body under gravity
+
+The smallest possible physics simulation is a dot that falls.
+
+```scheme
+;; A dot at (160, 40) falls under gravity, lands on a floor at 240.
+(define (drop-one-dot)
+  (world/reset!)
+  (world/gravity! 0 0.5)          ;; a = (0, 0.5) px/frame^2
+  (world/floor! 240)              ;; hard floor at y=240
+  (let ((dot (world/spawn 'dot 160 40)))
+    (entity/bounce! dot 0.0)      ;; no bounce
+    (let loop ((n 60))
+      (world/step)
+      (if (> n 0) (loop (- n 1)) (entity/pos dot)))))
+
+(drop-one-dot)
+;; => (160.0 . 240.0)
+```
+
+Twenty acceleration units per second squared, forty pixels of headroom,
+sixty frames. The dot lands. `world/step` is where the physics
+actually happens; the rest of the program describes the world it is
+happening in. If you strip the print and squint, this program is one
+line: `(let loop ((n 60)) (world/step) (loop (- n 1)))`. Everything
+else is setup.
+
+## 1.2 What world/step is doing to your dot
+
+Let's replace `(world/step)` with our own version. We will not
+integrate the whole world — just this one dot — so we can watch each
+part of the algorithm move on the page.
+
+```scheme
+;; Hand-rolled Euler integrator for one falling body.
+(define (euler-drop steps)
+  (let ((g  0.5)                     ;; acceleration
+        (dt 1.0))                    ;; one frame = 1 unit of time
+    (let loop ((n  steps)
+               (y  40)
+               (vy 0))
+      (if (<= n 0)
+          (cons y vy)
+          (let* ((ay g)                        ;; acceleration this frame
+                 (vy* (+ vy (* ay dt)))        ;; new velocity
+                 (y*  (+ y  (* vy* dt))))      ;; new position (semi-implicit)
+            (loop (- n 1) y* vy*))))))
+
+(euler-drop 60)
+;; => (930.0 . 30.0)   -> if we had no floor, this is where we'd be
+```
+
+Read that inner `let*` twice. First we compute the acceleration; then
+the velocity that comes out of applying that acceleration for one
+frame; then the position that comes out of moving at THAT NEW velocity
+for one frame. This is semi-implicit Euler. If we had written
+`(+ y (* vy dt))` with the OLD velocity, we would have plain-vanilla
+Euler, which is worse. Appendix A shows the two side by side, and it
+matters more than you might think — plain Euler adds a tiny bit of
+energy every frame; a plain-Euler pendulum swings wider and wider until
+it goes over the top. Semi-implicit Euler doesn't do that.
+
+The `world/step` inside Motoi Scheme uses semi-implicit Euler as its
+default. You can swap it — the appendix covers the swap — but the
+default is chosen because it's the least amount of code that doesn't
+blow up on the second pendulum.
+
+## 1.3 Two bodies pulling on each other
+
+One body under gravity is Newton's LAW. Two bodies pulling on each
+other is Newton's UNIVERSAL law — the surprise is that gravity between
+the Earth and an apple, and gravity between the Earth and the Moon,
+and gravity between two marbles on a table, are all the SAME
+phenomenon with different masses. We do not have to teach the marbles
+about the apple. We just apply the formula.
+
+```scheme
+;; Two bodies. Each pulls on the other with F = G m1 m2 / r^2.
+(define (two-body-attract)
+  (world/reset!)
+  (let ((a (world/spawn 'a  80 120))
+        (b (world/spawn 'b 240 120)))
+    (entity/mass! a 5000)
+    (entity/mass! b 5000)
+    (entity/set-vel! a 0 -1.2)         ;; a drifts up
+    (entity/set-vel! b 0  1.2)         ;; b drifts down
+    (world/attract! a b 1.0)           ;; mutual gravity, G-effective = 1
+    (world/attract! b a 1.0)
+    (let loop ((n 400))
+      (world/step)
+      (if (> n 0) (loop (- n 1))
+          (list (entity/pos a) (entity/pos b))))))
+
+(two-body-attract)
+;; => ((~89 ~118) (~231 ~122))    <- they drifted, then curled back
+```
+
+`world/attract!` installs a persistent inverse-square force from source
+to target. We install it twice, once each way, because gravity is
+mutual. Give them opposing initial velocities and they will curl
+around each other in an ellipse, come back near their starting
+positions, and do it again. It is a repeating orbit — the two-body
+problem has closed-form solutions, and our numerical sim reproduces
+one.
+
+Notice the shape of the loop. Whether we have one body or two, the
+outer loop is the same: `(world/step)` then check if we're done. This
+is what makes the whole book possible — every simulation, from a
+falling dot to a fifty-body cluster, uses this same shape. The only
+thing that changes is what's in the world when the loop starts.
+
+## 1.4 Many bodies — the arrival of emergence
+
+Now fifty bodies. Each one pulls on every other one. We didn't tell
+them to form a cluster; we told them to obey `F = G m1 m2 / r^2`.
+Watch what happens.
+
+```scheme
+;; Fifty bodies, mutual gravity, no floor. Let them find their shape.
+(define (cluster n)
+  (world/reset!)
+  (let loop ((i 0) (bodies '()))
+    (if (>= i n)
+        (bodies-attract-all bodies)
+        (let* ((x  (+ 100 (* 200 (random))))
+               (y  (+  80 (* 160 (random))))
+               (vx (- (* 0.5 (random)) 0.25))
+               (vy (- (* 0.5 (random)) 0.25))
+               (b  (world/spawn 'star x y)))
+          (entity/mass!    b (+ 50 (* 200 (random))))
+          (entity/set-vel! b vx vy)
+          (loop (+ i 1) (cons b bodies))))))
+
+(define (bodies-attract-all bs)
+  ;; Every body attracts every other body. (n^2) force installs.
+  (for-each
+    (lambda (a)
+      (for-each
+        (lambda (b)
+          (when (not (eq? a b))
+            (world/attract! a b 1.0)))
+        bs))
+    bs))
+
+(cluster 50)
+(let loop ((n 600)) (world/step) (when (> n 0) (loop (- n 1))))
+```
+
+After a few hundred frames you see it: the outliers get flung, the
+inner bodies fall together, and a knot forms in the middle. Nothing
+you wrote said 'form a knot.' The knot emerges because inverse-square
+attraction pulls hard at short range, and once two heavy stars pass
+close they capture each other, and once they capture each other other
+stars fall in. Structure appears. This is the first surprise of the
+book, and it will be repeated many times: give the pieces a rule,
+apply it many times, and watch shapes appear that no line of code
+demanded.
+
+`phys/nbody` gives you the same effect without the `for-each` boilerplate:
+
+```scheme
+;; The same thing with the built-in n-body verb.
+(define (cluster-nice n)
+  (world/reset!)
+  (let ((bs (phys/nbody-spawn n
+              :region   '(100 80 300 240)
+              :mass     '(50 . 250)
+              :vel      '(-0.25 . 0.25)
+              :G        1.0)))
+    bs))
+
+(cluster-nice 50)
+```
+
+`phys/nbody-spawn` installs the (n(n-1)) attractions for you and
+returns the list of entities. Under the hood: exactly the code above.
+
+---
+
+## 1.5 The four routing patterns in a simulation loop
+
+The book on the shelf next to this one — Book of Systems — teaches
+four patterns the runtime uses everywhere: composition, orchestration,
+in-routing, and routing. Even a one-chapter simulation touches all
+four. This section names them so you notice, next time, where the
+pattern is.
+
+**Composition.** `world/step` is not one verb; it is many small verbs
+composed. Under the hood it does: apply forces, integrate velocities,
+integrate positions, resolve constraints, check collisions, notify
+handlers. We compose it into our own step for the hand-rolled dropper.
+The `bodies-attract-all` function above is composition of `for-each`
+with `world/attract!`.
+
+**Orchestration.** The `let loop ((n 600))` is an orchestration of
+`world/step` across time. It waits, it counts down, it eventually
+returns. A more elaborate orchestration would `world/step` for 300
+frames, `world/snapshot` the state, `world/step` for another 300
+frames, and diff the snapshots to detect equilibrium.
+
+**In-routing.** When two stars collide, the physics engine has to route
+the collision event to the right handler. We haven't wired one yet, but
+in chapter 4 you'll see:
+
+```scheme
+(world/on-collision! 'star 'star
+  (lambda (a b) (entity/despawn! b)))  ;; merge two stars, keep one
+```
+
+The `'star 'star` is an in-route: 'when an entity tagged star hits
+another entity tagged star, dispatch here.'
+
+**Routing.** The result of the simulation has to go somewhere. Right
+now our functions return positions to the REPL. In a running world,
+each frame the positions route to the framebuffer via
+`(paint-circle x y r color)`, the collision events route to an audio
+handler, and any interesting emergent-cluster-forming events could
+route to Cortex as 'this initial condition led to a bound cluster.'
+
+Four patterns, all in one 60-line simulation. You'll see them again
+in every chapter.
+
+---
+
+## 1.6 Common desktop tasks
+
+An operator running a physical-goods shop asked the runtime once: 'if I hang
+a light fixture from a chain, and someone opens the front door and a
+wind comes through, how long until the fixture stops swinging?' That
+is a one-body simulation. It is `world/gravity!` + `entity/pin!` + an
+initial `world/impulse!` + `entity/friction!`, and it runs in eighty
+lines. Chapter 3 builds it. The point today: one-body simulation is not
+just for kids in astronomy class — it is a tool for answering everyday
+questions about the physical world.
+
+Another operator asked: 'if two of my parking spots are close together
+and both are magnetized to pull cars in, will cars end up in one spot
+or split evenly?' That is a two-body-attractor problem, and the answer
+depends on the ratio of attraction strength to car separation. You can
+find out with `two-body-attract` above; change 5000 to 2500 in one
+mass and re-run. This is the shop-side use of simulation.
+
+## 1.7 Try this yourself
+
+1. Change gravity to (0.5, 0) — sideways gravity. Re-run
+   `drop-one-dot`. Where does it land?
+2. In `euler-drop`, change the order of the two updates so `y` is
+   computed with `vy` instead of `vy*` (plain Euler). Run for 200
+   steps. Compare the y-value against the exact formula
+   `y = y0 + 0.5 * g * t^2`. Which is closer to the truth?
+3. In `two-body-attract`, make body b's mass 10× body a's mass. Do
+   both bodies still swing, or does the small one orbit the big one?
+4. In `cluster`, start with 200 bodies instead of 50. Does the cluster
+   form faster or slower? Why?
+
+## 1.8 Pitfalls
+
+**Blow-up.** If you set gravity too high and the timestep too big, the
+dot skips through the floor. Semi-implicit Euler helps but doesn't
+cure. Fix: smaller timestep, or use `world/floor!` which enforces
+after every substep, or clamp velocity via `entity/max-speed!`.
+
+**Ghost forces.** If you `world/attract!` in a running loop instead of
+once, you install a fresh attractor every frame. Bodies fly away at
+absurd speed. Install force relationships ONCE outside the loop.
+
+**Symmetric-vs-antisymmetric.** `world/attract! a b` is 'a attracts
+toward b.' Not 'they attract each other.' If you want mutual, call it
+twice. This is a source of many first-week simulation bugs.
+
+---
+
+Next chapter: two bodies linked by a spring, then ten of them in a
+chain, then a 15×15 grid of them in a piece of cloth. Same
+`world/step`, same integrator, one new primitive: `world/link!`.")

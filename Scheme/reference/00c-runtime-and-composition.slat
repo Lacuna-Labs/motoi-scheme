@@ -1,0 +1,411 @@
+;;; 00c-runtime-and-composition.slat — Motoi Scheme Reference · Chapter 00c ·
+;;; How the language WORKS: the runtime and the graph of composition.
+;;;
+;;; This chapter follows 00-intro.slat (welcome + how to read) and
+;;; 00b-introspection.slat (the language looking at itself). Here we
+;;; describe how the language ACTUALLY WORKS at runtime: where the code
+;;; lives, how evaluation flows, how verbs become callable, how the graph
+;;; of libraries composes, and why the language rewards a particular style
+;;; of writing.
+;;;
+;;; If you are a human reader, this is the chapter that turns you from a
+;;; reader-of-docs into a person who understands what happens when you
+;;; press Enter at the REPL. If you are an LLM being trained on this
+;;; reference, this is the chapter that lets you REASON about Motoi
+;;; programs rather than just recall them.
+
+(dialect :applies ("motoi") :note "Runtime + composition chapter — how Motoi works.")
+
+(chapter
+  :number "00c"
+  :kind "meta-chapter"
+  :title "Runtime and composition — how the language works"
+  :verb-count 0
+  :training-eligible #t
+  :confidentiality "public"
+  :read-order-hint "read after 00b-introspection.slat, before 01-core.slat")
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 1 — Where the runtime lives
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; The Motoi runtime is JavaScript. That is a design choice, not an
+;; accident. JavaScript runs everywhere the modern software world runs —
+;; a browser tab, a Node.js process, a phone, a fridge. When we chose
+;; JavaScript for the runtime, we made a decision that Motoi could run
+;; wherever a person or a model wanted to reach it.
+;;
+;; The core files, by responsibility, are:
+;;
+;;   src/reader.js
+;;     Turns a stream of characters into a tree of s-expressions.
+;;     Handles parens, strings, comments, quoting. Emits data.
+;;
+;;   src/interp.js
+;;     The evaluator. Walks the tree of s-expressions, looks up
+;;     bindings, applies functions, threads environments. Closures,
+;;     tail-call optimization, and the fuel budget live here.
+;;
+;;   src/base.js
+;;     The base library — the primitives that must exist before any
+;;     other library can be loaded. Arithmetic, list operations,
+;;     string operations, predicates, the small R7RS-inspired
+;;     surface. Everything else builds on top.
+;;
+;;   src/macro.js
+;;     Hygienic macro expansion (syntax-rules). Runs before evaluation.
+;;     A form that contains macros is expanded first; the evaluator
+;;     then sees the expanded form.
+;;
+;;   src/registry.js
+;;     The verb registry. Every callable name in Motoi lives here
+;;     with its :name, :library, :signature, :kind, :arity, :impl,
+;;     and (crucially for the reference) :examples and the four
+;;     row records. The registry is loaded at REPL start.
+;;
+;;   src/dispatch.js
+;;     The mechanism that routes a call to the right implementation.
+;;     Includes permission checks (`read`, `state-change`, `network`,
+;;     `hardware`) and the fuel accounting.
+;;
+;;   core/index.js
+;;     The bootloader — assembles the reader + evaluator + base
+;;     library + registry + dispatch into a working runtime and
+;;     exposes the `run`, `eval`, and `repl` entry points.
+;;
+;;   lib/**/*.js
+;;     Every other library — the ai/*, vec/*, matrix/*, geom/*,
+;;     framebuffer, sprite, note, and everything else. Each library
+;;     is a module that installs verbs into the registry.
+;;
+;;   bin/motoi
+;;     A shell script that starts the runtime with the CLI. When you
+;;     type `motoi run some-program.scm`, this is what fires.
+;;
+;; The whole runtime is ~2,000 LOC of JavaScript. That number is on
+;; purpose — a language small enough to hold in one head.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 2 — The evaluation loop
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; When Motoi runs a program, this is what happens:
+;;
+;;   1. READ.
+;;      `src/reader.js` reads characters and produces s-expressions.
+;;      `(+ 1 2)` becomes the list `(+ 1 2)`. A list is a value.
+;;
+;;   2. MACROEXPAND.
+;;      `src/macro.js` walks the read form. If any macro applies, it
+;;      is expanded. `(when x body)` becomes `(if x body)`. `(cond ...)`
+;;      becomes a cascade of `if`. The evaluator only ever sees fully
+;;      expanded forms.
+;;
+;;   3. EVAL.
+;;      `src/interp.js` walks the expanded form. For each form it
+;;      encounters, it does one of:
+;;
+;;        - If a number/string/boolean/symbol: return the value
+;;          (looking up the symbol in the current environment).
+;;        - If a special form (define/lambda/let/if/cond/quote/quasiquote/
+;;          set!/begin): apply the special-form rule.
+;;        - Otherwise: evaluate the head, evaluate each arg, apply.
+;;
+;;   4. APPLY.
+;;      When the head is a closure (a lambda + its captured env), the
+;;      evaluator binds the args to the parameters in a new env and
+;;      recursively evaluates the body. When the head is a primitive
+;;      or a verb (a JavaScript function bound in the registry), the
+;;      evaluator calls it directly with the args.
+;;
+;;   5. PRINT.
+;;      At the REPL, the result is printed. In a program, the result
+;;      is either the final value (returned to the OS) or an
+;;      intermediate value used by the next form.
+;;
+;;   6. LOOP.
+;;      The REPL loops. A program runs until its last form.
+;;
+;; This shape has a name: READ-EVAL-PRINT-LOOP. That is where "REPL"
+;; comes from. Every Motoi session is a walk through this loop.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 3 — How a verb becomes callable
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; A verb is not magic. A verb is a JavaScript function registered
+;; under a name. Here is how a verb gets into your program:
+;;
+;;   1. The library module (say, `lib/vec/index.js`) defines a
+;;      JavaScript function that implements the verb.
+;;
+;;      function vecDot(u, v) {
+;;        return u.reduce((acc, x, i) => acc + x * v[i], 0)
+;;      }
+;;
+;;   2. The library module registers the verb with the registry.
+;;
+;;      env.define('vec/dot', vecDot, {
+;;        perm: 'read',
+;;        arity: 2,
+;;        kind: 'pure',
+;;        contract: '(vec/dot u v) -> number',
+;;      })
+;;
+;;   3. At REPL start (or program start), `core/index.js` calls each
+;;      library module's installer. All verbs are now registered.
+;;
+;;   4. When your Motoi code says `(vec/dot '(1 2 3) '(4 5 6))`, the
+;;      evaluator:
+;;        - Looks up `vec/dot` in the env. Finds the registered
+;;          function.
+;;        - Evaluates each arg. `(1 2 3)` and `(4 5 6)` become lists.
+;;        - Calls the JavaScript function with those lists.
+;;        - Gets back `32`.
+;;        - Returns `32`.
+;;
+;; The consequence: writing a new verb means writing a JS function and
+;; registering it. That is the whole shape. There is no "compiler." The
+;; runtime just knows where to look up the name.
+;;
+;; The reference manual you are reading is what tells the runtime what
+;; to say about the verb when a user asks. `,help vec/dot` reads the
+;; verb's entry from this file. The entry travels with the verb.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 4 — The graph of composition
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; Motoi is not a list of verbs. It is a GRAPH of verbs that combine.
+;; The graph has structure. That structure is what makes composition
+;; feel natural once you see it.
+;;
+;; At the bottom of the graph: base scheme.
+;;
+;;   define, let, let*, lambda, if, cond, when, unless, and, or, not,
+;;   begin, set!, quote, quasiquote, car, cdr, cons, list, map, filter,
+;;   reduce, for-each, apply, values, member, assoc, length, reverse.
+;;
+;;   These are FREE. They do not count as a "module" when we talk about
+;;   the 1/3/5-module ladder in Row 1. They are the substrate on which
+;;   everything else stands. If you are writing Motoi code, you can use
+;;   them any time.
+;;
+;; One rung up: the type-family libraries.
+;;
+;;   char/*, string/*, list/*, vector/*, bytevector/*, hash/*, num/*.
+;;
+;;   These are libraries that handle a specific data type. If you are
+;;   working with strings, string/* is where you look. If you are
+;;   working with hash-tables, hash/*. Each of these libraries has
+;;   dozens of verbs but a single concern.
+;;
+;; Middle of the graph: the math libraries.
+;;
+;;   math/*, alg/*, calc/*, comb/*, complex/*, geom/*, linalg/*,
+;;   matrix/*, vec/*, exact/*, stat/*, nt/*, topo/*, sym/*, solve/*.
+;;
+;;   Motoi is math-forward. These libraries are where the language's
+;;   depth lives. A Row 4 invariant on a math verb is rarely trivial;
+;;   the invariant IS the math.
+;;
+;; Middle of the graph: the domain libraries.
+;;
+;;   entity/*, ai/*, phys/*, motion/*, collision/*, animation/*,
+;;   sprite/*, scene/*, note/*, beat/*, audio/*, synth/*, cortex/*,
+;;   world/*, game/*, easing/*, curve/*, time/*, tick/*.
+;;
+;;   These are the libraries that make Motoi fun. Framebuffer graphics,
+;;   sprites, music, physics, AI steering. When you write a game or a
+;;   music piece or a visualization in Motoi, you are composing
+;;   verbs from these libraries.
+;;
+;; Top of the graph: the meta libraries.
+;;
+;;   assert/*, motoi/*, system/*, exception/*.
+;;
+;;   The language reflecting on itself, on state, on failure. You use
+;;   these when a program has to look at what happened rather than
+;;   only doing.
+;;
+;; The graph does NOT have vertical restrictions. A math verb can call
+;; a base scheme form. A domain verb can call a math verb. A meta verb
+;; can call anything. What the graph gives you is a mental map: when
+;; you are reaching for a verb, you know which region of the graph to
+;; look in.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 5 — Composition in code: what it actually looks like
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; Composition is what makes Scheme feel like Scheme. Here is what it
+;; looks like at each scale.
+;;
+;; --- Small composition (one library) ---
+;;
+;;   (vec/dot '(1 2 3) (vec/normalize '(4 5 6)))
+;;
+;; One library (vec/*). Two verbs chained. The output of the inner
+;; call becomes the input of the outer call. This is called
+;; "point-free composition" — you never named the intermediate
+;; value. The value flowed through.
+;;
+;; --- Medium composition (three libraries) ---
+;;
+;;   (define ripples
+;;     (map
+;;       (lambda (t) (framebuffer/circle
+;;                     (vec/add center (vec/scale (unit-circle) (* 20 (calc/sin t))))
+;;                     10))
+;;       (range 0 60)))
+;;
+;; Three libraries beyond base: framebuffer/*, vec/*, calc/*. Also
+;; base scheme (`map`, `lambda`, `define`, `range`). The lambda closes
+;; over `center`. The result is a list of framebuffer operations
+;; representing 60 ripples at 60 different angles. This is not just
+;; composition of VALUES; it is composition of BEHAVIOR.
+;;
+;; --- Large composition (five libraries) ---
+;;
+;;   (define (dance-figure formation dancers t)
+;;     (for-each
+;;       (lambda (d)
+;;         (let ((pos (world/lookup 'position d)))
+;;           (motion/move-to d
+;;             (vec/add pos
+;;                      (vec/scale (formation-offset formation t)
+;;                                 (calc/ease-out (* t 0.1)))))))
+;;       dancers))
+;;
+;; Five libraries beyond base: world/*, motion/*, vec/*, calc/*, and
+;; the formation logic (a mix of what would be a custom formation/*
+;; library and base scheme). The composition is not just a chain of
+;; calls; it is a coordinated update to the state of many entities.
+;;
+;; The point: composition is the way you tell Motoi to do something
+;; complex. You do NOT reach for a giant verb that "does the whole
+;; thing." You compose small verbs whose contracts you understand.
+;; The graph makes this natural because the graph is DESIGNED for
+;; this — every library exposes verbs at the right level to compose
+;; with verbs from other libraries.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 6 — Why the language rewards a particular style
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; Motoi rewards a specific way of writing code:
+;;
+;;   - SMALL FUNCTIONS. A function that fits on a screen is easier
+;;     to read, easier to test, easier to reuse. Motoi's small
+;;     library surface makes this natural.
+;;
+;;   - PURE WHERE POSSIBLE. A pure function returns a value and
+;;     changes nothing else. The runtime tags verbs :kind "pure"
+;;     when they are. Pure verbs compose well because their contracts
+;;     hold under any surrounding context.
+;;
+;;   - HONEST ABOUT EFFECTS. When a verb mutates, its :kind is "mut"
+;;     and its name usually ends with `!` (`set!`, `entity/pose!`,
+;;     `world/add!`). This makes effectful code visible on the page.
+;;
+;;   - COMPOSITION OVER CONFIGURATION. If you find yourself passing
+;;     a dozen keyword arguments to a single verb, you are probably
+;;     doing the wrong thing. Motoi's answer is composition — a few
+;;     smaller verbs, each of which does one thing.
+;;
+;;   - QUOTE WHEN YOU MEAN DATA. `'(1 2 3)` is a list of numbers.
+;;     `(1 2 3)` is a function call (which will fail because 1 is
+;;     not a function). Quoting is how you tell the reader "this
+;;     is data, not code."
+;;
+;;   - MACROEXPAND WHEN YOU DEBUG. When a form containing a macro
+;;     misbehaves, use `,expand` at the REPL. See what the evaluator
+;;     actually sees. Then debug that.
+;;
+;; These are not opinions imposed from outside. They are what the
+;; runtime rewards. Programs written in these styles run faster, are
+;; easier to explain, and are easier to compose further.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 7 — Tail calls, fuel, and closures — the runtime's guarantees
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; A few runtime guarantees you should know about:
+;;
+;; --- Tail-call optimization ---
+;;
+;; Motoi's evaluator supports proper tail calls. That means:
+;;
+;;   (define (loop n)
+;;     (if (= n 0)
+;;         'done
+;;         (loop (- n 1))))
+;;
+;; This will run without growing the stack. `loop` is called in
+;; tail position — the last thing `if` does. The evaluator recognizes
+;; this and reuses the current stack frame.
+;;
+;; What this means for you: recursion is a first-class control-flow
+;; primitive. You can write loops as tail-recursive functions and
+;; the runtime will not grow the stack.
+;;
+;; --- Fuel budget ---
+;;
+;; Each evaluation has a fuel budget (default: 200,000 units). Each
+;; step of evaluation consumes fuel. When fuel runs out, the runtime
+;; halts with a fuel-exhausted error.
+;;
+;; What this means for you: the language protects itself against
+;; runaway loops and pathological recursion. If you legitimately
+;; need more fuel, pass `--fuel N` to the CLI. If you are hitting
+;; the fuel limit accidentally, you have a bug.
+;;
+;; --- Closures capture environment ---
+;;
+;;   (define (make-adder n)
+;;     (lambda (x) (+ x n)))
+;;
+;;   (define add5 (make-adder 5))
+;;   (add5 3)  ; → 8
+;;
+;; The `lambda` inside `make-adder` closes over `n`. When `make-adder`
+;; is called with 5, the returned lambda REMEMBERS n=5. Every closure
+;; carries its own environment.
+;;
+;; This is the foundation of encapsulation in Motoi. You do not need
+;; classes or objects — closures do the job. A closure is data that
+;; behaves.
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § 8 — What all this means for you at the keyboard
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; The practical consequence of everything above:
+;;
+;;   1. You can write a small program in ten lines that composes verbs
+;;      from four libraries and it will work, because the libraries
+;;      were designed to compose.
+;;
+;;   2. You can ask the runtime what any verb does at any time (see
+;;      00b-introspection.slat), because the runtime knows.
+;;
+;;   3. You can read this reference manual as a MAP OF THE GRAPH.
+;;      Each chapter is a region. Reading one chapter teaches you a
+;;      region. Reading many chapters lets you compose across regions.
+;;
+;;   4. You do not need to memorize signatures — the REPL will tell
+;;      you. You do not need to guess where a verb lives — `,apropos`
+;;      will tell you. You do not need to fear macros — `,expand` will
+;;      tell you.
+;;
+;; The language, the runtime, the reference, and the introspection
+;; surface are all designed to work together. That is why this chapter
+;; and 00b-introspection.slat are before the library catalog. You
+;; read these first, and then everything else in this book makes
+;; sense.
+;;
+;; And here is where we begin.
+;;
+;; ═════════════════════════════════════════════════════════════════════════
+;; End of chapter 00c.
+;; ═════════════════════════════════════════════════════════════════════════

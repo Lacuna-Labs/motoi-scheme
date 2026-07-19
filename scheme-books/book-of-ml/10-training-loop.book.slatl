@@ -1,0 +1,336 @@
+(chapter
+  :book "Book of ML"
+  :chapter-number 10
+  :title "The training loop"
+  :audience "kid-and-adult operators"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-19"
+     :sources ((:reference "MOTOI-SCHEME-REFERENCE.slat" :section "vec/, math/, core")
+               (:concept "SGD as used in modern deep learning")))
+  :prose
+"# Chapter 10 — The training loop
+
+Everything the last four chapters set up gets used here. Forward
+pass, loss, backward pass, parameter update. Do that many times on
+many examples. That is training. Change the data, change the
+architecture, change the loss, but the loop shape is the same
+whether you are fitting a line or training GPT-4.
+
+## The loop, in words
+
+```
+initialize parameters (randomly)
+repeat many times:
+  pick some examples
+  forward: compute predictions from current parameters
+  loss: compute how wrong the predictions are
+  backward: compute the gradient of the loss with respect to every parameter
+  update: parameter := parameter - learning_rate * gradient
+stop when the loss is small enough (or you run out of time)
+```
+
+Every trained model in the world went through this loop. Big models
+have more data, more parameters, and more sophisticated update rules
+(Adam, AdamW), but the loop is exactly this shape.
+
+## Problem 1 — Train a single neuron to fit y = 2x + 1
+
+We did this in chapter 6 with finite-difference gradients. Now let's
+do it with analytic backprop. Same result, faster, cleaner.
+
+```
+;; Data: pairs (x, y) where y = 2x + 1 with a little noise
+(define data
+  (list (cons -2.0 -3.0)
+        (cons -1.0 -1.0)
+        (cons  0.0  1.0)
+        (cons  1.0  3.0)
+        (cons  2.0  5.0)))
+
+;; Model: y_pred = w*x + b
+;; Loss: (y_pred - y_true)^2
+
+(define (train-step w b lr example)
+  (define x (car example))
+  (define y-true (cdr example))
+  (define y-pred (+ (* w x) b))
+  ;; Backprop:
+  (define dL-dy (* 2 (- y-pred y-true)))
+  (define dL-dw (* dL-dy x))
+  (define dL-db dL-dy)
+  ;; Update:
+  (list (- w (* lr dL-dw))
+        (- b (* lr dL-db))))
+
+(define (train-epoch w b lr data)
+  (fold (lambda (example params)
+          (train-step (car params) (cadr params) lr example))
+        (list w b)
+        data))
+
+(define (mean-loss w b data)
+  (define (sq p)
+    (let ((y-pred (+ (* w (car p)) b))
+          (y-true (cdr p)))
+      (* (- y-pred y-true) (- y-pred y-true))))
+  (/ (reduce + 0 (map sq data)) (length data)))
+
+(define final
+  (let loop ((w 0.0) (b 0.0) (epoch 0))
+    (if (> epoch 200)
+        (list w b (mean-loss w b data))
+        (let ((next (train-epoch w b 0.05 data)))
+          (loop (car next) (cadr next) (+ epoch 1))))))
+
+(display final)
+;; => approximately (2.0 1.0 ~0)
+```
+
+The neuron converged. Starting from `w=0, b=0`, after 200 epochs
+(passes through the data), the parameters are essentially the true
+`w=2, b=1` and the loss is essentially zero.
+
+Read the code:
+
+- `train-step` takes one example, computes gradients, updates.
+- `train-epoch` folds `train-step` over the whole data list.
+- The outer loop runs 200 epochs.
+- `mean-loss` at the end tells us how well we did.
+
+## Problem 2 — Batching
+
+In problem 1 we updated after every example (called stochastic
+gradient descent, or SGD). The gradient from one example is noisy.
+Averaging gradients over a batch of examples smooths the noise.
+
+Batch gradient descent:
+
+```
+(define (batch-gradient w b batch)
+  (define n (length batch))
+  (define (grads example)
+    (let ((x (car example)) (y-true (cdr example)))
+      (let ((y-pred (+ (* w x) b)))
+        (let ((dL-dy (* 2 (- y-pred y-true))))
+          (list (* dL-dy x) dL-dy)))))
+  (define all (map grads batch))
+  (define sum-dw (reduce + 0 (map car all)))
+  (define sum-db (reduce + 0 (map cadr all)))
+  (list (/ sum-dw n) (/ sum-db n)))
+
+(define (batch-train w b lr batch)
+  (define g (batch-gradient w b batch))
+  (list (- w (* lr (car g)))
+        (- b (* lr (cadr g)))))
+
+(define data
+  (list (cons -2.0 -3.0) (cons -1.0 -1.0)
+        (cons  0.0  1.0) (cons  1.0  3.0) (cons 2.0 5.0)))
+
+(define result
+  (let loop ((w 0.0) (b 0.0) (n 0))
+    (if (> n 500)
+        (list w b)
+        (let ((next (batch-train w b 0.1 data)))
+          (loop (car next) (cadr next) (+ n 1))))))
+
+(display result)
+;; => approximately (2.0 1.0)
+```
+
+Same answer as SGD but the loss curve is smoother. In practice
+mini-batches (10-256 examples) balance smoothness against speed.
+
+## Problem 3 — Training a two-layer network on non-linear data
+
+Now let's train the multi-layer perceptron from chapter 8. Target:
+fit `y = x^2` on some data points. A linear model cannot do this.
+A network with ReLU and a hidden layer can.
+
+```
+(define (relu x) (if (> x 0) x 0))
+(define (relu-grad u) (if (> u 0) 1 0))
+
+;; Two-layer network: 1 input, H hidden, 1 output
+(define H 8)
+
+;; Random initialization
+(define (init-vec dim)
+  (map (lambda (_) (- (* (random) 0.5) 0.25)) (iota dim)))
+
+(define W1 (map (lambda (_) (init-vec 1)) (iota H)))    ;; H x 1
+(define b1 (init-vec H))
+(define W2 (list (init-vec H)))                          ;; 1 x H
+(define b2 (init-vec 1))
+
+;; Forward pass: returns (u1, h, y)
+(define (forward W1 b1 W2 b2 x)
+  (define u1 (map (lambda (row bi) (+ (vec/dot (vec/make row) (listx))) bi))
+                  W1 b1))
+  (define h  (map relu u1))
+  (define y  (+ (vec/dot (vec/make (car W2)) (vec/make h)) (car b2)))
+  (list u1 h y))
+
+;; Backward: computes gradients for all parameters
+(define (backward W1 b1 W2 b2 x y-true)
+  (define fwd (forward W1 b1 W2 b2 x))
+  (define u1 (car fwd))
+  (define h  (cadr fwd))
+  (define y  (caddr fwd))
+  (define dL-dy (* 2 (- y y-true)))
+  ;; y = W2·h + b2  -> dL/dW2[i] = dL-dy * h[i], dL/db2 = dL-dy
+  (define dL-dW2 (list (map (lambda (hi) (* dL-dy hi)) h)))
+  (define dL-db2 (list dL-dy))
+  (define dL-dh (map (lambda (w2i) (* dL-dy w2i)) (car W2)))
+  ;; h = relu(u1)  -> dL/du1[i] = dL-dh[i] * relu'(u1[i])
+  (define dL-du1 (map (lambda (dh u) (* dh (relu-grad u))) dL-dh u1))
+  ;; u1 = W1·x + b1 (each u1[i] = W1[i][0]*x + b1[i])
+  (define dL-dW1 (map (lambda (du) (list (* du x))) dL-du1))
+  (define dL-db1 dL-du1)
+  (list dL-dW1 dL-db1 dL-dW2 dL-db2))
+
+;; Update
+(define (vec-update v grads lr)
+  (map (lambda (vi gi) (- vi (* lr gi))) v grads))
+
+(define (row-update rows grads lr)
+  (map (lambda (r g) (vec-update r g lr)) rows grads))
+
+;; Data
+(define data
+  (map (lambda (i)
+         (let ((x (/ (- i 5) 2.5)))
+           (cons x (* x x))))
+       (iota 11)))
+;; x from -2 to 2 in steps of 0.4, y = x^2
+
+;; Training loop
+(define lr 0.03)
+
+(let loop ((W1 W1) (b1 b1) (W2 W2) (b2 b2) (epoch 0))
+  (if (> epoch 3000)
+      (begin
+        (display \"final loss: \")
+        (display
+          (/ (reduce +
+                     0
+                     (map (lambda (p)
+                            (let ((y (caddr (forward W1 b1 W2 b2 (car p)))))
+                              (* (- y (cdr p)) (- y (cdr p)))))
+                          data))
+             (length data)))
+        (newline))
+      (let inner ((rem data) (W1 W1) (b1 b1) (W2 W2) (b2 b2))
+        (if (null? rem)
+            (loop W1 b1 W2 b2 (+ epoch 1))
+            (let* ((example (car rem))
+                   (grads (backward W1 b1 W2 b2 (car example) (cdr example)))
+                   (dW1 (car grads))
+                   (db1 (cadr grads))
+                   (dW2 (caddr grads))
+                   (db2 (cadddr grads)))
+              (inner (cdr rem)
+                     (row-update W1 dW1 lr)
+                     (vec-update b1 db1 lr)
+                     (row-update W2 dW2 lr)
+                     (vec-update b2 db2 lr)))))))
+;; final loss: something small (< 0.05 typically, depending on random init)
+```
+
+The network learned to approximate `y = x^2` on the training data.
+The ReLU units bent the input space; the output layer summed them into
+a curve. This is the smallest interesting neural network training in
+Motoi Scheme.
+
+Read the code carefully. It has all the pieces: forward pass, loss,
+backward pass with chain rule, and parameter update. Nothing else.
+Everything else in this book is more of the same, arranged
+differently.
+
+## Problem 4 — Overfitting
+
+If you train a large network on a small dataset, it may memorize the
+training examples rather than learning the underlying pattern. The
+training loss goes to zero. The loss on held-out (test) data is
+large. That is overfitting.
+
+```
+;; If your training data has 5 points and your network has 50
+;; parameters, the network has enough capacity to hit every training
+;; point exactly and do nothing sensible in between.
+```
+
+The fix: more data, or a smaller model, or regularization (a penalty
+in the loss that discourages large parameters), or dropout (randomly
+zeroing hidden units during training). Real ML is largely about
+managing this trade-off.
+
+For a language model, overfitting means memorizing the training
+corpus rather than learning language patterns. Big models trained
+on huge corpora have a hard time overfitting because there is too
+much data to memorize. Small models on small corpora overfit like
+mad.
+
+## Problem 5 — When to stop
+
+Training does not stop 'automatically.' You choose when. Two
+strategies.
+
+**Fixed number of epochs.** Train for a preset number of passes over
+the data. Simple, predictable.
+
+**Early stopping.** Keep a held-out validation set. Train and track
+loss on the validation set. When the validation loss stops decreasing
+(or starts increasing), stop. That is the moment the model started
+to overfit.
+
+Modern practice is early stopping with a patience of a few epochs:
+stop after N consecutive epochs of no validation improvement.
+
+## Capstone — Training loop template
+
+A complete training loop as a template you can reuse. Not for any
+particular model — a scaffold.
+
+```
+;; Given:
+;;   init-params  -> parameters
+;;   forward params x -> prediction
+;;   loss params batch -> scalar
+;;   backward params batch -> gradient
+;;   update params gradient lr -> new params
+(define (train init-params forward loss backward update data lr epochs)
+  (let loop ((params init-params) (epoch 0))
+    (if (>= epoch epochs)
+        params
+        (let ((g (backward params data)))
+          (let ((new-params (update params g lr)))
+            (when (= (modulo epoch 100) 0)
+              (display \"epoch \") (display epoch)
+              (display \" loss \") (display (loss new-params data))
+              (newline))
+            (loop new-params (+ epoch 1)))))))
+```
+
+This shape works for any model. Change `forward`, `backward`, and
+`update` to match the architecture. The loop shell is invariant.
+
+## Why this matters
+
+You now know how to train. From random weights, through many small
+updates, to a model that fits data. This is the mechanism that
+produces every trained model in the world. Chapters 11-15 build the
+architecture of a language model. Chapter 16 trains it with the loop
+you just learned.
+
+## What's next
+
+Chapter 11 is where the language part of language models begins. We
+have to turn words into vectors. That is what tokens and embeddings
+are for. Once we have vectors, all the machinery from chapters 2-10
+applies directly.
+")

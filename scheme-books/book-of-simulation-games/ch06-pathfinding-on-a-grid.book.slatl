@@ -1,0 +1,290 @@
+;; ch06-pathfinding-on-a-grid.book.slatl
+;; Book of Simulation Games — Chapter 6: Pathfinding on a Grid
+;; Authored 2026-07-16 by simulation-games-engineer-lane.
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Simulation Games"
+  :chapter-number      6
+  :title               "Pathfinding on a Grid"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "simulation-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + physics-simulation-emergent"
+  :book-version        "1.0.0"
+  :draws-from-preserved (:book "book-of-games-preserved" :ch 8)
+  :provenance          ((:authored-by "Engineer") (:date "2026-07-16"))
+  :prose
+"A maze is a grid where some cells are walls and some cells are open.
+A path is a sequence of open cells from start to goal, each cell
+adjacent to the previous. A pathfinder is a program that finds a
+path given the maze, the start, and the goal. This chapter builds
+one, uses it to steer agents, and then makes the maze move under the
+agents so they have to re-plan.
+
+Pathfinding is not magic. It is search over a graph. The graph is
+'open cells linked to their open neighbors,' and the algorithm is
+called A-star (spelled A*). A* keeps a frontier of cells it hasn't
+examined yet, ordered by a smart guess of how close each is to the
+goal, and expands the best-looking cell first. When it reaches the
+goal, it reconstructs the path by walking back through remembered
+parents. That is the whole algorithm.
+
+Motoi Scheme's `ai/path` wraps A* so you don't write it yourself, but
+we'll build a tiny version by hand so you can see the shape.
+
+---
+
+## 6.1 A maze
+
+```scheme
+(define (make-maze cols rows)
+  (let ((g (ai/grid cols rows)))
+    ;; Walls around the edge.
+    (let loop-x ((c 0))
+      (when (< c cols)
+        (ai/wall! g c 0)
+        (ai/wall! g c (- rows 1))
+        (loop-x (+ c 1))))
+    (let loop-y ((r 0))
+      (when (< r rows)
+        (ai/wall! g 0 r)
+        (ai/wall! g (- cols 1) r)
+        (loop-y (+ r 1))))
+    ;; A few internal walls to make it interesting.
+    (for-each
+      (lambda (rc)
+        (ai/wall! g (car rc) (cdr rc)))
+      '((5 . 4) (5 . 5) (5 . 6) (5 . 7)
+        (10 . 8) (10 . 9) (10 . 10) (10 . 11)
+        (15 . 3) (15 . 4) (15 . 5) (15 . 6)
+        (15 . 7) (15 . 8)))
+    g))
+
+(define maze (make-maze 24 16))
+```
+
+`ai/grid` creates the pathfinding grid; `ai/wall!` marks a cell as
+non-traversable. Now we have a grid with obstacles.
+
+## 6.2 Find a path
+
+```scheme
+(define path (ai/path maze '(2 . 2) '(21 . 13)))
+;; => ((2 . 2) (3 . 2) (4 . 2) ... (21 . 13))
+```
+
+`ai/path` returns a list of cell coordinates from start to goal, or
+`#f` if no path exists. Under the hood, A* has:
+
+- Kept a priority queue of cells to examine, ordered by `g + h`,
+  where `g` is the cost to reach the cell from the start and `h` is
+  a HEURISTIC — a fast, admissible guess at cost from the cell to
+  the goal. On a grid, `h` is usually Manhattan distance.
+- Popped the cheapest cell, marked it examined, and expanded its
+  passable neighbors, updating their `g` and remembering their
+  parent.
+- Stopped when it popped the goal, at which point it walked parents
+  back to reconstruct the path.
+
+That is A*. Every game AI you've ever seen doing pathfinding uses
+some form of it.
+
+## 6.3 Walk the path
+
+```scheme
+(define (spawn-agent x y)
+  (let ((a (world/spawn 'runner x y)))
+    (entity/mass!      a 1.0)
+    (entity/max-speed! a 1.5)
+    (ai/max-force!     a 0.10)
+    a))
+
+(define runner (spawn-agent 32 32))
+
+(ai/follow-path runner path)
+```
+
+`ai/follow-path` installs a steering behavior on the agent. Each
+frame the agent computes 'which waypoint am I heading for now?' and
+steers toward it. When it reaches a waypoint, it advances to the
+next. When it reaches the last waypoint, it stops.
+
+The waypoint spacing matters. If waypoints are too dense, the agent
+zigzags between them; if too sparse, it takes shortcuts and clips
+through corners. `ai/waypoints` can down-sample a path by removing
+collinear points, which usually gives better-looking motion.
+
+```scheme
+(define smoothed (ai/waypoints path))
+(ai/follow-path runner smoothed)
+```
+
+## 6.4 Visualize the search
+
+Watching A* explore is one of the delightful things about it.
+`ai/path-debug` returns the search-order too, so you can paint each
+explored cell in fading color.
+
+```scheme
+(let ((debug (ai/path-debug maze '(2 . 2) '(21 . 13))))
+  (let ((order (assoc 'explored debug))
+        (path  (assoc 'path     debug)))
+    (on-frame
+      (lambda (t)
+        ;; Paint each explored cell, colored by order.
+        (for-each
+          (lambda (cell-and-time)
+            (let ((c    (car  cell-and-time))
+                  (when (cadr cell-and-time)))
+              (paint-cell (car c) (cdr c) (color-fade when))))
+          (cdr order))
+        ;; Overlay the path in bright.
+        (for-each
+          (lambda (c) (paint-cell (car c) (cdr c) yellow))
+          (cdr path))))))
+```
+
+You see A* radiating out from the start, biased toward the goal (that
+is the heuristic doing its work), then a bright path drawn on top when
+it reaches. Kids love this. It demystifies AI.
+
+## 6.5 Dynamic maze — re-plan under change
+
+Drop a wall in front of the agent mid-run. The agent has to notice
+and re-plan.
+
+```scheme
+(define (drop-wall-and-replan)
+  (ai/wall! maze 15 12)                 ;; block a cell on the path
+  (let* ((from (entity/cell runner))
+         (new  (ai/path maze from '(21 . 13))))
+    (if new
+        (ai/follow-path runner (ai/waypoints new))
+        (display \"stuck\"))))
+```
+
+You could do this on every keypress, or on every wall-drop, or
+continuously (re-plan every N frames). Continuous replanning is what
+real games do for enemies chasing a player who moves. It's cheap
+enough on small grids to run every frame.
+
+## 6.6 Guards on patrol — a stealth mini-sim
+
+Give some guards a fixed patrol path (a loop). Give the player a
+different goal. Ask: is there a path the player can take that never
+puts them in a guard's sight for the next 30 frames?
+
+```scheme
+(define guard-1 (spawn-agent 96 96))
+(define guard-1-path (ai/waypoints
+  (ai/path maze '(3 . 3) '(3 . 12))))
+(ai/follow-path-loop guard-1 guard-1-path)
+
+;; Predict where each guard will be in the next 30 frames.
+(define (guard-forecast guard n)
+  (let loop ((i 0) (positions '()))
+    (if (>= i n)
+        (reverse positions)
+        (loop (+ i 1)
+              (cons (ai/predict-position guard i)
+                    positions)))))
+
+;; A cell is 'unsafe' if any guard sees it within the next 30 frames.
+(define (unsafe? cell)
+  (let ((forecasts
+          (map (lambda (g) (guard-forecast g 30))
+               (world/find-all 'runner))))
+    (any (lambda (fs)
+           (any (lambda (p) (< (geom/distance cell p) 3)) fs))
+         forecasts)))
+
+;; A pathfind that treats unsafe cells as walls.
+(define (safe-path from to)
+  (let ((snapshot (ai/grid-copy maze)))
+    (for-each
+      (lambda (cell) (ai/wall! snapshot (car cell) (cdr cell)))
+      (unsafe-cells snapshot 30))
+    (ai/path snapshot from to)))
+```
+
+This is game design as pathfinding-plus-prediction. Each guard's
+future path is a spacetime tube; the player's plan avoids the tubes.
+
+---
+
+## 6.7 The four routing patterns in pathfinding
+
+**Composition.** The pathfinder is composed: heuristic function +
+priority queue + explored set + parent map. `ai/path` is a
+composition of those pieces. In-house you'd swap the heuristic to
+Chebyshev or Euclidean or a domain-specific one.
+
+**Orchestration.** A guard's life cycle is orchestrated: pick a patrol
+target → path to it → follow the path → pick the next target → repeat.
+The stealth game's player-plan is orchestrated across time: forecast
+guards → wall-off unsafe cells → replan → move for K frames → forecast
+again.
+
+**In-routing.** When the agent reaches a waypoint, the follow-path
+routine advances to the next. This is a mini in-router — the event
+'reached waypoint N' dispatches to 'set current target to waypoint N+1'
+or 'stop.' When a wall drops, an event like `world/on-grid-change`
+routes to a re-planner.
+
+**Routing.** The path itself is a route in the physical sense (the
+agent's route through the maze). The exploration visualization routes
+each explored cell to the framebuffer. The 'no path exists' outcome
+routes to the game's failure handler ('the level is unsolvable, tell
+the operator'). The runtime can persist to Cortex: 'from the shop's stock
+room, average path length to the checkout with this shelf
+arrangement is 14 cells.'
+
+---
+
+## 6.8 Common desktop tasks
+
+An operator asked: 'if we rearrange the shop, will customers still be
+able to reach every product?' Model the shop as a grid, model the
+shelves as walls, run `ai/path` from the entrance to each product's
+cell. If any product returns no path, you've boxed it in. Also useful:
+compute the average path length from entrance to each shelf as a
+'reachability score.'
+
+## 6.9 Try this
+
+1. Add DIAGONAL neighbors (`ai/grid-8-connected`). Do paths get
+   shorter? Do they look more natural?
+2. Turn some walls into 'expensive' cells (`ai/cost-set! g x y 5`).
+   Does A* route around them?
+3. Two agents, both pathfinding to the same goal. Do they collide?
+   Fix it: teach the pathfinder that another agent's next 5 cells
+   are temporarily walls.
+4. Fog of war: `ai/path` on a partial map (only cells the agent has
+   visited). Does the agent explore intelligently?
+5. Compare A* to breadth-first search (`ai/path :heuristic 'zero`)
+   on a big open grid. Which explores fewer cells?
+
+## 6.10 Pitfalls
+
+**Unreachable goal.** `ai/path` returns `#f`. Always handle this in
+your caller.
+
+**Bad heuristic.** If the heuristic overestimates distance to goal,
+A* is no longer optimal — it may return a suboptimal path. Manhattan
+is safe on 4-connected grids; Chebyshev is safe on 8-connected.
+
+**Grid resolution.** Too fine, and paths are jaggy AND expensive to
+compute. Too coarse, and paths miss the natural shape of your world.
+The right resolution matches the agent's collision size.
+
+---
+
+Next: the brachistochrone. What curve gets a ball from A to B
+fastest? Not the straight line, not the quarter circle. Something
+older and stranger.")

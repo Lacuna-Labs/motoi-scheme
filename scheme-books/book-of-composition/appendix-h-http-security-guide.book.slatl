@@ -1,0 +1,199 @@
+(chapter
+  :book "Book of Composition"
+  :chapter-number "appendix-h"
+  :title "Appendix H — HTTP server security guide"
+  :audience "programmer-fluent-in-other-languages"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-of-composition-author-agent"
+     :cli-verified #t)
+  :prose
+"# Appendix H — HTTP server security guide
+
+The composer's HTTP host serves carts to browsers on the local network. This appendix documents the security model: the permission gate, the path-traversal defenses, the request-classification rules, and the trust boundaries.
+
+Every defense listed is implemented in `lib/net/http-serve.js`. The file includes an inline security review commented at the top. This appendix expands and organizes that review.
+
+## H.1 The threat model
+
+Kids want to share carts with friends. Kids do NOT want:
+
+- Strangers editing their carts.
+- Servers exposing files outside the cart directory.
+- Browsers accidentally running writes.
+- Remote clients spoofing local identity.
+
+The HTTP server ships with defaults that address each of these. Alternative defaults are configurable but the SAFE PATH is the DEFAULT PATH.
+
+## H.2 Route summary
+
+Three route families:
+
+- `/` — landing. Public. Lists carts, brand header.
+- `/play/:cart` — cart play view. Public.
+- `/compose/:cart` — compose view. Permission-gated (default local-only).
+
+## H.3 The compose-perm gate
+
+`:compose-perm` option controls who can hit `/compose/:cart`.
+
+- `'local-only` (default) — only 127.0.0.1 and ::1 pass.
+- `'anyone` — no gate; all requests pass.
+
+The classification uses the socket's `remoteAddress`. It DOES NOT read X-Forwarded-For, X-Real-IP, or any other client-supplied header. A remote client cannot lie their way past the local-only gate by sending forged headers.
+
+The check is in `isLocalRequest(req)`:
+
+```javascript
+function isLocalRequest(req) {
+  const addr = req.socket && req.socket.remoteAddress ? String(req.socket.remoteAddress) : ''
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
+}
+```
+
+Three legal local addresses: IPv4 localhost, IPv6 localhost, IPv4-mapped IPv6 localhost.
+
+## H.4 Path traversal defenses
+
+Multiple layers.
+
+### H.4.1 URL sanity
+
+The request handler rejects (403) any URL that:
+
+- Contains a null byte (`\\0`).
+- Contains the literal string `..`.
+
+The check runs BEFORE URL parsing, so encoded variants (`%2e%2e`) are also rejected — URL parsing would normalize them, but the raw-string check catches them first at the pre-parse stage.
+
+### H.4.2 Cart-name regex
+
+Cart names are matched against `/^[A-Za-z0-9._-]+$/` per path segment. Legal characters: uppercase letters, lowercase letters, digits, dot, underscore, hyphen. Nothing else.
+
+This excludes:
+
+- Slashes within a segment (safe, since segments are joined with `/`).
+- Spaces.
+- URL-encoded characters that would decode to interesting characters.
+- Null bytes.
+- Unicode homoglyphs.
+- Control characters.
+
+### H.4.3 Path segment rules
+
+Cart names may contain up to 4 slash-separated segments (`composer/synth-patch/variant-a/version-2`). Each segment:
+
+- Must be 1-128 characters long.
+- Must match the regex above.
+- Must not be `.` or `..`.
+
+### H.4.4 Resolved-path check
+
+After the cart name is decoded, split, and joined with the cart directory, the resulting path is `path.resolve`'d. The absolute resolved path is compared against the normalized cart directory. If the resolved path does not start with the cart directory prefix (with a trailing separator), the cart is treated as missing (404).
+
+This catches any exotic case the regex misses. Even if a segment slipped through, the resolved path must physically land under the cart directory.
+
+### H.4.5 Existence + file check
+
+The candidate path must exist (`existsSync`) and be a regular file (`statSync().isFile()`). Directories don't serve; missing files 404.
+
+## H.5 Cart-dir resolution
+
+`:cart-dir` is passed to `safeResolveCartDir(cartDir)`. Steps:
+
+1. Resolve the cart dir against `process.cwd()`.
+2. Normalize both the resolved dir and cwd.
+3. Fail if the resolved dir does not start with the cwd prefix (or equal cwd).
+4. Fail if the resolved dir doesn't exist.
+5. Fail if the resolved dir is not a directory.
+
+Failures throw an error at `http/serve` call time. The server does not start with an unsafe cart-dir.
+
+The cwd-escape check means `:cart-dir \"../../etc\"` refuses. So does `:cart-dir \"/absolute/path/outside/cwd\"`.
+
+## H.6 Method restriction
+
+Only GET is accepted. POST, PUT, DELETE, PATCH, and any other method return 405 with a plain-text body `\"method not allowed\"`.
+
+v1.1 does not accept cart writes over HTTP. Cart edits round-trip through the composer's own `composer/save` and `composer/load`, on the local file system.
+
+## H.7 Content-Type responses
+
+- `text/plain` for the 405 body.
+- `text/html; charset=utf-8` for all other successful and error responses.
+
+The server does not serve arbitrary MIME types. It emits HTML shells around cart source. If a later wave adds asset serving (images, audio), it will add explicit MIME-type mapping per file extension.
+
+## H.8 HTML escaping
+
+Every user-controlled string that appears in HTML responses passes through `escapeHtml(s)`:
+
+```javascript
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+```
+
+Cart names, cart file source, and error messages all pass through this function. A cart named `<script>alert(1)</script>` renders as literal text (though the regex would refuse it at path resolution anyway).
+
+## H.9 No shell-out
+
+The server does not invoke any subprocess. All file reading is done via `readFileSync`, `readdirSync`, `statSync`, `existsSync`. There is no `exec`, `spawn`, or `child_process` invocation.
+
+## H.10 Rate limiting
+
+The v1.1 server does not implement rate limiting. On a local trusted network this is acceptable; on a public network you would front the server with a reverse proxy that rate-limits.
+
+## H.11 TLS
+
+The v1.1 server serves plain HTTP. No HTTPS. On a local network this is acceptable; on a public network you would front with a TLS-terminating proxy. The server has no TLS support of its own.
+
+## H.12 Cookies and sessions
+
+None. The server is stateless per request. No cookies are set. No sessions are tracked. The kid identity is `whoever runs the server`, not a browser identity.
+
+## H.13 CORS
+
+The server does not send CORS headers. Same-origin requests work; cross-origin requests hit the browser's default CORS policy. If you want to serve a cart to a JavaScript app on a different origin, you would need to add CORS handling (not implemented in v1.1).
+
+## H.14 The trust model in one sentence
+
+The server is a LOCAL DEVICE. The play route trusts anyone reachable by the port; the compose route trusts only local requests unless explicitly widened.
+
+## H.15 Testing the security posture
+
+`lib/net/http-serve.js` exports `_internal` for tests, containing `makeHandler`, `isLocalRequest`, `safeCartPathWithSubdir`, `safeResolveCartDir`, `listCarts`. A security test suite can:
+
+1. Simulate remote-address requests to `/compose/foo` and assert 403.
+2. Try `/play/../secret.txt` and assert 403 or 404.
+3. Try `/play/synth-patch%00.txt` and assert 403.
+4. Try a POST and assert 405.
+5. Try to escape the cart dir with `.., \\, //, etc.` and assert refusal.
+
+## H.16 What could go wrong
+
+Known limitations you should know about:
+
+- If your `carts/` directory contains files with sensitive content, ANYONE reachable on the port can read them via `/play/:cart`. Don't put secrets in your cart directory.
+- If you run the server on `0.0.0.0` (all interfaces) instead of `127.0.0.1`, anyone on your local network can hit play routes. The server binds per the `:port` argument's implicit default (Node's HTTP server default binds to `0.0.0.0`). Set `:host` in a future release when it lands; until then, use a firewall or bind to loopback.
+- The compose route with `:compose-perm 'anyone` is intended for TESTS ONLY. Do not use it on shared machines.
+
+## H.17 Where the server code lives
+
+`lib/net/http-serve.js`. Every function is pure or has narrow side-effect surface (file I/O, HTTP responses). The installer `installHttpServe(env, fuel)` registers four verbs: `http/serve`, `http/wait-until-ready`, `http/stop`, `http/serve-info`.
+
+## H.18 Security review provenance
+
+The initial security review was authored 2026-07-17 as part of the v1.1 ship. Every defense listed here maps to a `Priya-style` note in the source file's top comment. If a defense is missing from the source but listed here, the source wins — file a bug.
+
+The compose vs. play separation, the local-only default, the path-safety layers, and the GET-only restriction are load-bearing. Do not weaken them casually. If you must run a public cart host, put the composer behind a reverse proxy with authentication, rate limiting, and TLS.
+")

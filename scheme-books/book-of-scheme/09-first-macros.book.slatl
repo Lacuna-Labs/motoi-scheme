@@ -1,0 +1,320 @@
+;; 09-first-macros.book.slatl
+;; The Book of Motoi Scheme — Chapter 9 — First Macros
+
+(chapter
+  :book             "The Book of Motoi Scheme"
+  :chapter-number   9
+  :title            "Chapter 9 — First Macros"
+  :audience         :any
+  :dialect          "motoi"
+  :book-version     "1.0"
+  :provenance       "book-of-scheme-author-2026-07-17"
+  :training-eligible #t
+  :content-rating   :G
+  :prose
+"# Chapter 9 — First Macros
+
+There's a moment, when you're learning a language, when you realize you'd like to say something the language doesn't quite let you say.
+
+You've written `(let loop ((i 0)) (when (< i n) ... (loop (+ i 1))))` fifty times. You'd love to just write `(repeat n ...)`.
+
+You've written `(if condition (do-a-thing))` and wished there was `(when condition (do-a-thing))` — oh wait, there is. And there's `unless` too. Whoever built the language thought of it before you.
+
+But not every convenience made it into the base. Some had to wait for you to invent them.
+
+In most languages that's a wall — you can't add new syntax without waiting for the language designers. In Scheme, syntax is *yours*. You can define new forms whenever you like. The tool is called a *macro*, and by the end of this chapter you'll have written several.
+
+## What a macro actually does
+
+A macro is a *code transformation*. When Motoi is reading your program, it hits a macro use. Before evaluating it, the macro *rewrites* the code into some equivalent code that Motoi does know how to handle. Then Motoi evaluates the rewritten version.
+
+Concrete: suppose we define `unless` as a macro (Motoi already has it, but pretend it didn't).
+
+```
+(define-syntax unless
+  (syntax-rules ()
+    ((_ condition body ...)
+     (when (not condition) body ...))))
+```
+
+Now when you write:
+
+```
+(unless raining?
+  (go-outside))
+```
+
+Motoi's macro expander sees `unless` and rewrites your code into:
+
+```
+(when (not raining?)
+  (go-outside))
+```
+
+Then it evaluates the rewritten version. `when` is a built-in. `not` is a built-in. Everything works.
+
+The macro didn't add any *runtime* cost. It happened at expansion time, before evaluation. From the interpreter's point of view, `unless` never existed — it saw `when` and `not`.
+
+## `syntax-rules` — pattern matching for code
+
+The mechanism we're using is called `syntax-rules`. Every macro you'll write in this chapter has this shape:
+
+```
+(define-syntax NAME
+  (syntax-rules ()
+    ((_ PATTERN) TEMPLATE)
+    ((_ PATTERN) TEMPLATE)
+    ...))
+```
+
+- `NAME` — the macro's name.
+- `syntax-rules ()` — the macro engine. The empty `()` is a list of *literal* symbols the pattern uses; usually empty.
+- Each rule has a **pattern** and a **template**.
+- **Pattern** — the shape of code the macro should match. `_` stands for the macro's name. Other names in the pattern become *pattern variables*.
+- **Template** — the rewritten code. The pattern variables get substituted in.
+
+Simplest macro possible:
+
+```
+(define-syntax hello
+  (syntax-rules ()
+    ((_) (display \"hello\"))))
+
+(hello)
+```
+
+Pattern: `(_)` — matches `(hello)` with no arguments. Template: `(display \"hello\")`. So `(hello)` expands to `(display \"hello\")`, which prints `hello`.
+
+## A useful one: `repeat`
+
+Here's a macro for the loop we've written over and over:
+
+```
+(define-syntax repeat
+  (syntax-rules ()
+    ((_ n body ...)
+     (let loop ((i 0))
+       (when (< i n)
+         body ...
+         (loop (+ i 1)))))))
+```
+
+Pattern: `(_ n body ...)`. `n` is a pattern variable. `body ...` is a *rest pattern* — it matches zero or more forms. That's what the `...` means: \"repeat this pattern for however many things are here.\"
+
+Template: the loop, with `n` substituted in and `body ...` splatted out where `body ...` appears.
+
+Now:
+
+```
+(repeat 3 (display \"tick \"))
+```
+
+Expands to:
+
+```
+(let loop ((i 0))
+  (when (< i 3)
+    (display \"tick \")
+    (loop (+ i 1))))
+```
+
+Which prints `tick tick tick`. From your code's point of view, you just added a new form to the language. From the interpreter's point of view, there was never anything new — just a loop.
+
+```
+$ motoi eval \"(define-syntax repeat (syntax-rules () ((_ n body ...) (let loop ((i 0)) (when (< i n) body ... (loop (+ i 1))))))) (repeat 3 (display \\\"tick \\\"))\"
+tick tick tick
+```
+
+## Multiple body forms
+
+The `...` lets you have as many body forms as you like:
+
+```
+(repeat 3
+  (display \"beep-\")
+  (display \"boop \"))
+```
+
+Expands to:
+
+```
+(let loop ((i 0))
+  (when (< i 3)
+    (display \"beep-\")
+    (display \"boop \")
+    (loop (+ i 1))))
+```
+
+Which prints `beep-boop beep-boop beep-boop `.
+
+The `body ...` in the pattern captures all forms after `n`. The `body ...` in the template spreads them back out. Whatever you put in, comes back out in the same order.
+
+## A macro that captures a name
+
+Here's a subtler one. Suppose you want a `swap!` macro that swaps the values of two variables.
+
+```
+(define-syntax swap!
+  (syntax-rules ()
+    ((_ a b)
+     (let ((tmp a))
+       (set! a b)
+       (set! b tmp)))))
+
+(define x 1)
+(define y 2)
+(swap! x y)
+(list x y)
+;; => (2 1)
+```
+
+`swap!` uses a *temporary variable* named `tmp` inside its template. What if the caller happened to have their own variable named `tmp`? Wouldn't the macro's `tmp` clash with the caller's `tmp`?
+
+Not in Scheme. This is where `syntax-rules` earns its reputation: it's *hygienic*. Any local name introduced by a macro is automatically renamed to something unique that can't collide with anything in the caller's code. You never have to think about it. `tmp` inside the macro is a *different variable* than `tmp` outside, even though they share a name in the source.
+
+This hygienic guarantee is a big deal. In older macro systems (like C's `#define`), name collisions between macros and callers were a constant hazard. `syntax-rules` solved that once and for all.
+
+## Recursive macros
+
+Macros can call themselves. Here's a hand-rolled `and`:
+
+```
+(define-syntax my-and
+  (syntax-rules ()
+    ((_) #t)
+    ((_ x) x)
+    ((_ x y ...) (if x (my-and y ...) #f))))
+```
+
+Three rules:
+- `(my-and)` — no arguments — expands to `#t`. (Empty `and` is true.)
+- `(my-and x)` — one argument — expands to just `x`.
+- `(my-and x y ...)` — two or more — expands to a conditional that evaluates `x`; if truthy, recursively `my-and`s the rest.
+
+Test:
+
+```
+(my-and)              ;; => #t
+(my-and 1 2 3)        ;; => 3
+(my-and 1 #f 3)       ;; => #f
+```
+
+The pattern matcher picks the *first* matching rule from the top. `(my-and 1 2 3)` matches the third rule (it has more than one argument), which expands to `(if 1 (my-and 2 3) #f)`. `(my-and 2 3)` matches the third rule again, expands to `(if 2 (my-and 3) #f)`. `(my-and 3)` matches the second rule, expands to `3`. So `(my-and 1 2 3)` ends up as `(if 1 (if 2 3 #f) #f)` — which evaluates to 3.
+
+That's how `and` is often defined in Scheme itself, more or less.
+
+## `when` and `unless` — the classics
+
+Motoi has both of these built in, but they're two of the simplest useful macros. Let's see:
+
+```
+(define-syntax when
+  (syntax-rules ()
+    ((_ condition body ...)
+     (if condition
+         (begin body ...)
+         #f))))
+
+(define-syntax unless
+  (syntax-rules ()
+    ((_ condition body ...)
+     (when (not condition) body ...))))
+```
+
+`when` runs the body only if the condition is truthy. If not, returns `#f`. `unless` is `when` with a negated condition — the classic *build a new macro on top of another macro* pattern.
+
+Once you internalize `when` and `unless` and `repeat` and `swap!`, you'll want more. That's Chapter 10.
+
+## What a macro is *not*
+
+A macro is not a function. Two important consequences:
+
+**Arguments aren't evaluated.** In a function call, all arguments are evaluated before the function runs. In a macro use, arguments are just *code fragments* — they're substituted into the template as-is. This is what makes `if`, `when`, `and`, `or`, `cond` work — they can decide *whether* to evaluate their arguments. Functions can't do that.
+
+**Macros don't exist at runtime.** By the time your program runs, all macros have been expanded away. If you `,macroexpand` a form, you can see what it became. But at runtime it's just the expansion — no trace of the macro.
+
+Because of this, some things you can do with functions you can't do with macros:
+
+- You can't pass a macro as an argument to another function.
+- You can't put a macro in a list.
+- You can't `apply` a macro.
+
+If you want first-class-ness, you want a function. If you want new syntax, you want a macro.
+
+## `,expand` — see what the macro made
+
+Motoi's REPL has a shortcut for seeing the expansion. In your terminal:
+
+```
+$ motoi repl
+motoi> (define-syntax repeat
+         (syntax-rules ()
+           ((_ n body ...)
+            (let loop ((i 0))
+              (when (< i n)
+                body ...
+                (loop (+ i 1)))))))
+motoi> ,expand (repeat 3 (display \"a\"))
+(let loop ((i 0))
+  (when (< i 3)
+    (display \"a\")
+    (loop (+ i 1))))
+```
+
+You can inspect any macro use this way. If a macro is misbehaving, `,expand` is the debugger. Show me what you *think* the code became — usually that's enough to spot the bug.
+
+## Small, useful macros to have around
+
+```
+;; Do these things, ignore the result. Sometimes clearer than begin.
+(define-syntax do-things
+  (syntax-rules ()
+    ((_ body ...) (begin body ... #f))))
+
+;; Do these things, return the first form's value.
+(define-syntax do-and-return-first
+  (syntax-rules ()
+    ((_ first-form body ...)
+     (let ((result first-form))
+       body ...
+       result))))
+
+;; Assertion macro.
+(define-syntax assert
+  (syntax-rules ()
+    ((_ pred) (unless pred (display \"assertion failed\") (newline)))))
+
+(assert (= (+ 1 1) 2))   ;; silent — passes
+(assert (= (+ 1 1) 3))   ;; prints \"assertion failed\"
+```
+
+Each of these could be a function, sort of, but wouldn't behave right — functions would evaluate all arguments up-front. Macros can defer evaluation, which is exactly what `assert` needs (only evaluate the predicate if we're checking it) and what `do-and-return-first` needs (evaluate the body forms in order and return the *first* one, not the last).
+
+## What you know now
+
+- A macro is a code transformation that runs before evaluation.
+- `define-syntax` + `syntax-rules` define macros.
+- Each rule has a pattern (matches shape) and a template (rewrites into this).
+- `_` is the macro name in the pattern.
+- Pattern variables — any names besides `_` — are bound to whatever code appears there.
+- `...` in a pattern matches zero-or-more forms. `...` in the template splats them out.
+- Macros are *hygienic* — local names introduced by the macro don't collide with the caller's.
+- Macros can be recursive — call themselves for smaller cases.
+- Motoi's REPL has `,expand` to see what a macro produced.
+- Macros aren't functions: no first-class-ness, no arg evaluation.
+
+## Try before you turn the page
+
+1. Write a macro `swap-print!` that swaps two variables and prints the new values on separate lines. Test on `x` and `y`.
+
+2. Write a macro `times` that takes a count and a body and runs the body that many times without exposing an index. `(times 3 (display \"a\"))` should print `aaa`. Hint: it's `repeat` without the `i`.
+
+3. Write a macro `if-let` — takes `((name value))` and a then-branch and an else-branch. Binds `name` to `value`; if truthy, runs the then; else runs the else. `(if-let ((x (get-thing))) (use x) 'nothing)`.
+
+4. Rewrite Chapter 3's nested-loop grid painter with a macro `for-cell` that takes `(rows cols body ...)` and runs the body with `row` and `col` bound each iteration. Warning — hygiene matters here; think about whether `row` and `col` should be introduced by the macro or captured from the caller.
+
+5. Use `,expand` in the REPL to see the expansion of your `repeat` and `unless` calls. Confirm they're what you expect.
+
+## What's next
+
+Chapter 10: **real macros — a beat DSL**. We're going to build a little language *on top of* Scheme, using macros. `(beat 1 (kick) 2 (kick snare) 3 (kick) 4 (kick snare))` will read like sheet music and run like a drum machine. Macros are how languages grow. Chapter 10 is where that becomes obvious.")

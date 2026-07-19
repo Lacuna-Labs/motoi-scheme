@@ -1,0 +1,271 @@
+(dialect :applies ("motoi" "sakura") :note "Default: applies to both dialects.")
+
+(chapter
+  :book "Book of Logic"
+  :chapter-number 19
+  :appendix-letter "C"
+  :title "Resolution"
+  :dialect "sakura"
+  :audience :adult
+  :content-rating :G
+  :author-lane "the-engineer-book-of-logic-2026-07-16"
+  :training-eligible #t
+  :confidentiality "public"
+  :voice "sakura-teaching + gentle-formalist"
+  :classical-anchors ("Robinson — A Machine-Oriented Logic Based on the Resolution Principle (JACM 1965)"
+                      "Chang-Lee — Symbolic Logic and Mechanical Theorem Proving"
+                      "Bachmair-Ganzinger — Resolution Theorem Proving (Handbook 2001)")
+  :prose
+"# Appendix C — Resolution
+
+Where the entire proof-search machinery of first-order logic collapses
+to one rule and one algorithm.
+
+*Resolution* is a proof rule invented by Robinson in 1965. It works on
+formulas in *conjunctive normal form* (chapter 1) — a big AND of
+*clauses*, each clause a big OR of *literals*. A literal is either an
+atomic formula or its negation.
+
+The rule: from two clauses
+- `C₁ = L ∨ D₁` (contains literal L)
+- `C₂ = ¬L ∨ D₂` (contains its negation)
+
+derive the *resolvent*
+- `D₁ ∨ D₂`
+
+The complementary literals cancel; the remaining disjunctions merge.
+
+That is the whole rule. Every provable first-order sentence can be
+proved by repeated application of this rule (with unification, for
+predicate-logic cases). And there is a nearly-mechanical algorithm for
+applying it — resolution has been the workhorse of automated theorem
+proving for sixty years.
+
+## Propositional resolution
+
+Start with the propositional version. We work with clauses represented
+as sets of literals.
+
+```scheme
+;; A literal is either a symbol or (list 'not symbol).
+;; A clause is a list of literals.
+;; A CNF formula is a list of clauses.
+
+(define (literal-negate lit)
+  (cond
+    ((symbol? lit) (list 'not lit))
+    ((and (pair? lit) (eq? (car lit) 'not)) (cadr lit))))
+
+(define (literals-complementary? l1 l2)
+  (equal? l1 (literal-negate l2)))
+
+(define (resolve clause1 clause2)
+  ;; Return list of resolvents (usually one, sometimes more).
+  (apply append
+    (map (lambda (l1)
+           (apply append
+             (map (lambda (l2)
+                    (if (literals-complementary? l1 l2)
+                        (list (dedupe
+                                (append (remove-once l1 clause1)
+                                        (remove-once l2 clause2))))
+                        '()))
+                  clause2)))
+         clause1)))
+
+(define (remove-once x xs)
+  (cond ((null? xs) '())
+        ((equal? (car xs) x) (cdr xs))
+        (else (cons (car xs) (remove-once x (cdr xs))))))
+```
+
+Try it.
+
+```scheme
+(resolve '(P Q) '((not P) R))
+;; => ((Q R))    ; resolvent: Q ∨ R
+
+(resolve '(P) '((not P)))
+;; => (())       ; the empty clause: contradiction!
+```
+
+The *empty clause* — the disjunction of zero literals — is *false*.
+Deriving the empty clause means the input set of clauses is
+unsatisfiable, which means the negation of what we were trying to
+prove is unsatisfiable, which means what we were trying to prove is
+valid.
+
+## The resolution algorithm
+
+To prove that a formula φ is a theorem:
+
+1. Negate: ¬φ.
+2. Convert ¬φ to CNF.
+3. Repeatedly resolve pairs of clauses; add the resolvents to the
+   set.
+4. If we derive the empty clause, φ is a theorem.
+5. If no new resolvents can be produced and the empty clause has not
+   appeared, φ is not a theorem.
+
+```scheme
+(define (prove-by-resolution formula)
+  ;; Try to prove formula by refuting its negation.
+  (let ((clauses (cnf-of (list 'not formula))))
+    (let loop ((c clauses))
+      (cond
+        ((member '() c) 'proved)      ; empty clause derived
+        (else
+         (let ((new-resolvents (all-new-resolvents c)))
+           (cond
+             ((null? new-resolvents) 'not-proved)
+             (else (loop (append new-resolvents c))))))))))
+
+(define (all-new-resolvents clauses)
+  ;; Every pair of clauses; collect their resolvents; drop those
+  ;; already in `clauses`.
+  (apply append
+    (map (lambda (c1)
+           (apply append
+             (map (lambda (c2)
+                    (filter (lambda (r) (not (member r clauses)))
+                            (resolve c1 c2)))
+                  clauses)))
+         clauses)))
+```
+
+This is the *saturation* strategy: keep resolving until either the
+empty clause appears or no new resolvents can be produced. For
+propositional logic this always terminates because there are only
+finitely many possible clauses.
+
+## Predicate-logic resolution: adding unification
+
+For first-order logic we need one more piece: *unification* (Appendix
+B). When we resolve two clauses containing predicate applications with
+variables, we may need to unify the literals to make them
+complementary.
+
+    C₁ = (P X) ∨ Q
+    C₂ = (not (P a)) ∨ R
+
+The literals `(P X)` and `(not (P a))` are not directly complementary,
+but they can be made complementary by unifying `X` with `a`. After
+unification, the resolvent is `σ(Q ∨ R)` where σ = {X → a}.
+
+```scheme
+(define (resolve-first-order clause1 clause2)
+  ;; Try to resolve using unification of literals.
+  (apply append
+    (map (lambda (l1)
+           (apply append
+             (map (lambda (l2)
+                    (let ((unifier (try-complementary-unification l1 l2)))
+                      (if (eq? unifier 'fail)
+                          '()
+                          (list (apply-subst-to-clause
+                                 unifier
+                                 (dedupe
+                                  (append (remove-once l1 clause1)
+                                          (remove-once l2 clause2))))))))
+                  clause2)))
+         clause1)))
+
+(define (try-complementary-unification l1 l2)
+  ;; If l1 is (P ...) and l2 is (not (P ...)), unify the atomic parts.
+  (cond
+    ((and (pair? l2) (eq? (car l2) 'not))
+     (unify l1 (cadr l2) '()))
+    ((and (pair? l1) (eq? (car l1) 'not))
+     (unify (cadr l1) l2 '()))
+    (else 'fail)))
+```
+
+With unification, resolution becomes complete for first-order logic —
+that is, if a first-order sentence is valid, resolution will find a
+refutation of its negation (given enough time). This is a corollary of
+Godel's completeness theorem plus Robinson's completeness proof for
+resolution.
+
+## Refinements
+
+Naive resolution is complete but *inefficient*. The set of possible
+resolvents grows explosively. Real theorem provers use *refinements*
+that restrict which resolutions are allowed:
+
+- **Set-of-support.** Only resolve pairs at least one of which comes
+  from the negation of the goal. Focuses search on the goal.
+- **Unit resolution.** Only resolve when one clause is a single
+  literal (a *unit* clause). Fast; incomplete.
+- **Linear resolution.** Each resolution step uses the most recent
+  resolvent. Structures the search as a linear chain.
+- **Ordered resolution.** Impose an ordering on literals; only resolve
+  on maximal literals. Restricts search dramatically.
+- **Semantic resolution.** Use a specific model to guide which
+  resolvents are useful.
+
+Combinations of these refinements are what powers modern first-order
+provers like Vampire, E, and SPASS. They can solve problems with tens
+of thousands of clauses in seconds.
+
+## The connection to logic programming
+
+*Horn clauses* are clauses with at most one positive literal:
+
+    ¬A ∨ ¬B ∨ ¬C ∨ D             (the rule: D if A and B and C)
+    D                              (the fact: D holds)
+    ¬A ∨ ¬B ∨ ¬C                  (the goal: prove A and B and C — false statement)
+
+Prolog is essentially *SLD-resolution* — a specific refinement of
+resolution for Horn clauses. Every Prolog derivation is a resolution
+proof; every unification is the Appendix B algorithm. Prolog was born
+directly from Robinson's resolution principle, plus the observation
+that Horn clauses give a decidable resolution strategy.
+
+## What resolution cannot do
+
+Resolution is complete for *first-order* logic. It is not complete for:
+
+- Second-order logic (no algorithm is complete for full second-order).
+- Modal logic (needs special calculi).
+- Non-monotonic reasoning (fundamentally different structure).
+
+For these, other calculi apply: tableaux, sequent calculi, model
+elimination, satisfiability modulo theories (SMT).
+
+Resolution is also *semi-decidable*: if a formula is provable,
+resolution finds a proof; if not provable, resolution may run forever.
+This is a corollary of the undecidability of first-order validity
+(Church 1936).
+
+## What to try
+
+Implement propositional resolution end-to-end: parse a propositional
+formula, convert to CNF (using the pipeline sketched in chapter 1),
+call the resolution loop, report the result.
+
+Extend to first-order resolution with unification. Try the classic
+example: from *all men are mortal* and *Socrates is a man*, derive
+*Socrates is mortal* by resolution.
+
+Add the *set-of-support* refinement. Compare the number of resolvents
+generated with and without it on a small example.
+
+## Closing
+
+Resolution collapses first-order proof into one rule plus unification.
+It is complete, semi-decidable, and remarkably efficient with the
+right refinements. Every modern first-order theorem prover descends
+from Robinson's 1965 formulation.
+
+This appendix's implementations are the seed. Adding refinements,
+efficient indexing, and clause management scales the machinery to
+industrially useful sizes.
+"
+  :cross-refs
+    (:book-of-scheme :chapters (5 8)
+     :book-of-reason :chapters (5 6))
+  :verbs-used ("cond" "eq?" "cons" "car" "cdr" "cadr" "list" "map"
+               "filter" "append" "apply" "member" "null?" "pair?" "not"
+               "and" "or" "equal?" "define" "lambda" "let")
+  :word-count-estimate 2500
+)

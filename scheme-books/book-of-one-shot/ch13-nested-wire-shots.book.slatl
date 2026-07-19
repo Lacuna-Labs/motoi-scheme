@@ -1,0 +1,862 @@
+;; ch13-nested-wire-shots.slat
+;; Book of One-Shot — Chapter 13: Nested Wire-Shots
+
+(chapter
+  :book             "Book of One-Shot"
+  :chapter-number   null
+  :title            "Chapter 13: Nested Wire-Shots"
+  :source-path      "/Users/alfred/code/curator/BOOK/A-branch-scheme-books/one-shot/ch13-nested-wire-shots.md"
+  :size             44714
+  :sha256           "bd0126a3edfedd30"
+  :prose
+"# Chapter 13: Nested Wire-Shots
+
+You've learned to collapse a single wire call into one atomic form—fetch, transform, use, all closed by the same paren that opened the journey. Now double it: two wire calls, one nested inside the other, still expressed as a single top-level form. The outer call waits for the inner; the inner closes with data that the outer immediately consumes. No intermediate variable. No orphaned state between hops. No latency compounding across a seam.
+
+This is the nested wire-shot: one form, two flights, zero gaps.
+
+Why it matters in Motoi: a recipe site returns an ingredient list; a second call fetches the pantry inventory for each ingredient; the final answer—\"can I make this?\"—lands in one atomic expression. A news API returns a headline; a knowledge lookup fills the context; the composed summary surfaces in one shot. The disposition we're drilling: when two wire calls depend on each other, nest them in place rather than sequencing them across statements.
+
+The chapter opens gently—simple pairs where the dependency is obvious—and climbs toward genuinely hard nests where three or four calls close each other in a single form.
+
+---
+
+## The Simplest Nest
+
+A city name comes back from one wire call. A weather lookup needs that city. Instead of storing the city in a variable and calling weather in a second statement, nest the city fetch inside the weather call. One form. Two hops. The inner call closes the outer.
+
+```scheme
+(surface :say \"Current temperature: ~a°F\"
+  :from (fetch (string-append \"https://api.weather.local/temp?city=\"
+                              (fetch \"https://api.location.local/city\"))))
+```
+
+The inner `(fetch …)` runs first, returns a city string, and immediately closes the URL being built by `string-append`. The outer `fetch` fires with the complete URL. The temperature string closes the `:from` slot. One paren closes the whole interaction.
+
+---
+
+## Nest a Knowledge Lookup Inside a Query
+
+A wire call returns a species name. A local knowledge lookup needs that species to answer a habitat question. Nest the wire call inside the knowledge form.
+
+```scheme
+(knowledge/of :category \"habitat\"
+              :subject (fetch \"https://api.nature.local/species/random\"))
+```
+
+The fetch runs, returns `\"peregrine falcon\"` (or any species), and that string immediately closes the `:subject` slot. The knowledge lookup fires with the complete argument. One form. Two data sources—one remote, one local—both closed by the same outer paren.
+
+---
+
+## Nest a Recall Inside a Wire Call
+
+A speech template needs a topic summary. That summary lives in cortex. The final result gets sent over the wire to a logging service. Nest the recall inside the wire post.
+
+```scheme
+(fetch \"https://api.log.local/entry\"
+       :method 'POST
+       :body (cortex/recall :topic \"favorite-color\"))
+```
+
+The `(cortex/recall …)` runs first, returns the stored value, and immediately closes the `:body` slot. The `fetch` fires with the complete POST payload. One form. Two retrievals—one from cortex, one to the wire—nested without intermediate state.
+
+---
+
+## Nest a Computation Inside a Fetch
+
+A conversion endpoint needs a Celsius value. The Celsius value comes from a Fahrenheit fetch. Nest the fetch inside the arithmetic that closes the second URL.
+
+```scheme
+(fetch (string-append \"https://api.convert.local/c-to-k?c=\"
+                      (number->string
+                        (/ (- (string->number
+                                (fetch \"https://api.weather.local/temp-f?city=Portland\"))
+                              32)
+                           1.8))))
+```
+
+The innermost fetch returns a Fahrenheit string. `string->number` converts it. The arithmetic `(/ (- … 32) 1.8)` produces Celsius. `number->string` serializes it. `string-append` builds the Kelvin query URL. The outer fetch fires. One form. Four transformations. Two wire hops. Zero intermediate variables.
+
+---
+
+## Nest Two Knowledge Lookups
+
+A question about \"predators of X\" where X comes from a knowledge lookup about \"most common rodent in Y\" and Y comes from a wire call returning a biome name.
+
+```scheme
+(knowledge/of :category \"predators\"
+              :subject (knowledge/of :category \"common-rodent\"
+                                     :subject (fetch \"https://api.geo.local/biome?lat=45.5&lon=-122.6\")))
+```
+
+The innermost fetch returns `\"temperate rainforest\"`. The middle knowledge lookup returns `\"deer mouse\"`. The outer knowledge lookup returns `\"owls, snakes, foxes\"`. Three lookups. One form. Each call closes the slot of the call that wraps it.
+
+---
+
+## Nest a Guard Inside a Nested Fetch
+
+Only fetch the second resource if the first returns a non-empty result. Use `when` inside the outer form to guard the second hop.
+
+```scheme
+(when (not (string=? (fetch \"https://api.feature.local/enabled?flag=new-ui\") \"\"))
+  (fetch (string-append \"https://api.assets.local/bundle?name=\"
+                        (fetch \"https://api.feature.local/enabled?flag=new-ui\"))))
+```
+
+The first fetch runs. If it returns an empty string, the `when` short-circuits and the whole form returns `#f`. If it returns a feature name, the second fetch fires with that name embedded in the URL. One form. One guard. Two wire hops only if the guard passes.
+
+*[needs: short-circuit semantics for `when` across async fetch completions]*  
+<!-- BUILD: runtime must not fire the consequent fetch if the guard fetch returns falsey -->
+
+---
+
+## Nest a Map Over Fetched Data
+
+A wire call returns a list of city names (as a JSON array). Map a weather fetch over each city. The map closes the outer `surface :say` form.
+
+```scheme
+(surface :say \"Temperatures: ~a\"
+  :from (map (lambda (city)
+               (fetch (string-append \"https://api.weather.local/temp?city=\" city)))
+             (json-parse (fetch \"https://api.geo.local/cities?region=PNW\"))))
+```
+
+The innermost fetch returns a JSON string of city names. `json-parse` converts it to a list. `map` iterates, firing a weather fetch for each city. The resulting list of temperatures closes the `:from` slot. One form. Multiple wire hops (one + N). Zero intermediate accumulation outside the form.
+
+*[needs: `json-parse` in stdlib and async-aware `map` that waits for all fetches]*  
+<!-- BUILD: map must return a promise that resolves when all inner fetches complete -->
+
+---
+
+## Nest a Filtered Fetch Result Inside Another Call
+
+Fetch a list of product IDs. Filter for IDs above 1000. Fetch details for the first match. Return the product name.
+
+```scheme
+(let ((id (car (filter (lambda (n) (> n 1000))
+                       (json-parse (fetch \"https://api.store.local/products/ids\"))))))
+  (json-ref (fetch (string-append \"https://api.store.local/products/\" (number->string id)))
+            \"name\"))
+```
+
+The innermost fetch returns a JSON array of IDs. `json-parse` converts it to a list. `filter` keeps IDs > 1000. `car` takes the first. `number->string` serializes it. `string-append` builds the detail URL. The second fetch fires. `json-ref` extracts the name field. One `let` binds the filtered ID; the body is still a single composed expression. One top-level form.
+
+*[needs: `json-ref` accessor in stdlib]*  
+<!-- BUILD: (json-ref parsed-json \"key\") returns the value at key or 'nan -->
+
+---
+
+## Nest a Fold Over Fetched Data Inside a POST
+
+Fetch a list of numbers. Fold them into a sum. POST the sum to a logging endpoint. One form.
+
+```scheme
+(fetch \"https://api.log.local/sum\"
+       :method 'POST
+       :body (number->string
+               (fold + 0 (json-parse (fetch \"https://api.math.local/numbers\")))))
+```
+
+The innermost fetch returns a JSON array of numbers. `json-parse` converts it to a list. `fold` sums them. `number->string` serializes the result. The outer fetch POSTs it. One form. Three transformations. Two wire hops. The fold closes the `:body` slot; the body closes the POST.
+
+---
+
+## Nest Recall Inside a Conditional Inside a Fetch
+
+If a user preference is set, fetch a personalized resource; otherwise fetch the default. Nest the recall inside the conditional inside the URL builder.
+
+```scheme
+(fetch (string-append \"https://api.content.local/\"
+                      (if (cortex/recall :topic \"premium-user\")
+                          \"premium/feed\"
+                          \"standard/feed\")))
+```
+
+The `(cortex/recall …)` runs first, returns `#t` or `#f`. The `if` selects the path segment. `string-append` builds the URL. The fetch fires. One form. One recall. One wire hop. The conditional closes the URL; the URL closes the fetch.
+
+---
+
+## Nest a Fetch Inside a Case Dispatch
+
+A registry lookup returns a capability tier. A `case` dispatch selects which analytics endpoint to call. Nest the registry call inside the `case` test, and nest each fetch inside its branch.
+
+```scheme
+(case (system/registry :domain \"analytics-tier\")
+  ((premium) (fetch \"https://api.analytics.local/premium/event\" :method 'POST :body \"signup\"))
+  ((standard) (fetch \"https://api.analytics.local/standard/event\" :method 'POST :body \"signup\"))
+  (else 'nan))
+```
+
+The `(system/registry …)` runs first, returns a symbol like `'premium`. The `case` matches the branch. The corresponding fetch fires. One form. One registry lookup. One wire hop. The case closes the fetch; the fetch closes the form.
+
+---
+
+## Triple Nest: Fetch, Knowledge, Fetch
+
+A product category comes from a wire call. A knowledge lookup maps the category to a warehouse region. A second wire call fetches inventory for that region. Three lookups, one form.
+
+```scheme
+(fetch (string-append \"https://api.inventory.local/stock?region=\"
+                      (knowledge/of :category \"warehouse-region\"
+                                    :subject (fetch \"https://api.catalog.local/product/category?id=8472\"))))
+```
+
+The innermost fetch returns a category string like `\"electronics\"`. The knowledge lookup returns a region code like `\"west\"`. `string-append` builds the inventory URL. The outer fetch fires. One form. Three data sources—two remote, one local—all closed by the same top-level paren.
+
+---
+
+## Nest Four Calls: Fetch, Parse, Filter, Fetch
+
+Fetch a JSON array of user IDs. Parse it. Filter for IDs divisible by 10. Fetch profile details for the first match. Return the username.
+
+```scheme
+(json-ref (fetch (string-append \"https://api.users.local/profile?id=\"
+                                (number->string
+                                  (car (filter (lambda (n) (= (modulo n 10) 0))
+                                               (json-parse (fetch \"https://api.users.local/ids\")))))))
+          \"username\")
+```
+
+Four transformations: fetch, parse, filter, fetch. The innermost fetch returns a JSON string. `json-parse` converts it to a list. `filter` keeps IDs divisible by 10. `car` takes the first. `number->string` serializes it. `string-append` builds the profile URL. The second fetch fires. `json-ref` extracts the username. One form. Two wire hops. Four transformations. Zero intermediate bindings outside the expression.
+
+---
+
+## Nest a Conditional Wire-Shot Inside Another Conditional
+
+If a feature flag is enabled (first fetch), and if the user is premium (recall), fetch the premium content; otherwise fetch standard. Two guards, two fetches, one form.
+
+```scheme
+(if (and (string=? (fetch \"https://api.feature.local/enabled?flag=premium-content\") \"true\")
+         (cortex/recall :topic \"premium-user\"))
+    (fetch \"https://api.content.local/premium\")
+    (fetch \"https://api.content.local/standard\"))
+```
+
+The first fetch checks the feature flag. The recall checks the user tier. `and` short-circuits if either is false. The `if` selects the content fetch. One form. Up to three lookups (one wire, one recall, one wire). The guards close the `if`; the `if` closes the consequent fetch.
+
+*[needs: async `and` that short-circuits without firing subsequent fetches if an earlier operand is false]*  
+<!-- BUILD: and/or must handle promises and not start downstream fetches if upstream returns falsey -->
+
+---
+
+## Nest a Fetch Inside a Let-Bound Transformation
+
+Fetch a temperature in Kelvin. Bind the conversion factor in a `let`. Return the Fahrenheit value as a formatted string. One form (the `let` is the top-level form; the body is a single expression).
+
+```scheme
+(let ((k (string->number (fetch \"https://api.weather.local/temp-k?city=Seattle\"))))
+  (string-append (number->string (+ (* (- k 273.15) 1.8) 32)) \"°F\"))
+```
+
+The fetch runs, returns a Kelvin string. `string->number` converts it. The `let` binds `k`. The body computes Fahrenheit and formats it. One `let` form. One fetch. One transformation. The fetch closes the binding; the transformation closes the body.
+
+---
+
+## Nest a Fold Over Two Fetched Lists
+
+Fetch a list of prices. Fetch a list of quantities. Zip them and fold to compute total cost. POST the result.
+
+```scheme
+(fetch \"https://api.orders.local/total\"
+       :method 'POST
+       :body (number->string
+               (fold (lambda (pair acc)
+                       (+ acc (* (car pair) (cdr pair))))
+                     0
+                     (map cons
+                          (json-parse (fetch \"https://api.orders.local/prices\"))
+                          (json-parse (fetch \"https://api.orders.local/quantities\"))))))
+```
+
+Two fetches return JSON arrays. Two `json-parse` calls convert them to lists. `map cons` zips the lists into pairs. `fold` accumulates the sum of `(price * quantity)` for each pair. `number->string` serializes the total. The outer fetch POSTs it. One form. Two wire reads. One wire write. The fold closes the `:body`; the body closes the POST.
+
+*[needs: `map` must accept multiple lists and zip them]*  
+<!-- BUILD: (map proc list1 list2 ...) should zip lists and apply proc to each tuple -->
+
+---
+
+## Nest a Recursive Fetch Chain
+
+Fetch a paginated API. If the response includes a `next` URL, fetch it recursively. Return all accumulated items. (Use named `let` for recursion within a single top-level form.)
+
+```scheme
+(let fetch-all ((url \"https://api.data.local/items?page=1\")
+                (acc '()))
+  (let ((resp (json-parse (fetch url))))
+    (let ((items (json-ref resp \"items\"))
+          (next (json-ref resp \"next\")))
+      (if next
+          (fetch-all next (append acc items))
+          (append acc items)))))
+```
+
+Named `let` establishes the recursive loop. The first fetch runs. The response is parsed. Items and the next-page URL are extracted. If `next` exists, recurse with the new URL and accumulated items. Otherwise return the final accumulation. One top-level form (the named `let`). Multiple wire hops (unknown count until `next` is null). Zero intermediate state outside the recursion.
+
+*[needs: async recursion where each `fetch` returns a promise and `let`-bound values wait for promise resolution]*  
+<!-- BUILD: named let must support async recursion with promise-returning fetch -->
+
+---
+
+## Nest a Fetch Inside a Guarded Map
+
+Fetch a list of city names. For each city, fetch weather only if the city name is longer than 5 characters. Return the list of temperatures (with `'nan` for skipped cities).
+
+```scheme
+(map (lambda (city)
+       (if (> (string-length city) 5)
+           (fetch (string-append \"https://api.weather.local/temp?city=\" city))
+           'nan))
+     (json-parse (fetch \"https://api.geo.local/cities?region=EU\")))
+```
+
+The inner fetch returns a JSON array of city names. `json-parse` converts it to a list. `map` iterates. For each city, the guard checks length. If long enough, fetch temperature; otherwise return `'nan`. The map closes the outer form. One top-level `map`. One + N wire hops (where N is the number of long city names). Zero intermediate accumulation outside the `map`.
+
+---
+
+## Nest a Knowledge Lookup Inside a Filtered Map
+
+Fetch a list of animal names. For each animal, look up its habitat. Filter the results to keep only \"forest\" animals. Return the filtered list.
+
+```scheme
+(filter (lambda (pair) (string=? (cdr pair) \"forest\"))
+        (map (lambda (animal)
+               (cons animal (knowledge/of :category \"habitat\" :subject animal)))
+             (json-parse (fetch \"https://api.nature.local/animals\"))))
+```
+
+The fetch returns a JSON array of animal names. `json-parse` converts it to a list. `map` iterates, performing a knowledge lookup for each animal and pairing the animal name with its habitat. `filter` keeps only pairs where the habitat is `\"forest\"`. One form. One wire hop. N knowledge lookups. The filter closes the map; the map closes the fetch.
+
+---
+
+## Nest a Recall Inside a Let Inside a Fetch POST
+
+Fetch a username from a wire call. Recall a stored auth token. Combine them in a JSON payload. POST to a login endpoint. One form.
+
+```scheme
+(let ((username (fetch \"https://api.auth.local/username\"))
+      (token (cortex/recall :topic \"auth-token\")))
+  (fetch \"https://api.auth.local/login\"
+         :method 'POST
+         :body (string-append \"{\\\"username\\\":\\\"\" username \"\\\",\\\"token\\\":\\\"\" token \"\\\"}\")))
+```
+
+The `let` binds two values: one from a wire call, one from cortex recall. The body constructs a JSON string and POSTs it. One `let` form (the top-level). One wire read. One recall. One wire write. The bindings close the body; the body closes the POST.
+
+---
+
+## Nest a Case Dispatch Over a Fetched Status Code
+
+Fetch a health-check endpoint that returns a status code as a string. Dispatch on the code: if \"200\", fetch the main resource; if \"503\", return an error message; otherwise return `'nan`.
+
+```scheme
+(case (fetch \"https://api.service.local/health\")
+  ((\"200\") (fetch \"https://api.service.local/data\"))
+  ((\"503\") \"Service unavailable\")
+  (else 'nan))
+```
+
+The first fetch runs, returns a string like `\"200\"`. The `case` matches the string. The corresponding branch fires. If `\"200\"`, the second fetch runs. One form. Up to two wire hops. The case closes the consequent fetch; the fetch closes the form.
+
+*[needs: `case` matching on strings, not just symbols]*  
+<!-- BUILD: case should support string literals in addition to symbol literals -->
+
+---
+
+## Nest Three Wire Calls in a Chain
+
+Fetch a user ID. Use it to fetch a profile. Use the profile's region field to fetch regional settings. Return the timezone.
+
+```scheme
+(json-ref (fetch (string-append \"https://api.settings.local/region?code=\"
+                                (json-ref (fetch (string-append \"https://api.users.local/profile?id=\"
+                                                                (fetch \"https://api.auth.local/user-id\")))
+                                          \"region\")))
+          \"timezone\")
+```
+
+Three fetches. The innermost returns a user ID string. The middle fetch returns a JSON profile. `json-ref` extracts the region code. The outer fetch returns regional settings. `json-ref` extracts the timezone. One form. Three wire hops. Six transformations. Zero intermediate bindings outside the nesting.
+
+---
+
+## Nest a Fold Inside a Fetch POST with a Guarded Map
+
+Fetch a list of transaction amounts. Filter out negative values. Sum the remaining amounts. POST the total to a reporting endpoint.
+
+```scheme
+(fetch \"https://api.reports.local/total\"
+       :method 'POST
+       :body (number->string
+               (fold + 0
+                     (filter (lambda (n) (>= n 0))
+                             (json-parse (fetch \"https://api.transactions.local/amounts\"))))))
+```
+
+The innermost fetch returns a JSON array of numbers. `json-parse` converts it to a list. `filter` keeps non-negative values. `fold` sums them. `number->string` serializes the result. The outer fetch POSTs it. One form. Five transformations. Two wire hops. The fold closes the `:body`; the body closes the POST.
+
+---
+
+## Nest a Conditional Fetch Based on Two Recalls
+
+If the user has both \"premium\" and \"early-access\" flags set in cortex, fetch the beta resource; otherwise fetch the stable resource.
+
+```scheme
+(if (and (cortex/recall :topic \"premium\")
+         (cortex/recall :topic \"early-access\"))
+    (fetch \"https://api.content.local/beta\")
+    (fetch \"https://api.content.local/stable\"))
+```
+
+Two recalls. One `and`. One `if`. Two possible fetches. One form. The recalls close the `and`; the `and` closes the `if`; the `if` closes the consequent fetch.
+
+---
+
+## Nest a Map Over a Filtered Knowledge Lookup Result
+
+Look up all animals in the \"endangered\" category (assume it returns a list). For each, fetch a photo URL from a wire endpoint. Return the list of URLs.
+
+```scheme
+(map (lambda (animal)
+       (fetch (string-append \"https://api.photos.local/animal?name=\" animal)))
+     (knowledge/of :category \"endangered-species\"))
+```
+
+The knowledge lookup returns a list of animal names. `map` iterates, building a URL and fetching a photo for each. The map closes the outer form. One top-level `map`. One knowledge lookup. N wire hops. Zero intermediate state.
+
+*[needs: `knowledge/of` returning a list when :category matches multiple entries]*  
+<!-- BUILD: knowledge/of should return a list of subjects when category is queried without :subject -->
+
+---
+
+## Nest a Fetch Inside a Let* with Dependent Bindings
+
+Fetch a product ID. Use it to fetch a product name. Use the name to fetch reviews. Return the count of reviews.
+
+```scheme
+(let* ((id (fetch \"https://api.catalog.local/product/id?sku=A987\"))
+       (name (json-ref (fetch (string-append \"https://api.catalog.local/product?id=\" id))
+                       \"name\"))
+       (reviews (json-parse (fetch (string-append \"https://api.reviews.local/list?product=\" name)))))
+  (length reviews))
+```
+
+`let*` binds three values sequentially, each depending on the prior. Three fetches. Three transformations. The body computes the review count. One `let*` form (the top-level). Three wire hops. The final binding closes the body; the body closes the `length` call.
+
+---
+
+## Nest a Cond Dispatch Over a Fetched Configuration
+
+Fetch a config value. Use `cond` to dispatch on the value: if \"alpha\", fetch alpha resources; if \"beta\", fetch beta; otherwise return `'nan`.
+
+```scheme
+(cond
+  ((string=? (fetch \"https://api.config.local/env\") \"alpha\")
+   (fetch \"https://api.resources.local/alpha\"))
+  ((string=? (fetch \"https://api.config.local/env\") \"beta\")
+   (fetch \"https://api.resources.local/beta\"))
+  (else 'nan))
+```
+
+The fetch runs twice (once per test clause). If \"alpha\" matches, the first consequent fetch fires. If \"beta\" matches, the second fires. Otherwise `'nan`. One `cond` form. Up to three wire hops. The tests close the consequent fetches; the cond closes the form.
+
+*[needs: cond should memoize the fetched value across test clauses to avoid duplicate fetches]*  
+<!-- BUILD: cond must not re-evaluate a fetch expression in multiple test clauses — bind it once and test the result -->
+
+Better form to avoid duplicate fetch:
+
+```scheme
+(let ((env (fetch \"https://api.config.local/env\")))
+  (cond
+    ((string=? env \"alpha\") (fetch \"https://api.resources.local/alpha\"))
+    ((string=? env \"beta\") (fetch \"https://api.resources.local/beta\"))
+    (else 'nan)))
+```
+
+One `let` form. One fetch bound, tested twice. Up to two wire hops total. The cond closes the consequent fetch; the let closes the cond.
+
+---
+
+## Nest a Fetch Inside a Recursive Countdown
+
+Count down from a fetched number to zero, logging each step to a wire endpoint. Use named `let` for recursion. One form.
+
+```scheme
+(let countdown ((n (string->number (fetch \"https://api.math.local/random-int?max=10\"))))
+  (if (<= n 0)
+      'done
+      (begin
+        (fetch \"https://api.log.local/event\" :method 'POST :body (number->string n))
+        (countdown (- n 1)))))
+```
+
+The fetch returns a random integer as a string. `string->number` converts it. Named `let` starts the countdown. Each iteration POSTs the current number to the log endpoint, then recurses with `n - 1`. When `n` reaches zero, return `'done`. One top-level named `let`. One initial fetch. N POST fetches (where N is the random integer). Zero intermediate state outside the recursion.
+
+*[needs: `begin` supporting multiple expressions in a form, and async recursion]*  
+<!-- BUILD: begin must sequence async fetch calls and wait for each before continuing -->
+
+---
+
+## Nest a Filter Inside a Fold Inside a POST
+
+Fetch a list of scores. Filter out scores below 50. Compute the average of the remaining scores. POST the average to a summary endpoint.
+
+```scheme
+(fetch \"https://api.summary.local/average\"
+       :method 'POST
+       :body (number->string
+               (let ((passing (filter (lambda (n) (>= n 50))
+                                      (json-parse (fetch \"https://api.scores.local/list\")))))
+                 (/ (fold + 0 passing) (length passing)))))
+```
+
+The innermost fetch returns a JSON array of scores. `json-parse` converts it to a list. `filter` keeps scores >= 50. The `let` binds the filtered list. `fold` sums the scores. `length` counts them. Division computes the average. `number->string` serializes it. The outer fetch POSTs it. One `let` form (containing the POST). One wire read. One wire write. The fold closes the average computation; the computation closes the `:body`; the body closes the POST.
+
+---
+
+## Nest Two Knowledge Lookups and a Fetch
+
+Look up the capital city of a country (from a fetched country code). Look up the timezone of that city. Fetch current time for that timezone.
+
+```scheme
+(fetch (string-append \"https://api.time.local/now?tz=\"
+                      (knowledge/of :category \"timezone\"
+                                    :subject (knowledge/of :category \"capital\"
+                                                           :subject (fetch \"https://api.geo.local/country-code?ip=203.0.113.42\")))))
+```
+
+Three nested lookups: fetch, knowledge, knowledge. The fetch returns a country code like `\"FR\"`. The first knowledge lookup returns `\"Paris\"`. The second knowledge lookup returns `\"Europe/Paris\"`. `string-append` builds the time query URL. The outer fetch returns the current time. One form. One wire read. Two knowledge lookups. One wire read. Zero intermediate bindings.
+
+---
+
+## Nest a Map with a Let-Bound Fetched Value
+
+Fetch a currency conversion rate. Map over a list of prices (also fetched) to convert each price using the rate. Return the converted list.
+
+```scheme
+(let ((rate (string->number (fetch \"https://api.currency.local/rate?from=USD&to=EUR\"))))
+  (map (lambda (price) (* price rate))
+       (json-parse (fetch \"https://api.prices.local/list?currency=USD\"))))
+```
+
+The first fetch returns a conversion rate as a string. `string->number` converts it. The `let` binds `rate`. The second fetch returns a JSON array of prices. `json-parse` converts it to a list. `map` multiplies each price by the rate. One `let` form. Two fetches. One map. The map closes the body; the body closes the `let`.
+
+---
+
+## Nest a Guarded Fetch Inside a Fold
+
+Fetch a list of product IDs. For each ID, fetch stock quantity if the ID is even; otherwise use zero. Sum the quantities.
+
+```scheme
+(fold (lambda (id acc)
+        (+ acc (if (even? id)
+                   (string->number (fetch (string-append \"https://api.inventory.local/stock?id=\" (number->string id))))
+                   0)))
+      0
+      (json-parse (fetch \"https://api.catalog.local/product-ids\")))
+```
+
+The innermost fetch returns a JSON array of IDs. `json-parse` converts it to a list. `fold` iterates. For each ID, if even, fetch the stock quantity and add it to the accumulator; otherwise add zero. One form. One initial fetch. Up to N additional fetches (where N is the count of even IDs). The fold closes the sum; the sum closes the form.
+
+---
+
+## Nest a Case Dispatch Over a Knowledge Lookup Inside a Fetch
+
+Look up a user's subscription tier from knowledge. Use `case` to select which analytics event to POST based on the tier.
+
+```scheme
+(case (knowledge/of :category \"subscription-tier\" :subject \"user:4523\")
+  ((free) (fetch \"https://api.analytics.local/event/free-action\" :method 'POST :body \"click\"))
+  ((premium) (fetch \"https://api.analytics.local/event/premium-action\" :method 'POST :body \"click\"))
+  (else 'nan))
+```
+
+The knowledge lookup returns a symbol like `'free`. The `case` matches the branch. The corresponding POST fires. One form. One knowledge lookup. One wire hop. The case closes the consequent fetch; the fetch closes the form.
+
+---
+
+## Nest a Fold Over Two Fetched and Zipped Lists with a Guard
+
+Fetch prices. Fetch availability flags. Zip them. Fold to sum prices only for available items.
+
+```scheme
+(fold (lambda (pair acc)
+        (if (cdr pair)
+            (+ acc (car pair))
+            acc))
+      0
+      (map cons
+           (json-parse (fetch \"https://api.prices.local/list\"))
+           (json-parse (fetch \"https://api.availability.local/list\"))))
+```
+
+Two fetches return JSON arrays. Two `json-parse` calls convert them to lists. `map cons` zips them into pairs `(price . available?)`. `fold` iterates: if the item is available (cdr is truthy), add the price to the accumulator; otherwise skip. One form. Two wire reads. One fold. The fold closes the sum; the sum closes the form.
+
+---
+
+## Nest a Fetch Inside a Let with a Conditional Guard
+
+Fetch a feature flag. If enabled, bind a resource URL from a second fetch; otherwise bind a default URL. Use the bound URL in a final expression.
+
+```scheme
+(let ((url (if (string=? (fetch \"https://api.feature.local/enabled?flag=new-search\") \"true\")
+               (fetch \"https://api.config.local/search-url?version=new\")
+               \"https://api.search.local/default\")))
+  (string-append \"Search at: \" url))
+```
+
+The first fetch checks the feature flag. The `if` fires either the second fetch or returns a hardcoded string. The `let` binds `url`. The body formats a message. One `let` form. Up to two wire hops. The conditional closes the binding; the body closes the `let`.
+
+---
+
+## Nest Four Calls: Fetch, Knowledge, Filter, Fetch
+
+Fetch a biome name. Look up common animals in that biome. Filter for animals longer than 6 characters. Fetch photos for each filtered animal. Return the list of photo URLs.
+
+```scheme
+(map (lambda (animal)
+       (fetch (string-append \"https://api.photos.local/animal?name=\" animal)))
+     (filter (lambda (name) (> (string-length name) 6))
+             (knowledge/of :category \"common-animals\"
+                           :subject (fetch \"https://api.geo.local/biome?region=PNW\"))))
+```
+
+Four nested transformations: fetch, knowledge, filter, map (with nested fetch in the map body). The innermost fetch returns a biome name. The knowledge lookup returns a list of animals. `filter` keeps animals with names longer than 6 characters. `map` fires a photo fetch for each. One form. One initial fetch. One knowledge lookup. N photo fetches. Zero intermediate bindings outside the nesting.
+
+---
+
+## Nest a Recursive Fetch with a Conditional Stopping Condition
+
+Fetch a paginated list. Continue fetching the `next` page until the response has no `next` field or until 5 pages have been fetched. Accumulate all items.
+
+```scheme
+(let fetch-pages ((url \"https://api.data.local/items?page=1\")
+                  (acc '())
+                  (count 0))
+  (if (>= count 5)
+      acc
+      (let ((resp (json-parse (fetch url))))
+        (let ((items (json-ref resp \"items\"))
+              (next (json-ref resp \"next\")))
+          (if next
+              (fetch-pages next (append acc items) (+ count 1))
+              (append acc items))))))
+```
+
+Named `let` with a page counter. Each iteration fetches a page. If the counter reaches 5, stop and return the accumulator. Otherwise parse the response, extract items and the next URL. If next exists, recurse; otherwise return the final accumulation. One top-level named `let`. Up to 5 wire hops. Zero intermediate state outside the recursion.
+
+---
+
+## Nest a Fetch Inside a Cond with Multiple Guards
+
+Fetch a status code. Use `cond` to dispatch: if \"200\", fetch data; if \"404\", return an error message; if \"500\", fetch a fallback resource; otherwise return `'nan`.
+
+```scheme
+(let ((status (fetch \"https://api.service.local/status\")))
+  (cond
+    ((string=? status \"200\") (fetch \"https://api.service.local/data\"))
+    ((string=? status \"404\") \"Not found\")
+    ((string=? status \"500\") (fetch \"https://api.service.local/fallback\"))
+    (else 'nan)))
+```
+
+The `let` binds the status from a fetch. The `cond` tests the status and fires the appropriate branch. One `let` form. Up to two wire hops (status + one branch fetch). The cond closes the consequent fetch; the let closes the cond.
+
+---
+
+## Nest a Fold Over Fetched Data with a Let-Bound Coefficient
+
+Fetch a multiplier from a config endpoint. Fetch a list of base values. Multiply each by the multiplier and sum the results.
+
+```scheme
+(let ((mult (string->number (fetch \"https://api.config.local/multiplier\"))))
+  (fold (lambda (n acc) (+ acc (* n mult)))
+        0
+        (json-parse (fetch \"https://api.data.local/values\"))))
+```
+
+The first fetch returns the multiplier. `string->number` converts it. The `let` binds `mult`. The second fetch returns a JSON array. `json-parse` converts it to a list. `fold` multiplies each value by `mult` and accumulates the sum. One `let` form. Two fetches. One fold. The fold closes the body; the body closes the `let`.
+
+---
+
+## Nest a Fetch Inside a Filtered Map with a Knowledge Guard
+
+Fetch a list of city names. For each city, look up the country. Filter to keep only cities in \"USA\". For each remaining city, fetch the population. Return the list of populations.
+
+```scheme
+(map (lambda (city)
+       (string->number (fetch (string-append \"https://api.geo.local/population?city=\" city))))
+     (filter (lambda (city)
+               (string=? (knowledge/of :category \"country\" :subject city) \"USA\"))
+             (json-parse (fetch \"https://api.geo.local/cities\"))))
+```
+
+The innermost fetch returns a JSON array of city names. `json-parse` converts it to a list. `filter` iterates, performing a knowledge lookup for each city and keeping only those in \"USA\". `map` fetches population for each remaining city. One form. One initial fetch. N knowledge lookups (where N is the total city count). M population fetches (where M is the USA city count). Zero intermediate bindings outside the pipeline.
+
+---
+
+## Nest a Fold with a Conditional Accumulation Inside a POST
+
+Fetch a list of transaction amounts. Fold to sum only the positive amounts. POST the sum to a reporting endpoint.
+
+```scheme
+(fetch \"https://api.reports.local/positive-sum\"
+       :method 'POST
+       :body (number->string
+               (fold (lambda (n acc)
+                       (if (> n 0) (+ acc n) acc))
+                     0
+                     (json-parse (fetch \"https://api.transactions.local/amounts\")))))
+```
+
+The innermost fetch returns a JSON array. `json-parse` converts it to a list. `fold` iterates: if the value is positive, add it to the accumulator; otherwise leave the accumulator unchanged. `number->string` serializes the result. The outer fetch POSTs it. One form. Two wire hops. The fold closes the `:body`; the body closes the POST.
+
+---
+
+## Nest Two Fetches with a Let-Bound Transformation Between Them
+
+Fetch a raw CSV string. Parse it into a list (assume a `csv-parse` function). Fetch metadata for the first row's ID. Return the metadata.
+
+```scheme
+(let ((rows (csv-parse (fetch \"https://api.data.local/export.csv\"))))
+  (json-parse (fetch (string-append \"https://api.meta.local/info?id=\" (car (car rows))))))
+```
+
+The first fetch returns a CSV string. `csv-parse` converts it to a list of lists. The `let` binds `rows`. `car (car rows)` extracts the first cell (an ID). `string-append` builds the metadata URL. The second fetch returns JSON. `json-parse` converts it. One `let` form. Two fetches. The fetch closes the `json-parse`; the parse closes the body; the body closes the `let`.
+
+*[needs: `csv-parse` in stdlib]*  
+<!-- BUILD: (csv-parse string) returns a list of lists, one per row -->
+
+---
+
+## Nest a Fetch Inside a Case Dispatch Over a Recall
+
+Recall a user preference. Use `case` to select which resource to fetch based on the preference.
+
+```scheme
+(case (cortex/recall :topic \"theme\")
+  ((dark) (fetch \"https://api.assets.local/css/dark.css\"))
+  ((light) (fetch \"https://api.assets.local/css/light.css\"))
+  (else (fetch \"https://api.assets.local/css/default.css\")))
+```
+
+The recall returns a symbol like `'dark`. The `case` matches the branch. The corresponding fetch fires. One form. One recall. One wire hop. The case closes the consequent fetch; the fetch closes the form.
+
+---
+
+## Nest a Fetch Inside a Map Over a Let-Bound Filtered List
+
+Fetch a list of product IDs. Filter for IDs > 1000. Bind the filtered list in a `let`. Map over the list to fetch details for each ID. Return the list of product names.
+
+```scheme
+(let ((ids (filter (lambda (n) (> n 1000))
+                   (json-parse (fetch \"https://api.catalog.local/product-ids\")))))
+  (map (lambda (id)
+         (json-ref (fetch (string-append \"https://api.catalog.local/product?id=\" (number->string id)))
+                   \"name\"))
+       ids))
+```
+
+The innermost fetch returns a JSON array of IDs. `json-parse` converts it to a list. `filter` keeps IDs > 1000. The `let` binds the filtered list. `map` fires a detail fetch for each ID and extracts the name. One `let` form. One initial fetch. N detail fetches. The map closes the body; the body closes the `let`.
+
+---
+
+## Nest a Fold Over a Fetched List with a Knowledge Lookup Per Item
+
+Fetch a list of animal names. For each animal, look up its average lifespan (from knowledge, assume it returns a number). Sum the lifespans.
+
+```scheme
+(fold (lambda (animal acc)
+        (+ acc (knowledge/of :category \"lifespan\" :subject animal)))
+      0
+      (json-parse (fetch \"https://api.nature.local/animals\")))
+```
+
+The fetch returns a JSON array of animal names. `json-parse` converts it to a list. `fold` iterates, performing a knowledge lookup for each animal (returning a number) and adding it to the accumulator. One form. One wire hop. N knowledge lookups. The fold closes the sum; the sum closes the form.
+
+*[needs: `knowledge/of` returning a numeric value when category is a quantifiable attribute]*  
+<!-- BUILD: knowledge/of should coerce numeric strings to numbers when category semantics indicate quantity -->
+
+---
+
+## Nest a Fetch Inside a Recursive Function That Builds a List
+
+Fetch a count. Recursively fetch a random word from an API that many times. Return the list of words.
+
+```scheme
+(let fetch-words ((n (string->number (fetch \"https://api.config.local/word-count\")))
+                  (acc '()))
+  (if (<= n 0)
+      acc
+      (fetch-words (- n 1)
+                   (cons (fetch \"https://api.words.local/random\") acc))))
+```
+
+Named `let` with a counter and accumulator. The initial fetch returns the count. Each iteration fetches a random word and conses it onto the accumulator, then recurses with `n - 1`. When `n` reaches zero, return the accumulated list. One top-level named `let`. One initial fetch. N word fetches. Zero intermediate state outside the recursion.
+
+---
+
+## Nest a Conditional Fetch Based on a Fetched Boolean
+
+Fetch a boolean flag (as a string \"true\" or \"false\"). If true, fetch resource A; otherwise fetch resource B. Return the fetched resource.
+
+```scheme
+(if (string=? (fetch \"https://api.feature.local/flag?name=use-new-api\") \"true\")
+    (fetch \"https://api.resources.local/new\")
+    (fetch \"https://api.resources.local/old\"))
+```
+
+The first fetch returns a string. The `if` compares it to \"true\". The consequent or alternate fetch fires. One form. Two wire hops. The if closes the consequent fetch; the fetch closes the form.
+
+---
+
+## The Summit: Five-Level Nest
+
+Fetch a user's location (lat/lon as JSON). Use the location to look up the biome (knowledge). Use the biome to fetch a list of common plants (wire). Filter plants with names longer than 8 characters. For each plant, fetch a care guide URL. Return the list of URLs.
+
+```scheme
+(map (lambda (plant)
+       (fetch (string-append \"https://api.garden.local/care?plant=\" plant)))
+     (filter (lambda (name) (> (string-length name) 8))
+             (json-parse (fetch (string-append \"https://api.plants.local/list?biome=\"
+                                               (knowledge/of :category \"biome\"
+                                                             :subject (json-ref (json-parse (fetch \"https://api.geo.local/location\"))
+                                                                                \"name\")))))))
+```
+
+Five transformations: fetch location, parse JSON, extract name, knowledge lookup, fetch plant list, parse JSON, filter, map with nested fetch. The innermost fetch returns location JSON. `json-parse` converts it. `json-ref` extracts the location name (e.g., \"Portland\"). The knowledge lookup returns a biome string (e.g., \"temperate rainforest\"). `string-append` builds the plant list URL. The second fetch returns a JSON array of plant names. `json-parse` converts it. `filter` keeps names longer than 8 characters. `map` fires a care guide fetch for each. One form. Three wire hops. One knowledge lookup. N care guide fetches. Zero intermediate bindings outside the nesting.
+
+---
+
+[VISUAL: A dependency graph showing five nested calls: fetch location → parse → extract → knowledge → fetch plants → parse → filter → map(fetch). Each call closes the slot of the call that wraps it. The final closing paren appears as a large bracket encompassing all five levels.]
+
+---
+
+## Why This Matters
+
+You've now written forty nested wire-shots, each a single top-level form. The disposition you've drilled: when two (or three, or five) calls depend on each other, nest them in place rather than sequencing them across statements. The inner call closes the outer. No intermediate variable. No orphaned state between hops. No latency compounding across a seam.
+
+This is the core of the one-shot habit: a complicated-looking problem—fetch, transform, lookup, fetch again, filter, map, fold—still collapses to a single composed expression. The retrieval expression closes the outer form. Close data, close paren.
+
+---
+
+## Exercises
+
+Write the route/program for each of the following scenarios. Each answer should be a single top-level Scheme form (a `let`, a `map`, a named `let` recursion, etc.—but ONE form).
+
+1. **Nested weather + preference**: Fetch a city name from `https://api.location.local/city`. Recall a temperature unit preference from cortex (`:topic \"temp-unit\"`, returns `'F` or `'C`). Fetch weather from `https://api.weather.local/temp?city=CITY&unit=UNIT` where `CITY` and `UNIT` are filled from the prior calls. Return the temperature string.
+
+2. **Triple knowledge nest**: Fetch a country code from `https://api.geo.local/country?ip=203.0.113.99`. Look up the country's official language (knowledge, `:category \"official-language\" :subject COUNTRY`). Look up a greeting in that language (knowledge, `:category \"greeting\" :subject LANGUAGE`). Return the greeting string.
+
+3. **Paginated sum**: Fetch a paginated list of numbers from `https://api.data.local/numbers?page=1`. Each response is JSON with `{\"numbers\": [...], \"next\": \"...\"}`. Recursively fetch all pages (stop when `next` is null). Sum all the numbers across all pages. Return the sum. (Use named `let` recursion.)
+
+4. **Guarded map + fold**: Fetch a list of product IDs from `https://api.catalog.local/ids`. For each ID, fetch stock quantity from `https://api.inventory.local/stock?id=ID` only if the ID is divisible by 3; otherwise use zero. Sum all the quantities. Return the sum.
+
+5. **Conditional double-fetch**: Fetch a feature flag from `https://api.feature.local/enabled?flag=premium`. If the flag is `\"true\"`, fetch user data from `https://api.users.local/premium/profile?id=42`; otherwise fetch from `https://api.users.local/standard/profile?id=42`. Extract the `\"username\"` field from the JSON response. Return the username.
+
+6. **Five-level nest with filter and map**: Fetch a zip code from `https://api.location.local/zip`. Look up the city for that zip (knowledge, `:category \"city\" :subject ZIP`). Fetch a list of restaurants in that city from `https://api.food.local/restaurants?city=CITY`. Parse the JSON (assume it returns an array of restaurant names). Filter to keep only restaurants with names longer than 10 characters. For each remaining restaurant, fetch a menu URL from `https://api.food.local/menu?name=NAME`. Return the list of menu URLs.
+
+---
+
+You've completed Chapter 13. You can now express a two-hop dependency—or a five-hop dependency—as a single atomic form. The inner call closes the outer. The outer call closes the top. One form. Many hops. Zero gaps.
+
+Next: **Chapter 14: The Speech Shot** — `(surface :say TMPL :from (…))` where data and utterance collapse into one closing paren.
+")

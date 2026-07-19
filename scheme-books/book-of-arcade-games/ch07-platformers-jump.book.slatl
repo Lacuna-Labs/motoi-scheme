@@ -1,0 +1,536 @@
+;; ch07-platformers-jump.book.slatl
+;; Book of Arcade Games — Chapter 7: The Platformer's Jump
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Arcade Games"
+  :chapter-number      7
+  :title               "The Platformer's Jump"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + game-design"
+  :book-version        "1.0.0"
+  :draws-from-preserved (:book "book-of-games-preserved" :ch 12)
+  :prose
+"The jump is the hardest simple thing in game design.
+
+You press a button. A character leaves the ground, arcs through the air,
+lands. That is one physics equation and two frames of state (grounded,
+airborne). And yet: a jump can feel wrong in a hundred different ways.
+Too heavy. Too floaty. Too twitchy. Insufficient hangtime at the apex.
+Missing coyote time. Missing input buffer. Landing thud not matched to
+fall distance. Camera judder on landing. The very best platformers spend
+YEARS tuning the jump. Everything else in the game arranges itself
+around the character's ability to arc between two platforms and land
+where the player expected.
+
+This chapter tunes the jump. We start with the raw physics —
+`world/gravity!` + `entity/set-vel!` on 'a' press — and add polish
+layer by layer until the jump feels great. Variable jump height by
+releasing 'a' early. Slow-float apex via `entity/gravity-scale!`.
+Coyote time. Jump buffer. Landing-shake sized to fall speed.
+
+By the end you have a jump you would ship. And you have a template you
+can drop into any character game.
+
+---
+
+## 7.1 The naive jump
+
+Press 'a'. Set y-velocity to negative. Done.
+
+```scheme
+;; Naive jump: y-velocity to -12 on press. Gravity does the rest.
+(define (naive-jump)
+  (world/reset!)
+  (world/gravity! 0 0.6)
+  (world/floor! 220)
+  (let ((p (world/spawn 'player 160 200)))
+    (entity/shape! p 'rect 12 16)
+    (entity/bounce! p 0)
+    (entity/solid! p #t)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/pressed? 'a)
+         (entity/set-vel! p (car (entity/vel p)) -12))
+       (world/step)
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 12 16)))))
+
+(big-bang naive-jump)
+```
+
+Play it. The player leaps, arcs, lands. It works. It feels lifeless.
+
+Two problems: every jump goes to the exact same height (you cannot
+tap-a for a small hop or hold-a for a big leap), and there is no
+generosity — if you press 'a' one frame after walking off a ledge,
+tough luck.
+
+We will fix both.
+
+---
+
+## 7.2 Variable jump height
+
+Hold 'a' longer for a higher jump. Release early to cut short.
+
+```scheme
+;; Variable jump: release 'a' early cuts the ascent.
+(define (variable-jump)
+  (world/reset!)
+  (world/gravity! 0 0.6)
+  (world/floor! 220)
+  (let ((p (world/spawn 'player 160 200)))
+    (entity/shape! p 'rect 12 16)
+    (entity/bounce! p 0)
+    (entity/solid! p #t)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/pressed? 'a)
+         (entity/set-vel! p (car (entity/vel p)) -12))
+       ;; If ascending AND 'a' not held: cut ascent (fall faster).
+       (when (and (not (input/down? 'a))
+                  (< (cadr (entity/vel p)) 0))
+         (entity/set-vel! p (car (entity/vel p))
+                          (* (cadr (entity/vel p)) 0.5)))
+       (world/step)
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 12 16)))))
+
+(big-bang variable-jump)
+```
+
+The block after the jump-press is the whole trick. Every frame we
+check: is the player rising (vy < 0), AND is 'a' NOT held? If yes,
+halve vy. This effectively terminates the ascent whenever the button
+releases.
+
+Tap 'a' quickly: small hop, maybe 15 pixels. Hold 'a' through the
+whole ascent: full 60-pixel leap. The single button now has infinite
+variability.
+
+Every platformer worth playing has this. Kids feel the difference
+within three presses.
+
+---
+
+## 7.3 Apex hang
+
+Gravity should be lower at the top of the arc so the player hangs.
+Increase gravity on descent.
+
+```scheme
+;; Apex hang: gravity-scale is 0.6 when rising, 1.0 when falling.
+(define (hang-jump)
+  (world/reset!)
+  (world/gravity! 0 0.6)
+  (world/floor! 220)
+  (let ((p (world/spawn 'player 160 200)))
+    (entity/shape! p 'rect 12 16)
+    (entity/bounce! p 0)
+    (entity/solid! p #t)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/pressed? 'a)
+         (entity/set-vel! p (car (entity/vel p)) -12))
+       (when (and (not (input/down? 'a))
+                  (< (cadr (entity/vel p)) 0))
+         (entity/set-vel! p (car (entity/vel p))
+                          (* (cadr (entity/vel p)) 0.5)))
+       ;; Apex-hang: dial gravity-scale based on vy.
+       (cond
+         ((< (cadr (entity/vel p)) -3)
+          (entity/gravity-scale! p 0.7))    ;; rising fast — normal
+         ((< (cadr (entity/vel p)) 1)
+          (entity/gravity-scale! p 0.4))    ;; near apex — float
+         (else
+          (entity/gravity-scale! p 1.2)))   ;; falling — heavier
+       (world/step)
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 12 16)))))
+
+(big-bang hang-jump)
+```
+
+`entity/gravity-scale! p k` multiplies world gravity for this entity
+only. At 0.7 the player is a little floaty; at 0.4 near the apex, they
+seem to pause; at 1.2 on descent, they slam back down.
+
+That combination — float up, hang at top, fall fast — is what
+distinguishes a good platformer jump from a physical one. Real gravity
+is symmetric; game gravity is asymmetric.
+
+---
+
+## 7.4 Coyote time
+
+If the player runs off a ledge, they get a few frames of grace to
+still jump. The character 'coyote's — pauses in the air just long
+enough to save the button-press. Named after the cartoon that DIDN'T
+have this feature.
+
+```scheme
+;; Coyote time: 6 frames of jump-grace after leaving the ground.
+(define grounded? #t)
+(define coyote-frames 0)
+
+(define (coyote-jump)
+  (world/reset!)
+  (world/gravity! 0 0.6)
+  (world/floor! 220)
+  (let ((p (world/spawn 'player 160 200)))
+    (entity/shape! p 'rect 12 16)
+    (entity/bounce! p 0)
+    (entity/solid! p #t)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       ;; Ground check: are we near the floor?
+       (let ((now-grounded? (>= (entity/y p) 212)))
+         (when (and grounded? (not now-grounded?))
+           ;; Just left the ground — start coyote timer.
+           (set! coyote-frames 6))
+         (set! grounded? now-grounded?))
+       (when (> coyote-frames 0)
+         (set! coyote-frames (- coyote-frames 1)))
+       ;; Jump if grounded OR within coyote window.
+       (when (and (input/pressed? 'a)
+                  (or grounded? (> coyote-frames 0)))
+         (entity/set-vel! p (car (entity/vel p)) -12)
+         (set! coyote-frames 0))
+       (when (and (not (input/down? 'a))
+                  (< (cadr (entity/vel p)) 0))
+         (entity/set-vel! p (car (entity/vel p))
+                          (* (cadr (entity/vel p)) 0.5)))
+       (world/step)
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 12 16)
+       (paint-text (if grounded? \"grounded\" \"AIRBORNE\") 10 10)
+       (paint-text (string-append \"coyote: \" (number->string coyote-frames))
+                   10 20)))))
+
+(big-bang coyote-jump)
+```
+
+The kid runs to the edge of the floor, off the edge, and taps 'a'
+mid-air. If they are within six frames of leaving, the jump fires.
+That is 0.1 seconds — invisible to conscious perception, but the
+kid's SUBCONSCIOUS notices, and the game feels 'fair.'
+
+Without coyote time, edges feel punishing. With it, edges feel
+generous. Both are the same edge.
+
+---
+
+## 7.5 Jump buffer
+
+If the player presses 'a' shortly BEFORE landing, buffer the press so
+it fires on landing.
+
+```scheme
+;; Jump buffer: 'a' pressed within 8 frames before landing = fire on
+;; land.
+(define buffered-jump-frames 0)
+
+(define (buffered-jump)
+  (world/reset!)
+  (world/gravity! 0 0.6)
+  (world/floor! 220)
+  (let ((p (world/spawn 'player 160 200)))
+    (entity/shape! p 'rect 12 16)
+    (entity/bounce! p 0)
+    (entity/solid! p #t)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (let ((now-grounded? (>= (entity/y p) 212)))
+         (when (input/pressed? 'a)
+           (if now-grounded?
+               (entity/set-vel! p (car (entity/vel p)) -12)
+               (set! buffered-jump-frames 8)))
+         ;; If buffered and we JUST landed: fire the buffered jump.
+         (when (and now-grounded? (> buffered-jump-frames 0))
+           (entity/set-vel! p (car (entity/vel p)) -12)
+           (set! buffered-jump-frames 0)))
+       (when (> buffered-jump-frames 0)
+         (set! buffered-jump-frames (- buffered-jump-frames 1)))
+       (when (and (not (input/down? 'a))
+                  (< (cadr (entity/vel p)) 0))
+         (entity/set-vel! p (car (entity/vel p))
+                          (* (cadr (entity/vel p)) 0.5)))
+       (world/step)
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 12 16)))))
+
+(big-bang buffered-jump)
+```
+
+Kids running off a ledge and pressing 'a' juuust before landing feel
+respected. The game listens even when they are 'wrong' by strict
+timing.
+
+---
+
+## 7.6 Landing shake
+
+Big drops deserve a bigger thud.
+
+```scheme
+;; Landing shake sized to fall velocity.
+(define was-airborne? #f)
+
+(define (thumpy-jump)
+  (world/reset!)
+  (world/gravity! 0 0.6)
+  (world/floor! 220)
+  (let ((p (world/spawn 'player 160 100)))
+    (entity/shape! p 'rect 12 16)
+    (entity/bounce! p 0)
+    (entity/solid! p #t)
+    (on-frame
+     (lambda ()
+       (when (input/pressed? 'a)
+         (entity/set-vel! p (car (entity/vel p)) -12))
+       (let ((vy (cadr (entity/vel p)))
+             (now-grounded? (>= (entity/y p) 212)))
+         ;; Just landed?
+         (when (and was-airborne? now-grounded?)
+           (world/camera-shake! (max 2 (* vy 0.3)) 0.9))
+         (set! was-airborne? (not now-grounded?)))
+       (world/step)
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 12 16)))))
+
+(big-bang thumpy-jump)
+```
+
+A small hop lands with barely a shake. A 100-pixel drop shakes the
+whole screen. The player intuits WEIGHT from the feedback.
+
+---
+
+## 7.7 Putting it together — the good jump
+
+All the tricks in one player controller.
+
+```scheme
+;; The full-featured jump: variable, apex-hang, coyote, buffer, thump.
+(define grounded? #t)
+(define was-grounded? #t)
+(define coyote-frames 0)
+(define buffered-jump 0)
+
+(define (great-jump)
+  (world/reset!)
+  (world/gravity! 0 0.6)
+  (world/floor! 220)
+  (let ((p (world/spawn 'player 160 200)))
+    (entity/shape! p 'rect 12 16)
+    (entity/bounce! p 0)
+    (entity/solid! p #t)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (set! grounded? (>= (entity/y p) 212))
+       ;; Coyote update.
+       (when (and was-grounded? (not grounded?))
+         (set! coyote-frames 6))
+       (when (> coyote-frames 0)
+         (set! coyote-frames (- coyote-frames 1)))
+       ;; Jump-press: fire if grounded/coyote, else buffer.
+       (when (input/pressed? 'a)
+         (if (or grounded? (> coyote-frames 0))
+             (begin
+               (entity/set-vel! p (car (entity/vel p)) -12)
+               (set! coyote-frames 0))
+             (set! buffered-jump 8)))
+       ;; Buffered jump fires on land.
+       (when (and grounded? (> buffered-jump 0))
+         (entity/set-vel! p (car (entity/vel p)) -12)
+         (set! buffered-jump 0))
+       (when (> buffered-jump 0)
+         (set! buffered-jump (- buffered-jump 1)))
+       ;; Variable jump height.
+       (when (and (not (input/down? 'a))
+                  (< (cadr (entity/vel p)) 0))
+         (entity/set-vel! p (car (entity/vel p))
+                          (* (cadr (entity/vel p)) 0.5)))
+       ;; Apex hang via gravity-scale.
+       (cond
+         ((< (cadr (entity/vel p)) -3) (entity/gravity-scale! p 0.7))
+         ((< (cadr (entity/vel p)) 1)  (entity/gravity-scale! p 0.4))
+         (else                          (entity/gravity-scale! p 1.2)))
+       ;; Landing thump.
+       (when (and (not was-grounded?) grounded?)
+         (world/camera-shake!
+          (max 2 (* (cadr (entity/vel p)) 0.3)) 0.9))
+       (set! was-grounded? grounded?)
+       (world/step)
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 12 16)))))
+
+(big-bang great-jump)
+```
+
+Play this. If you have played any of the classic platformers, you will
+recognize the feel: forgiving, expressive, thumpy. About 40 lines
+between the raw jump and this one, and every line is one of the eight
+knobs from chapter 6.
+
+---
+
+## 7.8 The four patterns in a platformer
+
+**Composition.** The player controller is a stack of small compositions:
+gravity, gravity-scale, jump-press-handler, coyote-timer, jump-buffer,
+land-shake. Each is a small stateful cell (`grounded?`, `coyote-frames`,
+`buffered-jump`, `was-grounded?`) mutated per frame.
+
+**Orchestration.** Order-of-updates matters and is subtle. Update
+`grounded?` after physics settles, so the check is accurate. Fire
+buffered jump BEFORE variable-height cut, so the cut doesn't
+immediately nerf the buffered leap. Landing-shake needs to compare
+this frame's grounded to LAST frame's grounded — hence
+`was-grounded?`.
+
+**In-routing.** The 'a' button routes to different handlers depending
+on state: if grounded, fire jump; if airborne and ascending, cut jump
+short (on release); if airborne and 'a' pressed, buffer. One button,
+three routes.
+
+**Routing.** Landing routes to camera-shake. Variable-height routes
+to velocity. Coyote-timer routes back to input-eligibility. Every
+frame is a small router table.
+
+---
+
+## 7.9 Common desktop tasks
+
+**Fetch-decision toy.** A shop with lots of scrollable items presents
+a small jump-to-collect: the customer's cursor is a character running
+along a row of items; a tap makes them jump to grab an item; hold to
+reach higher shelves. The jump curve determines what they can reach.
+Playful shopping.
+
+**Timing-check onboarding.** A shop welcoming new users runs a
+30-second platformer tutorial as its splash — 'jump across three gaps
+to enter.' Kids get in fast. The abandon-rate on 3-gap tutorials is
+lower than on 3-tap tutorials, because doing feels better than
+watching.
+
+---
+
+## 7.10 Pitfalls
+
+**Player falls through the floor at high fall speed.** Tunneling. The
+one-frame delta at terminal velocity exceeds the floor thickness.
+Cap fall speed with `entity/max-speed!` or use `entity/gravity-scale!
+p 0.5` at high vy to cap gently.
+
+**Jump feels too floaty.** Reduce max jump velocity from -12 to -10,
+increase gravity from 0.6 to 0.8. Also check that gravity-scale
+returns to 1.2 (or higher) on descent.
+
+**Coyote fires from ceilings.** Your `grounded?` check compares to
+floor y=220, but the player may touch a ceiling and register grounded
+briefly. Distinguish floor-contact from any-contact via layer-based
+collision.
+
+**Buffered jump fires on death.** Clear `buffered-jump` on death or
+respawn.
+
+**Apex hang looks weird when player is falling from a standstill.**
+The gravity-scale conditional keys off velocity, not intent. If the
+player was falling from a jump vs stepping off a platform, the
+gravity-scale is the same. Usually fine, but for finicky feel you can
+gate hang to 'only after a jump.'
+
+---
+
+## 7.11 Try this yourself
+
+1. Tune max jump velocity from -12 to -8, -14, -20. Find the value
+   that feels HEROIC without breaking the game.
+2. Add double-jump: on the second press mid-air, if not-yet-double-
+   jumped, fire another jump at -9 (weaker second jump).
+3. Wall-jump: on collision with a wall while airborne, spring off
+   at (5 * heading-x, -8).
+4. Dash: 'b' button, sets vx to +/-8 for 6 frames while ignoring
+   gravity. Chapter 6's ease applies.
+5. Trampoline block: an entity with `entity/bounce! 1.5` that the
+   player lands on and gets launched 20% higher.
+6. Ledge grab: on collision with the corner of a platform while
+   airborne, hold player at that y with `entity/pin!` until 'a' is
+   pressed for a mantle-up.
+
+---
+
+## 7.12 What we built
+
+A jump. Variable height. Apex hang. Coyote time. Jump buffer. Landing
+shake. The full-featured platformer controller in about 40 lines of
+per-frame logic. Every gaming platformer from the last 20 years uses
+some subset of these tricks; the great ones use all of them.
+
+Next chapter: leave the fixed screen behind. Build a tile world large
+enough that the camera must scroll. Grids, tile-based collision,
+level design as data.")
+
+(code-block :chapter 7 :lang "scheme" :source
+"(define grounded? #t)
+(define was-grounded? #t)
+(define coyote-frames 0)
+(define buffered-jump 0)
+(define (platformer-jump-anchor)
+  (world/reset!)
+  (world/gravity! 0 0.6)
+  (world/floor! 220)
+  (let ((p (world/spawn 'player 160 200)))
+    (entity/shape! p 'rect 12 16)
+    (entity/bounce! p 0)
+    (entity/solid! p #t)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (set! grounded? (>= (entity/y p) 212))
+       (when (and was-grounded? (not grounded?))
+         (set! coyote-frames 6))
+       (when (> coyote-frames 0) (set! coyote-frames (- coyote-frames 1)))
+       (when (input/pressed? 'a)
+         (if (or grounded? (> coyote-frames 0))
+             (begin (entity/set-vel! p (car (entity/vel p)) -12)
+                    (set! coyote-frames 0))
+             (set! buffered-jump 8)))
+       (when (and grounded? (> buffered-jump 0))
+         (entity/set-vel! p (car (entity/vel p)) -12)
+         (set! buffered-jump 0))
+       (when (> buffered-jump 0) (set! buffered-jump (- buffered-jump 1)))
+       (when (and (not (input/down? 'a)) (< (cadr (entity/vel p)) 0))
+         (entity/set-vel! p (car (entity/vel p)) (* (cadr (entity/vel p)) 0.5)))
+       (cond ((< (cadr (entity/vel p)) -3) (entity/gravity-scale! p 0.7))
+             ((< (cadr (entity/vel p)) 1)  (entity/gravity-scale! p 0.4))
+             (else                          (entity/gravity-scale! p 1.2)))
+       (when (and (not was-grounded?) grounded?)
+         (world/camera-shake! (max 2 (* (cadr (entity/vel p)) 0.3)) 0.9))
+       (set! was-grounded? grounded?)
+       (world/step)
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 12 16)))))
+(big-bang platformer-jump-anchor)")

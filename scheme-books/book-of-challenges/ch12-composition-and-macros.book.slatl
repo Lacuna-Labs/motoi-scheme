@@ -1,0 +1,1350 @@
+;; ch12-composition-and-macros.slat
+;; Book of Challenges — Chapter 12 — Composition & Macro-by-Hand
+
+(chapter
+  :book             "Book of Challenges"
+  :chapter-number   null
+  :title            "Chapter 12 — Composition & Macro-by-Hand"
+  :size             42054
+  :sha256           "8243caa3fddd339d"
+  :prose
+"# Chapter 12 — Composition & Macro-by-Hand
+
+There's a particular thrill in building your own tools. Not because the language lacks them—Scheme is generous—but because making a thing *from* the primitives teaches you what the primitives actually do. Composition, piping, partial application: these aren't exotic. They're just functions that return functions, closures that remember arguments, and the willingness to pass a lambda where you used to write a name.
+
+This chapter builds abstractions from scratch using only `lambda`, `let`, and `apply`. We'll write `compose`, `pipe`, `curry`, and a few combinators, then use them to solve real problems: chaining verbs, transforming data, routing around failure. The programs start gentle and ramp to genuinely hard—deep pipelines, failure-aware composition, multi-stage orchestration. By the end, you'll have a small combinator library you built yourself, and you'll have used it to do work that matters.
+
+Why this matters for the runtime: every route she runs is composition. When she fetches a listing, transforms the title, checks inventory, and formats a reply, she's threading data through stages. Building these tools by hand teaches her—and you—how to *see* the structure of a route, how to factor it, and how to make it honest when any stage might fail.
+
+---
+
+## Composing Two Functions
+
+The simplest abstraction: take two functions, return a new function that calls the second on the result of the first. In math notation, `(f ∘ g)(x) = f(g(x))`. In Scheme, it's a lambda that closes over both functions.
+
+```scheme
+;; compose: takes two functions, returns their composition
+;; (right-to-left: (compose f g) means \"do g, then do f\")
+(define (compose f g)
+  (lambda (x)
+    (f (g x))))
+
+;; Example: square a number, then add ten
+(define (square n) (* n n))
+(define (add-ten n) (+ n 10))
+
+(define square-then-add-ten (compose add-ten square))
+
+(square-then-add-ten 5)  ; => (square 5) = 25, then (add-ten 25) = 35
+```
+
+Right-to-left feels backwards at first, but it matches mathematical notation and makes certain pipelines easier to read. We'll build left-to-right (`pipe`) next.
+
+```scheme
+;; compose three functions to normalize, slug, and uppercase a string
+(define (trim-spaces s)
+  (text/normalize s))  ; wired verb: trims, collapses whitespace
+
+(define (slugify s)
+  (text/slug-compose s))  ; wired verb: lowercase, hyphens, safe chars
+
+(define (upcase s)
+  (list->string
+    (map (lambda (c)
+           (if (char-lower-case? c)
+               (char-upcase c)
+               c))
+         (string->list s))))
+
+;; compose all three: normalize, slug, then upcase
+(define process-title
+  (compose upcase
+           (compose slugify trim-spaces)))
+
+(process-title \"  Hello   World!  \")
+;; => first trim -> \"Hello World!\"
+;; => then slug -> \"hello-world\"
+;; => then upcase -> \"HELLO-WORLD\"
+```
+
+That works, but nesting `compose` calls is awkward. We can do better.
+
+---
+
+## Compose for N Functions
+
+A `compose` that takes any number of functions and chains them right-to-left. We'll use `foldr` (or `fold-right`) to apply them in sequence.
+
+```scheme
+;; compose-n: takes any number of functions, composes right-to-left
+(define (compose-n . fns)
+  (lambda (x)
+    (foldr (lambda (f acc) (f acc))
+           x
+           fns)))
+
+;; Example: chain four text operations
+(define (remove-punct s)
+  (list->string
+    (filter (lambda (c)
+              (or (char-alphabetic? c)
+                  (char-whitespace? c)))
+            (string->list s))))
+
+(define process
+  (compose-n upcase slugify trim-spaces remove-punct))
+
+(process \"  Café—2024!  \")
+;; => remove-punct: \"Café  \"
+;; => trim-spaces: \"Café\"
+;; => slugify: \"cafe\"
+;; => upcase: \"CAFE\"
+```
+
+Much cleaner. But reading right-to-left is still a stumble. Let's build `pipe`.
+
+---
+
+## Pipe: Left-to-Right Composition
+
+Pipe is just compose with the functions reversed. Data flows left to right, matching the order you write them.
+
+```scheme
+;; pipe: compose left-to-right (Unix-pipeline style)
+(define (pipe . fns)
+  (lambda (x)
+    (foldl (lambda (acc f) (f acc))
+           x
+           fns)))
+
+;; Same transformation, but easier to read
+(define process-ltr
+  (pipe remove-punct
+        trim-spaces
+        slugify
+        upcase))
+
+(process-ltr \"  Hello—World! 2024  \")
+;; => \"HELLO-WORLD\"
+```
+
+Now the order on the page matches the order of execution. This is FORWARD in code: each stage advances the value toward the final shape.
+
+---
+
+## Partial Application by Hand
+
+Currying and partial application let you \"freeze\" some arguments and return a function waiting for the rest. Scheme doesn't curry by default, but we can build it.
+
+```scheme
+;; partial: freeze the first argument of a two-argument function
+(define (partial f a)
+  (lambda (b)
+    (f a b)))
+
+;; Example: build an \"add-5\" function from a generic add
+(define (add x y) (+ x y))
+(define add-5 (partial add 5))
+
+(add-5 10)  ; => 15
+(add-5 100) ; => 105
+```
+
+More useful: partial application for predicates.
+
+```scheme
+;; Build a \"greater-than-10\" predicate
+(define (greater-than x y) (> y x))
+(define gt-10 (partial greater-than 10))
+
+(filter gt-10 '(5 12 8 15 3 20))
+;; => (12 15 20)
+```
+
+Now generalize to any number of arguments.
+
+```scheme
+;; partial-n: freeze any number of leading arguments
+(define (partial-n f . frozen)
+  (lambda rest-args
+    (apply f (append frozen rest-args))))
+
+;; Example: build a multiplier
+(define (multiply a b c) (* a b c))
+(define times-2-3 (partial-n multiply 2 3))
+
+(times-2-3 4)  ; => 2 * 3 * 4 = 24
+(times-2-3 10) ; => 2 * 3 * 10 = 60
+```
+
+This is the foundation of point-free style: building new functions by partially applying old ones, no explicit lambda needed.
+
+---
+
+## Composing with Verb Calls
+
+Now we're ready to compose wired verbs. Real work: fetch data, transform it, route it onward. Every stage might fail, so we'll handle `'nan` and `escalate` honestly.
+
+```scheme
+;; Fetch today's date, format it as ISO8601, then extract just the year
+(define extract-year
+  (pipe system/date-today
+        (lambda (date)
+          (if (eq? date 'nan)
+              'nan
+              (substring (symbol->string date) 0 4)))))
+
+(extract-year)
+;; If system/date-today returns \"2024-05-17\", result is \"2024\"
+;; If it returns 'nan, we propagate 'nan
+```
+
+That's ESCAPE: we check for failure and route it cleanly. But writing `if (eq? date 'nan)` every stage is tedious. Let's build a combinator.
+
+---
+
+## Maybe-Pipe: Composition that Short-Circuits on Failure
+
+A pipeline that stops as soon as any stage returns `'nan` or an escalation.
+
+```scheme
+;; maybe-apply: apply f to x, but only if x is not 'nan or escalate
+(define (maybe-apply f x)
+  (cond
+    ((eq? x 'nan) 'nan)
+    ((and (pair? x) (eq? (car x) 'escalate)) x)
+    (else (f x))))
+
+;; maybe-pipe: like pipe, but short-circuits on 'nan or escalate
+(define (maybe-pipe . fns)
+  (lambda (x)
+    (foldl maybe-apply x fns)))
+
+;; Example: fetch a product SKU, normalize it, look up stock
+;; If any stage fails, the whole pipeline returns the failure
+(define (normalize-sku sku)
+  (if (string? sku)
+      (text/normalize sku)
+      'nan))
+
+(define (lookup-stock sku)
+  (if (equal? sku \"WIDGET-42\")
+      100
+      'nan))
+
+(define stock-pipeline
+  (maybe-pipe normalize-sku lookup-stock))
+
+(stock-pipeline \"  WIDGET-42  \")  ; => 100
+(stock-pipeline \"UNKNOWN\")         ; => 'nan (lookup fails)
+(stock-pipeline 12345)             ; => 'nan (normalize fails on non-string)
+```
+
+Now failure propagates automatically. This is ESCAPE built into the pipeline itself.
+
+---
+
+## Curry: Transform Any Multi-Arg Function
+
+True currying: transform a function of N arguments into N functions of one argument each.
+
+```scheme
+;; curry-2: curry a two-argument function
+(define (curry-2 f)
+  (lambda (a)
+    (lambda (b)
+      (f a b))))
+
+(define curried-add (curry-2 +))
+((curried-add 5) 10)  ; => 15
+
+;; We can partially apply by just calling once
+(define add-7 (curried-add 7))
+(add-7 3)   ; => 10
+(add-7 100) ; => 107
+```
+
+Generalizing to N arguments is harder and requires introspection Scheme doesn't give us directly, but we can build a version that takes the arity explicitly.
+
+```scheme
+;; curry-n: curry a function of known arity
+(define (curry-n arity f)
+  (letrec ((collect
+             (lambda (args-so-far)
+               (if (= (length args-so-far) arity)
+                   (apply f args-so-far)
+                   (lambda (next-arg)
+                     (collect (append args-so-far (list next-arg))))))))
+    (collect '())))
+
+(define curried-multiply (curry-n 3 *))
+(((curried-multiply 2) 3) 4)  ; => 24
+
+(define times-5 (curried-multiply 5))
+((times-5 10) 2)  ; => 100
+```
+
+Currying is rarely the *simplest* tool—`partial-n` is usually clearer—but it's elegant and teaches how closures accumulate state across calls.
+
+---
+
+## Building a Tiny Combinator Library
+
+Let's collect our tools and add a few more: `identity`, `constant`, `flip`, and `apply-to`.
+
+```scheme
+;; Core combinators
+
+(define (identity x) x)
+
+(define (constant x)
+  (lambda (_) x))
+
+(define (flip f)
+  (lambda (a b)
+    (f b a)))
+
+(define (apply-to x)
+  (lambda (f)
+    (f x)))
+
+;; Composition
+(define (compose f g)
+  (lambda (x) (f (g x))))
+
+(define (pipe . fns)
+  (lambda (x)
+    (foldl (lambda (acc f) (f acc)) x fns)))
+
+;; Partial application
+(define (partial-n f . frozen)
+  (lambda rest
+    (apply f (append frozen rest))))
+
+;; Failure-aware composition
+(define (maybe-apply f x)
+  (cond
+    ((eq? x 'nan) 'nan)
+    ((and (pair? x) (eq? (car x) 'escalate)) x)
+    (else (f x))))
+
+(define (maybe-pipe . fns)
+  (lambda (x)
+    (foldl maybe-apply x fns)))
+```
+
+Now let's use this library to solve a real problem.
+
+---
+
+## Real Task: Multi-Stage Listing Transformation
+
+We'll fetch an Etsy listing, extract its title, normalize and slug it, check if a similar SKU exists in inventory, and return a report. Every stage can fail; the pipeline handles it.
+
+```scheme
+;; Combinator library (inline for standalone execution)
+(define (pipe . fns)
+  (lambda (x)
+    (foldl (lambda (acc f) (f acc)) x fns)))
+
+(define (maybe-apply f x)
+  (cond
+    ((eq? x 'nan) 'nan)
+    ((and (pair? x) (eq? (car x) 'escalate)) x)
+    (else (f x))))
+
+(define (maybe-pipe . fns)
+  (lambda (x)
+    (foldl maybe-apply x fns)))
+
+;; Stage 1: Fetch listing by ID
+(define (fetch-listing listing-id)
+  (etsy/listing listing-id))
+
+;; Stage 2: Extract title from listing JSON
+(define (extract-title listing)
+  (if (eq? listing 'nan)
+      'nan
+      (let ((title-field (assoc 'title listing)))
+        (if title-field
+            (cdr title-field)
+            'nan))))
+
+;; Stage 3: Normalize and slug the title
+(define (make-sku title)
+  (if (eq? title 'nan)
+      'nan
+      (text/slug-compose (text/normalize title))))
+
+;; Stage 4: Check if SKU exists in inventory (mock for demo)
+(define (check-inventory sku)
+  (if (eq? sku 'nan)
+      'nan
+      (cond
+        ((equal? sku \"vintage-teapot\") '(sku \"vintage-teapot\" stock 5))
+        ((equal? sku \"handmade-candle\") '(sku \"handmade-candle\" stock 0))
+        (else '(sku unknown stock 0)))))
+
+;; The full pipeline
+(define listing-pipeline
+  (maybe-pipe fetch-listing
+              extract-title
+              make-sku
+              check-inventory))
+
+;; Run it
+(listing-pipeline 123456789)
+;; If listing exists and title is \"Vintage Teapot\", result:
+;; => (sku \"vintage-teapot\" stock 5)
+;; If any stage fails, result is 'nan or escalate
+```
+
+That's a four-verb, four-transform pipeline with honest failure handling, built entirely from combinators. FORWARD: each stage advances the data. ESCAPE: failure propagates cleanly. BACK: no extra machinery, just composition.
+
+---
+
+## Flip and Reorder: Adapting Argument Order
+
+Sometimes a function's arguments are in the wrong order for partial application. `flip` swaps them.
+
+```scheme
+(define (flip f)
+  (lambda (a b)
+    (f b a)))
+
+;; Example: cons builds (a . b), but we want to freeze b and vary a
+(define (cons-flipped b a) (cons a b))
+
+(define attach-metadata (flip cons '(meta approved)))
+
+(attach-metadata \"Widget\")
+;; => (\"Widget\" meta approved)
+
+(attach-metadata \"Gadget\")
+;; => (\"Gadget\" meta approved)
+```
+
+More useful: adapting a filter predicate.
+
+```scheme
+;; We have (> a b), but filter expects (lambda (x) (> x threshold))
+;; Flip lets us freeze the threshold on the right
+(define (less-than a b) (< a b))
+(define greater-than (flip less-than))
+
+(define above-50 (partial-n greater-than 50))
+
+(filter above-50 '(20 60 45 80 55))
+;; => (60 80 55)
+```
+
+---
+
+## Apply-To: Threading a Value Through Functions
+
+`apply-to` takes a value and returns a function that applies any function to that value. It's the dual of partial application.
+
+```scheme
+(define (apply-to x)
+  (lambda (f)
+    (f x)))
+
+;; Example: thread the number 10 through several transformations
+(define process-10 (apply-to 10))
+
+(process-10 (lambda (n) (* n n)))      ; => 100
+(process-10 (lambda (n) (+ n 5)))      ; => 15
+(process-10 (lambda (n) (- n 3)))      ; => 7
+```
+
+More powerful: use it in a pipeline to \"inject\" a value at each stage.
+
+```scheme
+;; Build a report by threading a listing ID through several fetchers
+(define (build-report listing-id)
+  (let ((getter (apply-to listing-id)))
+    (list 'listing (getter etsy/listing)
+          'inventory (getter (lambda (id)
+                               (stock/on-hand (string-append \"SKU-\" (number->string id)))))
+          'reviews (getter (lambda (id) 'nan)))))  ; mock: no review verb for ID
+
+(build-report 999)
+;; => (listing <result-of-etsy/listing-999>
+;;     inventory <result-of-stock/on-hand-\"SKU-999\">
+;;     reviews nan)
+```
+
+---
+
+## Composing Predicates: And, Or, Not
+
+Higher-order predicates: take predicates, return new predicates.
+
+```scheme
+;; predicate-and: both predicates must be true
+(define (predicate-and p1 p2)
+  (lambda (x)
+    (and (p1 x) (p2 x))))
+
+;; predicate-or: at least one must be true
+(define (predicate-or p1 p2)
+  (lambda (x)
+    (or (p1 x) (p2 x))))
+
+;; predicate-not: invert a predicate
+(define (predicate-not p)
+  (lambda (x)
+    (not (p x))))
+
+;; Example: filter numbers that are even AND greater than 10
+(define (even? n) (= (modulo n 2) 0))
+(define (gt-10? n) (> n 10))
+
+(define even-and-large (predicate-and even? gt-10?))
+
+(filter even-and-large '(5 12 8 15 20 3 14))
+;; => (12 20 14)
+```
+
+Compose them further:
+
+```scheme
+;; Odd OR greater than 15
+(define (odd? n) (not (even? n)))
+(define (gt-15? n) (> n 15))
+
+(define odd-or-very-large (predicate-or odd? gt-15?))
+
+(filter odd-or-very-large '(2 9 12 17 20 5))
+;; => (9 17 20 5)
+```
+
+---
+
+## Macro-by-Hand: Building Custom Control Flow
+
+Scheme macros transform code before evaluation, but we can *simulate* some macro-like behavior with higher-order functions. Not true macros—we can't delay evaluation fully—but close enough for many patterns.
+
+Example: a `when-let` that binds a value only if it's not `'nan`, else returns a default.
+
+```scheme
+;; when-value: if x is not 'nan, apply f; else return default
+(define (when-value x f default)
+  (if (eq? x 'nan)
+      default
+      (f x)))
+
+;; Example: fetch a listing title, process it, or return \"No title\"
+(define (get-title-or-default listing-id)
+  (when-value (etsy/listing listing-id)
+              (lambda (listing)
+                (let ((title (assoc 'title listing)))
+                  (if title
+                      (cdr title)
+                      \"Untitled\")))
+              \"No title\"))
+
+;; (get-title-or-default 123) => \"Vintage Teapot\" or \"No title\"
+```
+
+Another pattern: `try-each` that tries a list of functions until one doesn't return `'nan`.
+
+```scheme
+;; try-each: apply functions in order until one succeeds (not 'nan)
+(define (try-each x fns)
+  (if (null? fns)
+      'nan
+      (let ((result ((car fns) x)))
+        (if (eq? result 'nan)
+            (try-each x (cdr fns))
+            result))))
+
+;; Example: try to extract a title from different fields
+(define (extract-from-title data)
+  (let ((t (assoc 'title data)))
+    (if t (cdr t) 'nan)))
+
+(define (extract-from-name data)
+  (let ((n (assoc 'name data)))
+    (if n (cdr n) 'nan)))
+
+(define (extract-from-description data)
+  (let ((d (assoc 'description data)))
+    (if d (substring (cdr d) 0 20) 'nan)))
+
+(define (get-some-label data)
+  (try-each data (list extract-from-title
+                       extract-from-name
+                       extract-from-description)))
+
+(get-some-label '((name . \"Widget\") (description . \"A fine widget indeed\")))
+;; => \"Widget\" (from name, since title is missing)
+```
+
+This is FORWARD—trying each fallback until one advances the computation—and ESCAPE—cleanly handling failure at each step.
+
+---
+
+## Deep Recursion with Combinators
+
+Use combinators to build recursive processing pipelines. Example: recursively process a nested list structure, applying a transformation at each level.
+
+```scheme
+;; deep-map: apply f to every atom in a nested list
+(define (deep-map f lst)
+  (cond
+    ((null? lst) '())
+    ((not (pair? lst)) (f lst))
+    (else (cons (deep-map f (car lst))
+                (deep-map f (cdr lst))))))
+
+;; Example: double every number in a nested structure
+(define (double x) (if (number? x) (* x 2) x))
+
+(deep-map double '(1 (2 (3 4) 5) 6))
+;; => (2 (4 (6 8) 10) 12)
+```
+
+Now compose `deep-map` with a pipeline:
+
+```scheme
+;; Transform nested data: deep-map a normalizer, then flatten
+(define (flatten lst)
+  (cond
+    ((null? lst) '())
+    ((not (pair? lst)) (list lst))
+    (else (append (flatten (car lst))
+                  (flatten (cdr lst))))))
+
+(define (normalize-string s)
+  (if (string? s)
+      (text/normalize s)
+      s))
+
+(define process-nested
+  (pipe (lambda (data) (deep-map normalize-string data))
+        flatten))
+
+(process-nested '(\"  Hello  \" (\"  World  \" \"  \") \"Test\"))
+;; => (\"Hello\" \"World\" \"Test\")
+```
+
+---
+
+## Building a Retry Combinator
+
+A higher-order function that retries a computation up to N times if it returns `'nan`.
+
+```scheme
+;; retry: try (thunk) up to n times; return first non-'nan result or final 'nan
+(define (retry n thunk)
+  (if (<= n 0)
+      'nan
+      (let ((result (thunk)))
+        (if (eq? result 'nan)
+            (retry (- n 1) thunk)
+            result))))
+
+;; Example: simulate a flaky network call
+(define attempt-count 0)
+(define (flaky-fetch)
+  (set! attempt-count (+ attempt-count 1))
+  (if (< attempt-count 3)
+      'nan
+      \"Success!\"))
+
+(retry 5 flaky-fetch)
+;; => \"Success!\" (after 3 attempts)
+```
+
+Now compose retry with a verb call:
+
+```scheme
+;; Retry fetching a listing up to 3 times
+(define (fetch-with-retry listing-id)
+  (retry 3 (lambda () (etsy/listing listing-id))))
+
+;; (fetch-with-retry 123) will try up to 3 times
+```
+
+This is ESCAPE with persistence: we don't give up on first failure, but we do give up honestly after N tries.
+
+---
+
+## Chaining Multiple Verbs with Failure Recovery
+
+A real orchestration: fetch a listing, extract the shop ID, fetch shop stats, compute a metric. If any stage fails, try a fallback path.
+
+```scheme
+;; Combinator library (inline)
+(define (maybe-apply f x)
+  (cond
+    ((eq? x 'nan) 'nan)
+    ((and (pair? x) (eq? (car x) 'escalate)) x)
+    (else (f x))))
+
+(define (maybe-pipe . fns)
+  (lambda (x)
+    (foldl maybe-apply x fns)))
+
+;; Fetch listing
+(define (fetch-listing id)
+  (etsy/listing id))
+
+;; Extract shop-id from listing
+(define (extract-shop-id listing)
+  (if (eq? listing 'nan)
+      'nan
+      (let ((shop (assoc 'shop_id listing)))
+        (if shop (cdr shop) 'nan))))
+
+;; Fetch shop stats
+(define (fetch-shop-stats shop-id)
+  (if (eq? shop-id 'nan)
+      'nan
+      (etsy/shop-stats shop-id)))
+
+;; Extract revenue from stats
+(define (extract-revenue stats)
+  (if (eq? stats 'nan)
+      'nan
+      (let ((rev (assoc 'revenue stats)))
+        (if rev (cdr rev) 'nan))))
+
+;; Primary pipeline
+(define primary-pipeline
+  (maybe-pipe fetch-listing
+              extract-shop-id
+              fetch-shop-stats
+              extract-revenue))
+
+;; Fallback: return a default revenue
+(define (with-fallback pipeline fallback)
+  (lambda (x)
+    (let ((result (pipeline x)))
+      (if (eq? result 'nan)
+          fallback
+          result))))
+
+(define robust-revenue
+  (with-fallback primary-pipeline 0))
+
+(robust-revenue 123456)
+;; => revenue if all stages succeed, else 0
+```
+
+FORWARD through four verbs, ESCAPE if any fails, BACK to a sensible default. This is the shape of real production routes.
+
+---
+
+## Composing Transformations Over JSON
+
+Real data is often JSON (represented as alists in Scheme). Let's build combinators to extract, transform, and assemble fields.
+
+```scheme
+;; get-field: extract a field from an alist, or 'nan
+(define (get-field key)
+  (lambda (alist)
+    (let ((pair (assoc key alist)))
+      (if pair (cdr pair) 'nan))))
+
+;; map-field: apply f to a field's value
+(define (map-field key f)
+  (lambda (alist)
+    (let ((pair (assoc key alist)))
+      (if pair
+          (cons (cons key (f (cdr pair)))
+                (filter (lambda (p) (not (eq? (car p) key))) alist))
+          alist))))
+
+;; Example: extract title, normalize it, put it back
+(define listing '((listing_id . 123)
+                  (title . \"  Vintage Teapot  \")
+                  (price . 25.00)))
+
+(define normalized
+  ((map-field 'title text/normalize) listing))
+
+normalized
+;; => ((listing_id . 123) (title . \"Vintage Teapot\") (price . 25.00))
+```
+
+Compose multiple field transformations:
+
+```scheme
+;; Transform title and price in one pipeline
+(define (format-price p)
+  (string-append \"$\" (number->string p)))
+
+(define transform-listing
+  (pipe (map-field 'title text/normalize)
+        (map-field 'price format-price)))
+
+(transform-listing listing)
+;; => ((listing_id . 123) (title . \"Vintage Teapot\") (price . \"$25.0\"))
+```
+
+---
+
+## Building a Lens-Like Getter/Setter
+
+A lens is a composable getter/setter pair. We'll build a simplified version.
+
+```scheme
+;; make-lens: takes a getter and setter, returns a lens
+(define (make-lens getter setter)
+  (list getter setter))
+
+(define (lens-get lens)
+  (car lens))
+
+(define (lens-set lens)
+  (cadr lens))
+
+;; Lens for accessing a field in an alist
+(define (field-lens key)
+  (make-lens
+    (lambda (alist)
+      (let ((pair (assoc key alist)))
+        (if pair (cdr pair) 'nan)))
+    (lambda (alist value)
+      (cons (cons key value)
+            (filter (lambda (p) (not (eq? (car p) key))) alist)))))
+
+;; Example: get and set the title field
+(define title-lens (field-lens 'title))
+
+((lens-get title-lens) '((title . \"Old Title\") (price . 10)))
+;; => \"Old Title\"
+
+((lens-set title-lens) '((title . \"Old Title\") (price . 10)) \"New Title\")
+;; => ((title . \"New Title\") (price . 10))
+```
+
+Compose lenses to navigate nested structures:
+
+```scheme
+;; Lens composition: access nested fields
+(define (compose-lens outer inner)
+  (make-lens
+    (lambda (data)
+      ((lens-get inner) ((lens-get outer) data)))
+    (lambda (data value)
+      ((lens-set outer) data
+                        ((lens-set inner) ((lens-get outer) data) value)))))
+
+;; Example: access shop.name in ((shop . ((name . \"MyShop\"))))
+(define shop-lens (field-lens 'shop))
+(define name-lens (field-lens 'name))
+(define shop-name-lens (compose-lens shop-lens name-lens))
+
+(define data '((shop . ((name . \"OldShop\") (id . 42)))))
+
+((lens-get shop-name-lens) data)
+;; => \"OldShop\"
+
+((lens-set shop-name-lens) data \"NewShop\")
+;; => ((shop . ((name . \"NewShop\") (id . 42))))
+```
+
+This is macro-like behavior: we've built a composable abstraction for nested access and mutation, entirely from lambdas.
+
+---
+
+## Y Combinator: Recursion Without Named Definitions
+
+The Y combinator enables recursion in an anonymous function by passing the function to itself. It's famous, beautiful, and genuinely hard.
+
+```scheme
+;; The Y combinator (call-by-value version)
+(define Y
+  (lambda (f)
+    ((lambda (x) (f (lambda (v) ((x x) v))))
+     (lambda (x) (f (lambda (v) ((x x) v)))))))
+
+;; Use it to define factorial without 'define'
+(define factorial
+  (Y (lambda (recur)
+       (lambda (n)
+         (if (<= n 1)
+             1
+             (* n (recur (- n 1))))))))
+
+(factorial 5)
+;; => 120
+```
+
+Why this matters: it proves that recursion is just a pattern of self-application. You don't *need* `letrec` or named `define`—you can build it from pure lambda calculus.
+
+Another example: Fibonacci.
+
+```scheme
+(define fibonacci
+  (Y (lambda (recur)
+       (lambda (n)
+         (if (<= n 1)
+             n
+             (+ (recur (- n 1))
+                (recur (- n 2))))))))
+
+(fibonacci 10)
+;; => 55
+```
+
+The Y combinator is the ultimate \"macro by hand\"—it's a control structure built entirely from function application.
+
+---
+
+## Transducers: Composing Transformations Without Intermediate Lists
+
+A transducer is a transformation that doesn't know about the container—it just describes the operation. We can compose transducers and then apply them to any reducible structure.
+
+```scheme
+;; A transducer is a function that transforms a reducing function
+
+;; mapping: transducer that maps f over elements
+(define (mapping f)
+  (lambda (reducer)
+    (lambda (acc x)
+      (reducer acc (f x)))))
+
+;; filtering: transducer that filters by predicate p
+(define (filtering p)
+  (lambda (reducer)
+    (lambda (acc x)
+      (if (p x)
+          (reducer acc x)
+          acc))))
+
+;; Compose transducers
+(define (compose-transducers . xfs)
+  (foldl (lambda (acc xf) (xf acc))
+         (lambda (acc x) (cons x acc))
+         (reverse xfs)))
+
+;; Apply a transducer to a list using foldl
+(define (transduce xf reducer init lst)
+  (foldl (xf reducer) init lst))
+
+;; Example: map square, filter even, without building intermediate lists
+(define (square n) (* n n))
+(define (even? n) (= (modulo n 2) 0))
+
+(define xf
+  (compose-transducers (mapping square) (filtering even?)))
+
+(transduce xf cons '() '(1 2 3 4 5))
+;; => (4 16) in reverse order (cons builds backwards)
+;; Reverse to correct: (reverse (transduce xf cons '() '(1 2 3 4 5)))
+;; => (4 16)
+```
+
+Transducers avoid allocating intermediate lists: the transformation is applied during the single fold.
+
+---
+
+## Building a Monadic Bind for Maybe
+
+Monads are just a pattern for chaining computations that might fail. We'll build `bind` for the Maybe monad (`'nan` or a value).
+
+```scheme
+;; maybe-bind: chain a computation that might return 'nan
+(define (maybe-bind m f)
+  (if (eq? m 'nan)
+      'nan
+      (f m)))
+
+;; Example: chain three computations
+(define (safe-div a b)
+  (if (= b 0) 'nan (/ a b)))
+
+(define (safe-sqrt x)
+  (if (< x 0) 'nan (sqrt x)))
+
+(define (safe-log x)
+  (if (<= x 0) 'nan (log x)))
+
+(define (compute x)
+  (maybe-bind (safe-div x 2)
+              (lambda (a)
+                (maybe-bind (safe-sqrt a)
+                            (lambda (b)
+                              (maybe-bind (safe-log b)
+                                          (lambda (c)
+                                            c)))))))
+
+(compute 8)
+;; => 8/2 = 4, sqrt(4) = 2, log(2) ≈ 0.693
+
+(compute -8)
+;; => 'nan (safe-div succeeds, but safe-sqrt fails on negative)
+```
+
+That's deeply nested. We can build a macro-like `do` notation with syntax, but by hand, we'll build a chaining helper.
+
+```scheme
+;; maybe-chain: thread a value through a list of functions, stopping at 'nan
+(define (maybe-chain init fns)
+  (foldl maybe-bind init fns))
+
+(define (compute-chain x)
+  (maybe-chain x
+               (list (lambda (v) (safe-div v 2))
+                     safe-sqrt
+                     safe-log)))
+
+(compute-chain 8)
+;; => ≈ 0.693
+
+(compute-chain -8)
+;; => 'nan
+```
+
+Much cleaner. This is FORWARD (each function advances the computation) and ESCAPE (failure short-circuits).
+
+---
+
+## Orchestrating Five Verbs in a Monadic Pipeline
+
+Let's combine everything: fetch data from multiple verbs, transform it, handle failure monadically, and produce a final report.
+
+```scheme
+;; Monadic helpers (inline for standalone execution)
+(define (maybe-bind m f)
+  (if (eq? m 'nan)
+      'nan
+      (f m)))
+
+(define (maybe-chain init fns)
+  (foldl maybe-bind init fns))
+
+;; Step 1: Fetch a listing
+(define (fetch-listing id)
+  (etsy/listing id))
+
+;; Step 2: Extract shop ID
+(define (get-shop-id listing)
+  (let ((shop (assoc 'shop_id listing)))
+    (if shop (cdr shop) 'nan)))
+
+;; Step 3: Fetch shop details
+(define (fetch-shop shop-id)
+  (etsy/shop shop-id))
+
+;; Step 4: Extract shop name and normalize
+(define (get-shop-name shop)
+  (let ((name (assoc 'shop_name shop)))
+    (if name
+        (text/normalize (cdr name))
+        'nan)))
+
+;; Step 5: Fetch shop reviews
+(define (fetch-reviews shop-id)
+  (reviews/etsy-fetch shop-id))
+
+;; Step 6: Count reviews
+(define (count-reviews reviews)
+  (if (list? reviews)
+      (length reviews)
+      'nan))
+
+;; Build a report: listing -> shop name + review count
+(define (build-shop-report listing-id)
+  (maybe-chain (fetch-listing listing-id)
+               (list (lambda (listing)
+                       (let ((shop-id (get-shop-id listing)))
+                         (if (eq? shop-id 'nan)
+                             'nan
+                             (maybe-chain (fetch-shop shop-id)
+                                          (list (lambda (shop)
+                                                  (let ((name (get-shop-name shop)))
+                                                    (if (eq? name 'nan)
+                                                        'nan
+                                                        (maybe-chain (fetch-reviews shop-id)
+                                                                     (list (lambda (reviews)
+                                                                             (let ((count (count-reviews reviews)))
+                                                                               (if (eq? count 'nan)
+                                                                                   'nan
+                                                                                   (list 'shop name 'reviews count)))))))))))))))))
+
+(build-shop-report 123456)
+;; If all stages succeed:
+;; => (shop \"Vintage Finds\" reviews 42)
+;; If any stage fails:
+;; => 'nan
+```
+
+That works, but it's deeply nested. Let's refactor with better combinators.
+
+```scheme
+;; Monadic helper: bind with multiple stages
+(define (mlet bindings body)
+  (if (null? bindings)
+      body
+      (let ((name (caar bindings))
+            (computation (cadar bindings)))
+        (maybe-bind computation
+                    (lambda (val)
+                      (mlet (cdr bindings)
+                            (body val)))))))
+
+;; Cleaner version (pseudo-code; real implementation would need explicit substitution)
+;; We'll stick with explicit chaining for clarity
+```
+
+The real lesson: even without syntax-transforming macros, you can build monadic control flow by hand. It's verbose, but it's honest and it works.
+
+---
+
+## A Fold-Based Router: Dispatching by Pattern
+
+Build a routing table that matches an input against patterns and dispatches to handlers.
+
+```scheme
+;; route-table: list of (pattern . handler) pairs
+;; pattern is a predicate; handler is a function
+
+(define (route input routes default)
+  (let loop ((rs routes))
+    (if (null? rs)
+        (default input)
+        (let ((pattern (caar rs))
+              (handler (cdar rs)))
+          (if (pattern input)
+              (handler input)
+              (loop (cdr rs)))))))
+
+;; Example: route numbers to different processors
+(define (is-negative? x) (< x 0))
+(define (is-zero? x) (= x 0))
+(define (is-positive? x) (> x 0))
+
+(define routes
+  (list (cons is-negative? (lambda (x) (list 'negative (abs x))))
+        (cons is-zero? (lambda (x) '(zero)))
+        (cons is-positive? (lambda (x) (list 'positive x)))))
+
+(define (fallback x) (list 'unknown x))
+
+(route -5 routes fallback)  ; => (negative 5)
+(route 0 routes fallback)   ; => (zero)
+(route 10 routes fallback)  ; => (positive 10)
+```
+
+Use this to dispatch verb calls based on data shape.
+
+```scheme
+;; Route based on data type: if string, normalize; if number, format; else fail
+(define (is-string? x) (string? x))
+(define (is-number? x) (number? x))
+
+(define data-routes
+  (list (cons is-string? (lambda (s) (text/normalize s)))
+        (cons is-number? (lambda (n) (number->string n)))))
+
+(define (process-data data)
+  (route data data-routes (lambda (x) 'nan)))
+
+(process-data \"  Hello  \")  ; => \"Hello\"
+(process-data 42)           ; => \"42\"
+(process-data '(1 2 3))     ; => 'nan
+```
+
+---
+
+## Building a State Machine with Closures
+
+A state machine: a closure that holds state and transitions based on input.
+
+```scheme
+;; make-fsm: takes initial state and transition table, returns a step function
+(define (make-fsm initial transitions)
+  (let ((state initial))
+    (lambda (input)
+      (let ((transition (assoc (list state input) transitions)))
+        (if transition
+            (begin
+              (set! state (cadr transition))
+              (caddr transition))
+            'nan)))))
+
+;; Example: a turnstile (locked/unlocked)
+(define turnstile-transitions
+  '(((locked coin)   unlocked \"Click! Unlocked.\")
+    ((locked push)   locked   \"Locked. Insert coin.\")
+    ((unlocked coin) unlocked \"Already unlocked.\")
+    ((unlocked push) locked   \"Push! Locked.\")))
+
+(define turnstile (make-fsm 'locked turnstile-transitions))
+
+(turnstile 'push)  ; => \"Locked. Insert coin.\"
+(turnstile 'coin)  ; => \"Click! Unlocked.\"
+(turnstile 'push)  ; => \"Push! Locked.\"
+(turnstile 'push)  ; => \"Locked. Insert coin.\"
+```
+
+State machines are closures that remember. This is a macro-like pattern: building custom control flow (state transitions) from lambdas and mutation.
+
+---
+
+## A Recursive Descent Parser Combinator
+
+Combinators for building parsers: match a character, sequence two parsers, choose between alternatives.
+
+```scheme
+;; Parser: a function (string, position) -> (result, new-position) or 'nan
+
+;; char-parser: match a specific character
+(define (char-parser c)
+  (lambda (input pos)
+    (if (and (< pos (string-length input))
+             (char=? (string-ref input pos) c))
+        (list c (+ pos 1))
+        'nan)))
+
+;; sequence: run p1, then p2
+(define (sequence p1 p2)
+  (lambda (input pos)
+    (let ((r1 (p1 input pos)))
+      (if (eq? r1 'nan)
+          'nan
+          (let ((r2 (p2 input (cadr r1))))
+            (if (eq? r2 'nan)
+                'nan
+                (list (list (car r1) (car r2)) (cadr r2))))))))
+
+;; choice: try p1, if it fails try p2
+(define (choice p1 p2)
+  (lambda (input pos)
+    (let ((r1 (p1 input pos)))
+      (if (eq? r1 'nan)
+          (p2 input pos)
+          r1))))
+
+;; Example: parse \"ab\" or \"cd\"
+(define parse-ab (sequence (char-parser #\\a) (char-parser #\\b)))
+(define parse-cd (sequence (char-parser #\\c) (char-parser #\\d)))
+(define parse-ab-or-cd (choice parse-ab parse-cd))
+
+(parse-ab-or-cd \"ab\" 0)  ; => ((#\\a #\\b) 2)
+(parse-ab-or-cd \"cd\" 0)  ; => ((#\\c #\\d) 2)
+(parse-ab-or-cd \"ef\" 0)  ; => 'nan
+```
+
+This is the foundation of parser combinators: building complex parsers by composing simple ones. Macro-like because we're defining a DSL (the combinators) for expressing grammars.
+
+---
+
+## Deep Orchestration: Six Verbs, Nested Failure Handling
+
+The hardest worked example: fetch a listing, extract tags, search for related listings, fetch their prices, compute average, compare to original, return a recommendation. Handle failure at every stage.
+
+```scheme
+;; Monadic helper (inline)
+(define (maybe-bind m f)
+  (cond
+    ((eq? m 'nan) 'nan)
+    ((and (pair? m) (eq? (car m) 'escalate)) m)
+    (else (f m))))
+
+;; Step 1: Fetch listing
+(define (fetch-listing id)
+  (etsy/listing id))
+
+;; Step 2: Extract tags
+(define (get-tags listing)
+  (let ((tags (assoc 'tags listing)))
+    (if tags (cdr tags) 'nan)))
+
+;; Step 3: Search for listings with the same first tag
+(define (search-by-tag tag)
+  (if (null? tag)
+      'nan
+      (etsy/listings (list (cons 'tags (car tag))))))
+
+;; Step 4: Extract prices from listings
+(define (extract-prices listings)
+  (if (or (eq? listings 'nan) (not (list? listings)))
+      'nan
+      (let ((prices (map (lambda (l)
+                           (let ((p (assoc 'price l)))
+                             (if p (cdr p) 'nan)))
+                         listings)))
+        (filter (lambda (p) (not (eq? p 'nan))) prices))))
+
+;; Step 5: Compute average price
+(define (average nums)
+  (if (null? nums)
+      'nan
+      (/ (foldl + 0 nums) (length nums))))
+
+;; Step 6: Compare to original price and recommend
+(define (recommend original-price avg-price)
+  (cond
+    ((eq? avg-price 'nan) 'nan)
+    ((< original-price (* avg-price 0.9)) '(recommendation \"Price is competitive\"))
+    ((> original-price (* avg-price 1.1)) '(recommendation \"Consider lowering price\"))
+    (else '(recommendation \"Price is average\"))))
+
+;; The full pipeline
+(define (price-recommendation listing-id)
+  (maybe-bind (fetch-listing listing-id)
+              (lambda (listing)
+                (let ((tags (get-tags listing))
+                      (price (let ((p (assoc 'price listing)))
+                               (if p (cdr p) 'nan))))
+                  (if (or (eq? tags 'nan) (eq? price 'nan))
+                      'nan
+                      (maybe-bind (search-by-tag tags)
+                                  (lambda (related)
+                                    (let ((prices (extract-prices related)))
+                                      (if (eq? prices 'nan)
+                                          'nan
+                                          (let ((avg (average prices)))
+                                            (recommend price avg)))))))))))
+
+(price-recommendation 123456)
+;; If all stages succeed:
+;; => (recommendation \"Price is competitive\")
+;; If any stage fails:
+;; => 'nan or (escalate ...)
+```
+
+Six verbs, five transformations, full failure handling, monadic chaining. This is mastery: orchestrating real work with honest control flow, built from lambdas and folds.
+
+---
+
+## Challenges
+
+Now it's your turn. Each challenge asks for a complete, standalone, runnable program—harder than the worked examples or at their level. Use only wired verbs + core Scheme forms. Handle failure honestly. Show ESCAPE, FORWARD, and BACK where they apply.
+
+1. **Transducer Pipeline with Three Stages**: Write a transducer that (a) maps a string normalizer over a list of product titles, (b) filters out any that are shorter than 5 characters, (c) maps a slug composer. Apply it to a list of titles and return the final slugs. Use `transduce` and compose the transducers by hand.
+
+2. **Lens for Nested JSON**: Build a lens that accesses `shop.location.city` in a nested alist structure. Use it to get the city, then set it to a new value. Demonstrate both operations on sample data.
+
+3. **Y Combinator for List Sum**: Use the Y combinator to define a `sum-list` function that recursively sums a list of numbers without using `define` to name the recursive call. Test it on a list of at least 10 numbers.
+
+4. **State Machine for Order Status**: Build a state machine with states `pending`, `shipped`, `delivered`, `cancelled`. Define transitions for events `ship`, `deliver`, `cancel`, `return`. The machine should reject invalid transitions (e.g., can't deliver before shipping) and return appropriate messages. Run it through a sequence of at least 5 events.
+
+5. **Monadic Pipeline Across Four Verbs**: Fetch an Etsy listing, extract the shop ID, fetch shop stats, extract revenue, fetch shop reviews, count them, and return a report `(shop-id <id> revenue <r> reviews <n>)`. If any stage fails, return `'nan`. Use `maybe-bind` to chain the stages.
+
+6. **Parser Combinator for Simple Expressions**: Build parsers for digits, the `+` operator, and simple addition expressions like `\"3+5\"`. Compose them with `sequence` and `choice`. Parse `\"3+5\"` and return the parsed structure. Handle failure if the input doesn't match.
+
+7. **Retry with Exponential Backoff**: Extend the `retry` combinator to take a delay function that returns increasing delays (simulated with a counter, since we can't actually sleep). Retry up to 5 times, \"waiting\" 1, 2, 4, 8, 16 units between attempts. Track and return the total delay along with the result.
+
+8. **Fold-Based Router with Verb Dispatch**: Build a routing table that dispatches to different verbs based on input type: if the input is a listing ID (number), call `etsy/listing`; if it's a shop name (string), call `etsy/shop`; if it's a product SKU (string starting with \"SKU-\"), call `stock/on-hand`. Return the result or `'nan` if no route matches. Test with at least three inputs.
+
+9. **Deep-Map Over JSON with Transformation**: Write a `deep-transform` function that recursively walks a nested alist structure and applies a transformation function to every *string* value (leaving numbers, symbols, and structure unchanged). Use it to normalize all string fields in a mock listing with nested shop and image data.
+
+10. **Compose Five Predicates**: Build a predicate that checks if a number is (a) positive, (b) even, (c) less than 100, (d) not a multiple of 10, and (e) prime (you'll need a helper for primality). Compose these five predicates using `predicate-and`. Filter a list of numbers from 1 to 100 using the composed predicate and return the matches.
+
+---
+
+**End of Chapter 12.**
+
+You've built a combinator library from first principles: `compose`, `pipe`, `partial`, `curry`, `maybe-pipe`, lenses, the Y combinator, transducers, monadic bind, state machines, and parser combinators. Every abstraction came from `lambda`, `let`, and `apply`—no magic, just composition done well.
+
+These tools aren't exotic. They're how you *see* a program: as stages that advance data (FORWARD), handle failure cleanly (ESCAPE), and stay as simple as the problem honestly demands (BACK). Now when you write a route, you'll recognize the shape: a pipeline, a fold, a recursive descent, a state transition. You'll know how to build the combinator that makes it clean.
+
+The hard part wasn't the code—it was learning to think in functions that return functions, closures that capture closures, and composition as the universal joint. You've got it now. Go build something beautiful.
+")

@@ -1,0 +1,1192 @@
+(chapter
+  :book "Book of Introspection"
+  :chapter-number 3
+  :title "Describe + typeOf — what am I looking at?"
+  :audience "programmer-learning-motoi"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-of-introspection-author-agent"
+     :sources ("src/introspect.js" "src/base.js" "src/repl.js"))
+  :prose
+"# Chapter 3 — Describe + typeOf: what am I looking at?
+
+You have a name in your head. You are not sure what it does. Or you have a value in your hand. You are not sure what shape it has. Either way you need a shorter path to an answer than pulling the whole metadata record.
+
+Motoi has three verbs for this. `describe` gives you a paragraph about a named verb. `type-of` gives you the runtime type of a value. `contract-of` gives you the signature of a verb. Together they answer *what am I looking at?* — whether the thing you are looking at is a name or a value.
+
+This chapter shows all three, when to use which, and how they compose.
+
+## 3.1 describe — a paragraph about a verb
+
+`describe` takes a verb name and returns a short human-readable description. Not the whole record. A paragraph you can read.
+
+```scheme
+(describe 'map)
+;; map [base] — arity 2 or more
+;; Apply a procedure to each element of one or more lists, returning a new list of results.
+```
+
+Two lines. Enough to know what the verb is, how it is called, and what it does. If you need more, use `help` and get the whole record. If you just want to remember what the verb does, `describe` is faster.
+
+Behind the scenes `describe` is a thin wrapper over `help`. It reads the same record; it just formats a subset of the fields for human eyes. See `src/introspect.js` for the implementation:
+
+```javascript
+export function describe(name) {
+  const meta = getVerbMeta(nameOf(name))
+  if (!meta) return `unknown verb: ${nameOf(name)}`
+  const doc = meta.doc || '(no doc)'
+  const arity = meta.arity ? ` — arity ${JSON.stringify(meta.arity)}` : ''
+  const ns = meta.namespace ? ` [${meta.namespace}]` : ''
+  return `${nameOf(name)}${ns}${arity}\\n${doc}`
+}
+```
+
+The verb concatenates name, namespace (if any), arity (if any), a newline, and the doc string. That is the whole description. Short by design.
+
+When to use `describe` instead of `help`:
+
+- You want a quick answer, not a full record.
+- You are showing a beginner what a verb does; the full record would overwhelm them.
+- You are logging or displaying to a UI that prefers text over structured data.
+
+When to use `help` instead of `describe`:
+
+- You need the examples, source, or since fields.
+- You are programmatically querying the metadata (contract, arity type-checked).
+- You are building your own display or tool.
+
+## 3.2 type-of — the runtime type of a value
+
+`type-of` takes any value and returns a symbol naming its runtime type.
+
+```scheme
+(type-of 42)               ;; => integer
+(type-of 3.14)             ;; => real
+(type-of \"hello\")         ;; => string
+(type-of #t)               ;; => boolean
+(type-of 'foo)             ;; => symbol
+(type-of '(1 2 3))         ;; => list
+(type-of '())              ;; => nil
+(type-of (cons 1 2))       ;; => pair
+(type-of (lambda (x) x))   ;; => procedure
+(type-of nil)              ;; => nil
+```
+
+The return is always a symbol. The vocabulary is fixed: `integer`, `real`, `string`, `boolean`, `symbol`, `list`, `pair`, `nil`, `procedure`, `char`, `vector`, `hash`, `record`, `error`, `port`.
+
+If Motoi gains a new runtime type, the type-of vocabulary grows by one symbol. But new types are rare — the core set has been stable across releases.
+
+Use `type-of` whenever you have a value and are not sure what shape it has. This happens more often than you might think:
+
+- You called a verb and it returned something unexpected.
+- You destructured a Cortex record and pulled out a value.
+- You are debugging a data pipeline and need to see what is flowing through it.
+
+```scheme
+(define x (some-verb-returning-i-am-not-sure-what))
+(type-of x)
+;; => hash
+(keys x)
+;; => (:name :age :occupation)
+```
+
+Two calls and you know the shape. Third call, you have the fields. Now you can work with the value.
+
+## 3.3 The overlap — type-of on names vs values
+
+Here is a subtlety worth calling out. `type-of` overlaps with the contract retrieval verb in a way that can confuse.
+
+`(type-of 42)` returns `integer`. `(type-of 'foo)` returns `symbol`.
+
+But `,type foo` at the REPL returns the *contract* of the verb named `foo`. Not `symbol`.
+
+The two behaviors are different:
+
+- **Value-side type-of**: takes a value, returns the runtime type symbol.
+- **Verb-side type retrieval** (accessible via `,type` REPL command or `contract-of` verb): takes a name, returns the contract string.
+
+The REPL meta-command `,type` in `src/repl.js` uses `typeOf` from the introspection layer, which returns the contract. This is a naming inconsistency the language has lived with. The book distinguishes them:
+
+- Use `type-of` in Scheme code for value inspection.
+- Use `contract-of` (or `,type` at the REPL) for verb-signature inspection.
+
+If you type `(type-of 'map)` at the REPL, what happens depends on whether you are treating `'map` as a symbol value (in which case `type-of` returns `symbol`) or as a verb name (in which case you probably meant `contract-of`).
+
+To be explicit:
+
+```scheme
+(type-of 'map)         ;; => symbol   (the value is a symbol)
+(contract-of 'map)     ;; => \"(procedure list ...) -> list\"
+```
+
+The two verbs answer different questions. Use the one that matches your question.
+
+## 3.4 contract-of — the signature of a verb
+
+`contract-of` is the value-return version of the REPL's `,type` meta-command. It takes a verb name and returns the contract string from the metadata record.
+
+```scheme
+(contract-of 'car)         ;; => \"(pair) -> any\"
+(contract-of 'map)         ;; => \"(procedure list ...) -> list\"
+(contract-of 'cortex/query) ;; => \"(:subject? :predicate? :object? :at? :source? :order-by?) -> list\"
+```
+
+If a verb has no contract in its metadata, `contract-of` returns nil.
+
+```scheme
+(contract-of 'some-undocumented-verb)
+;; => nil
+```
+
+Use `contract-of` when you want the signature as data, not as printed output. For example, if you are generating documentation programmatically, or auditing a cart, or wiring a runtime contract-checker.
+
+## 3.5 arity-of — how many arguments
+
+`arity-of` returns the arity field from the metadata record.
+
+```scheme
+(arity-of 'car)         ;; => 1
+(arity-of 'substring)   ;; => (2 3)
+(arity-of 'list)        ;; => variadic
+(arity-of 'newline)     ;; => 0
+```
+
+For fixed-arity verbs it returns an integer. For verbs with optional arguments it returns a pair `(min max)`. For variadic verbs it returns the symbol `variadic`.
+
+Use `arity-of` when you need to programmatically check argument counts, generate call sites, or validate against expected arities.
+
+## 3.6 doc-of — the docstring alone
+
+`doc-of` returns just the doc field from the metadata. This is the most common projection — often you just want the one-sentence description.
+
+```scheme
+(doc-of 'map)
+;; => \"Apply a procedure to each element of one or more lists, returning a new list of results.\"
+```
+
+Chapter 4 walks `doc-of`, `source-of`, and `examples-of` in more depth. This chapter mentions them for completeness.
+
+## 3.7 The projection family
+
+Together, the projection verbs are:
+
+- `describe(name)` — verb name → paragraph
+- `help(name)` — verb name → full record
+- `doc-of(name)` — verb name → doc string
+- `contract-of(name)` — verb name → contract string
+- `arity-of(name)` — verb name → arity value
+- `source-of(name)` — verb name → source pointer
+- `examples-of(name)` — verb name → list of example records
+- `type-of(value)` — any value → runtime-type symbol
+- `keys(hash)` — hash → list of keys
+- `values(hash)` — hash → list of values
+- `length(list-or-string)` — length as an integer
+- `shape-of(value)` — value → composite description (Chapter 13, LLM-augmented)
+
+That is the family. Each is a projection over the metadata or the runtime state. Each is one call. Each returns data.
+
+Learn the projection verbs the way you would learn accessor methods in an object-oriented language. Once you have them memorized, the language becomes queryable at a rhythm faster than you can look things up in a manual.
+
+## 3.8 A worked flow
+
+You are debugging. A verb call returned something unexpected. Walk through the introspection reflex.
+
+```scheme
+(define result (some-verb 42))
+```
+
+You do not know what shape `result` has. First move:
+
+```scheme
+(type-of result)
+;; => hash
+```
+
+It is a hash. Second move:
+
+```scheme
+(keys result)
+;; => (:name :age :occupation)
+```
+
+Three keys. Third move, pull the values:
+
+```scheme
+(map (lambda (k) (cons k (hash-ref result k))) (keys result))
+;; => ((:name . \"Alice\") (:age . 30) (:occupation . \"programmer\"))
+```
+
+Now you know exactly what `some-verb` returned. Four calls, no source-reading, no documentation lookup. Every call is a projection over the value.
+
+If instead the value had been a list of records, the flow would be:
+
+```scheme
+(type-of result)          ;; => list
+(length result)           ;; => 3
+(type-of (car result))    ;; => hash
+(keys (car result))       ;; => (:name :age :occupation)
+```
+
+Same pattern. Introspect the outer shape, then walk into the elements.
+
+## 3.9 Introspection as debugging
+
+The pattern above is what debugging looks like in Motoi. Not a debugger with breakpoints and stepping. Introspection verbs applied to bound values.
+
+If you have a debugger reflex from another language, retrain it. The Motoi reflex is:
+
+1. Bind the suspicious value to a name.
+2. Introspect the value's type.
+3. Introspect the value's shape.
+4. Compare what you found to what you expected.
+5. If they differ, you have found the bug.
+
+This is not a downgrade from a stepping debugger. For pure computation it is often faster — you get the answer in one round-trip, not a hundred keystrokes through a stepping session. For side-effecting code Chapter 9's `,trace` fills in the temporal dimension.
+
+## 3.10 length, keys, values
+
+These three are the workhorses of shape introspection.
+
+**length**: the number of elements in a list or characters in a string.
+
+```scheme
+(length '(1 2 3))       ;; => 3
+(length \"hello\")       ;; => 5
+(length '())            ;; => 0
+```
+
+For strings this is character count, not byte count. Motoi strings are Unicode; `(length \"日本語\")` returns 3, not 9.
+
+**keys**: the keys of a hash, as a list.
+
+```scheme
+(keys (hash :a 1 :b 2 :c 3))
+;; => (:a :b :c)
+```
+
+For alists, `keys` returns the list of cars:
+
+```scheme
+(keys '((a . 1) (b . 2) (c . 3)))
+;; => (a b c)
+```
+
+**values**: the values of a hash, as a list.
+
+```scheme
+(values (hash :a 1 :b 2 :c 3))
+;; => (1 2 3)
+```
+
+Order of keys and values from a hash is not guaranteed unless the hash is an ordered variant.
+
+These three verbs plus `type-of` are enough to unwrap any composite value in Motoi. The unwrapping is often the debugging.
+
+## 3.11 procedure? and its friends
+
+Motoi has predicate verbs for every runtime type:
+
+- `procedure?`
+- `number?`
+- `integer?`
+- `real?`
+- `string?`
+- `symbol?`
+- `list?`
+- `pair?`
+- `null?`
+- `boolean?`
+- `char?`
+- `vector?`
+- `hash?`
+- `record?`
+- `error?`
+
+Each takes a value and returns a boolean. These are the introspection verbs you use inside conditional code:
+
+```scheme
+(define (describe-value v)
+  (cond
+    ((null? v) \"empty\")
+    ((number? v) (string-append \"a number: \" (number->string v)))
+    ((string? v) (string-append \"a string: \" v))
+    ((list? v) (string-append \"a list of \" (number->string (length v))))
+    ((procedure? v) \"a procedure\")
+    (else (string-append \"something else: \" (symbol->string (type-of v))))))
+```
+
+The predicates are also what enable pattern-matching dispatch:
+
+```scheme
+(define (safe-first x)
+  (cond
+    ((pair? x) (car x))
+    ((null? x) nil)
+    ((string? x) (string-ref x 0))
+    (else (error \"cannot take first of \" x))))
+```
+
+`type-of` returns the *symbol* of the type; the predicates return a *boolean* for a specific type. Both are useful; different situations call for different shapes.
+
+## 3.12 A subtlety — nil is a value
+
+`nil` (Motoi's name for the empty value) has type `nil`. It is not a special non-value. It is a value with a specific type.
+
+```scheme
+(type-of nil)         ;; => nil
+(null? nil)           ;; => #t
+```
+
+If you are coming from a language where `null` or `nil` is a sentinel that all types share, Motoi is different. `nil` is its own type. A verb whose contract says `(a) -> integer` and returns nil is violating the contract. If the verb might return nil, its contract should say `(a) -> integer | nil`.
+
+The `nil` type has one value: the nil itself. `null?` is the predicate. This is a small point but it comes up often when reading contracts.
+
+## 3.13 A subtlety — pair vs list
+
+A pair and a list are related but not the same.
+
+A pair is a two-element cons cell. Its type-of is `pair`.
+
+A list is a chain of pairs where the last cdr is nil. Its type-of is `list`.
+
+```scheme
+(type-of (cons 1 2))       ;; => pair
+(type-of (list 1 2))       ;; => list
+(type-of '(1 . 2))         ;; => pair
+(type-of '(1 2))           ;; => list
+```
+
+This distinction matters for predicates:
+
+```scheme
+(pair? (cons 1 2))         ;; => #t
+(list? (cons 1 2))         ;; => #f
+(pair? (list 1 2))         ;; => #t   (every list is a chain of pairs)
+(list? (list 1 2))         ;; => #t
+```
+
+Every list is a pair (or nil). Not every pair is a list. Reading a contract, `pair` allows any cons cell; `list` requires the nil-terminated chain.
+
+Motoi's convention is that when you want a list you say list, when you want a raw cons cell you say pair. The distinction is preserved in `type-of` and in the predicates.
+
+## 3.14 Composing describe with other verbs
+
+Because `describe` returns a string, it composes with any verb that consumes strings.
+
+Print a verb's description:
+
+```scheme
+(display (describe 'map))
+(newline)
+```
+
+Log the description to Cortex:
+
+```scheme
+(cortex/write :key 'last-verb-described :value (describe 'map))
+```
+
+Feed the description to an LLM verb for augmentation (Chapter 13):
+
+```scheme
+(explain (describe 'map))
+```
+
+Aggregate descriptions for a namespace:
+
+```scheme
+(map describe
+     (filter (lambda (n) (string-prefix? \"cortex/\" n))
+             (map car (snapshot-registry))))
+```
+
+That last one returns a list of description strings for every cortex verb. Concatenate with newlines and you have a small cheat-sheet.
+
+## 3.15 A worked example — writing a cheat-sheet generator
+
+Let me show a small program that builds a printable cheat-sheet for a namespace.
+
+```scheme
+(define (namespace-cheat-sheet ns)
+  (define verbs
+    (filter
+      (lambda (n) (string-prefix? (string-append ns \"/\") n))
+      (map car (snapshot-registry))))
+  (define lines
+    (map describe verbs))
+  (string-join lines \"\\n\\n\"))
+
+(display (namespace-cheat-sheet \"cortex\"))
+```
+
+Output:
+
+```
+cortex/read [cortex] — arity 1
+Read a value from Cortex by key.
+
+cortex/write [cortex] — arity 2
+Write a key-value pair to Cortex.
+
+cortex/record [cortex] — arity variadic
+Write a fact to Cortex. Kwargs: :subject :predicate :object :at :source.
+
+cortex/query [cortex] — arity variadic
+Query Cortex records. Kwargs: :subject :predicate :object :at :source :order-by.
+```
+
+Six lines of code and you have a cheat-sheet for any namespace in the runtime. The cheat-sheet updates automatically when verbs are added or their docs change. There is no separate authoring pass.
+
+This is the payoff of having introspection as verbs. Every derived tool is a small script over the same primitives. You do not write a separate cheat-sheet-generator project; you write six lines in your REPL and get the cheat-sheet.
+
+## 3.16 shape-of — the LLM-augmented projection
+
+`shape-of` deserves a mention here even though its full treatment is in Chapter 13.
+
+`shape-of` takes a value and returns a composite description — mechanical type-of plus a paragraph of prose about what the value probably is. It bridges the two worlds: mechanical introspection for the type and length, LLM-augmented prose for the interpretation.
+
+```scheme
+(shape-of some-cortex-record)
+;; => (:mechanical (:type hash :length 5 :keys (:subject :predicate :object :at :source))
+;;     :prose \"This appears to be a Cortex record — a five-tuple of subject, predicate, object, timestamp, and source.\"
+;;     :probable-origin \"cortex/record or cortex/query\"
+;;     :confidence 0.92)
+```
+
+The mechanical fields are what `type-of` and `keys` would return. The prose is what the LLM adds. The confidence is the LLM's honest estimate of how sure it is.
+
+You do not need `shape-of` for most debugging. `type-of` and `keys` are enough. But when the value's shape does not tell you its meaning, `shape-of` fills the gap by asking the LLM to interpret.
+
+Chapter 13 walks the full LLM-augmented family, of which `shape-of` is one.
+
+## 3.17 When mechanical is not enough
+
+Mechanical introspection tells you the shape. Sometimes you need the meaning.
+
+A list of three integers might be an (x, y, z) coordinate. It might be an RGB color. It might be an image resolution. It might be a musical chord. The mechanical `type-of` and `length` will not distinguish.
+
+For that you have three options:
+
+1. **Look at the caller.** If the value came from `(color/from-rgb 128 64 32)`, it is a color. Read the source or the contract.
+
+2. **Ask the LLM.** `shape-of` will guess based on context — if the surrounding code is drawing, the LLM will guess color; if it is playing audio, the LLM will guess chord.
+
+3. **Use records instead of anonymous tuples.** If your data is going to be introspected, wrap it in a record with a type tag:
+
+```scheme
+(define red (make-record 'color :r 128 :g 64 :b 32))
+(type-of red)         ;; => record
+(record-type red)     ;; => color
+```
+
+Now the meaning is baked into the value. `type-of` returns `record`, and `record-type` returns `color`. Any introspecting reader knows what they are looking at.
+
+This is a design choice. Anonymous tuples are shorter to write but harder to introspect. Records with type tags are longer but self-describing. Motoi lets you pick per situation; the introspection layer is friendlier to records.
+
+## 3.18 Introspection at the REPL prompt
+
+At the REPL, some of these verbs have meta-command sugar:
+
+- `,help foo` — like `(display (describe 'foo))` but with the fuller record layout
+- `,type foo` — like `(display (contract-of 'foo))`
+- `,doc foo` — like `(display (doc-of 'foo))`
+- `,arity foo` — like `(display (arity-of 'foo))`
+
+The sugar is short and finger-friendly. It maps to the underlying verbs one-to-one; see `src/repl.js` for the exact dispatch table.
+
+Use the sugar when you are at the REPL and want speed. Use the verbs when you are inside a Scheme program and want the return value as data.
+
+## 3.19 The three questions
+
+There are three questions this chapter's verbs answer.
+
+**What is this name?** Use `describe` or `help`. Named things — verbs — are described by reading the metadata record.
+
+**What is this value?** Use `type-of`, `length`, `keys`. Runtime values are inspected by asking the runtime what it holds.
+
+**What does this verb expect?** Use `contract-of` or `arity-of`. The verb's signature is in the metadata; project the field you need.
+
+Three questions. Six or seven verbs. Every question one verb call away.
+
+## 3.20 A composition — building a `look-at` verb
+
+Because the projection verbs compose, you can wrap them in your own convenience verb. Here is a `look-at` that does the right thing whether you hand it a name or a value:
+
+```scheme
+(define (look-at x)
+  (cond
+    ((symbol? x)
+     ;; Assume it is a verb name; describe it.
+     (describe x))
+    ((and (string? x) (help (string->symbol x)))
+     ;; String naming a verb; describe it.
+     (describe (string->symbol x)))
+    (else
+     ;; It is a value; introspect it.
+     (list :type (type-of x)
+           :length (if (or (list? x) (string? x)) (length x) 'n/a)
+           :keys (if (hash? x) (keys x) 'n/a)
+           :value x))))
+```
+
+Usage:
+
+```scheme
+(look-at 'map)
+;; map [base] — arity 2 or more
+;; Apply a procedure to each element of one or more lists, ...
+
+(look-at 42)
+;; (:type integer :length n/a :keys n/a :value 42)
+
+(look-at '(1 2 3))
+;; (:type list :length 3 :keys n/a :value (1 2 3))
+
+(look-at (hash :a 1 :b 2))
+;; (:type hash :length n/a :keys (:a :b) :value (hash :a 1 :b 2))
+```
+
+One verb, four behaviors. All composed from the projection primitives. This is what having introspection as verbs enables — every tool you can imagine is a few lines above the primitives.
+
+## 3.21 An honest limit
+
+There is one thing `describe` and `type-of` cannot do: describe what a verb *ought* to do. They can tell you the doc, the contract, the arity — all the metadata the author filled in. They cannot tell you whether the metadata is right.
+
+If a verb's doc says \"Return the first element of a pair\" but the implementation returns the second, `describe` will still return the doc as written. Introspection is honest about what is registered, not about what is implemented.
+
+This is a small point but worth internalizing. The metadata is authoritative for what it claims to be. It is not a proof. If a verb is behaving strangely, cross-check the implementation with `source-of` and read the file. The metadata layer does not verify itself against the code.
+
+Chapter 8 will show how to use Motoi's error records to catch cases where the doc and the implementation diverge — the errors themselves tell a story that helps you spot the mismatch.
+
+## 3.22 Try it now
+
+Type these at the REPL. Do not skim.
+
+```scheme
+(describe 'map)
+(describe 'cortex/query)
+(describe 'car)
+(type-of 42)
+(type-of \"hello\")
+(type-of '(1 2 3))
+(type-of (hash :a 1))
+(type-of nil)
+(type-of type-of)
+(contract-of 'map)
+(arity-of 'substring)
+(arity-of 'list)
+```
+
+Read each answer. Some are obvious. Some may surprise you — especially `(type-of type-of)`, where the introspection verb introspects itself. That is `procedure`; a verb is a first-class procedure like any other.
+
+## 3.23 Composing describe with mental models
+
+There is a habit worth building.
+
+When you learn a new verb, run `(describe 'new-verb)` immediately. Read the two-line output. That is your first mental model of the verb. Do not skip this step, even if you think you already know what the verb does.
+
+Then look at the examples with `(examples-of 'new-verb)`. Read the novice, intermediate, and expert versions. That is your second mental model — how the verb is *used*, not just what it does.
+
+Then, only then, use the verb. If it does what you expected, the mental model was right. If it surprises you, introspect the return value with `type-of` and `keys` and refine your model.
+
+This four-step cycle — describe, examples, use, introspect — is how a Motoi programmer learns a verb. Repeat it a few dozen times and you have absorbed a serious chunk of the language.
+
+## 3.24 A final observation
+
+The projection verbs are small and cheap. Each takes one argument. Each returns one thing. Each is one line to call. Each composes with every other.
+
+Because they are small and cheap, using them becomes reflexive. You do not think about calling `describe`; your fingers just type it. You do not think about running `type-of` on an uncertain value; your fingers just run it.
+
+That reflex is the point. Introspection is not something you decide to do; it is something you do without deciding, dozens of times an hour, whenever a question arises. The projection verbs are the size and shape they are because they are meant to be reflexes.
+
+## 3.25 To Chapter 4
+
+You have the two ergonomic projections: `describe` for names, `type-of` for values. You have the family of specialized projections: `doc-of`, `contract-of`, `arity-of`.
+
+Chapter 4 goes deeper into three projections that deserve their own habits: `doc-of`, `source-of`, and `examples-of`. Each is worth its own section of muscle memory.
+
+Turn the page.
+
+## 3.26 Bonus — describe on a value
+
+I want to close with one edge case. What happens when you pass a value (not a name) to `describe`?
+
+```scheme
+(describe 42)
+```
+
+Motoi's `describe` is verb-oriented — it expects a name or symbol. If you pass a number, the runtime will try to convert it via `nameOf` (see `src/introspect.js`) and throw a TypeError.
+
+For describing a value, use `type-of` and `keys` as shown throughout this chapter, or reach for `shape-of` (Chapter 13) for the LLM-augmented version.
+
+The naming is a small friction. In a language where every verb was designed together it would be cleaner. In Motoi the two describes serve two audiences, so they have two verbs. `describe` for names. `shape-of` for values. Remember which is which and the friction disappears.
+
+Turn the page.
+
+## 3.27 Deep dive — the type vocabulary
+
+The `type-of` return vocabulary is a closed set. Let me walk each one, since a reader who does not know what `char` or `port` looks like will have trouble reading later chapters.
+
+**integer.** A whole number without decimal. `42`, `-7`, `0`. Motoi's integers are arbitrary-precision; you can compute `(expt 2 100)` and get back a real integer, not a wraparound.
+
+**real.** A number with decimal. `3.14`, `-0.5`, `1.0`. Motoi's reals are IEEE 754 double-precision floating point. The float trap (Book of Values Chapter 6) applies.
+
+**string.** A sequence of Unicode characters. `\"hello\"`, `\"日本語\"`. Strings are immutable.
+
+**boolean.** `#t` or `#f`. Only these two values.
+
+**symbol.** An interned atom. `'foo`, `'car`. Symbols compare by identity, not by name.
+
+**char.** A single Unicode character. `#\\a`, `#\\space`, `#\\日`. Rare in user code; used in string manipulation.
+
+**list.** A nil-terminated chain of pairs. `(1 2 3)`, `()`, `(a b c)`. The main sequence type.
+
+**pair.** A cons cell with car and cdr. `(1 . 2)`. A list is a pair whose cdr is a list.
+
+**nil.** The empty list, also the null value. There is only one nil.
+
+**procedure.** A callable — a lambda, a defined function, a verb from the registry. All are procedures.
+
+**vector.** A fixed-size indexed collection. `#(1 2 3)`. Mutable; index access is O(1).
+
+**hash.** A key-value map. `(hash :a 1 :b 2)`. Motoi's default hash is unordered; ordered variants exist as separate types.
+
+**record.** A tagged structure with named fields. `(make-record 'color :r 128 :g 64 :b 32)`. `record-type` returns the tag; `record-field` returns a specific field.
+
+**error.** An error record with fields like `:message`, `:location`, `:stack`, `:cause`. Chapter 8 walks the shape.
+
+**port.** An I/O handle — file, socket, string port. Rare in user code; used by verbs that read or write streams.
+
+Fifteen types. That is the whole runtime vocabulary. Every value you will ever see in a Motoi program has one of these fifteen types.
+
+If you see a `type-of` result that is not in the list, either the runtime added a type since this chapter was written, or you are in a dialect (Sakura, Lacuna) that added its own types. Motoi's base is fifteen.
+
+## 3.28 Predicate composition
+
+The single-type predicates (`integer?`, `string?`, etc.) compose into higher-order shape checks. Common compositions:
+
+**is this a list of numbers?**
+
+```scheme
+(define (list-of-numbers? x)
+  (and (list? x) (every number? x)))
+```
+
+**is this a hash with only string values?**
+
+```scheme
+(define (string-hash? h)
+  (and (hash? h) (every string? (values h))))
+```
+
+**is this a non-empty list of records with a `color` type tag?**
+
+```scheme
+(define (color-list? x)
+  (and (list? x)
+       (not (null? x))
+       (every (lambda (e) (and (record? e) (eq? 'color (record-type e))))
+              x)))
+```
+
+These compositions are common enough that Motoi has some pre-built:
+
+- `list-of? pred x` — is x a list whose every element satisfies pred
+- `hash-of? key-pred val-pred x` — is x a hash whose keys and values satisfy the given preds
+- `record-of? tag x` — is x a record with the given type tag
+
+Use these when they exist; roll your own when they do not. Both patterns are idiomatic.
+
+## 3.29 The record type — a special mention
+
+Records deserve extra attention because they are the primary self-describing value in Motoi.
+
+A record has a type tag (a symbol), a set of named fields, and values for each field. It is created with `make-record`:
+
+```scheme
+(define alice (make-record 'person :name \"Alice\" :age 30))
+```
+
+Introspect it:
+
+```scheme
+(type-of alice)             ;; => record
+(record-type alice)         ;; => person
+(record-fields alice)       ;; => (:name :age)
+(record-field alice :name)  ;; => \"Alice\"
+```
+
+The record protocol is a mini-introspection layer of its own. Any code that receives a record can ask what type it is, what fields it has, and what value each field holds. Without a schema. Without an interface declaration.
+
+Records are how Motoi programs shape their domain values. A cart's game state is often a record. A cortex query result is often a list of records. A composer widget's config is a record.
+
+When you are introspecting a value and `type-of` returns `record`, always follow with `record-type` and `record-fields`. That is the two-call unwrap for a record.
+
+## 3.30 Introspecting a procedure
+
+A procedure is the least introspectable value in Motoi, by design. `type-of` returns `procedure`, but there is no built-in way to walk the procedure's body from Scheme.
+
+You can still learn things about a procedure:
+
+**Is it a registered verb?**
+
+```scheme
+(define (registered-verb? p)
+  ;; Look through the registry for a procedure that eq?-matches p.
+  (find (lambda (entry)
+          (eq? p (cdr (assoc :fn (cdr entry)))))
+        (snapshot-registry)))
+```
+
+If so, you can get its metadata via `help`. If not, it is an anonymous procedure and the introspection layer has less to say.
+
+**What is its arity?**
+
+Motoi's runtime tracks procedure arity for closures created via `lambda`. `procedure-arity` (when available) returns the arity, though this is a runtime capability rather than a metadata field. For registered verbs, use `arity-of` with the verb name.
+
+**Is it a closure?**
+
+```scheme
+(closure? p)  ;; => #t if p captures a non-trivial env
+```
+
+Chapter 5 discusses how to introspect a closure's captured env.
+
+Beyond these, procedures are opaque. That is a deliberate choice — running arbitrary introspection on procedure bodies would break optimization and complicate the runtime. If you want to walk a procedure's body, keep the source form separately (via a macro that stores it) and introspect the form instead.
+
+## 3.31 Introspecting an error
+
+An error is a special record. `type-of` returns `error`. `error-message`, `error-location`, `error-stack`, and `error-fields` project the specific parts.
+
+Chapter 8 walks errors in depth. This chapter mentions them for completeness.
+
+```scheme
+(define e (last-error))
+(type-of e)               ;; => error
+(error-message e)         ;; => \"unknown verb: foo\"
+(error-location e)        ;; => (:file \"repl\" :line 1 :column 1)
+(error-fields e)          ;; => (:did-you-mean :context :cause)
+```
+
+Errors are values, not exceptions in the traditional sense. They can be bound to names, passed to verbs, introspected the same way any other value is introspected.
+
+## 3.32 Introspecting a port
+
+A port is an I/O handle. Motoi ports have limited introspection:
+
+```scheme
+(define p (open-input-file \"data.txt\"))
+(type-of p)               ;; => port
+(port-type p)             ;; => 'input-file
+(port-name p)             ;; => \"data.txt\"
+(port-closed? p)          ;; => #f
+```
+
+Ports are stateful (they track read position), so introspecting them mid-stream can be misleading. Prefer to introspect ports at open time or after they are closed.
+
+## 3.33 The introspection reflex, formalized
+
+Let me name the reflex explicitly so you can practice it.
+
+**Step 1 — bind the value.** If you have a value you are unsure about, `define` it to a name so you can query it repeatedly.
+
+```scheme
+(define x (some-uncertain-verb))
+```
+
+**Step 2 — type-of.** What is the outer shape?
+
+```scheme
+(type-of x)
+```
+
+**Step 3 — projection.** Based on the type, project the interesting fields:
+
+- If list: `(length x)`, `(car x)`, `(type-of (car x))`
+- If hash: `(keys x)`, `(values x)`
+- If record: `(record-type x)`, `(record-fields x)`
+- If procedure: `(help name)` if you know the name
+
+**Step 4 — recurse.** If any projected value is itself composite, apply steps 2 and 3 to it.
+
+**Step 5 — decide.** Now you know the shape. Do the code you needed to do.
+
+Practice this reflex on ten unfamiliar values. By the tenth you will have the sequence memorized. By the fiftieth you will not think about it consciously.
+
+## 3.34 A common trap — type-of on a list of one thing
+
+```scheme
+(type-of '(42))
+;; => list
+```
+
+Not `list-of-integer`. Not `integer` (that would be `(car '(42))`). Just `list`.
+
+Motoi does not have parametric types. A list is a list; the runtime does not track what shape its elements have. To check element shapes, walk the list:
+
+```scheme
+(map type-of '(1 \"two\" #t))
+;; => (integer string boolean)
+```
+
+That returns a list of type symbols for each element. Now you know the mixed shape.
+
+This is one of the friction points for programmers coming from statically typed languages. In Motoi, container types do not carry element shape info. You get the outer shape from `type-of`, and you inspect the elements individually if you need to.
+
+If you need to enforce a shape, use predicates: `(every integer? xs)` tells you whether xs is a list of integers, but the shape is not stored in the value.
+
+## 3.35 A common question — why not just print?
+
+A reader might ask: why not just `(display x)` and read the printed form?
+
+Answer: because printing is lossy. A list of records prints as a nested s-expression that is hard to read for anything nontrivial. A hash prints as a flat kv-listing that loses structure. A procedure prints as `<fn>` with no signature. An error prints as a message but the fields are hidden.
+
+Introspection is precise. Printing is a first-pass sanity check.
+
+For simple values, printing is enough. `(display 42)` tells you 42. `(display \"hello\")` tells you hello. Fine.
+
+For composite values — records, nested hashes, closures, errors — printing is a starting point but introspection is where you actually learn the shape. Reach for `type-of` and its friends after the first `display` gave you a shrug.
+
+Chapter 4 will show how to reach the source pointer when even introspection is not enough, so you can go read the implementation. Introspection first; source-reading only when introspection runs out.
+
+## 3.36 An educational aside — why the record fields have colons
+
+You may have noticed that record field names have a leading colon: `:name`, `:age`. That is Motoi's keyword syntax.
+
+A keyword is a self-evaluating symbol used as a field or parameter name. `:name` evaluates to itself; it does not need to be quoted. This makes keyword-plists (like `:subject 'user :predicate 'preferred-color`) easy to write — no quoting overhead.
+
+`type-of` on a keyword returns `symbol`:
+
+```scheme
+(type-of :name)
+;; => symbol
+```
+
+The colon is part of the name. `:name` and `name` are different symbols. Keywords are the convention for kwargs and record fields; regular symbols are the convention for values and identifiers.
+
+## 3.37 Composing describe with a REPL history
+
+Chapter 9 will introduce `,history` — the log of expressions evaluated at the REPL. Here is a preview of how it composes with describe.
+
+```scheme
+(define (describe-recently-used)
+  (map describe
+       (unique-verbs-in (last-n-history 20))))
+```
+
+`unique-verbs-in` extracts the verb symbols from a list of forms. `last-n-history` returns the last 20 evaluated forms. Compose them, describe the verbs, and you have a per-session cheat-sheet of the verbs you actually used.
+
+Small script. Real utility. Introspection primitives all the way down.
+
+## 3.38 The projection verbs and testing
+
+The projection verbs are useful in tests. A test can assert that a verb has expected metadata:
+
+```scheme
+(assert (equal? \"(pair) -> any\" (contract-of 'car)))
+(assert (equal? 1 (arity-of 'car)))
+(assert (not (null? (examples-of 'car))))
+```
+
+If any of these fail, the metadata drifted. This is a cheap way to catch regressions where a well-documented verb loses its metadata in a refactor.
+
+You can go further and enforce metadata quality across the whole registry:
+
+```scheme
+(define (test-all-verbs-have-docs)
+  (for-each
+    (lambda (name)
+      (assert (string? (doc-of name))
+              (string-append name \" has no doc\")))
+    (map car (snapshot-registry))))
+```
+
+Run in CI and you have a hard gate on documentation quality. Not enforced by the runtime, but enforced by your test suite.
+
+## 3.39 The projection verbs and code generation
+
+The projection verbs can generate code. If you want a wrapper around every verb in a namespace, you can generate the wrappers from the introspection layer:
+
+```scheme
+(define (generate-wrapper name)
+  `(define (,(string->symbol (string-append \"log/\" name)) . args)
+     (log-call ',name args)
+     (apply ,(string->symbol name) args)))
+
+(define (generate-logging-wrappers ns)
+  (map generate-wrapper
+       (filter (lambda (n) (string-prefix? (string-append ns \"/\") n))
+               (map car (snapshot-registry)))))
+```
+
+Now you have a list of wrapper definitions, one per verb in the namespace, that log the call before delegating. Splice into a `begin` and evaluate; you have logging wrappers for the whole namespace.
+
+This is metaprogramming built on the introspection surface. Chapter 6 (macros) will show more of this.
+
+## 3.40 A closing observation about naming
+
+The projection verbs are named for what they *return*, not for what they *take*. `type-of` returns the type. `arity-of` returns the arity. `doc-of` returns the doc. `source-of` returns the source.
+
+This is a small consistency but it helps memory. Once you know the naming convention, you can guess the projection verb for a field by adding `-of` to the field name.
+
+Some exceptions: `describe` (not `paragraph-of`) because the return is a longer thing than one field. `help` (not `record-of`) because the return is the whole record. `keys` and `values` (not `keys-of` and `values-of`) because they are older Scheme conventions.
+
+Motoi tried to be consistent; the exceptions are historical. Once you have used the family for a week, the naming feels natural.
+
+## 3.41 To Chapter 4
+
+You have `describe`, `type-of`, and the projection family. You know when to reach for each.
+
+Chapter 4 goes deep on three projections that deserve their own habits — `doc-of`, `source-of`, and `examples-of`. Each is a workflow, not just a verb call.
+
+Turn the page.
+
+## 3.42 Exercise — introspect ten values
+
+Before you turn the page, an exercise. Type these ten expressions at the REPL. For each, before you type it, guess what `type-of` will return. Then type the expression and check.
+
+```scheme
+(type-of 42)
+(type-of 42.0)
+(type-of \"forty-two\")
+(type-of #\\a)
+(type-of #t)
+(type-of 'forty-two)
+(type-of :forty-two)
+(type-of (list 42 42 42))
+(type-of (cons 42 42))
+(type-of nil)
+```
+
+Now some more subtle ones:
+
+```scheme
+(type-of (make-record 'point :x 3 :y 4))
+(type-of (hash :a 1 :b 2))
+(type-of (lambda (x) (* x 2)))
+(type-of type-of)
+(type-of (error \"oh no\"))
+```
+
+Did any surprise you? If so, note which. That is a gap in your model. The type vocabulary is only fifteen entries but internalizing it takes practice.
+
+## 3.43 Exercise — describe ten verbs
+
+Now the same for describe. For each, before you type it, guess what one-sentence description will come back. Then type and check.
+
+```scheme
+(describe 'car)
+(describe 'cdr)
+(describe 'cons)
+(describe 'list)
+(describe 'map)
+(describe 'filter)
+(describe 'fold)
+(describe 'display)
+(describe 'newline)
+(describe 'error)
+```
+
+Then some cortex verbs:
+
+```scheme
+(describe 'cortex/read)
+(describe 'cortex/write)
+(describe 'cortex/record)
+(describe 'cortex/query)
+```
+
+Any surprises? Any doc strings you would have written differently? That reaction is calibration — you are now developing a sense of what \"good doc\" looks like in Motoi.
+
+## 3.44 Reflection
+
+You have finished Chapter 3.
+
+You have `describe` for names, `type-of` for values, the full projection family for specific fields, the predicates for shape checks, and the reflex for using them together.
+
+That is enough to walk through most Motoi programs and answer most questions about them. The workflow is repeatable. The verbs are small. The composition is natural.
+
+Chapter 4 will deepen three of the projections into full workflows. Then Chapters 5 through 7 will show you the runtime layers under the metadata — env, macro, reader — so you can introspect not just what the language *says* about itself but what the language is *doing*.
+
+Turn the page.
+
+## 3.45 Deep aside — how type-of is implemented
+
+For the curious. Motoi's `type-of` is a small dispatcher inside the runtime. It looks at the JavaScript-side representation of the value and maps it to a Scheme type symbol.
+
+Roughly:
+
+```javascript
+function typeOf(v) {
+  if (v === null || v === undefined) return Sym('nil')
+  if (v === true || v === false) return Sym('boolean')
+  if (typeof v === 'number') {
+    return Number.isInteger(v) ? Sym('integer') : Sym('real')
+  }
+  if (typeof v === 'string') return Sym('string')
+  if (v instanceof Sym) return Sym('symbol')
+  if (v instanceof Pair) return Sym('pair')
+  if (Array.isArray(v)) return Sym('list')
+  if (typeof v === 'function' || v instanceof Closure) return Sym('procedure')
+  if (v instanceof Vector) return Sym('vector')
+  if (v instanceof Hash) return Sym('hash')
+  if (v instanceof Record) return Sym('record')
+  if (v instanceof MotoiError) return Sym('error')
+  if (v instanceof Port) return Sym('port')
+  if (typeof v === 'string' && v.length === 1) return Sym('char')  // depends on runtime
+  return Sym('unknown')
+}
+```
+
+The exact code is in `src/base.js` (search for the `type-of` registration). The dispatcher is a simple type-tag lookup.
+
+The important thing to understand is that `type-of` is O(1). It does not walk the value. It looks at the type tag and returns a symbol. This makes it cheap enough to call on every value in a debug loop without worrying about performance.
+
+Contrast with `length`, which is O(n) on a list, or `keys`, which is O(n) on a hash. Introspection primitives are cheap; introspection projections that walk data are as expensive as walking the data.
+
+## 3.46 The type vocabulary as a contract
+
+The fifteen-entry type vocabulary is itself a promise. When you write a contract that says `(list) -> integer`, the reader can be confident about what `list` means, because the vocabulary is fixed.
+
+If Motoi's type system were open — if any code could invent new type tags — the contract mini-language would be less trustworthy. `(list) -> integer` might mean the list type Motoi ships with, or it might mean some user-defined list-like type. Ambiguity would creep in.
+
+By closing the vocabulary, Motoi keeps contracts unambiguous. Every `list` in every contract in every verb means the same runtime type. Every `hash` means the same runtime hash. Every `record` means the same runtime record.
+
+The trade-off is that Motoi cannot express types like \"a list whose elements are all colors.\" You would write that as `list` in the contract and use a predicate at runtime. The type system does not track element constraints.
+
+For the size of language Motoi is, this trade is a good one. Full parametric types would triple the complexity of the introspection surface for a modest gain in expressiveness. The fifteen-entry vocabulary is small enough to keep in your head and expressive enough to describe most Motoi values.
+
+## 3.47 Introspection and REPL history
+
+Chapter 9 will introduce `,history`. Here is one more preview of how it composes with this chapter's verbs.
+
+When you evaluate an expression at the REPL, the result is bound to `*1` (the last result), `*2` (the second-to-last), etc. This is standard Scheme REPL convention.
+
+You can introspect the last result:
+
+```scheme
+> (some-verb 42)
+=> #hash{:a 1 :b 2}
+> (type-of *1)
+hash
+> (keys *1)
+(:a :b)
+```
+
+Three prompts and you have unwrapped the result. No re-typing the whole expression. No copy-paste. `*1` is your introspection handle for the last value.
+
+This is small ergonomic sugar, but it matters. It removes a friction from the introspect-loop. Every time you print a result and want to know more about it, `*1` is already bound.
+
+## 3.48 A working programmer's day, revisited
+
+Let me end the chapter with a scene.
+
+You are debugging a cart. A verb call returned something you did not expect. The REPL shows a hash. You want to know what is in it.
+
+```scheme
+> (type-of *1)
+hash
+> (keys *1)
+(:name :age :occupation :children)
+> (hash-ref *1 :children)
+(:elder :younger)
+> (type-of *1)
+list
+> (map hash-ref *1 (repeat :name))
+```
+
+You made a typo on the last one. `(map (lambda (c) (hash-ref c :name)) *1)` would be correct. But the point is: five prompts and you have walked from a mysterious hash down into its nested list and started to reason about it.
+
+No debugger. No stepping. Five introspection calls, each one line, each one answer.
+
+That is what this chapter's verbs enable. Learn them until they are reflexes. Then you are ready for Chapter 4, which deepens three of them into full workflows.
+
+Turn the page.
+
+## 3.49 Postscript — describe vs help, one more time
+
+The distinction between `describe` and `help` is one of the most-asked questions from new Motoi programmers. Let me pin it down.
+
+**describe** returns a string. Two lines. Formatted for humans. Meant for reading with your eyes at the REPL.
+
+**help** returns a record. Ten fields. Formatted for programs. Meant for querying with other verbs.
+
+Both read from the same underlying metadata. Both are cheap. Both are safe.
+
+If you are at a REPL and want to know what a verb does, use `describe`. If you are in code and want to project a specific field or feed the record to another verb, use `help`.
+
+The REPL meta-command `,help` uses a slightly different formatter (see `printHelp` in `src/repl.js`) that prints multiple lines with labels — the `printHelp` formatter is nicer than plain `describe` for terminal viewing, but the underlying data is the same record.
+
+If in doubt, use `describe` for prose and `help` for data. That is the whole rule.
+
+## 3.50 Real closing
+
+Chapter 3 covered:
+
+- `describe` for verb names → paragraph
+- `type-of` for values → runtime type symbol
+- `contract-of` for verb names → signature string
+- `arity-of` for verb names → arity value
+- `doc-of` for verb names → docstring
+- Predicates for each type: `integer?`, `string?`, `list?`, `hash?`, `record?`, etc.
+- `keys`, `values`, `length` for composite unwrapping
+- `record-type`, `record-fields`, `record-field` for records
+- The introspection reflex — bind, type-of, project, recurse, decide
+
+Chapter 4 goes deeper on `doc-of`, `source-of`, and `examples-of`. Each has its own workflow. Each is worth its own muscle memory.
+
+Turn the page.
+
+## 3.51 A test suite for your own describe
+
+Since this is a book meant to train reflexes, here is a small quiz. Take a scratch buffer and, for each of the following expressions, write down what you think `describe` or `type-of` will return, without running them. Then run them and compare.
+
+```scheme
+(describe 'apply)
+(describe 'call/cc)
+(describe 'error)
+(describe 'raise)
+(describe 'define)
+(type-of (lambda () 42))
+(type-of ((lambda () 42)))
+(type-of '((1 2) (3 4)))
+(type-of (map + '(1 2) '(3 4)))
+(type-of #(1 2 3))
+```
+
+Some of those are subtle. `(define)` might not be a regular verb — it may be a special form (Chapter 6 will explain). `((lambda () 42))` immediately calls a zero-arity lambda, returning 42, not the lambda. `#(1 2 3)` is a vector literal, not a list.
+
+Practice the guessing habit. Predict first, then verify. The predictions are how you build the mental model; the verifications are how you correct it.
+
+## 3.52 Truly final
+
+That is the end of Chapter 3.
+
+Take a break if you need one. When you come back, Chapter 4 will show you three verbs — `doc-of`, `source-of`, `examples-of` — that deserve their own attention because they are workflows, not just projections.
+
+Turn the page.
+
+## 3.53 One more note on style
+
+The two-verb pair — describe and type-of — is the most-used introspection pair in Motoi. If you learn nothing else from this chapter, learn these two.
+
+When you meet a new name, describe. When you meet a new value, type-of. Two reflexes. Together they cover most of the surprises Motoi will throw at you.
+
+Every other verb in this chapter is a refinement of one of these two. `doc-of` is describe minus the framing. `contract-of` is describe with the emphasis on the signature. `keys` is type-of when you already know it is a hash and want to go deeper.
+
+Two verbs. Every question about a name or a value. That is the shape.
+
+Turn the page.
+
+Chapter 4 opens the deeper workflows around three specific projections. Take a breath. Come back when ready.
+
+The introspection reflex, once built, does not go away. It gets faster. It gets more automatic. It becomes how you relate to any language you are working in, though few languages will support it as fully as Motoi does.
+
+Enjoy the practice. Turn the page.
+
+That is the end of Chapter 3 in every possible sense. Onward to Chapter 4, where three verbs get the full workflow treatment they deserve as first-class habits.
+")

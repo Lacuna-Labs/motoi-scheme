@@ -1,0 +1,283 @@
+(dialect :applies ("motoi" "sakura") :note "Default: applies to both dialects.")
+
+(chapter
+  :book "Book of Logic"
+  :chapter-number 17
+  :appendix-letter "A"
+  :title "A Tiny Proof Assistant in Scheme"
+  :dialect "sakura"
+  :audience :adult
+  :content-rating :G
+  :author-lane "the-engineer-book-of-logic-2026-07-16"
+  :training-eligible #t
+  :confidentiality "public"
+  :voice "sakura-teaching + gentle-formalist"
+  :classical-anchors ("Bertot-Casteran — Interactive Theorem Proving (Coq)"
+                      "Nipkow-Paulson-Wenzel — Isabelle/HOL Tutorial"
+                      "Chlipala — Certified Programming with Dependent Types")
+  :prose
+"# Appendix A — A Tiny Proof Assistant in Scheme
+
+Where we push the natural-deduction checker of chapter 3 one step
+further into an *interactive* system with tactics — the shape of Coq
+or Isabelle, in one hundred lines.
+
+Chapter 3 built a proof *checker* that verifies purported proofs. This
+appendix builds a proof *assistant*: an interactive session where the
+user has a *goal* to prove and applies *tactics* that reduce the goal
+to sub-goals until every sub-goal is trivially discharged.
+
+The core data structure is the *goal state*: a list of remaining
+subgoals, each with its own context of assumptions. A tactic
+transforms one goal state into another (possibly empty) goal state.
+When the state becomes empty, the proof is complete.
+
+## Goal states
+
+```scheme
+;; A subgoal: (ctx . conclusion)
+;;   ctx: list of assumption formulas
+;;   conclusion: formula to prove
+;;
+;; A goal state: list of subgoals.
+
+(define (make-goal ctx conclusion) (cons ctx conclusion))
+(define (goal-ctx  g) (car g))
+(define (goal-concl g) (cdr g))
+
+(define initial-state (lambda (concl) (list (make-goal '() concl))))
+```
+
+The initial state, given a formula to prove, is a single subgoal with
+that formula and no assumptions.
+
+## Tactics
+
+A *tactic* is a function that transforms the goal state. Some tactics
+succeed and produce a new state; others fail. Failing gracefully is
+important — the user should be able to try a tactic and back out if it
+does not work.
+
+The core tactics we need mirror the natural-deduction rules from
+chapter 3.
+
+- **`intro`.** For a goal of the form `(implies P Q)`, add P to the
+  context and change the goal to Q. Corresponds to `impl-intro`.
+- **`split`.** For a goal of the form `(and P Q)`, produce two subgoals:
+  P and Q, each in the same context. Corresponds to `conj-intro`.
+- **`left`, `right`.** For a goal of the form `(or P Q)`, pick which
+  side to prove. Corresponds to `disj-intro-l` or `disj-intro-r`.
+- **`assumption`.** If the current goal is one of the assumptions in
+  the context, discharge it.
+- **`apply`.** For a goal Q and an assumption `(implies P Q)` (matched
+  against something in context), produce the subgoal P.
+- **`destruct`.** For an assumption of form `(and P Q)`, replace it
+  with two assumptions P and Q. Or for `(or P Q)`, split the current
+  subgoal into two — one where the assumption is P, one where it is Q.
+
+Each tactic works on the *first* subgoal in the state (the *focused*
+subgoal).
+
+```scheme
+(define (tactic-intro state)
+  (let* ((g       (car state))
+         (rest    (cdr state))
+         (concl   (goal-concl g)))
+    (if (and (pair? concl) (eq? (car concl) 'implies))
+        (cons (make-goal (cons (cadr concl) (goal-ctx g))
+                          (caddr concl))
+              rest)
+        (error \"intro: goal is not an implication\" concl))))
+
+(define (tactic-split state)
+  (let* ((g       (car state))
+         (rest    (cdr state))
+         (concl   (goal-concl g)))
+    (if (and (pair? concl) (eq? (car concl) 'and))
+        (cons (make-goal (goal-ctx g) (cadr concl))
+              (cons (make-goal (goal-ctx g) (caddr concl))
+                    rest))
+        (error \"split: goal is not a conjunction\" concl))))
+
+(define (tactic-left state)
+  (let* ((g (car state)) (rest (cdr state)) (concl (goal-concl g)))
+    (if (and (pair? concl) (eq? (car concl) 'or))
+        (cons (make-goal (goal-ctx g) (cadr concl)) rest)
+        (error \"left: goal is not a disjunction\" concl))))
+
+(define (tactic-right state)
+  (let* ((g (car state)) (rest (cdr state)) (concl (goal-concl g)))
+    (if (and (pair? concl) (eq? (car concl) 'or))
+        (cons (make-goal (goal-ctx g) (caddr concl)) rest)
+        (error \"right: goal is not a disjunction\" concl))))
+
+(define (tactic-assumption state)
+  (let* ((g (car state)) (rest (cdr state)) (concl (goal-concl g)))
+    (if (member concl (goal-ctx g))
+        rest                    ; drop this subgoal; it is discharged
+        (error \"assumption: not in context\" concl))))
+
+(define (tactic-apply hyp state)
+  ;; hyp is an implication (implies P concl) in the context;
+  ;; reduce the current goal to proving P.
+  (let* ((g (car state)) (rest (cdr state)) (concl (goal-concl g)))
+    (cond
+      ((not (member hyp (goal-ctx g)))
+       (error \"apply: hypothesis not in context\" hyp))
+      ((not (and (pair? hyp) (eq? (car hyp) 'implies)
+                 (equal? (caddr hyp) concl)))
+       (error \"apply: hypothesis does not conclude with goal\" hyp))
+      (else
+       (cons (make-goal (goal-ctx g) (cadr hyp)) rest)))))
+```
+
+Six tactics; each is a small transformation. That is essentially the
+entire theorem-proving apparatus at the propositional level.
+
+## A worked interaction
+
+Prove `(implies P (implies Q P))`. This is a small classical theorem
+(constant function returns first argument).
+
+```scheme
+(define state1 (initial-state '(implies P (implies Q P))))
+;; state1: [ (() . (implies P (implies Q P))) ]
+
+(define state2 (tactic-intro state1))
+;; state2: [ ((P) . (implies Q P)) ]
+
+(define state3 (tactic-intro state2))
+;; state3: [ ((Q P) . P) ]
+
+(define state4 (tactic-assumption state3))
+;; state4: [ ]
+;; Empty! Proof complete.
+```
+
+Four tactics, one theorem. The Scheme session captures the
+back-and-forth of an interactive proof.
+
+## Composition of tactics
+
+Real proof assistants (Coq, Lean, Isabelle) have *tactic combinators*
+that compose tactics into strategies:
+
+- `seq t1 t2` — first apply t1, then t2 to the result.
+- `orelse t1 t2` — try t1; if it fails, try t2.
+- `repeat t` — apply t repeatedly until it fails.
+- `all t` — apply t to every subgoal.
+
+```scheme
+(define (tac-seq t1 t2)
+  (lambda (state)
+    (t2 (t1 state))))
+
+(define (tac-orelse t1 t2)
+  (lambda (state)
+    (with-exception-handler
+      (lambda (exn) (t2 state))
+      (lambda () (t1 state)))))
+
+(define (tac-repeat t)
+  (lambda (state)
+    ((tac-orelse (tac-seq t (tac-repeat t))
+                 (lambda (s) s))
+     state)))
+```
+
+With these combinators you can express high-level strategies:
+
+    (tac-repeat (tac-orelse tactic-intro
+                             (tac-orelse tactic-split
+                                          tactic-assumption)))
+
+This *auto* tactic will try `intro`, then `split`, then `assumption`,
+repeatedly, until no more progress is possible. For small propositional
+theorems, it often finds a proof unaided.
+
+## Extending to predicate logic
+
+For quantifiers we need two more tactics:
+
+- **`intro-forall`.** For a goal `(forall ?x phi)`, introduce a fresh
+  variable c not appearing in the context, and change the goal to
+  `phi[?x := c]`.
+- **`instantiate`.** For an assumption `(forall ?x phi)`, add
+  `phi[?x := t]` to the context for a specific term t.
+
+The freshness condition on `intro-forall` requires tracking which
+variables are used; the appendix keeps this bookkeeping straightforward.
+
+## Tactic-generated proof terms
+
+An assistant is *complete* only if it produces a *proof term* — a
+value in the Curry-Howard sense that certifies the theorem. We can
+extend the tactic language so every tactic step also builds a term.
+
+```scheme
+;; Extended state: (subgoals . proof-so-far)
+;; proof-so-far is a partial proof term with holes for each subgoal.
+
+;; When tactic-intro fires on goal (implies P Q):
+;;   the corresponding proof term is (lambda (x) hole),
+;;   where x binds the assumption and hole will be filled by the sub-proof of Q.
+
+;; When tactic-assumption discharges a hole with variable x:
+;;   the hole becomes x.
+
+;; When the state is empty, the proof-so-far is a complete proof term.
+```
+
+Building the proof term alongside the tactic reduction is what
+distinguishes a *proof assistant* from a mere *proof searcher*. The
+term is *the proof* — it is what you export, publish, or feed to an
+extraction tool.
+
+## Comparison to Coq
+
+Coq is a full proof assistant with:
+
+- Dependent types (a much richer type theory than STLC).
+- Hundreds of built-in tactics.
+- User-programmable tactics (Ltac, Ltac2, Mtac).
+- A large standard library.
+- An extraction machinery to OCaml, Haskell, Scheme.
+
+Our tiny assistant has none of these. But the pattern is the same:
+goal state, tactics, tactic combinators, proof terms. The scale differs;
+the shape is identical.
+
+## What to try
+
+Extend with `destruct` and `case-analysis` tactics. These are the ones
+that pattern-match on conjunctions and disjunctions in the context.
+
+Add a `contradiction` tactic: if the context contains both P and (not P),
+any goal is discharged. This is the *ex falso* rule.
+
+Implement a small *decision procedure* for pure propositional logic:
+given a goal, check whether it is a tautology by truth-table (chapter
+1) and, if so, construct the corresponding proof term automatically.
+This is the *tauto* tactic in Coq.
+
+## Closing
+
+A proof assistant is a UI over a proof checker. Add goal state, add
+tactics, add combinators — you have the essential shape. Scale it up
+with more tactics, better search, richer types, and you have Coq.
+Scale it in a different direction with a graphical interface and
+students, and you have a teaching tool.
+
+The core insight of this appendix: proof assistance is a
+transformation on goal states, and every tactic is a small program.
+Building one at this scale strips away the mystique. The tactic
+`intro` really is one line of code.
+"
+  :cross-refs
+    (:book-of-scheme :chapters (5 8)
+     :book-of-reason :chapters (5))
+  :verbs-used ("cond" "eq?" "cons" "car" "cdr" "cadr" "caddr" "list" "map"
+               "member" "not" "and" "or" "equal?" "define" "lambda" "let"
+               "let*" "error" "pair?")
+  :word-count-estimate 2900
+)

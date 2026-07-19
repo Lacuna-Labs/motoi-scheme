@@ -1,0 +1,374 @@
+(dialect :applies ("motoi" "sakura") :note "Default: applies to both dialects.")
+
+(chapter
+  :book "Book of Logic"
+  :chapter-number 9
+  :title "Modal Logic — S4 and S5"
+  :dialect "sakura"
+  :audience :adult
+  :content-rating :G
+  :author-lane "the-engineer-book-of-logic-2026-07-16"
+  :training-eligible #t
+  :confidentiality "public"
+  :voice "sakura-teaching + gentle-formalist"
+  :classical-anchors ("Blackburn-de Rijke-Venema — Modal Logic (2001)"
+                      "Chellas — Modal Logic: An Introduction"
+                      "Kripke — Semantical Considerations on Modal Logic (1963)"
+                      "Hughes-Cresswell — A New Introduction to Modal Logic")
+  :prose
+"# Chapter 9 — Modal Logic: Necessity, Possibility, and Kripke Worlds
+
+Where we add two operators — *necessarily* and *possibly* — and
+discover that the same trick supports reasoning about time, knowledge,
+obligation, and program correctness.
+
+Modal logic is what you get when you enrich propositional logic with
+*modes* — operators that qualify truth. The two classic modes are
+alethic:
+
+- `□P` — *necessarily P*, P is true in every possibility.
+- `◇P` — *possibly P*, P is true in some possibility.
+
+These operators do not fit into truth-functional propositional logic
+because their truth depends not just on P's truth but on *which
+possibilities exist and how they relate*. That extra structure — the
+possibility space — is what modal semantics captures.
+
+The modern semantics was invented by Kripke in the late 1950s. Modal
+logic became suddenly rigorous, testable, and useful. Today it
+underlies epistemic reasoning (knowledge, belief), temporal reasoning
+(before/after), deontic reasoning (obligation, permission), and formal
+verification of concurrent systems (invariants, liveness).
+
+We will build a small modal-logic engine in Scheme. The engine has two
+parts: a *Kripke frame* (worlds and relations) and an *evaluator* that
+tells you whether a modal formula is true at a given world.
+
+> **the runtime says**
+>
+> *The move from propositional to modal logic is like the move from
+> propositional to predicate: you gain a whole dimension of expressive
+> power for the cost of some formal machinery. Where predicate logic
+> lets you talk about many objects at once, modal logic lets you talk
+> about many possibilities at once. Once you have both, most of the
+> reasoning humans actually do is expressible.*
+
+## Kripke frames
+
+A *Kripke frame* is a pair (W, R) where:
+
+- W is a non-empty set of *worlds*.
+- R is a binary *accessibility relation* on W. `w R w'` means *from w
+  you can see w'*.
+
+A *Kripke model* adds an interpretation: a function V that assigns to
+each atomic proposition the set of worlds in which it is true.
+
+```scheme
+(define example-frame
+  '((:worlds (w1 w2 w3))
+    (:accessible ((w1 w2) (w1 w3) (w2 w2) (w3 w3)))
+    (:valuation
+     ((P . (w1 w2))
+      (Q . (w2 w3))))))
+```
+
+Three worlds; w1 can see w2 and w3; w2 can see itself; w3 can see
+itself. P is true at w1 and w2; Q is true at w2 and w3.
+
+## Semantics: truth at a world
+
+The truth of a modal formula is *relative to a world*. Write
+`M, w ⊨ φ` for *φ is true at world w in model M*.
+
+    M, w ⊨ P             iff  w ∈ V(P)                          [atomic]
+    M, w ⊨ ¬φ            iff  not (M, w ⊨ φ)
+    M, w ⊨ (φ ∧ ψ)       iff  (M, w ⊨ φ) and (M, w ⊨ ψ)
+    M, w ⊨ (φ ∨ ψ)       iff  (M, w ⊨ φ) or  (M, w ⊨ ψ)
+    M, w ⊨ (φ → ψ)       iff  if (M, w ⊨ φ) then (M, w ⊨ ψ)
+    M, w ⊨ (□φ)          iff  for all w' with w R w': (M, w' ⊨ φ)
+    M, w ⊨ (◇φ)          iff  there exists w' with w R w' and (M, w' ⊨ φ)
+
+The two new clauses are the interesting ones. `□φ` at w means every
+world reachable from w satisfies φ. `◇φ` at w means some world
+reachable from w satisfies φ.
+
+```scheme
+(define (accessible-worlds w frame)
+  (map cadr
+       (filter (lambda (edge) (eq? (car edge) w))
+               (cdr (assq :accessible frame)))))
+
+(define (holds-atomic p w frame)
+  (let ((valuation (cdr (assq :valuation frame))))
+    (member w (cdr (assq p valuation)))))
+
+(define (eval-modal phi w frame)
+  (cond
+    ((symbol? phi)
+     (holds-atomic phi w frame))
+    ((eq? (car phi) 'not)
+     (not (eval-modal (cadr phi) w frame)))
+    ((eq? (car phi) 'and)
+     (and (eval-modal (cadr phi)  w frame)
+          (eval-modal (caddr phi) w frame)))
+    ((eq? (car phi) 'or)
+     (or  (eval-modal (cadr phi)  w frame)
+          (eval-modal (caddr phi) w frame)))
+    ((eq? (car phi) 'implies)
+     (or (not (eval-modal (cadr phi) w frame))
+         (eval-modal (caddr phi) w frame)))
+    ((eq? (car phi) 'box)
+     (every (lambda (w2) (eval-modal (cadr phi) w2 frame))
+            (accessible-worlds w frame)))
+    ((eq? (car phi) 'diamond)
+     (any (lambda (w2) (eval-modal (cadr phi) w2 frame))
+          (accessible-worlds w frame)))))
+```
+
+Ten lines of semantics. Run it.
+
+```scheme
+(eval-modal '(box P) 'w1 example-frame)
+;; => #t iff P holds at every world w1 can see: w2 and w3.
+;;    P holds at w2 (yes) and at w3 (no). So (box P) is #f at w1.
+
+(eval-modal '(diamond P) 'w1 example-frame)
+;; => #t (P holds at w2, and w1 can see w2).
+
+(eval-modal '(box (or P Q)) 'w1 example-frame)
+;; => #t (at w2, P holds; at w3, Q holds; so (P ∨ Q) holds at both).
+```
+
+That last is illustrative. `(□(P ∨ Q))` is true at w1 because every
+world accessible from w1 satisfies at least one of P and Q. But `(□P ∨ □Q)`
+is false at w1 — neither P nor Q holds at every accessible world. Modal
+distribution over disjunction fails.
+
+## Modal axioms and the systems K, T, S4, S5
+
+Modal logic is not a single logic — it is a *family* of logics, each
+determined by which axioms hold. The base system is called **K**, after
+Kripke. K contains only:
+
+- All propositional tautologies.
+- `K axiom: □(P → Q) → (□P → □Q)`  (distribution of box over implication).
+- `Necessitation rule: if ⊢ P then ⊢ □P`  (theorems are necessary).
+
+That is the base. Depending on what you want to model, you strengthen K
+with more axioms.
+
+- **T = K + □P → P**. What is necessary is actual. Corresponds to
+  reflexive frames (`w R w` for all w). *Alethic modal logic.*
+- **S4 = T + □P → □□P**. Iterated necessity is necessity. Corresponds to
+  reflexive + transitive frames. *Epistemic reasoning about a persistent
+  knower.*
+- **S5 = S4 + ◇P → □◇P**. If something is possible, that possibility
+  itself is necessarily possible. Corresponds to reflexive + transitive
+  + symmetric frames (i.e., equivalence relations). *Metaphysical
+  necessity; logical omniscience.*
+
+These correspondences are called *Sahlqvist correspondence theorems*
+and they are one of the deepest results in modal logic: certain axioms
+correspond exactly to certain frame properties.
+
+```scheme
+(define (reflexive? frame)
+  (every (lambda (w)
+           (member w (accessible-worlds w frame)))
+         (cdr (assq :worlds frame))))
+
+(define (transitive? frame)
+  (let ((worlds (cdr (assq :worlds frame))))
+    (every (lambda (w)
+             (every (lambda (u)
+                      (every (lambda (v)
+                               (implies (and (member u (accessible-worlds w frame))
+                                             (member v (accessible-worlds u frame)))
+                                        (member v (accessible-worlds w frame))))
+                             worlds))
+                    worlds))
+           worlds)))
+
+(define (symmetric? frame)
+  (let ((worlds (cdr (assq :worlds frame))))
+    (every (lambda (w)
+             (every (lambda (u)
+                      (implies (member u (accessible-worlds w frame))
+                               (member w (accessible-worlds u frame))))
+                    worlds))
+           worlds)))
+```
+
+If your frame is reflexive, T holds. If reflexive and transitive, S4
+holds. If reflexive, transitive, and symmetric, S5 holds. Design your
+frame; know your logic.
+
+## Epistemic reading
+
+The most fruitful modern application is *epistemic modal logic*, where
+`□φ` reads *the agent knows φ*.
+
+- T says: what you know is true. (You cannot know a falsehood.)
+- S4 says: what you know, you know that you know. (Positive
+  introspection.)
+- S5 says: what you *do not* know, you know that you do not know.
+  (Negative introspection.)
+
+S5 is the logic of an idealized omniscient reasoner who has perfect
+introspection. Real humans do not satisfy S5 — we do not always know
+what we do not know. But S5 is a useful *model*, and much of computer
+science's reasoning about *distributed knowledge* uses it (Fagin,
+Halpern, Moses, Vardi — *Reasoning About Knowledge*, 1995).
+
+With multiple agents (Alice, Bob), you have multiple modalities:
+`K_alice φ`, `K_bob φ`, etc. Now you can express:
+
+- `K_alice (K_bob P)` — Alice knows that Bob knows P.
+- `K_alice (¬K_bob P)` — Alice knows that Bob does not know P.
+- `¬K_alice (K_bob P)` — Alice does not know whether Bob knows P.
+
+Adding a *common knowledge* modality `C_G` — φ is common knowledge
+among group G — is famously subtle: `C_G φ` means everyone knows φ,
+everyone knows that everyone knows φ, and so on ad infinitum. Cryptographic
+protocols use exactly this notion of common knowledge to reason about
+what an adversary can and cannot infer.
+
+## Deontic reading
+
+`□φ` reads *it is obligatory that φ*, and `◇φ` reads *it is permitted
+that φ*. Deontic modal logic.
+
+- `¬◇P ↔ □¬P`: what is not permitted is forbidden.
+- `□P → ¬□¬P` (deontic D): if you must do P, you may not be required to
+  do not-P. Rules out contradictory obligations.
+
+Deontic logic captures the structure of *systems of rules* — legal
+codes, contracts, policies. It is useful because it makes contradictions
+in rule systems explicit: if a policy demands both P and ¬P, the deontic
+formulas capture that inconsistency.
+
+## Program correctness
+
+`□P` can be read *P holds throughout the program's execution* and `◇P`
+as *P eventually holds*. This is a very small taste of *temporal logic*,
+which we treat in chapter 10.
+
+More directly, modal logic underlies *Hoare logic*: `{P} c {Q}` means
+*if P holds before c executes, Q holds after*. This can be recast
+modally as `[c] (P → Q)`, where `[c]` is a modality parameterized by
+the program c. This is *dynamic logic* (Pratt, 1976).
+
+## Composition: multiple modalities
+
+Real reasoning often needs several modalities at once.
+
+- Time + knowledge: *Alice knows now that Bob will know tomorrow.*
+- Space + obligation: *Everyone in this building must wear a mask.*
+- Belief + counterfactual: *If Alice had known, she would have acted.*
+
+Each modality is a separate operator with its own accessibility
+relation, and formulas can nest them arbitrarily. The engine we built
+above generalises: index the frame with a *set* of accessibility
+relations, one per modality, and add cases to the evaluator.
+
+## Canonical models and completeness
+
+For each of K, T, S4, S5, there is a completeness theorem: the axioms
+prove exactly the formulas that are semantically valid in the
+corresponding class of frames. The classic proof technique is the
+*canonical model construction*: build a model whose worlds are
+maximally-consistent sets of formulas, define accessibility so that
+w R w' iff every `□φ` in w has φ in w'. Show that a formula is true at
+w iff it is in w. Instant completeness.
+
+The full development is Blackburn-de Rijke-Venema, chapters 4-5. It is
+a beautiful piece of proof theory.
+
+## Bisimulation
+
+Two modal models are *bisimilar* if there is a relation between their
+worlds preserving atomic truths and matching accessibility both ways.
+Bisimilar worlds satisfy the same modal formulas — bisimulation is the
+appropriate notion of *sameness* for modal models.
+
+This matters computationally. If two systems (say two concurrent
+processes) are bisimilar, they satisfy the same modal temporal
+properties — every safety and liveness property that holds of one holds
+of the other. Bisimulation-based process algebras (CCS, CSP, pi-
+calculus) use this equivalence as their notion of behavioral
+equality.
+
+```scheme
+;; A sketch: two worlds w and w' are bisimilar (relative to a relation R)
+;; iff they agree on all atomic propositions and for every world u
+;; accessible from w, there is a world u' accessible from w' with (u,u') in R
+;; (and vice versa).
+```
+
+## Kripke and constructive modal logic
+
+Modal logic has a *constructive* variant: intuitionistic modal logic.
+The correspondence extends — modal S4 corresponds to *staged
+computation*, where `□P` is *a computation that produces P at a later
+stage*. This is the Davies-Pfenning 1996 correspondence and it
+underlies modern research on multi-stage languages, macro systems, and
+metaprogramming.
+
+The pattern: every modality gives rise to a computational effect. Boxed
+values are *stage-portable* values. Diamond-values are *possible*
+values in some non-deterministic sense. The type-theoretic reading of
+modality is one of the currently most active corners of the
+Curry-Howard programme.
+
+## Variations to try
+
+Extend the frame with multiple modalities — one for each of two agents,
+say. Now the syntax includes `(K-alice φ)` and `(K-bob φ)`. Rewrite the
+evaluator to handle both. Then encode a *common knowledge* modality as
+the fixed point of *everyone-knows*: `C φ = φ ∧ E φ ∧ E(E φ) ∧ ...`.
+The full common-knowledge modality does not terminate on infinite
+models; on finite models the fixed-point iteration converges. Try it
+on a two-agent puzzle.
+
+Build a *model checker*: given a frame and a formula, report the set of
+worlds where the formula is true. This is essentially the evaluator
+run at every world, collected. It is the seed of what real model
+checkers do for temporal logic (chapter 10).
+
+## Try this
+
+Set up a Kripke frame with three worlds, w1 = *rainy*, w2 = *sunny*,
+w3 = *snowy*, and accessibility that models weather transitions (say,
+rainy → sunny, sunny → rainy or snowy, snowy → snowy). Add an atomic
+proposition *outdoor-activity-possible* true at sunny only. Ask
+questions: at w1, is `◇ outdoor-activity-possible` true (yes)? At w3,
+`□ outdoor-activity-possible` (definitely not)? Play with the frame;
+add new worlds; adjust the relation. This is what modal logic feels
+like once you internalise it — a semantic sandbox for reasoning about
+possibilities.
+
+## Closing
+
+Modal logic adds two operators to propositional logic and gains a
+whole dimension of expressive power. Frames-and-relations semantics
+gives it precise meaning. The axiom systems K, T, S4, S5 correspond
+exactly to frame properties. Applications span knowledge, obligation,
+time, and program verification.
+
+Chapter 10 zooms in on one of these applications: temporal logic, where
+worlds are moments in time, accessibility is *time-after*, and we can
+formally verify properties like *once the system enters this state, it
+never leaves*. This is what model checkers do, and it has caught real
+bugs in real critical systems.
+"
+  :cross-refs
+    (:book-of-scheme :chapters (5 8)
+     :book-of-reason :chapters (6 7)
+     :book-of-reason-code :chapters (5 6)
+     :book-of-quine :chapters (2 3))
+  :verbs-used ("cond" "eq?" "cons" "car" "cdr" "cadr" "caddr" "list" "map"
+               "filter" "every" "any" "member" "assq" "symbol?" "not" "and"
+               "or" "define" "lambda" "let")
+  :word-count-estimate 5300
+)

@@ -1,0 +1,271 @@
+;; 13-cortex.book.slatl
+;; The Book of Motoi Scheme — Chapter 13 — Cortex (Memory Between Sessions)
+
+(chapter
+  :book             "The Book of Motoi Scheme"
+  :chapter-number   13
+  :title            "Chapter 13 — Cortex (Memory Between Sessions)"
+  :audience         :any
+  :dialect          "motoi"
+  :book-version     "1.0"
+  :provenance       "book-of-scheme-author-2026-07-17"
+  :training-eligible #t
+  :content-rating   :G
+  :prose
+"# Chapter 13 — Cortex (Memory Between Sessions)
+
+You've now had a `set!` variable that changes during a run. That variable dies when the program ends.
+
+You've had entities that live in a world. They die when the world dies.
+
+Cortex is different. Cortex is a *persistent* store. You write a value in one run; you read it back the next day. It's the way your Motoi programs remember anything about the outside world — the last score, the user's name, a preferred tempo, a shopping list, a list of favorite pitches. Anything you want to survive a restart.
+
+This chapter shows you the six cortex verbs and a small demo of what they're for.
+
+## `cortex/write` and `cortex/read` — the persistent pair
+
+The two you'll use most.
+
+```
+$ motoi eval \"(cortex/write 'greeting \\\"hello, again\\\")\"
+#t
+
+$ motoi eval \"(cortex/read 'greeting)\"
+\"hello, again\"
+```
+
+`(cortex/write key value)` saves a value under a key. It returns `#t` on success.
+
+`(cortex/read key)` reads back the value. Returns `#f` if no such key exists.
+
+Now the magic: close your terminal. Open a new one. Try again:
+
+```
+$ motoi eval \"(cortex/read 'greeting)\"
+\"hello, again\"
+```
+
+Still there. Cortex writes to disk at `~/.motoi/cortex.slat` — a small SLAT file that survives shutdowns, reboots, everything except deletion.
+
+## Keys are symbols; values are (nearly) anything
+
+Keys are typically symbols: `'greeting`, `'score`, `'user-name`. Values can be:
+
+- Numbers: `(cortex/write 'score 100)`
+- Strings: `(cortex/write 'name \"Motoi\")`
+- Symbols: `(cortex/write 'preferred-color 'blue)`
+- Lists: `(cortex/write 'favorites '(220 262 330))`
+
+```
+(cortex/write 'score 100)
+(cortex/write 'level 'medium)
+(cortex/write 'high-scores '(100 250 500 800))
+```
+
+Read them back:
+
+```
+(cortex/read 'score)         ;; => 100
+(cortex/read 'level)         ;; => \"medium\"
+(cortex/read 'high-scores)   ;; => (100 250 500 800)
+```
+
+Note that symbols round-trip as strings — `'medium` came back as `\"medium\"`. That's because cortex serializes through JSON, which doesn't have symbols. If you're storing symbols and need them back as symbols on read, you can convert:
+
+```
+(string->symbol (cortex/read 'level))  ;; => medium
+```
+
+Or store as an actual symbol quote-string:
+
+```
+(cortex/write 'level \"medium\")
+;; then when you read: treat it as a string
+```
+
+Pragmatically: use strings for anything symbol-like unless you need the extra structure.
+
+## `cortex/keys` and `cortex/size` — inspect the store
+
+```
+(cortex/keys)   ;; => a list of all keys currently stored
+(cortex/size)   ;; => number of keys
+```
+
+Useful for debugging (\"what did I remember?\") and for iterating over everything you've stored.
+
+## `cortex/forget` — remove a key
+
+```
+(cortex/forget 'greeting)
+(cortex/read 'greeting)    ;; => #f
+```
+
+`cortex/forget` removes a key. Returns `#f` (per the current implementation, always). If you need to know whether the key existed *before* forgetting, `cortex/read` it first, then forget.
+
+## `cortex/remember` and `cortex/recall` — the in-memory pair
+
+There's a *second* pair of cortex verbs that don't hit disk:
+
+```
+(cortex/remember 'streaming-value 42)   ;; in-memory only
+(cortex/recall 'streaming-value)        ;; => 42
+```
+
+These live in RAM for the duration of the process. They *don't* persist to disk. Two use cases:
+
+- **Session-local values** that don't need to survive a restart (a working score during a game).
+- **Fast lookups** during a live process where writing to disk on every update would be too slow.
+
+For truly persistent storage, use `cortex/write` and `cortex/read`. For session-only, use `cortex/remember` and `cortex/recall`. Don't mix them — write to one system, read from the other, you'll be confused.
+
+## `cortex/query` — pattern search
+
+```
+(cortex/query 'score)   ;; => list of entries matching pattern 'score
+```
+
+`cortex/query` searches. What the pattern means depends on how the cortex adapter is configured — some setups do prefix matching, some do fuzzy matching. For your kid-scale programs, `cortex/read` is usually enough. Reach for `query` when you have many keys and need to find them by partial name.
+
+## A cross-session score tracker
+
+Here's a small program that uses cortex to remember the best score you've ever gotten.
+
+Save as `high-score.scm`:
+
+```
+(define (get-high-score)
+  (let ((v (cortex/read 'high-score)))
+    (if v v 0)))
+
+(define (record-score s)
+  (let ((current (get-high-score)))
+    (if (> s current)
+        (begin
+          (cortex/write 'high-score s)
+          (display \"New high score: \") (display s) (newline))
+        (begin
+          (display \"Score: \") (display s)
+          (display \" (best so far: \") (display current) (display \")\")
+          (newline)))))
+
+(record-score 45)
+(record-score 120)
+(record-score 80)
+(record-score 200)
+```
+
+Run it (first time only — after that, your previous high score is remembered):
+
+```
+$ motoi run high-score.scm
+New high score: 45
+New high score: 120
+Score: 80 (best so far: 120)
+New high score: 200
+```
+
+The first line is a new high because we start at 0 (nothing stored yet), and any positive number beats that.
+
+Now — close the terminal. Open a new one. Run it again:
+
+```
+$ motoi run high-score.scm
+Score: 45 (best so far: 200)
+Score: 120 (best so far: 200)
+Score: 80 (best so far: 200)
+Score: 200 (best so far: 200)
+```
+
+No new high scores — because 200 is the best you've had, ever. Cortex remembered across runs.
+
+## A user preferences pattern
+
+The typical use of cortex in a real app is to store user preferences.
+
+```
+(define (setting key default)
+  (let ((v (cortex/read key)))
+    (if v v default)))
+
+(define (set-setting! key value)
+  (cortex/write key value))
+
+;; Usage
+(setting 'tempo 120)        ;; returns 120 if never set
+(set-setting! 'tempo 90)
+(setting 'tempo 120)        ;; now returns 90
+```
+
+`setting` reads with a fallback default. `set-setting!` writes. Wrapping cortex in a couple of helpers makes the calling code cleaner and encapsulates the *default value* logic in one place.
+
+## Journaling — append-only records
+
+Sometimes you don't want to *overwrite* a value — you want to *log* each new one.
+
+```
+(define (append-to-log entry)
+  (let* ((current (cortex/read 'log))
+         (log-list (if current current '())))
+    (cortex/write 'log (cons entry log-list))))
+
+(append-to-log 'started)
+(append-to-log 'level-up)
+(append-to-log 'died)
+(cortex/read 'log)
+;; => (died level-up started)
+```
+
+Each entry gets prepended (so the newest is first). Whole log stays as a list. When you want the oldest-first order, `reverse` it.
+
+For heavy logging you'd probably not use cortex — a text file or a proper database is better. But for a game's *event history* or a session's *actions taken*, this is a perfect fit.
+
+## Two design principles
+
+**Keep values small.** Cortex writes the whole store on each write. If your value is 100 MB, every write copies 100 MB. Fine for small stuff — scores, preferences, short lists. Terrible for large binary blobs. Use the file system directly for those.
+
+**Namespace your keys.** If your program uses cortex alongside other Motoi programs (they all share the same store, all keyed under `~/.motoi/cortex.slat`), collisions are possible. Prefix your keys: `'my-game/high-score`, `'my-app/tempo`, `'space-invaders/level`. Trivial to do; saves a headache later.
+
+## Deleting the store
+
+If you need to wipe it entirely:
+
+```
+$ rm ~/.motoi/cortex.slat
+```
+
+Or programmatically, walk `cortex/keys` and forget each one:
+
+```
+(for-each cortex/forget (cortex/keys))
+```
+
+That gives you a clean cortex without touching the file system. Useful in tests, when you want a known-empty starting state.
+
+## What you know now
+
+- Cortex is persistent memory that survives across sessions.
+- `cortex/write key value` — save persistently.
+- `cortex/read key` — read; returns `#f` if not present.
+- `cortex/keys`, `cortex/size` — inspect.
+- `cortex/forget key` — remove one.
+- `cortex/remember`/`cortex/recall` are the in-memory pair, session-only.
+- Cortex stores to `~/.motoi/cortex.slat` via JSON serialization.
+- Wrap cortex in helpers (`setting`, `set-setting!`, `append-to-log`) for cleaner call sites.
+- Namespace your keys (`'my-app/foo`) to avoid collisions with other Motoi programs.
+
+## Try before you turn the page
+
+1. Store your name in cortex. Read it back. Confirm it survives closing the terminal.
+
+2. Build a *counter*: `(bump-counter!)` increments a stored value; `(current-count)` reads it. Initial state (never set) should return 0. Test by running the program a few times and watching the count go up.
+
+3. Store a list of your favorite frequencies as `'favorites '(262 330 392)`. Write a function `(play-favorites)` that reads and plays them all.
+
+4. Namespace your keys under `'my-book/`. Store `'my-book/read-so-far` as a count of chapters. Every time you \"finish\" a chapter, `(bump 'my-book/read-so-far)`. Check the number.
+
+5. Wipe your cortex with `(for-each cortex/forget (cortex/keys))`. Confirm `cortex/size` is 0.
+
+## What's next
+
+Chapter 14: **modules — importing what you need**. So far you've used the CORE verbs — everything built into Motoi's base. Chapter 14 introduces *modules* — the way you reach for `music-advanced`, `math-geometry-advanced`, `game-ai-advanced`, and the other packs that ship with Motoi. Then Chapter 15 shows you how to *make* your own.")

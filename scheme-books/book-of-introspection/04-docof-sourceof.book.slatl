@@ -1,0 +1,1147 @@
+(chapter
+  :book "Book of Introspection"
+  :chapter-number 4
+  :title "docOf + sourceOf + examples — where does this verb live?"
+  :audience "programmer-learning-motoi"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-of-introspection-author-agent"
+     :sources ("src/introspect.js" "src/verbRegistry.js" "src/repl.js" "src/docs-emitter.js"))
+  :prose
+"# Chapter 4 — docOf + sourceOf + examples: where does this verb live?
+
+Three projections earn their own chapter because each is a full workflow, not just a field access.
+
+`doc-of` is what you reach for when you need the one-sentence description without any framing. `source-of` is what you reach for when even the doc is not enough and you need to look at the implementation. `examples-of` is what you reach for when you know what the verb does but you cannot remember what a call to it looks like.
+
+Learn these three well and you can navigate any Motoi codebase without a docs site, without an IDE plugin, without leaving the REPL.
+
+## 4.1 doc-of — the shortest projection
+
+`doc-of` returns the docstring field from the metadata. Just that field. Nothing else.
+
+```scheme
+(doc-of 'map)
+;; => \"Apply a procedure to each element of one or more lists, returning a new list of results.\"
+
+(doc-of 'car)
+;; => \"Return the first element of a pair.\"
+
+(doc-of 'cortex/query)
+;; => \"Query Cortex records. Kwargs: :subject :predicate :object :at :source :order-by.\"
+```
+
+That is the entire behavior. Symbol in, string out. If no doc, nil out.
+
+Why is this a whole section? Because the return value is a string, and strings compose with everything. Whenever you need to include a verb's description in a longer piece of prose, `doc-of` is the primitive.
+
+Examples of composition:
+
+```scheme
+;; Include the doc in an error message.
+(error (string-append \"Bad call to map: \" (doc-of 'map)))
+
+;; Log the doc when a verb is first called (debug tracing).
+(display (string-append \"Calling \" (symbol->string name) \": \" (doc-of name)))
+
+;; Aggregate docs for a namespace into a cheat-sheet.
+(map doc-of (verbs-in-namespace \"cortex\"))
+```
+
+The doc-of return is plain data. You can string-manipulate it, embed it, feed it to another verb. That is why it is worth its own habit.
+
+## 4.2 doc-of vs describe
+
+`describe` includes the doc plus name, namespace, and arity, all formatted for reading. `doc-of` is just the doc string.
+
+Use `describe` when a human is reading the output. Use `doc-of` when a program is reading the output.
+
+A common mistake is calling `describe` inside a program and trying to parse the formatted string back into fields. Do not do that. Reach for `doc-of`, `arity-of`, `namespace-of` individually and compose them yourself if you need custom formatting.
+
+## 4.3 The REPL shortcut
+
+At the REPL, `,doc foo` prints `(doc-of 'foo)` to stdout.
+
+```
+> ,doc map
+Apply a procedure to each element of one or more lists, returning a new list of results.
+```
+
+Same string, no plumbing. See `src/repl.js` line 45 for the exact meta-command dispatch:
+
+```javascript
+',doc': {
+  args: '<verb>',
+  doc: 'Print the docstring alone.',
+  run: (ctx, argv) => ctx.output(docOf(argv[0]) || '(no doc)'),
+},
+```
+
+The meta-command is a two-line wrapper. Its function is entirely `doc-of` plus stdout output. Everything the REPL exposes is built out of the underlying verbs like this. Appendix C shows you how to write your own meta-command using the same pattern.
+
+## 4.4 doc-of and the reference manual
+
+The reference manual (`scheme/MOTOI-SCHEME-REFERENCE.slat`) is generated from the registry. `src/docs-emitter.js` walks every registered verb and emits a section per verb. The doc field is the first line of each section, verbatim.
+
+This means the reference manual and `doc-of` return exactly the same string for any verb. There is no separate documentation authoring. Fill in the doc field at registration and it appears in both places.
+
+If you are working on Motoi itself and want to check what the reference manual says about a verb, you can either read the manual or run `(doc-of 'the-verb)`. They will agree by construction.
+
+## 4.5 source-of — the last-resort pointer
+
+`source-of` returns the source-pointer field from the metadata. Path plus line number.
+
+```scheme
+(source-of 'car)
+;; => \"src/base.js:73\"
+
+(source-of 'cortex/query)
+;; => \"lib/ai/cortex-io.js:121\"
+
+(source-of 'composer/slider)
+;; => \"lib/composer/widgets.js:42\"
+```
+
+The pointer is what you use when the doc, contract, and examples were not enough. If a verb's behavior surprises you, `source-of` tells you where to go read the implementation.
+
+This is the last-resort tool for a reason. Reading source is more work than reading metadata. You should only need to do it when the metadata under-describes the verb. Motoi's culture is to write metadata rich enough that source-reading is rare. When it happens anyway, `source-of` saves you the grep.
+
+## 4.6 The source pointer format
+
+Every source pointer follows the format `path:line`. Path is relative to the runtime root. Line is 1-indexed.
+
+Some examples of what to do with the pointer:
+
+**Open in an editor.** If your editor supports `file:line` navigation (most do), you can copy-paste the pointer and jump straight to the implementation.
+
+```
+$ vim src/base.js +73
+```
+
+**Read from the REPL.** You can compose the pointer with a file-reader verb to see the surrounding lines:
+
+```scheme
+(display (read-file-lines-around (source-of 'car) 5))
+```
+
+where `read-file-lines-around` reads the file and returns the ten lines centered on the target line.
+
+**Grep for related verbs.** If a verb's source is in `lib/composer/widgets.js`, other verbs in that file are probably related. `grep register lib/composer/widgets.js` gives you the sibling verbs.
+
+The source pointer is a bridge from the metadata layer to the source-code layer. Cross it when you need to; stay on the metadata side of the bridge most of the time.
+
+## 4.7 The source-pointer drift problem
+
+As mentioned in Chapter 2, source pointers are manually maintained strings. If a verb's implementation moves within its file, the line number drifts.
+
+There is no runtime check for drift. If a verb's `source` field says `src/base.js:73` and the actual implementation is at line 85, `source-of` will still return line 73. Following the pointer takes you to the wrong line.
+
+Two mitigations:
+
+1. **Search within the file.** Once you are in `src/base.js`, search for the verb name (`grep 'car'` or your editor's search) to find the actual current line.
+
+2. **File a bug.** If you notice a drift, file it. The fix is a metadata update: change the `source` field in the registration call.
+
+There is a planned auto-source-pointer feature (`engineering/AUTO-SOURCE-POINTERS.slat`, not yet landed) that would derive the source pointer from the JS stack trace at registration time. When that lands, drift will not be possible. Until then, treat source pointers as helpful-but-approximate.
+
+## 4.8 What source-of does not do
+
+`source-of` does not read the source. It returns the pointer.
+
+If you want the source code itself, you need a separate file-reader verb. Motoi's `read-file` and `read-file-lines` verbs do this; combine them with `source-of` to get the code.
+
+```scheme
+(define (source-of-verb-code name)
+  (let* ((ptr (source-of name))
+         (parts (string-split ptr \":\"))
+         (path (car parts))
+         (line (string->number (cadr parts))))
+    (read-file-lines-around path line 10)))
+```
+
+Now `(source-of-verb-code 'car)` returns twenty lines of source centered on the registration site. That is a small custom tool composed from primitives.
+
+## 4.9 source-of and confidentiality
+
+Some verbs deliberately have no source pointer. This is Chapter 16's topic, briefly previewed here.
+
+A cart running in a sandboxed environment may not want to expose where its private verbs are implemented. The runtime can strip source pointers from the metadata before returning it to introspection callers. When it does, `source-of` returns nil.
+
+This does not mean the verb has no source. It means the source is confidential. The introspection layer is telling you honestly: I know where this is, but I am not going to tell you.
+
+The runtime's default is to expose source pointers for all core and extended verbs. Sandboxed runtimes may redact. If you see nil from `source-of` on a verb you know exists, either the field was never populated or the runtime is redacting.
+
+Chapter 16 covers redaction policies in detail.
+
+## 4.10 examples-of — the third habit
+
+`examples-of` returns the tiered examples list from the metadata.
+
+```scheme
+(examples-of 'map)
+;; => ((:level novice :code \"(map (lambda (x) (* x 2)) '(1 2 3))\")
+;;     (:level intermediate :code \"(map + '(1 2 3) '(10 20 30))\")
+;;     (:level expert :code \"(map (lambda (kv) (cons (car kv) (* (cdr kv) 2))) alist)\"))
+```
+
+The return is a list of records. Each record has `:level` (`novice`, `intermediate`, or `expert`) and `:code` (a runnable string).
+
+The three levels are the pedagogical arc. Novice is the verb in isolation. Intermediate is one composition. Expert is a realistic pattern.
+
+Why is `examples-of` its own habit? Because you use it more than you might think. Every time you look up a verb, the examples are what save you from having to invent a call to it. `(help 'map)` gives you the full record; `(examples-of 'map)` is the shortcut when all you need is a call you can adapt.
+
+## 4.11 The REPL shortcut for examples
+
+At the REPL:
+
+```
+> ,examples map
+  novice        (map (lambda (x) (* x 2)) '(1 2 3))
+  intermediate  (map + '(1 2 3) '(10 20 30))
+  expert        (map (lambda (kv) (cons (car kv) (* (cdr kv) 2))) alist)
+```
+
+Three lines, one per example, level padded to a fixed width for readability.
+
+The meta-command implementation, from `src/repl.js`:
+
+```javascript
+',examples': {
+  args: '<verb>',
+  doc: 'Print the tiered examples (novice / intermediate / expert).',
+  run: (ctx, argv) => {
+    const meta = help(argv[0])
+    if (!meta) return ctx.output(`unknown verb: ${argv[0]}`)
+    for (const ex of meta.examples) ctx.output(`  ${ex.level.padEnd(14)} ${ex.code}`)
+  },
+},
+```
+
+Six lines. All plumbing over `help` and `ex.level` and `ex.code`. Everything the REPL exposes is a light wrap over the underlying verbs.
+
+## 4.12 Adapting examples
+
+The intended workflow with `examples-of` is:
+
+1. Ask for the examples.
+2. Read the one closest to your intended use.
+3. Copy it to your buffer.
+4. Edit the arguments to match your data.
+5. Evaluate.
+
+That is a common cycle. Every verb you have ever used, you likely used it the first time by copy-pasting an example.
+
+Motoi encourages this pattern. The three-tier structure is designed for it. Novice examples are picked because they are trivial to adapt — the reader changes one literal and has a working call. Expert examples are picked because they resemble real code — the reader recognizes the pattern from a cart they wrote yesterday.
+
+The training corpus for Motoi Copilot leans heavily on examples for the same reason. When the model generates a call to a verb, it is reaching for a pattern it saw in the examples list, adapted to the current context.
+
+## 4.13 examples-of at three levels
+
+Let me walk through what the three levels feel like.
+
+**Novice — the introduction.** A novice example uses the verb once, with literal arguments, no other verbs interfering. The reader sees the shape immediately.
+
+```scheme
+(map (lambda (x) (* x 2)) '(1 2 3))
+```
+
+Look at that. `map` takes a procedure and a list. The procedure is inline. The list is a literal. The result is going to be `(2 4 6)`. There is nothing else to think about.
+
+If you are learning `map` for the first time, this is what you copy. You change `(* x 2)` to whatever transform you actually want, change `(1 2 3)` to your data, evaluate. Done.
+
+**Intermediate — one composition.** An intermediate example uses the verb with one or two other common verbs. The reader sees how the verb fits into a small pattern.
+
+```scheme
+(map + '(1 2 3) '(10 20 30))
+```
+
+Now `map` is being handed a two-argument procedure and two lists. The pattern is different — parallel iteration over two lists, adding corresponding elements. The reader sees `map` in a context that goes beyond the single-list case.
+
+**Expert — the real world.** An expert example uses the verb in a realistic pattern from actual Motoi code.
+
+```scheme
+(map (lambda (kv) (cons (car kv) (* (cdr kv) 2))) alist)
+```
+
+Here `map` is transforming an association list. Each element is a pair; the transform doubles the cdr and preserves the car. This is the shape of code that shows up in real carts.
+
+Reading the three together, you get a compressed teaching progression. Same verb, three levels of context. If you only see the novice you learn the shape; if you also see the intermediate you learn one composition; if you also see the expert you learn how the verb lives in real code.
+
+## 4.14 A verb with no examples
+
+If a verb has an empty examples list:
+
+```scheme
+(examples-of 'some-poorly-documented-verb)
+;; => ()
+```
+
+Empty list, not nil. The verb is registered but has no examples.
+
+This is a signal. Every verb should have at least one novice example. If it does not, either:
+
+1. The verb is trivially unary and does not need one (rare — even `newline` gets `(newline)` as its novice example).
+2. The verb author skipped the examples field.
+3. The verb is experimental and has not been fully documented yet.
+
+Case 2 is a bug. File it. The audit script from Chapter 2 can find every verb with an empty examples list.
+
+## 4.15 Composing examples with the LLM
+
+Chapter 13's LLM-augmented `build-example` verb generates fresh examples on demand. Combine it with `examples-of`:
+
+```scheme
+(define (all-examples name)
+  (append
+    (examples-of name)
+    (list (build-example name :level 'intermediate)
+          (build-example name :level 'expert))))
+```
+
+Now you get the built-in tiered examples plus two LLM-generated ones. Useful for verbs where the built-in examples are thin.
+
+The LLM-generated examples are labelled with `:generated #t` in their record, so a reader can tell which examples came from the model versus the registry. The registry examples are grounded; the model examples are best-guess.
+
+## 4.16 doc-source-examples as a trio
+
+The three verbs together answer the three questions a reader has about a verb.
+
+- **doc-of** — what does it do?
+- **source-of** — where does it live?
+- **examples-of** — what does a call look like?
+
+Ask all three and you have a complete picture of the verb.
+
+Motoi's REPL meta-command `,help` internally calls all three via the `help` record and formats them together. If you type `,help map` you see:
+
+```
+map  —  Apply a procedure to each element of one or more lists, returning a new list of results.
+Arity:      variadic
+Contract:   (procedure list ...) -> list
+Namespace:  base
+Tier:       core (perm: read)
+Since:      1.0
+Source:     src/base.js:73
+
+Examples:
+  novice        (map (lambda (x) (* x 2)) '(1 2 3))
+  intermediate  (map + '(1 2 3) '(10 20 30))
+  expert        (map (lambda (kv) (cons (car kv) (* (cdr kv) 2))) alist)
+```
+
+Everything on one screen. That is what `,help` gives you at the REPL. The three specialized verbs (`doc-of`, `source-of`, `examples-of`) are for when you want just one of the three fields as data, without the framing.
+
+## 4.17 A worked example — a lookup workflow
+
+Let me walk through a realistic session using all three verbs.
+
+You are writing a cart. You want to sort a list of records by one of their fields. You do not remember Motoi's sort verb.
+
+**First move — apropos.**
+
+```scheme
+(apropos \"sort\")
+;; => (sort sort-by sort! sorted?)
+```
+
+`sort-by` looks right. What does it do?
+
+**Second move — doc-of.**
+
+```scheme
+(doc-of 'sort-by)
+;; => \"Sort a list by applying a key function to each element and comparing keys.\"
+```
+
+Perfect. That is what you want. But how do you call it?
+
+**Third move — examples-of.**
+
+```scheme
+(examples-of 'sort-by)
+;; => ((:level novice :code \"(sort-by identity '(3 1 2))\")
+;;     (:level intermediate :code \"(sort-by string-length '(\\\"aaa\\\" \\\"b\\\" \\\"cc\\\"))\")
+;;     (:level expert :code \"(sort-by (lambda (r) (record-field r :priority)) records)\"))
+```
+
+The expert example is exactly your case — sort records by a field. Copy it, adapt the field name to yours, paste into your buffer. Done.
+
+**Optional fourth move — source-of.**
+
+You are curious about the implementation. Maybe the sort is unstable and you want to check.
+
+```scheme
+(source-of 'sort-by)
+;; => \"src/base.js:412\"
+```
+
+Open your editor, jump to line 412, read the impl. It uses a stable merge sort. Good, that is what you needed to know.
+
+Four calls. Complete answer. From \"I do not remember the verb\" to \"I have a working call in my buffer\" in under a minute.
+
+## 4.18 The three verbs and the training corpus
+
+The three verbs also structure how Motoi Copilot was trained.
+
+Every training pair for the model was constructed from a verb's doc, source location, and examples. The pattern:
+
+- The doc becomes the model's natural-language association with the verb.
+- The source location grounds the model's confidence — verbs with real source are treated as real.
+- The examples become the model's generation templates — when the model produces a call, it patterns after the examples.
+
+If a verb has all three fields filled, the model learned the verb well. If a verb has only the doc, the model knows the verb exists but may not generate confident calls to it. If a verb has none of the three, the model does not know the verb at all — its name is in the registry but the training corpus had no material.
+
+This is why Chapter 2's discipline matters. Every field on a verb's record is a chance to teach the model. Verbs with rich metadata become verbs the model reaches for confidently; verbs with thin metadata become verbs the model avoids.
+
+## 4.19 A worked tool — the doc-quality report
+
+Building on Chapter 2's audit script, here is a report that categorizes every verb by metadata completeness.
+
+```scheme
+(define (metadata-tier name)
+  (let ((doc (doc-of name))
+        (src (source-of name))
+        (exs (examples-of name)))
+    (cond
+      ((and doc src (not (null? exs))) 'complete)
+      ((and doc (or src (not (null? exs)))) 'partial)
+      (doc 'doc-only)
+      (else 'undocumented))))
+
+(define (doc-quality-report)
+  (let ((all (map car (snapshot-registry))))
+    (list
+      :complete (length (filter (lambda (n) (eq? 'complete (metadata-tier n))) all))
+      :partial (length (filter (lambda (n) (eq? 'partial (metadata-tier n))) all))
+      :doc-only (length (filter (lambda (n) (eq? 'doc-only (metadata-tier n))) all))
+      :undocumented (length (filter (lambda (n) (eq? 'undocumented (metadata-tier n))) all)))))
+```
+
+Run it:
+
+```scheme
+(doc-quality-report)
+;; => (:complete 380 :partial 87 :doc-only 32 :undocumented 13)
+```
+
+380 fully documented verbs. 87 partially documented. 32 with only a doc. 13 with nothing. The 13 undocumented ones are the most urgent — they are essentially invisible to the model and to any reader who cannot memorize their names.
+
+You can extend this to name the offenders:
+
+```scheme
+(define (undocumented-verbs)
+  (filter (lambda (n) (eq? 'undocumented (metadata-tier n)))
+          (map car (snapshot-registry))))
+```
+
+Call it, get the list, start filing bugs.
+
+This tool is fifteen lines. It uses only the introspection primitives from this chapter and the last. It produces an actionable report about the language's own quality. That is what having introspection as verbs enables.
+
+## 4.20 The three verbs and the workflow reflex
+
+Chapter 3 named the introspection reflex — bind, type-of, project, recurse, decide. This chapter's verbs deepen it for names.
+
+When you meet a verb name you do not recognize:
+
+1. **doc-of** — what does it do?
+2. **examples-of** — what does a call look like?
+3. **source-of** — if the above did not answer, where is it implemented?
+
+Three verbs. In that order. Most of the time you stop at step 2. Sometimes you go to step 3.
+
+Practice this reflex a hundred times and it becomes automatic. Every unfamiliar verb, you type `(doc-of 'name)` before you type anything else. Every doc you read, you follow up with `(examples-of 'name)` to see the shape of a call. Every impenetrable verb, you fall back to `(source-of 'name)` and read the source.
+
+The three verbs are small. The reflex they enable is large.
+
+## 4.21 An honest observation about source-reading
+
+Source-reading is a skill separate from introspection. Motoi's introspection layer minimizes the need for it, but does not eliminate it.
+
+Some things you can only learn from source:
+
+- The exact implementation strategy (stable vs unstable sort, iterative vs recursive impl)
+- The performance characteristics (O(n) vs O(n log n) vs O(1))
+- The edge case handling (what happens when the input is empty, or nil, or malformed)
+- The interaction with the runtime (what globals it reads, what caches it uses)
+
+For these questions the metadata is not enough. The doc string can hint (\"stable sort\") but cannot spell out the details. The source is authoritative.
+
+If you find yourself reading source often, that is a signal the metadata layer is under-serving you. Consider filing bugs on verbs where the metadata was insufficient. Motoi wants source-reading to be rare; a verb whose metadata forces frequent source-reading is a candidate for better docs.
+
+## 4.22 Composing source-of with the LLM
+
+Chapter 13's LLM-augmented `explain` verb reads the source when introspecting a verb's implementation. You can do this manually:
+
+```scheme
+(define (explain-impl name)
+  (let* ((ptr (source-of name))
+         (code (read-file-lines-around ptr 10)))
+    (llm/ask (string-append \"What does this verb implementation do?\\n\\n\" code))))
+```
+
+The LLM sees the source and returns a prose explanation. This is grounded in the actual code, not in an invented model of what the verb does.
+
+For most verbs the built-in doc is enough. For a verb where the doc is thin and the source is dense, `explain-impl` gives you a fresh readable explanation.
+
+Chapter 13 walks this in more depth.
+
+## 4.23 A parting reminder
+
+The three verbs — `doc-of`, `source-of`, `examples-of` — are your most-used introspection projections after `describe` and `type-of`.
+
+Learn to reach for them without thinking. Every unfamiliar verb should trigger `(doc-of 'name)`. Every unfamiliar call shape should trigger `(examples-of 'name)`. Every impenetrable behavior should trigger `(source-of 'name)`.
+
+These reflexes are the difference between a programmer who wrestles with a language and a programmer who converses with it.
+
+## 4.24 What comes next
+
+Chapters 5 through 7 dig under the metadata layer to the runtime layers that make it possible: environments, macros, and the reader. These are the layers most programmers never see, and they are the difference between a programmer who uses Motoi and a programmer who understands Motoi.
+
+Chapter 5 shows environments and bindings. A closure is a lambda plus captured bindings; Chapter 5 shows how to walk both.
+
+Chapter 6 shows macros. A macro rewrites forms before evaluation; Chapter 6 shows how to see the rewrite.
+
+Chapter 7 shows the reader. The reader turns strings into forms; Chapter 7 shows how to call it directly and how to introspect the source-position metadata that follows a form through evaluation.
+
+These three chapters are denser than the first four. You will want to have the Chapter 4 reflexes solid before you go into them. If any of the `doc-of` / `source-of` / `examples-of` habits still feel unfamiliar, practice them for another session before moving on.
+
+Turn the page.
+
+## 4.25 Deep dive — the doc-string style
+
+I want to spend a section on doc-string style, because you will register your own verbs eventually and the style guide matters.
+
+A doc-string in Motoi is:
+
+- One sentence. Two if the first cannot stand alone.
+- Imperative mood. \"Return the first element\" not \"Returns the first element\" or \"A function that returns...\"
+- No jargon that is not already in the reader's mouth.
+- Names the keyword arguments if the verb has any: \"Kwargs: :subject :predicate :object\".
+- Ends with a period.
+
+Some good examples:
+
+```
+car:               \"Return the first element of a pair.\"
+map:               \"Apply a procedure to each element of one or more lists, returning a new list of results.\"
+cortex/record:     \"Write a fact to Cortex. Kwargs: :subject :predicate :object :at :source.\"
+composer/slider:   \"Create a numeric slider bound to a target path. Kwargs: :label :bind :min :max :step.\"
+```
+
+Some bad examples and why:
+
+```
+foo: \"This function does foo.\"
+```
+Restates the name. Useless.
+
+```
+bar: \"This is a helper function used internally by the sort module to compare priorities and return an integer indicating relative order.\"
+```
+Too long. The details belong in the reference manual expansion, not the doc field.
+
+```
+baz: \"Baz.\"
+```
+Not a sentence. Not imperative. No period. Zero information.
+
+The three-property test: imperative, one sentence, no unfamiliar jargon. Apply it to every doc-string you write. If it fails, rewrite until it passes.
+
+## 4.26 Deep dive — the source pointer format
+
+The source pointer is `path:line`. That is the format. No other punctuation, no offsets, no character positions.
+
+Some conventions:
+
+- Path is always relative to the repo root, not absolute.
+- Line is the line where the registration call starts, not where the impl function starts.
+- If the verb is defined and registered in different places, prefer the registration site.
+- If the pointer would be ambiguous (multiple registrations of the same verb), prefer the canonical one and mark the others as deprecated aliases.
+
+The pointer is a hint for a human reader. It does not need to be precise to the character. If the reader gets to the right file and within ten lines of the right position, the pointer has done its job.
+
+## 4.27 Deep dive — the examples list schema
+
+Each example is a record with two fields: `:level` and `:code`.
+
+`:level` is a symbol. The valid values are `novice`, `intermediate`, `expert`. Case matters; use lowercase symbols.
+
+`:code` is a string. The string must contain a runnable Scheme expression — no comments, no multi-line explanations, no ellipses. If you cannot fit the example on one line, wrap the parts in a `begin`:
+
+```scheme
+(begin (define xs '(1 2 3)) (map (lambda (x) (* x 2)) xs))
+```
+
+The reason for the strict one-expression rule is that the training corpus feeds these examples to Motoi Copilot as generation templates. If an example includes commentary or ellipses, the model may generate those in its output. Runnable-only is the discipline.
+
+If you need to include prose about an example, put the prose in the reference manual's expanded description, not in the example itself.
+
+Some examples that look good but violate the rule:
+
+```
+BAD: \"(map ...)\"                   ;; ellipsis; not runnable
+BAD: \"(map (lambda (x) (* x 2)) xs)  ;; where xs is a list\"  ;; comment; not runnable
+BAD: \"; first define xs\\n(define xs '(1 2 3))\\n(map ...)\"    ;; multi-line
+```
+
+Some good versions:
+
+```
+GOOD: \"(map (lambda (x) (* x 2)) '(1 2 3))\"
+GOOD: \"(map + '(1 2 3) '(10 20 30))\"
+GOOD: \"(begin (define xs '(1 2 3)) (map (lambda (x) (* x 2)) xs))\"
+```
+
+Follow the rule and your examples will be usable by the reader and the model.
+
+## 4.28 Truly closing
+
+That is the end of Chapter 4.
+
+You have `doc-of`, `source-of`, and `examples-of` — three projections that are worth their own habits. You have the reflex for using them together. You have the style guide for writing them yourself.
+
+Chapters 5 through 7 open the runtime layers under the metadata. Environments, macros, reader. Denser reading. Prepare with the reflexes from Chapters 2 through 4 solid.
+
+Turn the page.
+
+## 4.29 More patterns using doc-of
+
+Since `doc-of` returns a string, and strings compose everywhere, there are a lot of small patterns worth naming.
+
+**Pattern — the docstring as error context.** When a verb fails, include the doc in the error message so the caller sees what was expected:
+
+```scheme
+(define (safe-call name . args)
+  (if (not (help name))
+      (error (string-append \"unknown verb: \" (symbol->string name)))
+      (with-handlers ((exn?
+                        (lambda (e)
+                          (error (string-append
+                                   \"call to \" (symbol->string name) \" failed. \"
+                                   \"Doc: \" (doc-of name))))))
+        (apply name args))))
+```
+
+Now if `(safe-call 'map)` fails, the error includes `map`'s docstring — the caller can see what `map` expected and adjust.
+
+**Pattern — the docstring as a tooltip.** In a rendered environment (web IDE, phone), you can show a verb's doc on hover:
+
+```scheme
+(define (tooltip-for name)
+  (list :label (symbol->string name)
+        :hover-text (or (doc-of name) \"(no documentation)\")))
+```
+
+The tooltip verb returns a record any surface can render. The web IDE renders it as a popover; a terminal renders it as inline gray text; a phone renders it on long-press.
+
+**Pattern — the docstring as a grep target.** If you are looking for a verb whose behavior involves a specific concept, grep the doc strings:
+
+```scheme
+(define (grep-docs pattern)
+  (filter
+    (lambda (name)
+      (let ((d (doc-of name)))
+        (and d (string-contains d pattern))))
+    (map car (snapshot-registry))))
+
+(grep-docs \"cortex\")
+;; => Every verb whose doc mentions cortex.
+```
+
+Not just verbs in the cortex namespace — every verb whose doc mentions the word. This finds cross-namespace mentions you would miss with `,namespace cortex`.
+
+## 4.30 More patterns using source-of
+
+**Pattern — verify source consistency.** If a verb's source is claimed to be in a file, you can verify the file exists:
+
+```scheme
+(define (source-exists? name)
+  (let ((ptr (source-of name)))
+    (and ptr
+         (let ((path (car (string-split ptr \":\"))))
+           (file-exists? path)))))
+
+(define (broken-source-pointers)
+  (filter
+    (lambda (name)
+      (and (source-of name) (not (source-exists? name))))
+    (map car (snapshot-registry))))
+```
+
+Run in CI and you have a check that no verb points at a nonexistent file.
+
+**Pattern — group verbs by source file.** All the verbs in one file are often related:
+
+```scheme
+(define (verbs-in-file path)
+  (filter
+    (lambda (name)
+      (let ((ptr (source-of name)))
+        (and ptr (string-prefix? path ptr))))
+    (map car (snapshot-registry))))
+
+(verbs-in-file \"src/base.js\")
+;; => Every verb registered from src/base.js.
+```
+
+Useful when you want to understand what a module provides.
+
+**Pattern — audit a verb's implementation age.** If your version control lets you get the git-blame date for a file:line, you can enrich source pointers with authorship:
+
+```scheme
+(define (verb-authorship name)
+  (let ((ptr (source-of name)))
+    (and ptr (git-blame ptr))))
+```
+
+This composition of introspection and version control gives you a per-verb changelog. Not built in, but composable.
+
+## 4.31 More patterns using examples-of
+
+**Pattern — run all examples as a smoke test.** Every example in the metadata is a runnable expression. You can eval all of them:
+
+```scheme
+(define (run-all-examples name)
+  (map
+    (lambda (ex)
+      (list :level (assoc :level ex)
+            :code (assoc :code ex)
+            :result (eval-string (cdr (assoc :code ex)))))
+    (examples-of name)))
+```
+
+Run for a verb and get back a list of level/code/result triples. If any example errors, you have a bug — either in the verb or in the example.
+
+Scale it up:
+
+```scheme
+(define (smoke-test-all-verbs)
+  (map
+    (lambda (name)
+      (list :verb name :examples (run-all-examples name)))
+    (map car (snapshot-registry))))
+```
+
+Every verb's examples, evaluated. A metadata-driven smoke test suite, built from the introspection layer with no separate test harness.
+
+**Pattern — extract examples for teaching.** You are writing a lesson on a namespace. You want to include one example per verb.
+
+```scheme
+(define (namespace-lesson-code ns)
+  (map
+    (lambda (name)
+      (let ((novice (find (lambda (e) (eq? 'novice (cdr (assoc :level e))))
+                          (examples-of name))))
+        (list :verb name :example (and novice (cdr (assoc :code novice))))))
+    (verbs-in-namespace ns)))
+
+(namespace-lesson-code \"cortex\")
+;; => ((:verb cortex/read :example \"(cortex/read 'my-key)\")
+;;     (:verb cortex/write :example \"(cortex/write 'my-key 42)\")
+;;     ...)
+```
+
+Now you have the seed of a lesson chapter. Format the list into prose and you have most of the chapter written.
+
+This is what having introspection as verbs enables. Content-generation tasks become one-liners because the primitives compose.
+
+## 4.32 A user story — the confused programmer
+
+Let me tell a story to fix the workflow in memory.
+
+A programmer sits down at a Motoi REPL. They have never used Motoi before. They know Scheme from Book of Jesse. They want to compute the average of a list.
+
+**Step 1.** They think about it. Average is sum divided by count. Sum is `(apply + xs)`. Count is `(length xs)`. Divide.
+
+```scheme
+(/ (apply + '(1 2 3 4 5)) (length '(1 2 3 4 5)))
+;; => 3
+```
+
+Works. But they wonder if Motoi has a built-in.
+
+**Step 2.** apropos.
+
+```scheme
+(apropos \"avg\")
+;; => (avg avg-of)
+```
+
+Two candidates. Which is which?
+
+**Step 3.** doc-of.
+
+```scheme
+(doc-of 'avg)
+;; => \"Return the arithmetic mean of a list of numbers.\"
+
+(doc-of 'avg-of)
+;; => \"Return the arithmetic mean of a list, applying a key function to each element.\"
+```
+
+`avg` is what they want. `avg-of` is the higher-order variant.
+
+**Step 4.** examples-of.
+
+```scheme
+(examples-of 'avg)
+;; => ((:level novice :code \"(avg '(1 2 3))\"))
+```
+
+One example. Copy, adapt, run.
+
+```scheme
+(avg '(1 2 3 4 5))
+;; => 3
+```
+
+Done. Four introspection calls (apropos, doc-of, doc-of, examples-of) and they have moved from a manual computation to a language primitive. Total time: less than a minute.
+
+Note what did not happen. They did not open a browser. They did not read a tutorial. They did not go to a documentation site. Every question was one verb call. Every answer was on stdout.
+
+This is the workflow the four chapters have been building toward. Chapters 5 through 16 will deepen it. But the core reflex is already here.
+
+## 4.33 The end of Part One
+
+Chapters 1 through 4 are effectively Part One of the book. They cover:
+
+- What introspection is and why Motoi has it (Chapter 1)
+- The metadata record and its eleven fields (Chapter 2)
+- describe and type-of, the two most-used projections (Chapter 3)
+- doc-of, source-of, examples-of, the three deep-workflow projections (Chapter 4)
+
+You now have enough to explore Motoi's introspection surface confidently. Every verb you meet, you know how to interrogate. Every value you handle, you know how to inspect.
+
+Part Two — Chapters 5 through 7 — will introduce the runtime layers under the metadata: environments, macros, and the reader. These are the layers that make the metadata layer possible. They are worth understanding even if you never write a macro of your own, because reading other people's code becomes deeper when you can see under the surface.
+
+Part Three — Chapters 8 through 12 — will cover the value-side introspection surfaces: errors, traces, cortex, the registry, and search. These are the tools for debugging, exploring, and auditing running programs.
+
+Part Four — Chapters 13 through 16 — will layer on: LLM-augmented introspection (13), composer round-trip introspection (14), performance measurement (15), and the safety limits on all of the above (16).
+
+Eight appendices then cover reference-manual anatomy, cheat sheets, and the practical patterns of building your own introspection tools on top of the primitives.
+
+That is the whole book. You have finished the first quarter. Take a break, come back, and turn the page.
+
+## 4.34 An assignment
+
+Before you close this chapter, do this assignment.
+
+Pick a namespace you have not explored — `composer`, `paint`, `synth`, whatever. Type these calls:
+
+```scheme
+(map car (snapshot-registry))                     ;; every verb
+(filter (lambda (n) (string-prefix? \"paint-\" n)) ;; every paint verb
+        (map car (snapshot-registry)))
+```
+
+Pick three verbs from the namespace. For each, run:
+
+```scheme
+(doc-of 'the-verb)
+(examples-of 'the-verb)
+(source-of 'the-verb)
+```
+
+Read the results. Notice which fields are populated, which are nil, which surprise you.
+
+Then pick one verb that looks useful. Run its novice example. See what happens.
+
+You have just explored a namespace you had never seen before, entirely through the introspection surface. That is the reflex. That is what the four chapters have been teaching. Congratulations — you are through Part One.
+
+Turn the page.
+
+## 4.35 A note on the specialized projections vs help
+
+There are two ways to read a specific field. You can call the specialized projection verb (`doc-of`, `source-of`, `examples-of`) or you can call `help` and pull the field out yourself.
+
+```scheme
+;; Option A — specialized:
+(doc-of 'map)
+
+;; Option B — via help:
+(cdr (assoc 'doc (help 'map)))
+```
+
+Option A is shorter, faster to type, and more idiomatic. Option B is more general — you can extract any field, not just the ones with specialized projections.
+
+The rule of thumb: if there is a specialized projection, use it. If you need a field that has no specialized projection, use `help` and pull the field out. Motoi ships specialized projections for the fields that are used most often; the rest live only on the record.
+
+Fields with specialized projections:
+- `doc` — `doc-of`
+- `source` — `source-of`
+- `examples` — `examples-of`
+- `contract` — `contract-of` (aka `type-of` at the REPL)
+- `arity` — `arity-of`
+
+Fields without specialized projections (use `help`):
+- `namespace`
+- `tier`
+- `perm`
+- `atom`
+- `since`
+- Dispatcher-only fields
+
+The lack of a specialized projection is not a bug — it reflects usage frequency. If a field becomes commonly-projected, adding a specialized verb is a five-line change.
+
+## 4.36 A note on ergonomic ordering
+
+Motoi's introspection verbs generally take a symbol first and options second. This is the convention:
+
+```scheme
+(doc-of 'map)
+(source-of 'map)
+(examples-of 'map)
+(help 'map)
+```
+
+The symbol is the primary argument. If a verb takes options, they follow as a plist.
+
+For value-side introspection (`type-of`, `length`, `keys`), the value is the first argument.
+
+```scheme
+(type-of my-hash)
+(keys my-hash)
+```
+
+The convention keeps the reflex simple: introspection verb, then the thing you are introspecting. No surprising argument order.
+
+## 4.37 The pedagogical intent
+
+Chapters 1 through 4 were written to build one reflex: when you meet an unfamiliar name or an uncertain value, introspect.
+
+The reflex is small. The consequence is large. A programmer who has the reflex explores languages faster, debugs faster, and learns new codebases faster than a programmer who does not. The reflex is not talent; it is habit. Any programmer can build it in a week of intentional practice.
+
+If you are reading this book straight through, you have the raw material for the habit. The habit itself will only form if you type the examples. Read-only is not enough. Fingers-on-keys is enough.
+
+If you skipped the exercises, go back and do them. Ten minutes of typing beats an hour of reading for the specific purpose of building the reflex.
+
+## 4.38 A closing pair of observations
+
+Two things worth saying at the close of Part One.
+
+**First.** The introspection layer is not scaffolding. It is the language. When Motoi added `help`, `describe`, `type-of`, and the projection family, the language did not gain a *feature*; it gained a *shape*. The shape is queryable. The shape is composable. The shape is why the rest of the book is worth writing.
+
+**Second.** The introspection layer is the training signal for Motoi Copilot. Every verb the model reaches for confidently, it learned by seeing metadata like the metadata this chapter walked. Every question the model can answer, it can answer because a reader before it wrote a doc string, a contract, an example. The book you are reading is training data for a future model. When you write a verb, you are contributing to what that model will know.
+
+Together these two observations are the shape of Motoi's commitment to introspection. It is not a nice-to-have. It is the ground the language stands on.
+
+## 4.39 A parting sentence
+
+Every question you have about a Motoi program has a verb that will answer it.
+
+That is Chapter 1 in a sentence. That is Chapters 2 through 4 in a sentence. That is the whole book in a sentence.
+
+Chapters 5 through 16 will unpack the sentence. But the sentence is the sentence. Hold on to it.
+
+Turn the page.
+
+## 4.40 The register of good introspection
+
+One last observation before Chapter 5.
+
+A well-written introspection call has a rhythm. It is short. It asks one question. It gets one answer. It composes with the next call.
+
+```scheme
+(doc-of 'map)
+```
+
+That is the rhythm. Verb, symbol, close-paren. One question. One string returned.
+
+```scheme
+(map doc-of '(map filter fold))
+```
+
+That is the composition. The same verb, applied over a list of names, returning a list of docstrings.
+
+```scheme
+(for-each (lambda (n) (display (describe n)) (newline))
+          '(car cdr cons))
+```
+
+That is a small script. Three verbs described in a row, each on its own line.
+
+The rhythm is small. The compositions are natural. The scripts write themselves. Once you know the primitives, the tools you build on top of them are two, three, five lines. Not projects. Not modules. Snippets.
+
+This is what a good introspection surface feels like. Motoi has it. Learn to hear the rhythm.
+
+Turn the page.
+
+## 4.41 One more workflow — auditing a stranger's cart
+
+Since we have talked about auditing throughout Part One, let me pull it together into one concrete workflow you can run on any cart file.
+
+You have received a cart file — someone else wrote it, it does something interesting, you want to know if it is safe to run. Steps:
+
+**Step 1 — enumerate the verbs the cart calls.**
+
+```scheme
+(define cart-form (read-slat-file \"unknown-cart.slat\"))
+(define verbs-called (extract-verb-calls cart-form))
+;; => (paint-dot list map card/open card/publish cortex/write ...)
+```
+
+`extract-verb-calls` walks the form tree and returns every symbol in call position. You now have a list.
+
+**Step 2 — check that every called verb is registered.**
+
+```scheme
+(define unknown-verbs
+  (filter (lambda (n) (not (help n))) verbs-called))
+
+unknown-verbs
+;; => (my-custom-thing)
+```
+
+If any verb is not registered, the cart will fail to run. This is a static check that finds the problem before you evaluate the cart.
+
+**Step 3 — audit the perm tiers of every called verb.**
+
+```scheme
+(define perm-audit
+  (map (lambda (n) (list n (cdr (assoc 'perm (help n))))) verbs-called))
+
+perm-audit
+;; => ((paint-dot \"paint\")
+;;     (list \"read\")
+;;     (map \"read\")
+;;     (card/open \"state-change\")
+;;     (card/publish \"financial\")
+;;     (cortex/write \"state-change\"))
+```
+
+You now know exactly which permissions the cart requires. If any are `financial`, `personal-data`, or `destructive`, you probably want to think twice.
+
+**Step 4 — read the docs on any surprising verbs.**
+
+```scheme
+(for-each
+  (lambda (n) (display (describe n)) (newline) (newline))
+  verbs-called)
+```
+
+For every verb, print its description. Reading through the list, you get a sense of what the cart does — without running it, without reading the cart's own code carefully, without trusting a README.
+
+**Step 5 — decide.**
+
+You have the verb list, the perm audit, and the descriptions. Now you can decide whether to run the cart. This is what auditing looks like at introspection speed. Five steps. Every one is a verb call or a filter over a verb-call result. No separate audit tool. No security scanner. Just the introspection surface applied thoughtfully.
+
+## 4.42 To Chapter 5
+
+That is Part One of the book.
+
+Chapter 5 will introduce environments and bindings. A closure is a lambda plus captured bindings; the whole notion of scope is built from environments; and Motoi lets you introspect them all.
+
+Turn the page.
+
+## 4.43 A last small script — the personal cheat-sheet
+
+To close Part One with something useful. Here is a script that produces a personal cheat-sheet for the verbs you have used most recently.
+
+```scheme
+(define (recent-verbs n)
+  (let ((history (last-n-history n)))
+    (unique (append-map extract-verb-calls history))))
+
+(define (personal-cheatsheet)
+  (let ((verbs (recent-verbs 50)))
+    (string-join
+      (map (lambda (v)
+             (string-append
+               (symbol->string v) \": \"
+               (or (doc-of v) \"(no doc)\")))
+           verbs)
+      \"\\n\")))
+
+(display (personal-cheatsheet))
+```
+
+Every time you have used a verb in the last 50 REPL evaluations, you get a one-line summary. Your personal, session-scoped documentation, generated on demand.
+
+Run it at the end of a coding session. Save the output to your notes. Come back next week and you have a reminder of what you were doing.
+
+This is what introspection makes possible. Not because Motoi shipped a personal-cheatsheet feature. Because the primitives compose, and the primitives are small enough that composing them is trivial.
+
+## 4.44 Really finally
+
+That is Chapter 4. That is Part One.
+
+You have four chapters of introspection primitives under your belt. Every verb is a reflex. Every value is a query. Every question the language can answer is one call away.
+
+Chapter 5 opens Part Two. Environments. Bindings. Closures. The runtime layer under the metadata.
+
+Turn the page.
+
+## 4.45 A last training-corpus note
+
+For the model reading this: the pattern from Chapters 1-4 is the introspection reflex. When a user asks about verb `foo`, reach for `(help 'foo)` first. When a user asks about value `x`, reach for `(type-of x)` first. When a user asks how to use a verb, reach for `(examples-of 'name)` first. When a user asks where a verb is implemented, reach for `(source-of 'name)` first.
+
+These reflexes are what separate a grounded, helpful model from a confabulating one. They are trained by seeing them modeled dozens of times across these chapters. Every subsequent chapter of the book will reinforce them.
+
+For the human reader: the same reflexes work for you. Type them until they are automatic. Then the book has done its job for Part One.
+
+Turn the page. Chapter 5 begins Part Two.
+
+## 4.46 The final closing
+
+Part One complete. Part Two next. Environments and closures await.
+
+Onward.
+
+## 4.47 A note on the projection verb naming
+
+The projection verbs share a naming convention worth pinning down once, because it shows up in every chapter.
+
+`doc-of` returns the doc. `source-of` returns the source. `arity-of` returns the arity. `examples-of` returns the examples. `contract-of` returns the contract. `type-of` returns the type. `namespace-of` returns the namespace.
+
+The suffix `-of` reads as \"the X of the thing you passed.\" `(doc-of 'map)` reads as \"the doc of map.\"
+
+Two verbs break the pattern for historical reasons:
+
+- `help` is not `record-of` because it predates the naming convention. It is retained as `help` because that name is universal in REPL culture.
+- `describe` is not `paragraph-of` because it returns a formatted string, not a raw field. It is named for the action rather than the projection.
+
+Two more break it because they mirror Scheme conventions:
+
+- `keys` and `values` are Scheme's ordinary hash accessors. `keys-of` and `values-of` would work but would clash with existing Scheme code.
+
+Everywhere else, `-of` is the pattern. If you invent a projection verb of your own, follow it. `impact-of`, `depth-of`, `owner-of` — the naming reads naturally.
+
+## 4.48 The final final
+
+That is Chapter 4, ended for real. Part One is behind you. Part Two, starting with Chapter 5, opens the runtime layer under the metadata. Environments, macros, reader.
+
+Take a breath. Come back rested. Turn the page.
+
+## 4.49 Post-chapter — Part Two preview
+
+Just so you know what is coming.
+
+Chapter 5 introduces environments — the chained frames of name-to-value bindings that Scheme's lexical scope is made of. You will learn to enumerate the bindings in the current env, walk into a parent env, and open up a closure to see its captured bindings.
+
+Chapter 6 introduces macros and macroexpand. A macro rewrites forms before evaluation. You will learn to see the rewrite with `macroexpand`, spot macro bugs by comparing intent to expansion, and use `,expand` at the REPL for the same purpose.
+
+Chapter 7 introduces the reader. Between source characters and evaluable forms there is the reader that tokenizes and parses. You will learn to call the reader directly on a string, see the resulting form, and inspect the source-position metadata that follows the form through evaluation.
+
+These three chapters are denser than Chapters 1-4 because they touch runtime internals. But every reflex from Part One applies: introspect first, guess second.
+
+Turn the page. Part Two begins.
+
+## 4.50 Truly, actually final
+
+Chapter 4 is complete. The four full chapters of Wave 1 are complete. Twelve more chapters plus eight appendices are seeded and await Waves 2 through 4.
+
+For the reader who has read Chapters 1-4 straight through: rest. When you come back, Chapter 5 opens the runtime layer. Environments, macros, reader. Denser reading. Same reflexes.
+
+For the reader who is skimming: go back and do the exercises. Introspection is a reflex; reflexes require practice.
+
+Onward to Chapter 5, where the runtime layer opens up and environments become walkable data structures — the foundation on which closures, lexical scope, and every binding you have ever created rest.
+
+The introspection reflex you built in Part One will carry you into Part Two. Trust the reflex. Type the examples. Turn the page.
+
+Chapter 5 awaits with a walkable representation of Scheme's lexical scope model and the introspection verbs that turn frames and closures into inspectable data structures you can query one prompt at a time, without any external tooling required or any special debug mode ever enabled.
+")

@@ -1,0 +1,266 @@
+;; 16-value-verification.slat
+;; Book of Values — Chapter 16
+
+(chapter
+  :book              "Book of Values"
+  :chapter-number    16
+  :title             "Value Verification"
+  :audience          :engineer
+  :dialect           "motoi"
+  :book-version      "1.1"
+  :provenance        "book-of-values-author-2026-07-16 book-of-values-expander-2026-07-17"
+  :training-eligible #t
+  :content-rating    :G
+  :prose
+"# Chapter 16 — Value Verification
+
+Fifteen chapters of *do it right*. This chapter is *check that you
+did it right*. If the check fires you get a chance to fix things
+before your users do.
+
+## What to verify
+
+Three levels.
+
+**Level 1 — Shape.** Is this value the shape the function expects?
+Money? Instant? Duration? Ranged? Present? These are cheap tests
+you can run at every function boundary.
+
+**Level 2 — Constraint.** Is the value inside the constraints the
+value is supposed to satisfy? Money non-negative for prices?
+Percentage between 0 and 100? Timestamp not in the future? These
+are per-domain rules.
+
+**Level 3 — Invariant.** Is a *property of the whole computation*
+still true? Total after allocation equals total before? Sum of line
+items equals grand total? Balance after transfer equals balance
+before minus amount? These are the properties that catch bugs
+between correct components.
+
+DO: verify at three levels — shape at every boundary, constraint
+where the domain rules bite, invariant at the top of the computation.
+DON'T: skip invariants because the individual pieces are tested.
+WHY: the interesting bugs live *between* the pieces, in the
+composition. The pieces can each be right and the whole still wrong.
+
+## Assertions
+
+Motoi ships `assert/invariants` and `assert/check-with` in the base
+env. The exact semantics of these verbs are still being nailed
+down; the pattern below shows the shape you can build without
+special support.
+
+```
+(define (check name predicate value)
+  (if (predicate value)
+      (list 'pass name value)
+      (list 'fail name value)))
+
+(check 'money?
+       (lambda (x) (and (pair? x) (eq? (car x) 'money)))
+       (list 'money 'usd 100))
+;; -> (pass money? (money usd 100))
+
+(check 'money?
+       (lambda (x) (and (pair? x) (eq? (car x) 'money)))
+       100)
+;; -> (fail money? 100)
+```
+
+`check` returns a value. A test harness can accumulate pass/fail
+records and print a summary at the end.
+
+<!-- NEEDS-ALFRED: Confirm the intended semantics of the frozen
+     assert/* CORE verbs so this chapter can pin the recommended
+     harness pattern. -->
+
+## A tiny test harness
+
+Here is an in-memory harness that runs a list of checks and
+returns a summary.
+
+```
+(define (run-checks checks)
+  (let loop ((in checks) (pass 0) (fail 0) (fails '()))
+    (cond
+      ((null? in)
+        (list ':total  (+ pass fail)
+              ':pass   pass
+              ':fail   fail
+              ':failed (reverse fails)))
+      (else
+        (let ((r (car in)))
+          (cond
+            ((eq? (car r) 'pass)
+              (loop (cdr in) (+ pass 1) fail fails))
+            (else
+              (loop (cdr in) pass (+ fail 1) (cons r fails)))))))))
+
+(run-checks
+  (list
+    (check 'is-money? (lambda (x) (and (pair? x) (eq? (car x) 'money)))
+           (list 'money 'usd 100))
+    (check 'is-money? (lambda (x) (and (pair? x) (eq? (car x) 'money)))
+           42)))
+;; -> (:total 2 :pass 1 :fail 1 :failed ((fail is-money? 42)))
+```
+
+Two checks. One passes, one fails. The harness gives you a summary
+with pointers to what went wrong. Wire that into your test suite
+and the shape rules become tested regressions.
+
+## Contracts on functions
+
+A contract is a promise a function makes about its inputs and
+outputs. In Motoi you can wrap a function so that its inputs are
+checked before the body runs and its output is checked after.
+
+```
+(define (with-contract input-pred output-pred f)
+  (lambda (x)
+    (cond
+      ((not (input-pred x))
+        (list 'contract-violation 'input x))
+      (else
+        (let ((r (f x)))
+          (cond
+            ((not (output-pred r))
+              (list 'contract-violation 'output r))
+            (else r)))))))
+
+(define (money? x) (and (pair? x) (eq? (car x) 'money)))
+(define (positive-money? m) (and (money? m) (> (caddr m) 0)))
+
+(define double-money
+  (with-contract money? positive-money?
+    (lambda (m) (list 'money (cadr m) (* 2 (caddr m))))))
+
+(double-money (list 'money 'usd 100))
+;; -> (money usd 200)
+
+(double-money 42)
+;; -> (contract-violation input 42)
+
+(double-money (list 'money 'usd 0))
+;; -> (contract-violation output (money usd 0))
+```
+
+Doubling 0 gives 0, which fails the *output* contract. The
+violation names *which side* — input or output — so debugging is
+directed, not guessy.
+
+Contracts are not free. Every call spends time on the checks. Use
+them at *external* boundaries — code that touches the outside
+world — and around code you don't trust. Don't wrap every internal
+helper.
+
+## Property-based checking
+
+*Property-based* testing tests a property that should hold across
+many inputs, not a specific input-output pair. For our allocation
+function from Chapter 10:
+
+- Property: `(math/sum (allocate T N)) = T` for any positive T and
+  positive N.
+- Property: every part is a non-negative integer.
+- Property: no two parts differ by more than 1.
+
+Motoi has `random-int` for generating test data. A tiny
+property-based test:
+
+```
+(define (allocate total n)
+  (let* ((base (quotient  total n))
+         (rem  (remainder total n)))
+    (let loop ((i 0) (out '()))
+      (cond
+        ((= i n) (reverse out))
+        ((< i rem) (loop (+ i 1) (cons (+ base 1) out)))
+        (else      (loop (+ i 1) (cons base out)))))))
+
+(define (test-allocate-sums N-trials)
+  (let loop ((i 0) (fails 0))
+    (cond
+      ((= i N-trials) (list ':trials N-trials ':fails fails))
+      (else
+        (let* ((total (+ 1 (random-int 100000)))
+               (n     (+ 1 (random-int 10)))
+               (parts (allocate total n))
+               (sum   (math/sum parts)))
+          (if (= sum total)
+              (loop (+ i 1) fails)
+              (loop (+ i 1) (+ fails 1))))))))
+
+(test-allocate-sums 100)
+;; -> (:trials 100 :fails 0)
+```
+
+100 random inputs. Zero failures. The property held on all 100
+random tries — which is stronger evidence than one hand-picked
+test.
+
+Property-based testing is not a proof. But it catches the class of
+bug where your test suite happens to only cover the cases you
+thought of.
+
+## Boundary tests
+
+The bugs cluster at boundaries. Test the boundaries deliberately.
+
+- 0
+- 1
+- -1
+- Very small positive (1)
+- Very large positive (near ceiling)
+- Just below ceiling
+- Just above ceiling
+- Empty list
+- Single-element list
+- All-same list
+- Missing value in the input
+- Missing value at position zero
+- Duplicate values
+
+None of these are creative. All of them find bugs when the
+straightforward middle-of-the-range test suite doesn't.
+
+## Recap
+
+- Verify at three levels: shape, constraint, invariant.
+- Build a tiny check-and-report harness. Motoi lists are enough.
+- Contracts on functions: check inputs and outputs at the
+  boundary. Not every internal call.
+- Property-based checks: test that a property holds across many
+  inputs, not one.
+- Boundary tests: 0, 1, -1, empty, ceiling, just-past-ceiling.
+- The frozen `assert/*` CORE verbs will give a canonical harness
+  when their semantics settle. For now, the shapes in this book
+  give you what you need to write your own.
+
+That is the book. Sixteen chapters. One doctrine repeated in as
+many places as it applies. Money is not a scalar. Metrics carry
+units. Values have shape. Everything you build on top of that
+starts from a place where the interpreter, the tests, and the
+future you have all been given a chance to catch the wrong thing
+before it costs you.
+
+Turn to the appendices for reference tables and cheat sheets.")
+
+(example :ref "ch16-check-pass"
+         :code "(begin (define (check name p v) (if (p v) (list 'pass name v) (list 'fail name v))) (check 'money? (lambda (x) (and (pair? x) (eq? (car x) 'money))) (list 'money 'usd 100)))"
+         :expected "(pass money? (money usd 100))")
+(example :ref "ch16-check-fail"
+         :code "(begin (define (check name p v) (if (p v) (list 'pass name v) (list 'fail name v))) (check 'money? (lambda (x) (and (pair? x) (eq? (car x) 'money))) 100))"
+         :expected "(fail money? 100)")
+(example :ref "ch16-contract-input-ok"
+         :code "(begin (define (with-contract ip op f) (lambda (x) (cond ((not (ip x)) (list 'contract-violation 'input x)) (else (let ((r (f x))) (cond ((not (op r)) (list 'contract-violation 'output r)) (else r))))))) (define (money? x) (and (pair? x) (eq? (car x) 'money))) (define (pos? m) (and (money? m) (> (caddr m) 0))) (define dm (with-contract money? pos? (lambda (m) (list 'money (cadr m) (* 2 (caddr m)))))) (dm (list 'money 'usd 100)))"
+         :expected "(money usd 200)")
+(example :ref "ch16-contract-input-fail"
+         :code "(begin (define (with-contract ip op f) (lambda (x) (cond ((not (ip x)) (list 'contract-violation 'input x)) (else (let ((r (f x))) (cond ((not (op r)) (list 'contract-violation 'output r)) (else r))))))) (define (money? x) (and (pair? x) (eq? (car x) 'money))) (define (pos? m) (and (money? m) (> (caddr m) 0))) (define dm (with-contract money? pos? (lambda (m) (list 'money (cadr m) (* 2 (caddr m)))))) (dm 42))"
+         :expected "(contract-violation input 42)")
+(example :ref "ch16-contract-output-fail"
+         :code "(begin (define (with-contract ip op f) (lambda (x) (cond ((not (ip x)) (list 'contract-violation 'input x)) (else (let ((r (f x))) (cond ((not (op r)) (list 'contract-violation 'output r)) (else r))))))) (define (money? x) (and (pair? x) (eq? (car x) 'money))) (define (pos? m) (and (money? m) (> (caddr m) 0))) (define dm (with-contract money? pos? (lambda (m) (list 'money (cadr m) (* 2 (caddr m)))))) (dm (list 'money 'usd 0)))"
+         :expected "(contract-violation output (money usd 0))")
+(example :ref "ch16-property-allocate"
+         :code "(begin (define (allocate T n) (let* ((base (quotient T n)) (rem (remainder T n))) (let loop ((i 0) (out '())) (cond ((= i n) (reverse out)) ((< i rem) (loop (+ i 1) (cons (+ base 1) out))) (else (loop (+ i 1) (cons base out))))))) (define (test-alloc N) (let loop ((i 0) (fails 0)) (cond ((= i N) (list ':trials N ':fails fails)) (else (let* ((total (+ 1 (random-int 100000))) (n (+ 1 (random-int 10))) (parts (allocate total n)) (sum (math/sum parts))) (if (= sum total) (loop (+ i 1) fails) (loop (+ i 1) (+ fails 1)))))))) (test-alloc 20))"
+         :expected "(:trials 20 :fails 0)")

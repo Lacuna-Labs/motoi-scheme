@@ -1,0 +1,1096 @@
+;; ch08-text-and-strings.slat
+;; Book of Challenges — Chapter 8 — Text & String Craft
+
+(chapter
+  :book             "Book of Challenges"
+  :chapter-number   null
+  :title            "Chapter 8 — Text & String Craft"
+  :size             51487
+  :sha256           "437293a7917f476a"
+  :prose
+"# Chapter 8 — Text & String Craft
+
+There is something deeply satisfying about taking a messy string—a fragment of user input, a line scraped from the wild web, a ragged CSV row—and turning it into something structured, something you can *route* through the rest of a program. Text is the universal interchange format: addresses arrive as strings, product descriptions are strings, messages are strings, error logs are strings. Mastery of text craft means you can parse what arrives, transform it into the shape you need, and emit it cleanly on the other side.
+
+This chapter drills **text manipulation at full strength**: the `text/` verbs we have, and the recursion, list manipulation, and pipeline orchestration that turn a string into data and data back into a string. We'll start with simple normalization and distance calculation, then build up to multi-stage pipelines—parsing a format, transforming the structure, templating a reply—where each stage's output feeds the next, and failure at any stage is handled honestly. By the end, you'll be able to take a ragged input, route it through a parse-transform-emit stack, and surface a clean result or a clean escalation.
+
+The programs here are **complete and runnable**: each one stands alone, does one thing well, and produces a real result. The first few are warm-ups; the later ones are genuinely hard, orchestrating recursion, higher-order functions, and multiple verbs into a single route. Let's begin.
+
+---
+
+## Normalizing and Measuring Text
+
+Before you can route text through a pipeline, you often need to clean it: strip punctuation, fold case, collapse whitespace. The `text/normalize` verb does exactly this—it takes a string and returns a cleaned version, ready for comparison or storage.
+
+Once normalized, you can measure *distance*: how different are two strings? The `text/distance` verb computes Levenshtein distance—the minimum number of single-character edits needed to transform one string into another. This is the foundation of fuzzy matching, typo correction, and deduplication.
+
+Let's start simple: normalize a product title, then measure how far it is from a canonical form.
+
+```scheme
+;; Normalize a product title and measure distance from a canonical version.
+(define (title-distance raw canonical)
+  (let ((cleaned (text/normalize raw)))
+    (if (equal? cleaned 'nan)
+        (escalate 'normalize-failed raw)
+        (let ((dist (text/distance cleaned canonical)))
+          (if (equal? dist 'nan)
+              (escalate 'distance-failed (list cleaned canonical))
+              (list (cons 'raw raw)
+                    (cons 'cleaned cleaned)
+                    (cons 'canonical canonical)
+                    (cons 'distance dist)))))))
+
+(title-distance \"  HAND-Knit Wool SCARF!!! \" \"hand knit wool scarf\")
+;; => ((raw . \"  HAND-Knit Wool SCARF!!! \")
+;;     (cleaned . \"hand knit wool scarf\")
+;;     (canonical . \"hand knit wool scarf\")
+;;     (distance . 0))
+```
+
+Both verbs succeeded, and the distance is zero—the cleaned string matches the canonical form exactly. If `text/normalize` had failed (perhaps given a non-string), we'd see `(escalate normalize-failed ...)` instead. **ESCAPE** is honest: we check every verb result before using it.
+
+Now let's ramp up: given a list of candidate titles, find the one closest to a target, or escalate if none are within a threshold.
+
+```scheme
+;; Find the closest match to a target string from a list of candidates,
+;; or escalate if all are too far away.
+(define (closest-match target candidates threshold)
+  (define (measure candidate)
+    (let ((dist (text/distance target candidate)))
+      (if (equal? dist 'nan)
+          #f
+          (cons candidate dist))))
+  
+  (let ((measured (filter (lambda (x) x)
+                          (map measure candidates))))
+    (if (null? measured)
+        (escalate 'no-valid-candidates candidates)
+        (let ((sorted (sort measured (lambda (a b) (< (cdr a) (cdr b))))))
+          (let ((best (car sorted)))
+            (if (<= (cdr best) threshold)
+                best
+                (escalate 'no-match-within-threshold
+                          (list (cons 'target target)
+                                (cons 'best best)
+                                (cons 'threshold threshold)))))))))
+
+(define (sort lst less?)
+  (if (null? lst)
+      '()
+      (let ((pivot (car lst))
+            (rest (cdr lst)))
+        (append (sort (filter (lambda (x) (less? x pivot)) rest) less?)
+                (list pivot)
+                (sort (filter (lambda (x) (not (less? x pivot))) rest) less?)))))
+
+(closest-match \"hand knit wool scarf\"
+               '(\"handknit wool scarf\"
+                 \"machine knit scarf\"
+                 \"hand knit cotton scarf\"
+                 \"wool scarf\")
+               3)
+;; => (\"handknit wool scarf\" . 1)
+```
+
+The closest match is one edit away; it passes the threshold of 3. If we tighten the threshold to 0, we'd get `(escalate no-match-within-threshold ...)` instead. **FORWARD** means composing the next stage: we measure, filter out failures, sort, and check the threshold before returning.
+
+---
+
+## Word Counting and Readability
+
+The `text/word-count` verb returns the number of words in a string—useful for draft length checks, content analysis, and billing by word. The `text/flesch-kincaid` verb computes the Flesch-Kincaid readability grade level: a score of 8.0 means roughly eighth-grade reading level.
+
+Let's write a program that takes a draft message, checks its word count and readability, and either approves it or escalates with a reason.
+
+```scheme
+;; Check if a draft meets word count and readability requirements.
+(define (draft-check text min-words max-words max-grade)
+  (let ((wc (text/word-count text)))
+    (if (equal? wc 'nan)
+        (escalate 'word-count-failed text)
+        (let ((grade (text/flesch-kincaid text)))
+          (if (equal? grade 'nan)
+              (escalate 'readability-failed text)
+              (cond
+                ((< wc min-words)
+                 (escalate 'too-short (list (cons 'words wc)
+                                            (cons 'min min-words))))
+                ((> wc max-words)
+                 (escalate 'too-long (list (cons 'words wc)
+                                           (cons 'max max-words))))
+                ((> grade max-grade)
+                 (escalate 'too-complex (list (cons 'grade grade)
+                                              (cons 'max max-grade))))
+                (else
+                 (list (cons 'words wc)
+                       (cons 'grade grade)
+                       (cons 'status 'approved)))))))))
+
+(draft-check \"This is a short and simple sentence. Easy to read.\"
+             5 50 10.0)
+;; => ((words . 10) (grade . 3.4) (status . approved))
+```
+
+Ten words, third-grade reading level—approved. If the text were three words, we'd see `(escalate too-short ...)`. **ESCAPE** is layered: check the verb result, *then* check the business rule.
+
+Now let's compose a pipeline: given a draft, normalize it first (strip trailing punctuation artifacts), then check it.
+
+```scheme
+;; Normalize a draft, then check word count and readability.
+(define (normalize-and-check text min-words max-words max-grade)
+  (let ((cleaned (text/normalize text)))
+    (if (equal? cleaned 'nan)
+        (escalate 'normalize-failed text)
+        (draft-check cleaned min-words max-words max-grade))))
+
+(normalize-and-check \"  THIS is A SHORT & simple SENTENCE!!! Easy to READ. \"
+                     5 50 10.0)
+;; => ((words . 10) (grade . 3.4) (status . approved))
+```
+
+Two stages: normalize, then check. If normalization fails, we never reach the check. **FORWARD** is sequential: the output of one stage is the input to the next.
+
+---
+
+## Slugification and URL-Safe Text
+
+The `text/slug-compose` verb (aliased as `system/slugify` in the `system/` namespace, but we'll use the text/ form here since this is a text chapter) turns arbitrary text into a URL-safe slug: lowercase, hyphens for spaces, no special characters. This is essential for generating product URLs, page slugs, and file names.
+
+Let's write a program that takes a product title, normalizes it, generates a slug, and checks that the slug is non-empty and within a length limit.
+
+```scheme
+;; Generate a URL-safe slug from a product title, with validation.
+(define (product-slug title max-length)
+  (let ((normalized (text/normalize title)))
+    (if (equal? normalized 'nan)
+        (escalate 'normalize-failed title)
+        (let ((slug (system/slugify normalized)))
+          (if (equal? slug 'nan)
+              (escalate 'slugify-failed normalized)
+              (cond
+                ((equal? slug \"\")
+                 (escalate 'empty-slug title))
+                ((> (string-length slug) max-length)
+                 (escalate 'slug-too-long (list (cons 'slug slug)
+                                                (cons 'length (string-length slug))
+                                                (cons 'max max-length))))
+                (else
+                 (list (cons 'title title)
+                       (cons 'slug slug)))))))))
+
+(product-slug \"Hand-Knit 100% Wool Scarf (Heather Gray)\" 50)
+;; => ((title . \"Hand-Knit 100% Wool Scarf (Heather Gray)\")
+;;     (slug . \"hand-knit-100-wool-scarf-heather-gray\"))
+```
+
+The slug is clean, URL-safe, and within the limit. If the title were all special characters (e.g., `\"!!!\"`), the slug would be empty, and we'd escalate. **BACK** means restraint: we don't add features the problem doesn't need (no timestamp suffix, no hash)—just the minimum honest solution.
+
+Now let's handle a batch: given a list of titles, generate slugs for all, and return either a list of title/slug pairs or the first escalation encountered.
+
+```scheme
+;; Generate slugs for a batch of titles; stop at the first failure.
+(define (batch-slug titles max-length)
+  (define (slug-one title)
+    (product-slug title max-length))
+  
+  (define (process-list remaining acc)
+    (if (null? remaining)
+        (reverse acc)
+        (let ((result (slug-one (car remaining))))
+          (if (and (pair? result) (equal? (car result) 'escalate))
+              result
+              (process-list (cdr remaining) (cons result acc))))))
+  
+  (process-list titles '()))
+
+(batch-slug '(\"Hand-Knit Wool Scarf\"
+              \"Machine-Washable Cotton Throw\"
+              \"Organic Linen Pillowcase\")
+            50)
+;; => (((title . \"Hand-Knit Wool Scarf\")
+;;      (slug . \"hand-knit-wool-scarf\"))
+;;     ((title . \"Machine-Washable Cotton Throw\")
+;;      (slug . \"machine-washable-cotton-throw\"))
+;;     ((title . \"Organic Linen Pillowcase\")
+;;      (slug . \"organic-linen-pillowcase\")))
+```
+
+All three succeeded. If the second title had failed, we'd return `(escalate ...)` immediately—no partial results. This is **ESCAPE** in batch processing: fail fast, escalate cleanly, don't pretend the batch succeeded.
+
+---
+
+## Parsing Structured Text with Recursion
+
+Real-world text often has structure hidden inside it: key-value pairs separated by delimiters, CSV rows, simple tag-value formats. Parsing means turning that linear string into a structured list or association list that the rest of your program can route through.
+
+Let's write a parser for a simple key-value format: `\"name:Alice,age:30,city:Portland\"`. We'll split on commas, then split each segment on colons, building an association list.
+
+```scheme
+;; Parse a key-value string like \"name:Alice,age:30,city:Portland\".
+(define (parse-kv text)
+  (define (split-on-char str ch)
+    (define (split-helper chars acc word-acc)
+      (cond
+        ((null? chars)
+         (reverse (cons (list->string (reverse word-acc)) acc)))
+        ((char=? (car chars) ch)
+         (split-helper (cdr chars)
+                       (cons (list->string (reverse word-acc)) acc)
+                       '()))
+        (else
+         (split-helper (cdr chars) acc (cons (car chars) word-acc)))))
+    (split-helper (string->list str) '() '()))
+  
+  (define (parse-pair pair-str)
+    (let ((parts (split-on-char pair-str #\\:)))
+      (if (= (length parts) 2)
+          (cons (string->symbol (car parts)) (cadr parts))
+          #f)))
+  
+  (let ((pairs (split-on-char text #\\,)))
+    (let ((parsed (map parse-pair pairs)))
+      (if (member #f parsed)
+          (escalate 'malformed-kv text)
+          parsed))))
+
+(parse-kv \"name:Alice,age:30,city:Portland\")
+;; => ((name . \"Alice\") (age . \"30\") (city . \"Portland\"))
+```
+
+We split on commas, then split each piece on colons. If any piece lacks a colon, `parse-pair` returns `#f`, and we escalate. **ESCAPE** is validation: we check the structure before returning it as valid.
+
+Now let's extend this: parse the key-value string, then normalize all the *values* (in case they have extra whitespace), and finally look up a specific key.
+
+```scheme
+;; Parse key-value text, normalize all values, and look up a key.
+(define (parse-normalize-lookup text key)
+  (define (split-on-char str ch)
+    (define (split-helper chars acc word-acc)
+      (cond
+        ((null? chars)
+         (reverse (cons (list->string (reverse word-acc)) acc)))
+        ((char=? (car chars) ch)
+         (split-helper (cdr chars)
+                       (cons (list->string (reverse word-acc)) acc)
+                       '()))
+        (else
+         (split-helper (cdr chars) acc (cons (car chars) word-acc)))))
+    (split-helper (string->list str) '() '()))
+  
+  (define (parse-pair pair-str)
+    (let ((parts (split-on-char pair-str #\\:)))
+      (if (= (length parts) 2)
+          (cons (string->symbol (car parts)) (cadr parts))
+          #f)))
+  
+  (let ((pairs (split-on-char text #\\,)))
+    (let ((parsed (map parse-pair pairs)))
+      (if (member #f parsed)
+          (escalate 'malformed-kv text)
+          (let ((normalized (map (lambda (pair)
+                                   (let ((k (car pair))
+                                         (v (cdr pair)))
+                                     (let ((nv (text/normalize v)))
+                                       (if (equal? nv 'nan)
+                                           (cons k v)
+                                           (cons k nv)))))
+                                 parsed)))
+            (let ((entry (assoc key normalized)))
+              (if entry
+                  (cdr entry)
+                  (escalate 'key-not-found (list (cons 'key key)
+                                                 (cons 'available (map car normalized)))))))))))
+
+(parse-normalize-lookup \"name:  Alice  ,age: 30 ,city: Portland \" 'city)
+;; => \"portland\"
+```
+
+We parsed, normalized each value, then looked up `city`—and got `\"portland\"` (normalized to lowercase, whitespace stripped). If we'd looked up `'country`, we'd get `(escalate key-not-found ...)`. **FORWARD** is layered composition: parse → normalize → lookup, with each stage building on the last.
+
+---
+
+## Templating: From Data to Formatted Text
+
+Parsing goes one way (text → data); templating goes the other (data → text). Given a template string with placeholders and an association list of values, we want to replace each placeholder with its corresponding value.
+
+Let's write a simple templater: placeholders are `{{key}}`, and we substitute from an alist.
+
+```scheme
+;; Simple template engine: replace {{key}} with values from an alist.
+(define (template tmpl alist)
+  (define (find-placeholder str start)
+    ;; Find the next {{ in the string starting at index start.
+    ;; Returns (start-idx . end-idx) or #f if not found.
+    (define (search idx)
+      (cond
+        ((>= idx (- (string-length str) 1)) #f)
+        ((and (char=? (string-ref str idx) #\\{)
+              (char=? (string-ref str (+ idx 1)) #\\{))
+         (let ((end (find-close str (+ idx 2))))
+           (if end
+               (cons idx end)
+               #f)))
+        (else (search (+ idx 1)))))
+    (search start))
+  
+  (define (find-close str start)
+    ;; Find the next }} starting at index start.
+    (define (search idx)
+      (cond
+        ((>= idx (- (string-length str) 1)) #f)
+        ((and (char=? (string-ref str idx) #\\})
+              (char=? (string-ref str (+ idx 1)) #\\}))
+         (+ idx 2))
+        (else (search (+ idx 1)))))
+    (search start))
+  
+  (define (substitute str)
+    (let ((match (find-placeholder str 0)))
+      (if match
+          (let ((start (car match))
+                (end (cdr match)))
+            (let ((key-str (substring str (+ start 2) (- end 2))))
+              (let ((key (string->symbol key-str)))
+                (let ((entry (assoc key alist)))
+                  (if entry
+                      (let ((value (cdr entry)))
+                        (string-append
+                          (substring str 0 start)
+                          value
+                          (substitute (substring str end (string-length str)))))
+                      (escalate 'key-not-found (list (cons 'key key)
+                                                     (cons 'template tmpl))))))))
+          str)))
+  
+  (substitute tmpl))
+
+(template \"Hello, {{name}}! You have {{count}} new messages.\"
+          '((name . \"Alice\") (count . \"3\")))
+;; => \"Hello, Alice! You have 3 new messages.\"
+```
+
+We scan for `{{`, extract the key name, look it up in the alist, and substitute the value. If a key is missing, we escalate. **ESCAPE** is clean: no silent placeholder passthrough, no fake substitution.
+
+Now let's combine parsing and templating into a single pipeline: parse a key-value config string, then use those values to fill a template.
+
+```scheme
+;; Parse a config string, then use it to fill a template.
+(define (config-template config-str tmpl-str)
+  (define (split-on-char str ch)
+    (define (split-helper chars acc word-acc)
+      (cond
+        ((null? chars)
+         (reverse (cons (list->string (reverse word-acc)) acc)))
+        ((char=? (car chars) ch)
+         (split-helper (cdr chars)
+                       (cons (list->string (reverse word-acc)) acc)
+                       '()))
+        (else
+         (split-helper (cdr chars) acc (cons (car chars) word-acc)))))
+    (split-helper (string->list str) '() '()))
+  
+  (define (parse-pair pair-str)
+    (let ((parts (split-on-char pair-str #\\:)))
+      (if (= (length parts) 2)
+          (cons (string->symbol (car parts)) (cadr parts))
+          #f)))
+  
+  (define (parse-kv text)
+    (let ((pairs (split-on-char text #\\,)))
+      (let ((parsed (map parse-pair pairs)))
+        (if (member #f parsed)
+            (escalate 'malformed-kv text)
+            parsed))))
+  
+  (define (find-placeholder str start)
+    (define (search idx)
+      (cond
+        ((>= idx (- (string-length str) 1)) #f)
+        ((and (char=? (string-ref str idx) #\\{)
+              (char=? (string-ref str (+ idx 1)) #\\{))
+         (let ((end (find-close str (+ idx 2))))
+           (if end
+               (cons idx end)
+               #f)))
+        (else (search (+ idx 1)))))
+    (search start))
+  
+  (define (find-close str start)
+    (define (search idx)
+      (cond
+        ((>= idx (- (string-length str) 1)) #f)
+        ((and (char=? (string-ref str idx) #\\})
+              (char=? (string-ref str (+ idx 1)) #\\}))
+         (+ idx 2))
+        (else (search (+ idx 1)))))
+    (search start))
+  
+  (define (template tmpl alist)
+    (define (substitute str)
+      (let ((match (find-placeholder str 0)))
+        (if match
+            (let ((start (car match))
+                  (end (cdr match)))
+              (let ((key-str (substring str (+ start 2) (- end 2))))
+                (let ((key (string->symbol key-str)))
+                  (let ((entry (assoc key alist)))
+                    (if entry
+                        (let ((value (cdr entry)))
+                          (string-append
+                            (substring str 0 start)
+                            value
+                            (substitute (substring str end (string-length str)))))
+                        (escalate 'key-not-found (list (cons 'key key)
+                                                       (cons 'template tmpl))))))))
+            str)))
+    (substitute tmpl))
+  
+  (let ((config (parse-kv config-str)))
+    (if (and (pair? config) (equal? (car config) 'escalate))
+        config
+        (template tmpl-str config))))
+
+(config-template \"customer:Alice,item:Scarf,price:45\"
+                 \"Dear {{customer}}, your {{item}} is ready. Total: ${{price}}.\")
+;; => \"Dear Alice, your Scarf is ready. Total: $45.\"
+```
+
+Parse → template. If parsing fails, we return the escalation immediately; if templating fails (missing key), we return that escalation. **FORWARD** is sequential routing: the output of parse is the input to template, and we never proceed if a stage fails.
+
+---
+
+## Multi-Stage Text Pipeline: Parse, Transform, Format
+
+Let's take everything we've learned and build a genuinely hard program: a multi-stage pipeline that (1) parses a CSV-like string into rows, (2) transforms each row by normalizing text fields and computing a derived field, (3) formats the result as a human-readable summary using a template.
+
+The CSV format: `\"name,role,years\\nAlice,Engineer,5\\nBob,Designer,3\"`. We'll parse it, compute a \"seniority\" label based on years, normalize the role, and emit a formatted report.
+
+```scheme
+;; Parse CSV rows, transform with normalization and derived fields, format output.
+(define (csv-transform-report csv-str)
+  (define (split-on-char str ch)
+    (define (split-helper chars acc word-acc)
+      (cond
+        ((null? chars)
+         (reverse (cons (list->string (reverse word-acc)) acc)))
+        ((char=? (car chars) ch)
+         (split-helper (cdr chars)
+                       (cons (list->string (reverse word-acc)) acc)
+                       '()))
+        (else
+         (split-helper (cdr chars) acc (cons (car chars) word-acc)))))
+    (split-helper (string->list str) '() '()))
+  
+  ;; Step 1: Parse CSV into list of rows (each row is a list of fields).
+  (define (parse-csv text)
+    (let ((lines (split-on-char text #\\newline)))
+      (if (null? lines)
+          (escalate 'empty-csv text)
+          (let ((header (split-on-char (car lines) #\\,)))
+            (let ((rows (map (lambda (line) (split-on-char line #\\,)) (cdr lines))))
+              (if (any? (lambda (row) (not (= (length row) (length header)))) rows)
+                  (escalate 'uneven-columns text)
+                  (cons header rows)))))))
+  
+  (define (any? pred lst)
+    (and (not (null? lst))
+         (or (pred (car lst))
+             (any? pred (cdr lst)))))
+  
+  ;; Step 2: Transform each row—normalize role, compute seniority.
+  (define (transform-rows header rows)
+    (define name-idx (list-index \"name\" header))
+    (define role-idx (list-index \"role\" header))
+    (define years-idx (list-index \"years\" header))
+    
+    (define (list-index item lst)
+      (define (search idx remaining)
+        (cond
+          ((null? remaining) #f)
+          ((equal? (car remaining) item) idx)
+          (else (search (+ idx 1) (cdr remaining)))))
+      (search 0 lst))
+    
+    (if (or (not name-idx) (not role-idx) (not years-idx))
+        (escalate 'missing-columns (list (cons 'header header)
+                                         (cons 'expected '(\"name\" \"role\" \"years\"))))
+        (map (lambda (row)
+               (let ((name (list-ref row name-idx))
+                     (role (list-ref row role-idx))
+                     (years-str (list-ref row years-idx)))
+                 (let ((years (string->number years-str)))
+                   (if (not years)
+                       (escalate 'invalid-years years-str)
+                       (let ((norm-role (text/normalize role)))
+                         (if (equal? norm-role 'nan)
+                             (escalate 'normalize-failed role)
+                             (let ((seniority (cond
+                                                ((< years 2) \"junior\")
+                                                ((< years 5) \"mid-level\")
+                                                (else \"senior\"))))
+                               (list (cons 'name name)
+                                     (cons 'role norm-role)
+                                     (cons 'years years)
+                                     (cons 'seniority seniority)))))))))
+             rows)))
+  
+  ;; Step 3: Format each transformed row as a summary line.
+  (define (format-report rows)
+    (define (format-one row)
+      (let ((name (cdr (assoc 'name row)))
+            (role (cdr (assoc 'role row)))
+            (years (cdr (assoc 'years row)))
+            (seniority (cdr (assoc 'seniority row))))
+        (string-append name \" (\" seniority \" \" role \", \" (number->string years) \" years)\")))
+    (map format-one rows))
+  
+  ;; Pipeline: parse → transform → format.
+  (let ((parsed (parse-csv csv-str)))
+    (if (and (pair? parsed) (equal? (car parsed) 'escalate))
+        parsed
+        (let ((header (car parsed))
+              (rows (cdr parsed)))
+          (let ((transformed (transform-rows header rows)))
+            (if (and (pair? transformed) (equal? (car transformed) 'escalate))
+                transformed
+                (format-report transformed)))))))
+
+(csv-transform-report \"name,role,years\\nAlice,Engineer,5\\nBob,Designer,3\")
+;; => (\"Alice (senior engineer, 5 years)\" \"Bob (mid-level designer, 3 years)\")
+```
+
+Three stages: parse CSV → transform (normalize role, derive seniority) → format. Each stage can fail, and we check at every boundary. If Bob's years were `\"three\"` instead of `\"3\"`, we'd escalate `(invalid-years \"three\")`. **ESCAPE** is thorough: every verb call, every parse step, every lookup is guarded.
+
+Now let's extend this: after transformation, filter rows by seniority, then format only the filtered subset.
+
+```scheme
+;; Parse, transform, filter by seniority, then format.
+(define (csv-filter-report csv-str seniority-filter)
+  (define (split-on-char str ch)
+    (define (split-helper chars acc word-acc)
+      (cond
+        ((null? chars)
+         (reverse (cons (list->string (reverse word-acc)) acc)))
+        ((char=? (car chars) ch)
+         (split-helper (cdr chars)
+                       (cons (list->string (reverse word-acc)) acc)
+                       '()))
+        (else
+         (split-helper (cdr chars) acc (cons (car chars) word-acc)))))
+    (split-helper (string->list str) '() '()))
+  
+  (define (parse-csv text)
+    (let ((lines (split-on-char text #\\newline)))
+      (if (null? lines)
+          (escalate 'empty-csv text)
+          (let ((header (split-on-char (car lines) #\\,)))
+            (let ((rows (map (lambda (line) (split-on-char line #\\,)) (cdr lines))))
+              (if (any? (lambda (row) (not (= (length row) (length header)))) rows)
+                  (escalate 'uneven-columns text)
+                  (cons header rows)))))))
+  
+  (define (any? pred lst)
+    (and (not (null? lst))
+         (or (pred (car lst))
+             (any? pred (cdr lst)))))
+  
+  (define (transform-rows header rows)
+    (define name-idx (list-index \"name\" header))
+    (define role-idx (list-index \"role\" header))
+    (define years-idx (list-index \"years\" header))
+    
+    (define (list-index item lst)
+      (define (search idx remaining)
+        (cond
+          ((null? remaining) #f)
+          ((equal? (car remaining) item) idx)
+          (else (search (+ idx 1) (cdr remaining)))))
+      (search 0 lst))
+    
+    (if (or (not name-idx) (not role-idx) (not years-idx))
+        (escalate 'missing-columns (list (cons 'header header)
+                                         (cons 'expected '(\"name\" \"role\" \"years\"))))
+        (map (lambda (row)
+               (let ((name (list-ref row name-idx))
+                     (role (list-ref row role-idx))
+                     (years-str (list-ref row years-idx)))
+                 (let ((years (string->number years-str)))
+                   (if (not years)
+                       (escalate 'invalid-years years-str)
+                       (let ((norm-role (text/normalize role)))
+                         (if (equal? norm-role 'nan)
+                             (escalate 'normalize-failed role)
+                             (let ((seniority (cond
+                                                ((< years 2) \"junior\")
+                                                ((< years 5) \"mid-level\")
+                                                (else \"senior\"))))
+                               (list (cons 'name name)
+                                     (cons 'role norm-role)
+                                     (cons 'years years)
+                                     (cons 'seniority seniority)))))))))
+             rows)))
+  
+  (define (format-report rows)
+    (define (format-one row)
+      (let ((name (cdr (assoc 'name row)))
+            (role (cdr (assoc 'role row)))
+            (years (cdr (assoc 'years row)))
+            (seniority (cdr (assoc 'seniority row))))
+        (string-append name \" (\" seniority \" \" role \", \" (number->string years) \" years)\")))
+    (map format-one rows))
+  
+  (let ((parsed (parse-csv csv-str)))
+    (if (and (pair? parsed) (equal? (car parsed) 'escalate))
+        parsed
+        (let ((header (car parsed))
+              (rows (cdr parsed)))
+          (let ((transformed (transform-rows header rows)))
+            (if (and (pair? transformed) (equal? (car transformed) 'escalate))
+                transformed
+                (let ((filtered (filter (lambda (row)
+                                          (equal? (cdr (assoc 'seniority row))
+                                                  seniority-filter))
+                                        transformed)))
+                  (if (null? filtered)
+                      (escalate 'no-matches seniority-filter)
+                      (format-report filtered)))))))))
+
+(csv-filter-report \"name,role,years\\nAlice,Engineer,5\\nBob,Designer,3\\nCarol,Manager,1\"
+                   \"senior\")
+;; => (\"Alice (senior engineer, 5 years)\")
+```
+
+Only Alice matches the `\"senior\"` filter. If we'd filtered on `\"executive\"`, we'd get `(escalate no-matches \"executive\")`. **FORWARD** is selective: we route only the data that passes the filter to the next stage.
+
+---
+
+## Recursive Text Transformation: Nested Placeholder Expansion
+
+Let's tackle a harder templating problem: templates can reference other templates by name, and we need to expand them recursively. For example, a greeting template might include `{{salutation}}`, which itself expands to `\"Hello, {{name}}\"`.
+
+We'll maintain a dictionary of named templates and recursively expand until no placeholders remain (or we detect a cycle).
+
+```scheme
+;; Recursive template expansion with cycle detection.
+(define (recursive-template root-template values templates max-depth)
+  (define (find-placeholder str start)
+    (define (search idx)
+      (cond
+        ((>= idx (- (string-length str) 1)) #f)
+        ((and (char=? (string-ref str idx) #\\{)
+              (char=? (string-ref str (+ idx 1)) #\\{))
+         (let ((end (find-close str (+ idx 2))))
+           (if end
+               (cons idx end)
+               #f)))
+        (else (search (+ idx 1)))))
+    (search start))
+  
+  (define (find-close str start)
+    (define (search idx)
+      (cond
+        ((>= idx (- (string-length str) 1)) #f)
+        ((and (char=? (string-ref str idx) #\\})
+              (char=? (string-ref str (+ idx 1)) #\\}))
+         (+ idx 2))
+        (else (search (+ idx 1)))))
+    (search start))
+  
+  (define (expand str depth)
+    (if (> depth max-depth)
+        (escalate 'max-depth-exceeded max-depth)
+        (let ((match (find-placeholder str 0)))
+          (if match
+              (let ((start (car match))
+                    (end (cdr match)))
+                (let ((key-str (substring str (+ start 2) (- end 2))))
+                  (let ((key (string->symbol key-str)))
+                    (let ((value-entry (assoc key values))
+                          (template-entry (assoc key templates)))
+                      (cond
+                        (value-entry
+                         (let ((value (cdr value-entry)))
+                           (expand (string-append
+                                     (substring str 0 start)
+                                     value
+                                     (substring str end (string-length str)))
+                                   depth)))
+                        (template-entry
+                         (let ((tmpl (cdr template-entry)))
+                           (let ((expanded-tmpl (expand tmpl (+ depth 1))))
+                             (if (and (pair? expanded-tmpl) (equal? (car expanded-tmpl) 'escalate))
+                                 expanded-tmpl
+                                 (expand (string-append
+                                           (substring str 0 start)
+                                           expanded-tmpl
+                                           (substring str end (string-length str)))
+                                         depth)))))
+                        (else
+                         (escalate 'key-not-found key)))))))
+              str))))
+  
+  (expand root-template 0))
+
+(recursive-template \"{{greeting}}, how can I help you today?\"
+                    '((name . \"Alice\"))
+                    '((greeting . \"Hello, {{name}}\"))
+                    10)
+;; => \"Hello, Alice, how can I help you today?\"
+```
+
+The root template contains `{{greeting}}`, which expands to `\"Hello, {{name}}\"`, which then expands to `\"Hello, Alice\"`. If we'd hit a cycle (e.g., `greeting` → `salutation` → `greeting`), we'd exceed `max-depth` and escalate. **ESCAPE** is depth-limited: we don't allow infinite recursion.
+
+Now let's add a second level of nesting: `greeting` → `salutation` → `name`.
+
+```scheme
+;; Three-level nested template expansion.
+(define (three-level-template root values templates max-depth)
+  (define (find-placeholder str start)
+    (define (search idx)
+      (cond
+        ((>= idx (- (string-length str) 1)) #f)
+        ((and (char=? (string-ref str idx) #\\{)
+              (char=? (string-ref str (+ idx 1)) #\\{))
+         (let ((end (find-close str (+ idx 2))))
+           (if end
+               (cons idx end)
+               #f)))
+        (else (search (+ idx 1)))))
+    (search start))
+  
+  (define (find-close str start)
+    (define (search idx)
+      (cond
+        ((>= idx (- (string-length str) 1)) #f)
+        ((and (char=? (string-ref str idx) #\\})
+              (char=? (string-ref str (+ idx 1)) #\\}))
+         (+ idx 2))
+        (else (search (+ idx 1)))))
+    (search start))
+  
+  (define (expand str depth)
+    (if (> depth max-depth)
+        (escalate 'max-depth-exceeded max-depth)
+        (let ((match (find-placeholder str 0)))
+          (if match
+              (let ((start (car match))
+                    (end (cdr match)))
+                (let ((key-str (substring str (+ start 2) (- end 2))))
+                  (let ((key (string->symbol key-str)))
+                    (let ((value-entry (assoc key values))
+                          (template-entry (assoc key templates)))
+                      (cond
+                        (value-entry
+                         (let ((value (cdr value-entry)))
+                           (expand (string-append
+                                     (substring str 0 start)
+                                     value
+                                     (substring str end (string-length str)))
+                                   depth)))
+                        (template-entry
+                         (let ((tmpl (cdr template-entry)))
+                           (let ((expanded-tmpl (expand tmpl (+ depth 1))))
+                             (if (and (pair? expanded-tmpl) (equal? (car expanded-tmpl) 'escalate))
+                                 expanded-tmpl
+                                 (expand (string-append
+                                           (substring str 0 start)
+                                           expanded-tmpl
+                                           (substring str end (string-length str)))
+                                         depth)))))
+                        (else
+                         (escalate 'key-not-found key)))))))
+              str))))
+  
+  (expand root 0))
+
+(three-level-template \"{{greeting}}\"
+                      '((name . \"Bob\") (title . \"Dr.\"))
+                      '((greeting . \"{{salutation}}, how are you?\")
+                        (salutation . \"{{title}} {{name}}\"))
+                      10)
+;; => \"Dr. Bob, how are you?\"
+```
+
+Root → `greeting` → `salutation` → `title` and `name`. Three levels of expansion. If we'd set `max-depth` to 2, we'd escalate before reaching `name`. **BACK** is parameterization: we don't hardcode the depth limit—we pass it in, making the function reusable for different risk tolerances.
+
+---
+
+## Composing Text Verbs: Normalize, Slug, Distance, and Format
+
+Let's write a program that orchestrates all the text verbs we have: given a list of product titles, normalize each, generate slugs, compute pairwise distances between slugs (to detect near-duplicates), and format a report of any pairs within a threshold.
+
+This is a genuinely hard program: it uses `text/normalize`, `system/slugify`, `text/distance`, nested loops, and formatting—all with honest failure handling.
+
+```scheme
+;; Find near-duplicate product titles by slug distance.
+(define (find-near-duplicates titles threshold)
+  (define (normalize-and-slug title)
+    (let ((norm (text/normalize title)))
+      (if (equal? norm 'nan)
+          (escalate 'normalize-failed title)
+          (let ((slug (system/slugify norm)))
+            (if (equal? slug 'nan)
+                (escalate 'slugify-failed norm)
+                (list (cons 'title title)
+                      (cons 'slug slug)))))))
+  
+  (define (all-pairs lst)
+    (define (pairs-with-first first rest)
+      (if (null? rest)
+          '()
+          (cons (cons first (car rest))
+                (pairs-with-first first (cdr rest)))))
+    (if (null? lst)
+        '()
+        (append (pairs-with-first (car lst) (cdr lst))
+                (all-pairs (cdr lst)))))
+  
+  (define (compute-distance pair)
+    (let ((slug-a (cdr (assoc 'slug (car pair))))
+          (slug-b (cdr (assoc 'slug (cdr pair)))))
+      (let ((dist (text/distance slug-a slug-b)))
+        (if (equal? dist 'nan)
+            (escalate 'distance-failed (list slug-a slug-b))
+            (list (cons 'title-a (cdr (assoc 'title (car pair))))
+                  (cons 'title-b (cdr (assoc 'title (cdr pair))))
+                  (cons 'slug-a slug-a)
+                  (cons 'slug-b slug-b)
+                  (cons 'distance dist))))))
+  
+  (let ((processed (map normalize-and-slug titles)))
+    (if (any? (lambda (x) (and (pair? x) (equal? (car x) 'escalate))) processed)
+        (car (filter (lambda (x) (and (pair? x) (equal? (car x) 'escalate))) processed))
+        (let ((pairs (all-pairs processed)))
+          (if (null? pairs)
+              '()
+              (let ((distances (map compute-distance pairs)))
+                (if (any? (lambda (x) (and (pair? x) (equal? (car x) 'escalate))) distances)
+                    (car (filter (lambda (x) (and (pair? x) (equal? (car x) 'escalate))) distances))
+                    (let ((near (filter (lambda (d) (<= (cdr (assoc 'distance d)) threshold))
+                                        distances)))
+                      near))))))))
+
+(define (any? pred lst)
+  (and (not (null? lst))
+       (or (pred (car lst))
+           (any? pred (cdr lst)))))
+
+(find-near-duplicates '(\"Hand-Knit Wool Scarf\"
+                        \"Handknit Wool Scarf\"
+                        \"Machine-Knit Cotton Throw\")
+                      2)
+;; => (((title-a . \"Hand-Knit Wool Scarf\")
+;;      (title-b . \"Handknit Wool Scarf\")
+;;      (slug-a . \"hand-knit-wool-scarf\")
+;;      (slug-b . \"handknit-wool-scarf\")
+;;      (distance . 1)))
+```
+
+The first two titles have slugs one character apart—they're near-duplicates. The third is far enough away that it doesn't appear. This program composes five techniques: normalization, slugification, distance computation, pairwise comparison, and filtering. **FORWARD** is orchestration: each stage feeds the next, and we only proceed if all stages succeed.
+
+---
+
+## Full Pipeline: Fetch, Parse, Transform, Template, Validate
+
+Let's build the hardest program in this chapter: a full data pipeline that (1) simulates fetching text data (we'll use a hardcoded string as if it came from `web/fetch`), (2) parses it as CSV, (3) transforms rows (normalize, derive fields), (4) filters by criteria, (5) templates each result into a message, (6) validates each message's word count and readability, and (7) returns the list of valid messages or the first escalation.
+
+```scheme
+;; Full pipeline: parse CSV, transform, filter, template, validate.
+(define (full-text-pipeline csv-str min-years template-str min-words max-words max-grade)
+  (define (split-on-char str ch)
+    (define (split-helper chars acc word-acc)
+      (cond
+        ((null? chars)
+         (reverse (cons (list->string (reverse word-acc)) acc)))
+        ((char=? (car chars) ch)
+         (split-helper (cdr chars)
+                       (cons (list->string (reverse word-acc)) acc)
+                       '()))
+        (else
+         (split-helper (cdr chars) acc (cons (car chars) word-acc)))))
+    (split-helper (string->list str) '() '()))
+  
+  ;; Step 1: Parse CSV.
+  (define (parse-csv text)
+    (let ((lines (split-on-char text #\\newline)))
+      (if (null? lines)
+          (escalate 'empty-csv text)
+          (let ((header (split-on-char (car lines) #\\,)))
+            (let ((rows (map (lambda (line) (split-on-char line #\\,)) (cdr lines))))
+              (if (any? (lambda (row) (not (= (length row) (length header)))) rows)
+                  (escalate 'uneven-columns text)
+                  (cons header rows)))))))
+  
+  (define (any? pred lst)
+    (and (not (null? lst))
+         (or (pred (car lst))
+             (any? pred (cdr lst)))))
+  
+  ;; Step 2: Transform rows.
+  (define (transform-rows header rows)
+    (define name-idx (list-index \"name\" header))
+    (define role-idx (list-index \"role\" header))
+    (define years-idx (list-index \"years\" header))
+    
+    (define (list-index item lst)
+      (define (search idx remaining)
+        (cond
+          ((null? remaining) #f)
+          ((equal? (car remaining) item) idx)
+          (else (search (+ idx 1) (cdr remaining)))))
+      (search 0 lst))
+    
+    (if (or (not name-idx) (not role-idx) (not years-idx))
+        (escalate 'missing-columns (list (cons 'header header)
+                                         (cons 'expected '(\"name\" \"role\" \"years\"))))
+        (map (lambda (row)
+               (let ((name (list-ref row name-idx))
+                     (role (list-ref row role-idx))
+                     (years-str (list-ref row years-idx)))
+                 (let ((years (string->number years-str)))
+                   (if (not years)
+                       (escalate 'invalid-years years-str)
+                       (let ((norm-role (text/normalize role)))
+                         (if (equal? norm-role 'nan)
+                             (escalate 'normalize-failed role)
+                             (list (cons 'name name)
+                                   (cons 'role norm-role)
+                                   (cons 'years years))))))))
+             rows)))
+  
+  ;; Step 3: Filter by minimum years.
+  (define (filter-by-years rows min-y)
+    (filter (lambda (row)
+              (>= (cdr (assoc 'years row)) min-y))
+            rows))
+  
+  ;; Step 4: Template each row into a message.
+  (define (template-rows rows tmpl)
+    (define (find-placeholder str start)
+      (define (search idx)
+        (cond
+          ((>= idx (- (string-length str) 1)) #f)
+          ((and (char=? (string-ref str idx) #\\{)
+                (char=? (string-ref str (+ idx 1)) #\\{))
+           (let ((end (find-close str (+ idx 2))))
+             (if end
+                 (cons idx end)
+                 #f)))
+          (else (search (+ idx 1)))))
+      (search start))
+    
+    (define (find-close str start)
+      (define (search idx)
+        (cond
+          ((>= idx (- (string-length str) 1)) #f)
+          ((and (char=? (string-ref str idx) #\\})
+                (char=? (string-ref str (+ idx 1)) #\\}))
+           (+ idx 2))
+          (else (search (+ idx 1)))))
+      (search start))
+    
+    (define (template-one alist)
+      (define (substitute str)
+        (let ((match (find-placeholder str 0)))
+          (if match
+              (let ((start (car match))
+                    (end (cdr match)))
+                (let ((key-str (substring str (+ start 2) (- end 2))))
+                  (let ((key (string->symbol key-str)))
+                    (let ((entry (assoc key alist)))
+                      (if entry
+                          (let ((value (cond
+                                         ((string? (cdr entry)) (cdr entry))
+                                         ((number? (cdr entry)) (number->string (cdr entry)))
+                                         (else (symbol->string (cdr entry))))))
+                            (substitute (string-append
+                                          (substring str 0 start)
+                                          value
+                                          (substring str end (string-length str)))))
+                          (escalate 'key-not-found (list (cons 'key key)
+                                                         (cons 'template tmpl))))))))
+              str)))
+      (substitute tmpl))
+    
+    (map template-one rows))
+  
+  ;; Step 5: Validate each message.
+  (define (validate-messages messages)
+    (define (validate-one msg)
+      (let ((wc (text/word-count msg)))
+        (if (equal? wc 'nan)
+            (escalate 'word-count-failed msg)
+            (let ((grade (text/flesch-kincaid msg)))
+              (if (equal? grade 'nan)
+                  (escalate 'readability-failed msg)
+                  (cond
+                    ((< wc min-words)
+                     (escalate 'too-short (list (cons 'message msg)
+                                                (cons 'words wc)
+                                                (cons 'min min-words))))
+                    ((> wc max-words)
+                     (escalate 'too-long (list (cons 'message msg)
+                                               (cons 'words wc)
+                                               (cons 'max max-words))))
+                    ((> grade max-grade)
+                     (escalate 'too-complex (list (cons 'message msg)
+                                                  (cons 'grade grade)
+                                                  (cons 'max max-grade))))
+                    (else msg)))))))
+    
+    (let ((validated (map validate-one messages)))
+      (if (any? (lambda (x) (and (pair? x) (equal? (car x) 'escalate))) validated)
+          (car (filter (lambda (x) (and (pair? x) (equal? (car x) 'escalate))) validated))
+          validated)))
+  
+  ;; Pipeline: parse → transform → filter → template → validate.
+  (let ((parsed (parse-csv csv-str)))
+    (if (and (pair? parsed) (equal? (car parsed) 'escalate))
+        parsed
+        (let ((header (car parsed))
+              (rows (cdr parsed)))
+          (let ((transformed (transform-rows header rows)))
+            (if (and (pair? transformed) (equal? (car transformed) 'escalate))
+                transformed
+                (let ((filtered (filter-by-years transformed min-years)))
+                  (if (null? filtered)
+                      (escalate 'no-matches min-years)
+                      (let ((templated (template-rows filtered template-str)))
+                        (if (and (pair? templated) (equal? (car templated) 'escalate))
+                            templated
+                            (validate-messages templated)))))))))))
+
+(full-text-pipeline \"name,role,years\\nAlice,Engineer,5\\nBob,Designer,3\\nCarol,Manager,7\"
+                    5
+                    \"Congratulations, {{name}}! As a {{role}} with {{years}} years of experience, you qualify for our senior program.\"
+                    15 50 12.0)
+;; => (\"Congratulations, Alice! As a engineer with 5 years of experience, you qualify for our senior program.\"
+;;     \"Congratulations, Carol! As a manager with 7 years of experience, you qualify for our senior program.\")
+```
+
+Bob is filtered out (only 3 years). Alice and Carol pass, their messages are templated, and both messages pass word count and readability validation. If Alice's message had been too long, we'd escalate with `(too-long ...)`. **ESCAPE** is multi-stage: we check at every boundary—parse, transform, filter (for emptiness), template, validate—and return the first failure.
+
+This is the hardest program in the chapter: five stages, three text verbs, recursion, filtering, templating, and validation, all orchestrated into a single pipeline. It's the kind of program that a beginner could not write, but a master can compose cleanly from smaller pieces.
+
+---
+
+## Challenges
+
+You've seen parsing, normalization, distance, slugification, templating, and multi-stage pipelines. Now write your own. Each challenge should be a **complete, standalone program** that runs top-to-bottom and produces a real result.
+
+1. **Email Address Validator**: Write a program that takes a string and validates it as an email address (simple rules: one `@`, at least one character before and after, a `.` in the domain part). Use `text/normalize` to clean the input first, then parse character-by-character with recursion. Return `(valid . <email>)` or `(escalate invalid-email <reason>)`.
+
+2. **Markdown Link Extractor**: Parse a Markdown string and extract all links in the format `[text](url)`. Return a list of `(text . url)` pairs. Handle malformed links by escalating if a `[` is not matched by `](...)`.
+
+3. **Template with Defaults**: Extend the templating engine to support default values: `{{key|default}}`. If `key` is not in the alist, use `default` instead of escalating. Write a program that templates a string with this feature.
+
+4. **CSV Column Projection**: Parse a CSV string, then project (select) only specified columns by name, reordering them as requested. Return a new CSV string with only those columns. Escalate if any requested column is missing.
+
+5. **Text Diff Summary**: Given two strings, compute their Levenshtein distance, then generate a human-readable summary: `\"The texts differ by X edits (Y% similar).\"` Use `text/distance` and compute percentage similarity as `100 * (1 - distance / max-length)`.
+
+6. **Multi-Template Report**: Given a list of data rows (as alists), a header template, a row template, and a footer template, generate a full report by templating the header once, each row once, and the footer once, then concatenating them with newlines. Validate that the final report is under a maximum character count, escalating if it exceeds.
+
+---
+
+You've reached the end of **Text & String Craft**. You've learned to parse ragged input, transform it recursively, template it cleanly, and validate it honestly—all while handling failure at every stage. These are the skills that let you take the messy strings the world hands you and turn them into structured data you can route through the rest of the runtime's programs. The next chapter will take these orchestration techniques even further, composing verbs across namespaces into routes that span the entire wired surface. Well done.
+")

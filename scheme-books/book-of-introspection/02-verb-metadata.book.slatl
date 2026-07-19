@@ -1,0 +1,968 @@
+(chapter
+  :book "Book of Introspection"
+  :chapter-number 2
+  :title "Verb metadata — the shape of every verb"
+  :audience "programmer-learning-motoi"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-of-introspection-author-agent"
+     :sources ("src/verbRegistry.js" "src/introspect.js" "src/base.js"))
+  :prose
+"# Chapter 2 — Verb metadata: the shape of every verb
+
+Every verb in Motoi carries the same record. Not most verbs. Every verb. From `car` to `cortex/record` to `composer/slider`, they all have the same field set, filled in by the module that registered them.
+
+This chapter opens the record and walks each field. When you finish, you will be able to look at any record `(help 'foo)` returns and know what each field means, what its type is, what its default is, and what you can do with it.
+
+The record is the alphabet the rest of the book is spelled in. If you skim any chapter, do not skim this one.
+
+## 2.1 The record, in one view
+
+Here is a full metadata record. Type this at a REPL:
+
+```scheme
+(help 'car)
+```
+
+You get back something like:
+
+```scheme
+((name . \"car\")
+ (doc . \"Return the first element of a pair.\")
+ (contract . \"(pair) -> any\")
+ (arity . 1)
+ (examples . ((:level novice   :code \"(car '(1 2 3))\")
+              (:level intermediate :code \"(car (cdr '(1 2 3)))\")))
+ (namespace . \"base\")
+ (tier . \"core\")
+ (perm . \"read\")
+ (atom . null)
+ (source . \"src/base.js:73\")
+ (since . \"1.0\"))
+```
+
+Ten fields. Every field is a fact about `car`. Read them one at a time. Do not try to hold them all at once. Each has its own use.
+
+## 2.2 Field one — name
+
+The `name` field is the string you would type to call the verb. For `car` it is `\"car\"`. For `card/open` it is `\"card/open\"`. For `cortex/record` it is `\"cortex/record\"`.
+
+Two subtleties.
+
+First, the name is a string, not a symbol. This is a runtime detail; the registry is keyed by string because keys need equality and strings compare cheaply. In Scheme you usually pass symbols to introspection verbs, and the verbs convert. `(help 'car)` and `(help \"car\")` both work.
+
+Second, the name in the record is authoritative — it is what the registry stored, which is what the dispatcher looks up. If you registered `card/open` and the record says `card/open`, that is the exact string the dispatcher matches on. Namespaces are part of the name; there is no separate namespace resolution at call time.
+
+If you want to enumerate every registered name in the runtime:
+
+```scheme
+(map car (snapshot-registry))
+;; => (car cdr cons list map for-each ... hundreds more ...)
+```
+
+This is a flat list of every verb the runtime currently knows about. Chapter 11 walks the registry in depth.
+
+## 2.3 Field two — doc
+
+The `doc` field is a docstring. One sentence, ideally. Two sentences if the first cannot stand alone. Never a paragraph — long documentation lives in the reference manual and the book, not in the doc string. The doc string is what shows up when a programmer types `,doc foo` in a hurry.
+
+For `car`: `\"Return the first element of a pair.\"`
+
+For `map`: `\"Apply a procedure to each element of one or more lists, returning a new list of results.\"`
+
+For `cortex/record`: `\"Write a fact to Cortex. Kwargs: :subject :predicate :object :at :source.\"`
+
+Notice the shape. Every doc string is imperative. It tells you what the verb *does*, not what the verb *is*. `\"Return the first element\"` not `\"A function that returns the first element\"`. Motoi's style guide is that doc strings are commands the verb executes on your behalf, described in the imperative mood.
+
+Fetch the doc alone:
+
+```scheme
+(doc-of 'map)
+;; => \"Apply a procedure to each element of one or more lists, returning a new list of results.\"
+```
+
+If a verb has no doc:
+
+```scheme
+(doc-of 'some-undocumented-verb)
+;; => nil
+```
+
+Nil, not empty string, not a placeholder. If the field is nil, the verb author did not fill it in. That is a bug you can file.
+
+## 2.4 Field three — contract
+
+The `contract` field is a one-line string describing the verb's shape. It is not enforced. Motoi does not typecheck against contracts. The contract is a promise the author is making to the reader — this is what the verb takes and this is what it returns.
+
+For `car`: `\"(pair) -> any\"`.
+
+For `map`: `\"(procedure list ...) -> list\"`.
+
+For `cortex/record`: `\"(:subject :predicate :object :at :source) -> boolean\"`.
+
+The mini-language is loose. Parens group. Arrows separate input from output. Symbols name shapes. `...` after a shape means variadic. Colons name keyword arguments. If you can read a function signature in any typed language you can read a Motoi contract.
+
+Fetch the contract:
+
+```scheme
+(type-of 'map)
+;; => \"(procedure list ...) -> list\"
+```
+
+Yes, the verb is called `type-of` and it returns a contract string. Chapter 3 explains why the name overlaps with the value-side `type-of` and how the two differ. For now: `type-of` on a verb name returns the contract; `type-of` on a runtime value returns the value's runtime type.
+
+The contract is descriptive, not prescriptive. If a verb's contract says `(number) -> number` and you pass it a string, the verb will do whatever it does with a string — probably error, sometimes silently coerce, rarely surprise you. The contract is the author's honest note about the intended shape; the runtime does not enforce it.
+
+Chapter 8 shows how to wrap contracts in an enforced-check macro if you want the runtime to police them.
+
+## 2.5 Field four — arity
+
+The `arity` field is the number of arguments the verb takes. It is a scalar for fixed-arity verbs; a two-element list `(min max)` for verbs with optional arguments; or a special marker for variadic verbs.
+
+For `car`: `1`. Exactly one argument.
+
+For `substring`: `(2 3)`. Two required, three total (the third is optional).
+
+For `list`: `variadic`. Zero or more.
+
+For `newline`: `0`. Zero.
+
+Fetch the arity:
+
+```scheme
+(arity-of 'car)          ;; => 1
+(arity-of 'substring)    ;; => (2 3)
+(arity-of 'list)         ;; => variadic
+(arity-of 'newline)      ;; => 0
+```
+
+The arity field matters because the dispatcher uses it to reject malformed calls before the verb runs. `(car)` with no arguments errors at the dispatcher level, not inside `car`'s implementation. The error message includes the expected arity, which was read from this exact field.
+
+Two subtleties.
+
+First, an arity of zero is a legitimate value. Some verbs — `newline`, `current-time`, `pi` — take no arguments. The record's arity field is `0`, not nil. The introspection layer in `src/introspect.js` uses `??` (nullish coalescing) explicitly so that a zero does not get treated as absent.
+
+Second, variadic is a symbol, not a number. If your code branches on the arity, remember to handle `variadic` as a distinct case:
+
+```scheme
+(define (fixed-arity? name)
+  (let ((a (arity-of name)))
+    (and (number? a) (not (eq? a 'variadic)))))
+```
+
+The registry's arity metadata is the source of truth for the reference manual's arity table. If a verb has no arity field it defaults to nil, and the reference manual shows it as unknown. That is a signal the verb was not fully registered.
+
+## 2.6 Field five — examples
+
+The `examples` field is a list of records. Each example has a `:level` and a `:code` field. Levels are `novice`, `intermediate`, `expert`. Code is a string containing a runnable expression.
+
+For `map`:
+
+```scheme
+(examples-of 'map)
+;; => ((:level novice \"(map (lambda (x) (* x 2)) '(1 2 3))\")
+;;     (:level intermediate \"(map + '(1 2 3) '(10 20 30))\")
+;;     (:level expert \"(map (lambda (kv) (cons (car kv) (* (cdr kv) 2))) alist)\"))
+```
+
+The three levels are a discipline. Novice examples use the verb in isolation. Intermediate examples compose the verb with one or two others. Expert examples show the verb in a realistic pattern from a real cart. The three-tier structure is what makes examples pedagogically useful — a reader who is just starting picks the novice example and adapts it; a reader who is fluent picks the expert example and remembers a pattern.
+
+The tiered examples are also what feeds the training corpus for Motoi Copilot. Every example is a training pair: the doc plus the example. The model learns the verb's shape by seeing three examples at three levels, repeated across the whole verb space.
+
+Fetch the examples:
+
+```scheme
+(examples-of 'map)
+```
+
+Print them with a tiered formatter:
+
+```scheme
+(for-each
+  (lambda (ex)
+    (display (assoc :level ex)) (display \" \")
+    (display (assoc :code ex)) (newline))
+  (examples-of 'map))
+```
+
+Or use the REPL meta-command:
+
+```
+> ,examples map
+  novice        (map (lambda (x) (* x 2)) '(1 2 3))
+  intermediate  (map + '(1 2 3) '(10 20 30))
+  expert        (map (lambda (kv) (cons (car kv) (* (cdr kv) 2))) alist)
+```
+
+If a verb has no examples, the field is an empty list. Empty is a bug you can file — every verb should have at least one novice example.
+
+## 2.7 Field six — namespace
+
+The `namespace` field is the prefix that groups related verbs. For `car` the namespace is `\"base\"` (or nil if the verb is in the unprefixed base). For `card/open` the namespace is `\"card\"`. For `cortex/query` the namespace is `\"cortex\"`.
+
+Fetch the namespace:
+
+```scheme
+(let ((meta (help 'cortex/query)))
+  (cdr (assoc 'namespace meta)))
+;; => \"cortex\"
+```
+
+Namespaces are informal. They are a naming convention, not a module system. The slash in `cortex/query` is part of the verb name; the dispatcher does not do namespace resolution. But the metadata field is populated by the module that registered the verb, and it lets the introspection layer group verbs by their family.
+
+List every verb in a namespace:
+
+```
+> ,namespace cortex
+cortex/read
+cortex/write
+cortex/record
+cortex/query
+cortex/remember
+cortex/recall
+```
+
+Or from Scheme:
+
+```scheme
+(filter
+  (lambda (n) (string-prefix? \"cortex/\" n))
+  (map car (snapshot-registry)))
+```
+
+Namespaces are the coarse categorization of the verb space. Chapter 11 walks the full namespace map.
+
+## 2.8 Field seven — tier
+
+The `tier` field is a label like `\"core\"`, `\"extended\"`, `\"experimental\"`. It describes how canonical the verb is. Core verbs are the frozen set the training corpus depends on; extended verbs are stable-but-optional; experimental verbs may change name or contract before the next fold.
+
+For `car`: `\"core\"`. Frozen. Never renaming.
+
+For `composer/slider`: `\"extended\"`. Stable, but not yet trained-on.
+
+For `llm/pair-with`: `\"experimental\"`. May change.
+
+Fetch the tier:
+
+```scheme
+(let ((meta (help 'composer/slider)))
+  (cdr (assoc 'tier meta)))
+;; => \"extended\"
+```
+
+Tier matters when you are writing durable code. A cart that only uses core verbs will still work after the next Motoi release; a cart that uses experimental verbs is signing up for possible breakage. The introspection layer lets you audit your own code — see Appendix G for a tiny linter that flags experimental-tier calls.
+
+## 2.9 Field eight — perm
+
+The `perm` field is the permission tier the verb requires to run. Motoi has a small closed vocabulary of perms:
+
+- `read` — pure observation, no state change
+- `paint` — visual side-effects only (dots, glyphs)
+- `animate` — motion or RAF tween
+- `state-change` — moves cards, focuses, opens UI
+- `destructive` — deletes data, transfers ownership
+- `financial` — money moves
+- `network` — outbound network call
+- `personal-data` — reads or writes user PII
+
+For `car`: `\"read\"`. Pure.
+
+For `paint-dot`: `\"paint\"`. Draws.
+
+For `cortex/record`: `\"state-change\"`. Writes.
+
+For `card/publish`: `\"financial\"`. Money.
+
+Fetch the perm:
+
+```scheme
+(let ((meta (help 'cortex/record)))
+  (cdr (assoc 'perm meta)))
+;; => \"state-change\"
+```
+
+The perm is what the dispatcher checks before running the verb. If the caller does not have the perm tier, the call is refused. Chapter 16 covers the sandbox mechanics in detail.
+
+For introspection purposes: the perm tells you *what kind of thing this verb does*. A quick audit like this:
+
+```scheme
+(let ((all (map car (snapshot-registry))))
+  (filter (lambda (n)
+            (equal? \"financial\" (assoc 'perm (help n))))
+          all))
+```
+
+...returns every financial-tier verb in the runtime. That is a useful thing to know about a cart you are considering trusting.
+
+The perm vocabulary is closed by design. If a verb needs to declare something outside the eight-word set, the registry validation step will reject it at load time. The narrow vocabulary keeps the audit story simple: eight tiers, one for each kind of thing a verb might do.
+
+## 2.10 Field nine — atom
+
+The `atom` field is a category label for grouping verbs at a finer grain than namespace. It is optional; many verbs leave it nil.
+
+For `car`: `nil` (base list ops are not further grouped).
+
+For `paint-dot`: `\"paint-primitive\"`.
+
+For `note`: `\"synth-note\"`.
+
+For `card/open`: `\"card-lifecycle\"`.
+
+The atom groups are for the reference manual's table of contents and for the tutorial's chapter-by-chapter progression. They are advisory metadata; the runtime does not care what the atom is.
+
+Fetch the atom:
+
+```scheme
+(let ((meta (help 'paint-dot)))
+  (cdr (assoc 'atom meta)))
+;; => \"paint-primitive\"
+```
+
+If a verb's atom is nil, it belongs to the general pool. If it has an atom, the reference manual groups it with its siblings under that atom heading.
+
+## 2.11 Field ten — source
+
+The `source` field is a path plus a line number. It tells you where the verb's implementation lives on disk.
+
+For `car`: `\"src/base.js:73\"`.
+
+For `composer/slider`: `\"lib/composer/widgets.js:42\"`.
+
+Fetch the source:
+
+```scheme
+(source-of 'car)
+;; => \"src/base.js:73\"
+```
+
+The source pointer is the last-resort tool. If the doc string does not tell you what you need, and the examples do not, and the contract is ambiguous, you can go read the implementation. The pointer saves you the trouble of grepping for the definition.
+
+Two subtleties.
+
+First, the path is relative to the runtime root. In a checked-out Motoi repo that is the repo root. In a bundled runtime it may be different; the source-of pointer still resolves to the module the verb was registered from, but you may need to consult the bundle's source map to find the file.
+
+Second, source pointers are not always present. If a verb was registered without a source field, `source-of` returns nil. Every verb registered from `src/base.js` and `lib/*` has a source; verbs registered by user carts may or may not. Chapter 16 discusses when a runtime deliberately omits source pointers for confidentiality.
+
+## 2.12 Field eleven — since
+
+The `since` field is a version string indicating when the verb was added to Motoi.
+
+For `car`: `\"1.0\"`. It has been there since day one.
+
+For `composer/slider`: `\"1.4\"`. Landed in the 1.4 release.
+
+For `llm/reason-about`: `\"1.5-experimental\"`. Landing in the 1.5 experimental line.
+
+Fetch the since:
+
+```scheme
+(let ((meta (help 'composer/slider)))
+  (cdr (assoc 'since meta)))
+;; => \"1.4\"
+```
+
+The since field is useful for two audiences.
+
+First, cart authors targeting an old runtime. If your cart needs `cortex/query` and your target runtime is 1.2, the since field tells you whether the verb existed then. If it says `\"1.4\"` you have to either upgrade the runtime or find a different verb.
+
+Second, historians and release-note writers. A quick query over the registry can produce a list of every verb that landed in a given release:
+
+```scheme
+(filter
+  (lambda (n)
+    (equal? \"1.4\" (cdr (assoc 'since (help n)))))
+  (map car (snapshot-registry)))
+```
+
+That is a first-cut release notes generator, built from the metadata layer.
+
+## 2.13 Extra fields — the dispatcher's private layer
+
+Beyond the ten public fields there are dispatcher-facing fields that the introspection layer usually hides. They are on the record if you ask for the raw registry entry via `snapshot-registry`, but `help` does not return them.
+
+The dispatcher fields include:
+
+- `confirm` — boolean; if true, dispatcher requires an explicit confirmation before running
+- `rateLimit` — string like `\"1/30s\"` or `\"10/min\"` or nil
+- `schema` — a function `(args) => true | error-string` for argument validation
+- `idempotent` — boolean; if true, dispatcher dedupes recent calls
+- `powerTier` — one of `always`, `paint`, `animate`, `full-power`; substrate-power gate
+- `chip` — one of `paint.applied`, `motion.applied`, `look.changed`, or nil; auto-emit chip type
+- `deprecated` — boolean; alias-only flag
+- `aliasFor` — name of the canonical verb this alias points to, or nil
+
+These fields are for the dispatcher and the substrate. They are not part of what a reader is asking when they type `(help 'foo)`. But they are queryable if you go through `snapshot-registry`:
+
+```scheme
+(let ((meta (cdr (assoc \"card/open\" (snapshot-registry)))))
+  (list :perm (cdr (assoc 'perm meta))
+        :confirm (cdr (assoc 'confirm meta))
+        :rate-limit (cdr (assoc 'rateLimit meta))))
+```
+
+Chapter 16 discusses how the dispatcher uses each of these fields.
+
+## 2.14 How metadata gets on the record
+
+Every verb enters the registry through one call: `env.define(name, fn, meta)`. The `meta` argument is a plist. Whichever module registers the verb passes the metadata. Here is what a real registration looks like in `src/base.js`:
+
+```javascript
+env.define('car', (p) => p[0], {
+  perm: 'read',
+  doc: 'Return the first element of a pair.',
+  contract: '(pair) -> any',
+  arity: 1,
+  examples: [
+    { level: 'novice', code: \"(car '(1 2 3))\" },
+    { level: 'intermediate', code: \"(car (cdr '(1 2 3)))\" },
+  ],
+  namespace: 'base',
+  tier: 'core',
+  source: 'src/base.js:73',
+  since: '1.0',
+})
+```
+
+The metadata is filled in at registration. When you later call `(help 'car)`, the introspection layer reads from this exact object. There is no separate documentation source. The doc lives with the code.
+
+This is what makes the reference manual generatable. `src/docs-emitter.js` walks the registry and produces the manual by concatenating the records. When a verb changes, the manual updates on the next build. There is no drift.
+
+## 2.15 Reading a verb like a datasheet
+
+Here is a workflow for reading a verb record you have never seen before.
+
+**First pass — the doc.** Read the doc string. That is the one-sentence summary. If the doc string tells you what you need, you can stop.
+
+**Second pass — the arity and contract.** How many arguments does it take? What shape do they have? What does it return? Now you know if it fits your use.
+
+**Third pass — the examples.** Pick the level closest to your current fluency. Read the code. Adapt it to your context.
+
+**Fourth pass — the perm and tier.** Does this verb do anything dangerous? Is it a stable verb or an experimental one? Now you know whether to trust it in production.
+
+**Fifth pass — the source.** Only if the previous four passes did not resolve your question. The source is the last resort.
+
+Most of the time you will stop at the first or second pass. The doc and the contract together answer most questions.
+
+Try this on three verbs of your choice right now:
+
+```scheme
+(help 'fold)
+(help 'string-split)
+(help 'cortex/query)
+```
+
+Read each record with the five-pass workflow. See how far you get before you need the source.
+
+## 2.16 The record is universal
+
+Here is the important thing. Every verb has the same record shape.
+
+Not almost every. Every.
+
+`car` has the record. `map` has the record. `cortex/record` has the record. `composer/slider` has the record. `paint-dot` has the record. Every verb in every namespace in every module.
+
+That uniformity is what makes introspection worth using. If you had to remember a different metadata shape for `card/*` verbs and another for `cortex/*` verbs and another for `composer/*` verbs, the mental overhead would defeat the purpose. Because the shape is universal, one skill — reading a verb record — works everywhere.
+
+The uniformity is enforced at registration. `verbRegistry.js` normalizes every metadata blob to the same shape. Fields that were not passed are set to nil (or an empty list for lists). Fields that are unknown to the schema are dropped. The record you get from `help` is normalized; you do not have to worry about which module registered the verb.
+
+## 2.17 Missing fields tell a story
+
+When a field is missing, that itself is information.
+
+Missing `doc`: the verb author did not fill it in. This is a bug you can file. Every core verb should have a doc string.
+
+Missing `contract`: same. Every verb should have a contract. If a verb takes complex arguments and the contract is missing, the reader has to guess from the examples.
+
+Missing `examples`: this happens more often than it should. The training corpus wants examples on every verb. An empty examples field is a signal the verb has not been fully documented for pedagogical use.
+
+Missing `source`: usually harmless. Some verbs are anonymous or generated. If the source is missing on a core verb, that is a bug.
+
+Missing `since`: the verb is old and predates the since-tag convention, or the author forgot. Neither is critical; the field is advisory.
+
+Missing `atom`: this is common and fine. Atoms are optional groupings.
+
+Missing `namespace`: the verb is in the base. Not a bug.
+
+If you see a lot of missing fields, the verb is not well documented. If you see all fields present, the verb is well documented. `help` gives you both signals in one pass.
+
+## 2.18 The registry validation step
+
+At startup, Motoi runs `validateRegistry` from `src/verbRegistry.js`. This walks every registered verb and checks a specific invariant: if a verb's name pattern suggests it changes state (ends in `!`, starts with `card-`, etc.) and the perm was inferred rather than explicitly declared, the validation fails and the runtime refuses to start.
+
+Why this specific check? Because forgetting to declare a perm on a state-changing verb is the single most dangerous authoring mistake. A verb that looks like a write but was inferred as `read` slips past the dispatcher's perm gate. The startup validation catches this before any cart runs.
+
+The check does not enforce anything else. It does not require doc strings, examples, contracts, since, or source. Those are cultural expectations, not runtime invariants. If you write a verb with a doc string of an empty string, the runtime will still start. If you skip the examples, the runtime will still start.
+
+The consequence: the metadata layer is culturally load-bearing but not technically enforced. That trade is deliberate — a stricter validator would slow down authoring; a looser validator would let dangerous verbs ship. The dispatcher's perm check is the hard line; everything else is soft.
+
+## 2.19 A worked example — registering your own verb
+
+Let me walk through registering a verb and then introspecting it, so the full loop is visible.
+
+Register a verb that computes the average of a list of numbers:
+
+```scheme
+(define (avg xs)
+  (if (null? xs)
+      0
+      (/ (apply + xs) (length xs))))
+```
+
+At the REPL this defines `avg` as a binding in your current env. But there is no metadata. If you call `(help 'avg)` you get nil, because the introspection layer looks in the *registry*, not the environment. `define` in Scheme binds; `env.define` in the runtime binds *and* registers.
+
+To register metadata, you would need to be inside a module using the registration API:
+
+```javascript
+env.define('avg', (xs) => xs.length ? xs.reduce((a,b) => a+b, 0) / xs.length : 0, {
+  doc: 'Return the arithmetic mean of a list of numbers. Empty list returns 0.',
+  contract: '(list-of-number) -> number',
+  arity: 1,
+  examples: [
+    { level: 'novice', code: '(avg (list 1 2 3))' },
+    { level: 'intermediate', code: '(avg (map square (list 1 2 3)))' },
+  ],
+  namespace: 'math',
+  tier: 'extended',
+  perm: 'read',
+  source: 'lib/math/basics.js:12',
+  since: '1.3',
+})
+```
+
+Now `(help 'avg)` returns the full record. Every field is populated. The verb is a first-class citizen of the introspection layer.
+
+The takeaway: metadata is what makes a verb queryable. A binding without metadata is invisible to `help`, `apropos`, `describe`, and the reference manual. Motoi rewards authors who fill in the fields.
+
+## 2.20 The record is the manual
+
+The reference manual for Motoi is generated from the registry. `src/docs-emitter.js` walks every registered verb, reads the same record `help` returns, and emits a big SLAT file with a section per verb.
+
+This means the reference manual has exactly the same information as `(help 'foo)`. There is no separate authoring pass. If a verb changes, the manual updates. If a verb is added, the manual grows. If a verb is removed, the manual shrinks. The manual and the runtime cannot disagree by construction.
+
+That is worth pausing on. In most languages the reference manual is a separate artifact, maintained by a documentation team, that drifts from the code. In Motoi the manual *is* the code's metadata, rendered. There is nowhere for drift to hide.
+
+The consequence for the reader: if you are looking something up in the manual, and the manual is silent, `(help 'foo)` in the REPL will also be silent. Not because the manual missed it — because the metadata is missing at registration. File a bug against the module that registered the verb, and the fix propagates to both.
+
+## 2.21 The record and the LLM
+
+The metadata record is also what Motoi Copilot was trained on.
+
+Every verb's record — name, doc, contract, arity, examples — is a training sample. The model learned to generate calls to `car` by seeing the record's examples in context. It learned to reach for the right verb when a user describes an intent by having seen thousands of doc-string-to-call pairings.
+
+This is why the doc string matters. A well-written doc string trains a well-behaved model. A vague or missing doc string produces a model that guesses. When you write a verb, you are writing training data. The kid who uses Motoi in five years will experience your verb through what the model learned from your metadata.
+
+Chapter 13 comes back to this. The LLM-augmented verbs are grounded in the same registry the mechanical `help` reads from. Both surfaces — mechanical and modeled — depend on the same field set. Fill in the fields and both work.
+
+## 2.22 A field-by-field reference table
+
+Here, for the pocket, is a table of every metadata field, its type, its default, and one line about its purpose.
+
+| Field | Type | Default | Purpose |
+|-------|------|---------|---------|
+| `name` | string | required | Verb name (registry key) |
+| `doc` | string | nil | One-sentence description, imperative mood |
+| `contract` | string | nil | Signature description; not enforced |
+| `arity` | number or list | nil | Argument count; `(min max)` for optional |
+| `examples` | list of records | `()` | Tiered examples: novice, intermediate, expert |
+| `namespace` | string | nil | Prefix grouping, e.g., `cortex`, `card` |
+| `tier` | string | nil | `core`, `extended`, or `experimental` |
+| `perm` | string | `read` | Permission tier; closed vocabulary of 8 |
+| `atom` | string | nil | Fine-grained category for reference-manual grouping |
+| `source` | string | nil | Path plus line number where verb is defined |
+| `since` | string | nil | Version string when verb was added |
+| `confirm` | boolean | `false` | Dispatcher-only; requires user confirmation |
+| `rateLimit` | string | nil | Dispatcher-only; call frequency cap |
+| `schema` | function | nil | Dispatcher-only; argument validator |
+| `idempotent` | boolean | `false` | Dispatcher-only; dedupe recent calls |
+| `powerTier` | string | perm-derived | Dispatcher-only; substrate power gate |
+| `chip` | string | nil | Dispatcher-only; auto-emitted chip kind |
+| `deprecated` | boolean | `false` | Alias-only flag |
+| `aliasFor` | string | nil | Canonical name if this is an alias |
+
+The first eleven fields are what `help` returns. The last eight are dispatcher-facing and hidden by default. Fetch them via `snapshot-registry`.
+
+Print this table and put it next to your keyboard for the first week. After that you will have memorized the fields you use most and can throw the paper away.
+
+## 2.23 The end of the alphabet
+
+You now know the alphabet.
+
+Chapter 3 will show you how to reach the fields. Chapter 4 will show three specialized retrievals — doc, source, examples — that are worth their own habits. Chapters 5 through 16 will use the alphabet to spell longer words.
+
+But every longer word starts here. Every verb you will ever introspect has this record shape. Every field you will ever query is one of the fields in the table above. Every question the next fourteen chapters teach you to ask, the answer is somewhere in the record.
+
+Read Chapter 2 again if any field is unclear. Then turn the page.
+
+## 2.24 A short exercise
+
+Pick five verbs you use often. For each, type `(help 'the-verb)` at the REPL. Read the full record. Note which fields are populated, which are nil, which surprise you.
+
+Suggested five: `map`, `filter`, `cons`, `substring`, `cortex/query`.
+
+Do that now. Come back when you have looked at all five.
+
+... Done? Good. Now you have seen five records with your own eyes. That is worth more than the whole chapter. You know what the alphabet looks like when it is spelled out.
+
+## 2.25 Closing
+
+The verb metadata record is the load-bearing shape of Motoi's introspection layer. Every verb has it. Every introspection verb reads from it. Every reference-manual entry is derived from it. Every LLM-augmented answer is grounded in it.
+
+Learn the fields. Learn how to read them. Learn what missing fields mean. That is Chapter 2.
+
+Chapter 3 shows you how to actually reach the fields with a smaller, more ergonomic set of verbs than the raw `help`. Turn the page.
+
+## 2.26 Deep dive — the doc field style guide
+
+The doc field is the field a reader touches first, so it deserves a longer look than the other fields got.
+
+A good doc string in Motoi has three properties.
+
+**Imperative mood.** \"Return the first element of a pair.\" Not \"Returns the first element\" or \"A function that returns the first element.\" The verb is a command the caller is issuing; the doc string describes the command in the same voice.
+
+**One sentence.** If it does not fit in one sentence, it belongs in the reference manual's expanded description, not in the doc field. The doc string is what pops up under a REPL prompt in a hurry.
+
+**No jargon that is not already in the reader's mouth.** A doc string that says \"Return the accumulator of a fold.\" is useless to a reader who does not know what a fold is. A doc string that says \"Combine a list into a single value by applying a two-argument procedure repeatedly.\" is useful to that same reader.
+
+Here are some doc strings from real Motoi verbs, annotated:
+
+```
+car:  \"Return the first element of a pair.\"
+```
+Good. Imperative. One sentence. No jargon.
+
+```
+cortex/record: \"Write a fact to Cortex. Kwargs: :subject :predicate :object :at :source.\"
+```
+Good. Imperative. Names the keyword arguments (which is helpful when the arity is variadic keyword-plist).
+
+```
+map: \"Apply a procedure to each element of one or more lists, returning a new list of results.\"
+```
+Good. Imperative. Handles the multi-list case in one clause.
+
+Here is what a *bad* doc string looks like:
+
+```
+foo: \"This function does foo.\"
+```
+
+That is useless. It restates the name and does not describe behavior. A verb with a doc string like that has effectively no doc.
+
+```
+bar: \"Applies the bar operation, returning the bar-result of the input, unless the second optional argument is passed, in which case it returns the extended bar-result, unless the third argument is a keyword, in which case the semantics change to the alternative bar dialect.\"
+```
+
+That is too long. It should be one sentence describing the main use, with the edge cases living in the reference-manual expansion.
+
+If you are ever registering a new verb, run the three-property test on the doc string. Imperative, one sentence, no unfamiliar jargon. If it passes, ship it. If it fails, rewrite.
+
+## 2.27 Deep dive — the contract mini-language
+
+The contract field uses a small ad-hoc syntax to describe verb signatures. It is not a formal type system. It is a promise.
+
+The core shapes are:
+
+- `number` — any number (integer or float)
+- `integer` — an integer specifically
+- `string` — a string
+- `symbol` — a symbol
+- `boolean` — a boolean
+- `pair` — a pair
+- `list` — a list
+- `list-of-X` — a list whose elements are of type X
+- `procedure` — a callable
+- `any` — anything
+- `nil` — the nil value
+
+Composition:
+
+- `(a b c) -> d` — takes a, b, c; returns d
+- `(a b?)` — b is optional
+- `(a ...)` — variadic in a
+- `(:key val)` — a keyword-plist argument
+- `X | Y` — union of X or Y
+- `(-> X)` — a procedure that returns X (higher-order shape)
+
+Examples from real Motoi verbs:
+
+```
+car:            \"(pair) -> any\"
+map:            \"(procedure list ...) -> list\"
+substring:      \"(string integer integer?) -> string\"
+cortex/record:  \"(:subject :predicate :object :at? :source?) -> boolean\"
+apply:          \"(procedure list) -> any\"
+```
+
+The contract is not typechecked at runtime. If a verb's contract says `(number) -> number` and you pass a string, you will get whatever the verb does with a string — probably an error, sometimes a coercion, occasionally a silent surprise.
+
+The contract is useful because:
+
+1. **It documents the intended shape.** A reader knows what to pass without having to run the verb.
+2. **It documents the intended return.** A reader knows what they will get back without having to run the verb.
+3. **It is what the LLM was trained on.** When the model generates code, the contract shapes what it generates.
+4. **It is what a runtime-time checker could enforce.** Chapter 8 shows a `check-contract` macro that reads the contract field and enforces it if you want stricter semantics.
+
+If you write a contract, keep it honest. If your verb accepts nil for the second argument, say `(a nil?)` not `(a b?)`. If your verb sometimes returns a symbol and sometimes returns a number, say `(a) -> symbol | number`, not `(a) -> any` — the honest union tells the reader more than the vague catch-all.
+
+## 2.28 Deep dive — the examples field structure
+
+The examples field is a list. Each element is a record with two keyword fields: `:level` and `:code`.
+
+The `:level` is one of three symbols: `novice`, `intermediate`, `expert`. That vocabulary is closed; do not invent a fourth level.
+
+The `:code` is a string containing a runnable Scheme expression. Not a code block. Not a multi-line snippet with comments. One expression that a reader can copy, paste at the REPL, and see a result from.
+
+Here is what the three levels are supposed to convey:
+
+**Novice.** The verb used in isolation, with literal arguments. The reader can grasp the verb's shape from this single call. No auxiliary bindings, no composition with other verbs.
+
+For `map`:
+```scheme
+(map (lambda (x) (* x 2)) '(1 2 3))
+```
+
+**Intermediate.** The verb composed with one or two other common verbs. The reader sees how the verb fits into a small pattern.
+
+For `map`:
+```scheme
+(map + '(1 2 3) '(10 20 30))
+```
+
+**Expert.** The verb in a realistic idiomatic pattern from actual Motoi code. The reader sees how the verb is used in the wild.
+
+For `map`:
+```scheme
+(map (lambda (kv) (cons (car kv) (* (cdr kv) 2))) alist)
+```
+
+The three levels are a pedagogical arc. A reader who is unfamiliar reaches for novice. A reader who is fluent reaches for expert. A reader in the middle reaches for intermediate. Every verb should offer all three where possible.
+
+Some verbs are too simple for three levels. `newline` is `(newline)` and that is all there is to say. In that case one novice example is enough, and the intermediate and expert slots may be empty.
+
+The examples are what feeds Motoi Copilot's training corpus most heavily. The doc string tells the model what the verb does; the examples show the model what a call *looks like*. Both together are what let the model generate a correct call when a user asks.
+
+## 2.29 Deep dive — the perm field's role in trust
+
+The perm field is what the dispatcher checks. It is also what a cart auditor checks.
+
+If you are running a stranger's cart in your runtime, you can enumerate every verb the cart calls and ask what perm tier each is. Any verb at `financial` or `personal-data` tier is a call you want to know about before you approve the cart.
+
+Here is a small audit script:
+
+```scheme
+(define (audit-cart cart-form)
+  (define calls (extract-verb-calls cart-form))
+  (filter
+    (lambda (name)
+      (let ((perm (cdr (assoc 'perm (help name)))))
+        (member perm '(\"financial\" \"personal-data\" \"destructive\"))))
+    calls))
+```
+
+Given a cart's form, `extract-verb-calls` walks the tree and returns every verb name. The filter keeps only the ones whose perm is in the sensitive list. You get back a list of the risky calls.
+
+Motoi's sandbox uses this same logic. When a cart tries to run a `financial` verb, the dispatcher checks whether the cart's manifest declares that tier. If it does not, the call is refused. The perm field is the coordination point between the cart's manifest and the runtime's gate.
+
+This is why the perm vocabulary is closed. Eight tiers is small enough that a cart's manifest can list them explicitly. Two hundred tiers would be unmanageable. Motoi picked eight; the audit story is manageable at eight.
+
+The perm field also composes with the powerTier field. Perm is *may this caller fire?*; powerTier is *may the substrate afford it right now?*. A verb at `perm: 'animate'` and `powerTier: 'animate'` is a motion verb that requires both permission and substrate power. If the substrate has thrown the animate power tier off (say, the tab is backgrounded), the verb is skipped even if perm would allow it.
+
+Chapter 16 walks the sandbox layer in more depth. For this chapter, the takeaway is: the perm field is not decoration. It is the coordination point between authors, dispatchers, and sandboxes.
+
+## 2.30 Deep dive — the source pointer's format
+
+The source field is a string of the form `path:line`. The path is relative to the runtime root. The line is a 1-indexed source line number.
+
+Examples:
+
+```
+car:              \"src/base.js:73\"
+cortex/query:     \"lib/ai/cortex-io.js:121\"
+composer/slider:  \"lib/composer/widgets.js:42\"
+```
+
+The pointer is populated at registration time. Whichever module registered the verb was responsible for including a source string. In `src/base.js` you will see registration calls that include `source: 'src/base.js:73'` and similar.
+
+Ideally the source pointer would be auto-generated from a stack trace at registration. Motoi does not do this — the source pointer is a manually maintained string. This has a downside: if a verb's implementation moves within its file, the line number may drift. The path stays right; the line may not.
+
+There is a project note (`engineering/AUTO-SOURCE-POINTERS.slat`, planned) to auto-derive source pointers from the registration call site. Until that lands, the pointers are honest-but-approximate.
+
+For introspection: the source pointer tells you *where to look*, not *what the impl is*. If you need the actual implementation, go read the file. If the line number is slightly off, search within the file for the verb's registration.
+
+## 2.31 Deep dive — the tier field's roadmap
+
+The tier field is `core`, `extended`, or `experimental`. But those are labels; what do they mean for the roadmap?
+
+**Core.** Frozen. Never renaming. Never changing arity. The training corpus for Motoi Copilot depends on core verbs being stable across releases. If a core verb changes, the model has to be retrained. So they do not change.
+
+The core set was frozen in July 2026 at 335 verbs (see `project_motoi_core_verbs_frozen_2026_07_16.md` in the memory notes). That set is what the model learned. Additions to core are rare and require Alfred's explicit approval.
+
+**Extended.** Stable, but not yet trained on. Extended verbs may change name or arity between releases. Carts using extended verbs are advised to pin the runtime version.
+
+Composer verbs (`composer/slider`, `composer/piano-roll`, etc.) are currently at `extended` tier. They will be promoted to `core` after the next training fold includes them.
+
+**Experimental.** May change without notice. Do not build production carts on top of these. Reserved for verbs that are being prototyped and whose contract is still being worked out.
+
+The LLM-augmented verbs from Chapter 13 (`what-is`, `explain`, `reason-about`) are at `experimental` tier while the LLM binding matures. They will be promoted after the ergonomics settle.
+
+If you are auditing a cart for durability, count how many extended and experimental verbs it uses. A cart with only core verbs will survive any Motoi release. A cart with experimental verbs is a snapshot in time.
+
+## 2.32 Deep dive — the atom field's grouping
+
+The atom field is a fine-grained category label. It exists so the reference manual can group related verbs together in its table of contents.
+
+Some common atoms:
+
+- `paint-primitive` — verbs like `paint-dot`, `paint-line`, `paint-circle`
+- `synth-note` — verbs like `note`, `chord`, `sequence`
+- `card-lifecycle` — verbs like `card/open`, `card/close`, `card/move`
+- `cortex-io` — verbs like `cortex/read`, `cortex/write`
+- `list-op` — verbs like `map`, `filter`, `fold`
+
+The atom is nil for most base verbs (they are just \"base\" verbs, no finer category needed). It is populated when a namespace has enough verbs to benefit from sub-grouping.
+
+The reference manual uses atoms to render sub-tables of contents. The training corpus uses atoms to group related examples for the model. The introspection layer exposes the atom on the record, and you can use it in your own queries:
+
+```scheme
+(filter
+  (lambda (n)
+    (equal? \"synth-note\" (cdr (assoc 'atom (help n)))))
+  (map car (snapshot-registry)))
+;; => (note chord sequence pattern rest strike)
+```
+
+That is every verb in the synth-note atom.
+
+## 2.33 What the fields collectively enable
+
+Take all eleven public fields together and you have enough to:
+
+- Render a reference-manual entry
+- Render a REPL help card
+- Generate a training pair for the LLM
+- Audit a cart's perm usage
+- Group verbs by namespace or atom for a table of contents
+- Filter verbs by tier for durability audits
+- Filter verbs by since for release-note generation
+- Point a reader to the source when the metadata is insufficient
+- Enforce the contract at runtime if you wire in a checker
+
+Every one of those uses reads from the same record. Every one of those uses is available to any programmer. There is no privileged tooling that has access to the record and no verb layer that does not.
+
+This is what \"the record is universal\" means in practice. The universality is why the record is worth the field-by-field attention we gave it in this chapter.
+
+## 2.34 A closing story
+
+Here is a story from Motoi's development.
+
+Early in the project the metadata records were partial. `car` had a doc string but no examples. `cons` had a contract but no arity. `cortex/record` had none of the above.
+
+The introspection layer worked, but it worked half. `(help 'car)` returned a record with three of ten fields filled. `(help 'cons)` returned a record with two of ten. Programmers using the REPL got shrugs where they expected answers.
+
+At some point Alfred pushed a rule: no verb ships without a full metadata record. Every registration call had to include doc, contract, arity, and at least one novice example. The registry validation was extended (informally at first) to nag on missing fields.
+
+Within a week the introspection layer went from half-useful to fully useful. Every `(help ...)` call returned a complete record. The REPL felt different — questions had answers. The training corpus, when it was generated, had complete pairs on every verb.
+
+The lesson: the metadata record is a discipline, not a feature. The runtime does not enforce it. The culture does. Every author who fills in the fields is contributing to a language that answers questions. Every author who skips the fields is contributing to a language that shrugs.
+
+Fill in the fields. Every verb, every time. The reader on the other end will thank you.
+
+## 2.35 To Chapter 3
+
+You have the alphabet. Chapter 3 will show you how to fetch specific letters without pulling the whole word every time. `describe`, `type-of`, and their family are the ergonomic layer above `help` — for the times when you do not want the whole record but a specific projection of it.
+
+Turn the page.
+
+## 2.36 A worked audit — building a metadata-quality report
+
+Let me show you a small program that uses the introspection surface to audit the metadata quality of every verb in the runtime.
+
+```scheme
+(define (audit-metadata)
+  (let* ((all (map car (snapshot-registry)))
+         (records (map help all)))
+    (list
+      :total-verbs (length all)
+      :has-doc (length (filter (lambda (r) (cdr (assoc 'doc r))) records))
+      :has-contract (length (filter (lambda (r) (cdr (assoc 'contract r))) records))
+      :has-examples (length (filter (lambda (r) (not (null? (cdr (assoc 'examples r))))) records))
+      :has-source (length (filter (lambda (r) (cdr (assoc 'source r))) records))
+      :has-since (length (filter (lambda (r) (cdr (assoc 'since r))) records)))))
+```
+
+Call it:
+
+```scheme
+(audit-metadata)
+;; => (:total-verbs 512 :has-doc 487 :has-contract 452 :has-examples 401 :has-source 500 :has-since 380)
+```
+
+Now you have a quality report. 512 verbs total. 487 have docs (25 do not). 452 have contracts (60 do not). 401 have examples (111 do not). 500 have source pointers (12 do not). 380 have since tags (132 do not).
+
+That is data. That is actionable. You can go find the 111 verbs without examples and file bugs, or write examples yourself. The introspection surface makes the whole language auditable in one small script.
+
+Extend the audit to name the offenders:
+
+```scheme
+(define (verbs-missing-doc)
+  (filter
+    (lambda (name)
+      (not (cdr (assoc 'doc (help name)))))
+    (map car (snapshot-registry))))
+```
+
+Call it, get a list of names, and start filling in doc strings.
+
+This is what having a universal metadata record buys you. The language is queryable in aggregate. Every metadata gap is findable. Every documentation debt is measurable.
+
+## 2.37 The record for aliases and deprecations
+
+Some verbs are aliases for other verbs. `cortex/remember` is an older name for `cortex/write`. `car` has no alias, but some verbs do. The record captures this via two fields on the dispatcher layer:
+
+- `deprecated: true` — the verb still works but is not the preferred name
+- `aliasFor: \"cortex/write\"` — the canonical name that this alias points to
+
+When you introspect a deprecated alias:
+
+```scheme
+(help 'cortex/remember)
+;; => ((name . \"cortex/remember\")
+;;     (doc . \"[deprecated] Write a value to Cortex. Use cortex/write.\")
+;;     (aliasFor . \"cortex/write\")
+;;     (deprecated . #t)
+;;     ...)
+```
+
+The introspection layer surfaces the deprecation. The doc string is prefixed with `[deprecated]` so a reader sees it. The `aliasFor` field points to the canonical name so a reader knows what to migrate to.
+
+The dispatcher does not refuse deprecated aliases — that would break old carts. But every deprecated call is a candidate for migration. A linter that reads the registry can flag every deprecated verb in a cart and suggest the canonical replacement.
+
+The alias/deprecation machinery is metadata all the way. There is no separate deprecation registry, no separate alias table. Just fields on the record.
+
+## 2.38 One more table — audit priorities
+
+If you are auditing a new module for metadata quality, here is the priority order for checking fields:
+
+1. **perm** (critical) — if missing, the dispatcher may treat it as read and let dangerous verbs slip past
+2. **doc** (high) — a verb without a doc is a verb no one can use without reading source
+3. **arity** (high) — the dispatcher's arity check depends on this; missing arity means malformed calls slip through
+4. **contract** (high) — the reader has to guess without it
+5. **examples** (medium) — three examples is ideal; one is acceptable; zero is a bug
+6. **namespace** (low) — inferable from the name in many cases
+7. **tier** (low) — informational; default is fine
+8. **source** (low) — helpful but not critical
+9. **since** (low) — helpful for release notes but not critical
+10. **atom** (very low) — optional; nil is fine
+
+Fix in this order and the introspection layer improves fastest.
+
+## 2.39 Chapter 2 in one sentence
+
+Every verb in Motoi carries the same eleven-field metadata record, populated at registration, readable from any Scheme prompt, and load-bearing for the REPL, the reference manual, the LLM training corpus, and every audit tool that will ever exist over the language.
+
+Now turn to Chapter 3.
+")

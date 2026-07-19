@@ -1,0 +1,343 @@
+(chapter
+  :book "Book of Jesse"
+  :chapter-number 11
+  :title "Macros as composition — beat languages, animation DSLs, control flow"
+  :audience "programmer-fluent-in-other-languages"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-of-jesse-author-agent"
+     :cli-verified #t)
+  :prose
+"# Chapter 11 — Macros as composition
+
+This is one of the two chapters where Motoi is at its most distinct. If macros are new to you, you'll leave with a working sense of what they buy. If you already know macros from Common Lisp or Clojure or Rust, this chapter is about *how Motoi's macros compose into DSLs* — beat languages, animation DSLs, state machines — and why that composition is one of Motoi's best affordances.
+
+A macro is not a function. It is a *transformation from source code to source code*. The transformation happens at read time, before the program runs. Whatever the macro expands into is what the runtime sees.
+
+This distinction matters because it lets you *invent syntax*. Not fake-invent-with-string-templates. Real invent, where the language reader turns your syntax into runtime forms without any overhead.
+
+## 11.1 The first macro — `unless`
+
+Motoi's core has `if`, `cond`, `when`. It does not have `unless`. Let's add it.
+
+```scheme
+(define-syntax unless
+  (syntax-rules ()
+    ((_ test body ...)
+     (if (not test) (begin body ...) #f))))
+```
+
+Now:
+
+```scheme
+(unless #f (display \"body ran\"))
+```
+
+Verified:
+
+```
+$ bin/motoi eval '(define-syntax unless (syntax-rules () ((_ test body ...) (if (not test) (begin body ...) #f)))) (unless #f 42)'
+42
+```
+
+Read the macro. `(define-syntax NAME (syntax-rules () (PATTERN TEMPLATE) ...))`. The pattern `(_ test body ...)` matches any form starting with the macro's name, followed by anything called `test`, followed by any number of things collected as `body ...`. The `_` is the macro's own name — a wildcard for `unless`.
+
+The template is the replacement. Wherever `test` appears in the template, the matched expression goes; wherever `body ...` appears, the matched sequence splices in.
+
+At read time, `(unless #f 42)` becomes `(if (not #f) (begin 42) #f)`, which becomes `(if #t 42 #f)`, which evaluates to `42`.
+
+You did not write a function. You wrote a transformation. The runtime never sees the word `unless` at all.
+
+## 11.2 Why not just write a function?
+
+Because functions evaluate their arguments before running.
+
+```scheme
+(define (unless-fn test body-fn) (if (not test) (body-fn)))
+
+(unless-fn #f (lambda () (display \"body ran\")))
+```
+
+That works, but you have to wrap the body in a lambda. The macro form doesn't.
+
+```scheme
+(unless #f (display \"body ran\"))
+```
+
+The macro rewrites the source; the body is placed inside the expansion; nothing gets called until the runtime hits it. This matters when the body has side effects, when it depends on the test having been false, or when performance-sensitive code would rather not allocate a lambda per call.
+
+## 11.3 Swap — the swap that isn't there
+
+Motoi has `set!` for mutation. It does not have `swap!`. Let's write it.
+
+```scheme
+(define-syntax swap!
+  (syntax-rules ()
+    ((_ a b)
+     (let ((tmp a))
+       (set! a b)
+       (set! b tmp)))))
+```
+
+Verified:
+
+```
+$ bin/motoi eval '(define-syntax swap! (syntax-rules () ((_ a b) (let ((tmp a)) (set! a b) (set! b tmp))))) (define x 1) (define y 2) (swap! x y) (list x y)'
+(2 1)
+```
+
+Notice the `let` inside. `tmp` is a fresh variable. If you tried to write `swap!` as a function, you'd have to pass `a` and `b` *by reference*, which Motoi doesn't do — variables are captured by value in a function call. Macros work at the syntax level, so they can insert `set!` into the caller's scope.
+
+The important thing: `tmp` will not accidentally collide with any `tmp` the caller has. This is `syntax-rules`'s *hygiene* at work. The expander renames the macro's introduced identifiers so they don't capture names from the caller. Common Lisp's `defmacro` doesn't do this automatically; you have to `gensym`. Motoi's `syntax-rules` handles it for you.
+
+## 11.4 `and` and `or` as macros
+
+Motoi's `and` and `or` are macros, not functions. They have to be — they short-circuit.
+
+`and`:
+
+```scheme
+(and)                       ; #t
+(and x)                     ; x
+(and x y ...)               ; if x is #f, #f; else (and y ...)
+```
+
+If `and` were a function, `(and (long-computation) #f)` would compute the long thing before discovering it doesn't matter. As a macro, `and` expands to nested `if`s that stop at the first `#f`.
+
+Try:
+
+```
+$ bin/motoi eval '(and 1 2 3)'
+3
+$ bin/motoi eval '(and 1 #f 3)'
+#f
+$ bin/motoi eval '(or #f #f 42)'
+42
+```
+
+`and` returns the last truthy value; `or` returns the first truthy value.
+
+Here's how `or` could be written:
+
+```scheme
+(define-syntax my-or
+  (syntax-rules ()
+    ((_) #f)
+    ((_ a) a)
+    ((_ a b ...) (let ((tmp a)) (if tmp tmp (my-or b ...))))))
+```
+
+Two patterns. The recursion in the template — `(my-or b ...)` — is *not* runtime recursion; it's macro-expansion recursion. The macro keeps rewriting itself, one argument at a time, until it hits the base case. By the time the runtime sees it, it's a nest of `let`+`if`.
+
+## 11.5 A `let-if` — bind and test in one form
+
+Sometimes you want `let` and `if` together:
+
+```scheme
+(define-syntax if-let
+  (syntax-rules ()
+    ((_ ((name expr)) then else)
+     (let ((name expr))
+       (if name then else)))))
+
+(if-let ((x (find something)))
+  (display (list \"found \" x))
+  (display \"not found\"))
+```
+
+The macro binds the expression, tests the bound name, branches. Read the pattern carefully: `((name expr))` is doubled parens for the binding-list shape. This matches Scheme's `let`. If you tried to use single parens, the macro would look for a different shape.
+
+## 11.6 A DSL — the beat language
+
+Now the fun part. Motoi's audio kit gives you `synth/kit` for drum sounds. Playing a beat sequence with function calls looks like this:
+
+```scheme
+(synth/kit 'kick  0.15)
+(synth/kit 'snare 0.15)
+(synth/kit 'kick  0.15)
+(synth/kit 'snare 0.15)
+```
+
+Legible but noisy. Let's write a beat DSL:
+
+```scheme
+(define-syntax beats
+  (syntax-rules ()
+    ((_ (hit ...) ...)
+     (begin (begin (synth/kit 'hit 0.15) ...) ...))))
+
+;; usage
+(beats
+  (kick snare)
+  (kick snare)
+  (kick kick snare)
+  (kick snare))
+```
+
+Each inner list is a bar; each element is a drum hit. The macro expands into nested `begin`s that play each hit in order.
+
+Because this is a macro, there's no runtime overhead. The reader turns your `(beats ...)` into `(begin (begin (synth/kit 'kick 0.15) (synth/kit 'snare 0.15)) ...)` at load time.
+
+You just invented syntax for describing beats. Verify a component call:
+
+```
+$ bin/motoi eval \"(synth/kit 'kick 0.2)\"
+ok
+```
+
+The `beats` macro expands into calls exactly like this. The reader made your DSL a thin wrapper over the base kit.
+
+For a more elaborate beat language — one with rests, dynamics, timing — the pattern extends:
+
+```scheme
+(define-syntax beat-line
+  (syntax-rules (- x)
+    ((_) (begin))
+    ((_ - rest ...) (begin (rest-16th) (beat-line rest ...)))
+    ((_ x rest ...) (begin (synth/kit 'kick 0.1) (beat-line rest ...)))
+    ((_ s rest ...) (begin (synth/kit 'snare 0.1) (beat-line rest ...)))))
+
+;; usage: 16 sixteenth notes; x = kick, s = snare, - = rest
+(beat-line x - s - x - s -   x - s - x s s -)
+```
+
+The `syntax-rules` literals `- x` (in the header `(- x)`) mean those symbols are treated as keywords, not pattern variables. The macro dispatches on which symbol appears.
+
+This is a beat pattern language, five macros deep. It reads like drum tablature. It compiles at read time to a flat sequence of drum calls. No lookup, no interpretation, no penalty.
+
+## 11.7 An animation DSL
+
+Motoi's animation kit gives you `motion/move-to`, `fade`, `slide`. The primitives are fine, but composing them for a scene is repetitive:
+
+```scheme
+(motion/move-to sprite-a 100 50 0.5)
+(motion/move-to sprite-a 100 100 0.5)
+(fade sprite-b 'in 1.0)
+(motion/move-to sprite-b 200 100 0.5)
+```
+
+An animation DSL:
+
+```scheme
+(define-syntax scene
+  (syntax-rules (move-to fade-in fade-out then)
+    ((_ then rest ...) (scene rest ...))
+    ((_ (sprite move-to x y over t) rest ...)
+     (begin (motion/move-to sprite x y t)
+            (scene rest ...)))
+    ((_ (sprite fade-in over t) rest ...)
+     (begin (fade sprite 'in t)
+            (scene rest ...)))
+    ((_ (sprite fade-out over t) rest ...)
+     (begin (fade sprite 'out t)
+            (scene rest ...)))
+    ((_) (begin))))
+
+;; usage
+(scene
+  (hero move-to 100 50 over 0.5)
+  (hero move-to 100 100 over 0.5)
+  then
+  (moon fade-in over 1.0)
+  (moon move-to 200 100 over 0.5))
+```
+
+The `then` keyword is a comment that reads well and does nothing. The `over` keyword marks the time parameter. The macro is a small state machine that dispatches on the first symbol of each clause.
+
+This is what \"beat languages, animation DSLs\" means in the chapter title. You're not building a new language runtime. You're building a *reader-time syntax* over the base runtime. The end user reads clean domain-specific text; the runtime sees flat calls.
+
+## 11.8 A state-machine DSL
+
+State machines are ubiquitous: game entity behavior, protocol handlers, UI flow. Let's write a state-machine DSL:
+
+```scheme
+(define-syntax state-machine
+  (syntax-rules (state on ->)
+    ((_ name (state s (on ev -> next) ...) ...)
+     (define name
+       (let ((cur 's-initial))       ; you'd pick the first state
+         (lambda (event)
+           (case cur
+             ((s) (case event ((ev) (set! cur 'next)) ...)) ...))))))
+;; illustrative — the exact structure depends on your needs
+```
+
+The macro turns:
+
+```scheme
+(state-machine door
+  (state closed (on push -> open))
+  (state open   (on close -> closed)))
+```
+
+Into a closure with a `cur` variable and a case-dispatch on state × event. At the call site you have declarative state machines. At runtime you have a case dispatch.
+
+## 11.9 The `->` and `->>` threading macros (writing them ourselves)
+
+Chapter 3 talked about Clojure's `->` and `->>`. Motoi's base doesn't have them. Here's `->`:
+
+```scheme
+(define-syntax ->
+  (syntax-rules ()
+    ((_ x) x)
+    ((_ x (fn args ...) rest ...) (-> (fn x args ...) rest ...))
+    ((_ x fn rest ...) (-> (fn x) rest ...))))
+```
+
+Now:
+
+```scheme
+(-> 5 (+ 3) (* 2))
+;; expands to (* (+ 5 3) 2)
+;; which is 16
+```
+
+Ten lines, and you've added Clojure's core convenience to your program. `->>` is the same idea, threading to the *last* position:
+
+```scheme
+(define-syntax ->>
+  (syntax-rules ()
+    ((_ x) x)
+    ((_ x (fn args ...) rest ...) (->> (fn args ... x) rest ...))
+    ((_ x fn rest ...) (->> (fn x) rest ...))))
+```
+
+Both compose. Both are transparent — they expand to nested calls that the runtime doesn't know were ever \"threaded.\"
+
+## 11.10 Hygiene in one paragraph
+
+`syntax-rules` renames every identifier the macro *introduces* so it doesn't collide with identifiers in the *caller's* scope. If your macro binds `tmp` inside a `let`, that `tmp` cannot capture or be captured by any `tmp` at the call site. This is the single largest safety difference between `syntax-rules` and Common Lisp's `defmacro`. It also constrains what macros can do — you can't intentionally introduce a name for the caller to see. When you need to, you drop into `syntax-case` (module) and use `datum->syntax` to build unhygienic identifiers.
+
+For 90% of macros, hygiene is what you want and `syntax-rules` gets it right for free.
+
+## 11.11 The composition claim
+
+The chapter title says *macros as composition*. What does that mean?
+
+Once you write a DSL as a macro, that DSL *composes with the rest of the language*. You can:
+
+- Put a `(beat-line ...)` inside a `(let ...)`.
+- Wrap a `(scene ...)` in an `(if ...)`.
+- Generate DSL calls programmatically with `(map ...)`.
+
+Because the DSL expands to base-language calls, the DSL is *not walled off*. There is no boundary between \"DSL mode\" and \"programming mode.\" You can call functions from within the DSL and use the DSL from within functions. This is the composition you don't get from external DSLs (regex, SQL, format strings) that live behind an opaque parser.
+
+This is why Lispers keep writing about macros. Not because they're clever. Because they compose.
+
+## 11.12 What to remember
+
+- A macro is a source-to-source transformation at read time.
+- `syntax-rules` is hygienic pattern-matching, sufficient for most macros.
+- `syntax-case` (module) gives full `defmacro`-style power when you need it.
+- Macros let you invent syntax that compiles into base-language forms.
+- Beat languages, animation DSLs, state machines, threading operators — all are macros.
+- Macros compose with the rest of the language, unlike external DSLs.
+
+If you take one thing from this chapter: *when a repeated pattern shows up in your code, ask whether it wants to be a function or a macro*. Functions abstract over *values*. Macros abstract over *shape*. Both are cheap in Motoi.
+
+Next chapter: sound and motion on one timeline.
+")

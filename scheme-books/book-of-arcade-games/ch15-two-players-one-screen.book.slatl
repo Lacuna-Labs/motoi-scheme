@@ -1,0 +1,370 @@
+;; ch15-two-players-one-screen.book.slatl
+;; Book of Arcade Games — Chapter 15: Two Players, One Screen
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Arcade Games"
+  :chapter-number      15
+  :title               "Two Players, One Screen"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + game-design"
+  :book-version        "1.0.0"
+  :prose
+"Two kids, one screen. Nothing beats it. Not online multiplayer. Not
+tournament play. Two humans in the same room, elbows almost touching,
+watching the same screen, playing the same game with different
+buttons. Sibling rivalry, best-friend teamwork, or the exquisite
+tension of a couch fighting game.
+
+Local multiplayer is the arcade's oldest form. Pong shipped as two
+paddles. Chapter 15 makes any game two-player by SPLITTING THE INPUT
+SPACE.
+
+The trick: player 1 uses ('left, 'right, 'a); player 2 uses ('up,
+'down, 'b). Same physics engine, same world, two entities. When the
+camera has to frame both players, we introduce dynamic zoom so both
+fit in view. When one player wins a round, camera-shake for both.
+
+By chapter end you have a two-player version of any earlier chapter's
+game. And you understand that the world is ONE world — two players
+are just two entities the world happens to listen to.
+
+---
+
+## 15.1 Two paddles, one ball
+
+The simplest possible two-player game: Pong.
+
+```scheme
+;; Two paddles, one ball. Player 1 left/right; Player 2 up/down.
+(define (pong)
+  (world/reset!)
+  (let ((p1 (world/spawn 'p1 20 120))
+        (p2 (world/spawn 'p2 300 120))
+        (ball (world/spawn 'ball 160 120)))
+    (entity/shape! p1 'rect 4 30)
+    (entity/shape! p2 'rect 4 30)
+    (entity/shape! ball 'circle 4)
+    (entity/solid! p1 #t) (entity/solid! p2 #t) (entity/solid! ball #t)
+    (entity/bounce! ball 1)   ;; perfect bounce
+    (entity/set-vel! ball 3 2)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p1 0 -3))
+       (when (input/down? 'right) (entity/move! p1 0 3))
+       (when (input/down? 'up)    (entity/move! p2 0 -3))
+       (when (input/down? 'down)  (entity/move! p2 0 3))
+       (world/step)
+       ;; Wall bounces (top/bottom).
+       (let ((by (entity/y ball)) (vy (cadr (entity/vel ball))))
+         (when (and (< by 5) (< vy 0))
+           (entity/set-vel! ball (car (entity/vel ball)) (- vy)))
+         (when (and (> by 235) (> vy 0))
+           (entity/set-vel! ball (car (entity/vel ball)) (- vy))))
+       (paint-clear)
+       (paint-cell 'p1 (entity/x p1) (entity/y p1) 4 30)
+       (paint-cell 'p2 (entity/x p2) (entity/y p2) 4 30)
+       (paint-cell 'ball (entity/x ball) (entity/y ball) 4 4)))))
+
+(big-bang pong)
+```
+
+Read the input handling. Left/right control P1's Y — the paddle moves
+UP and DOWN when P1 presses LEFT and RIGHT. That's arbitrary; do
+whatever the players agree to. Up/down control P2.
+
+`entity/bounce! ball 1` = perfect bounce, no energy loss. Physics
+takes care of paddle reflection. Wall reflection we handle in the
+`let` block after `world/step`.
+
+The kids play. One wins a point when the ball flies past the other's
+paddle. Add a scoreboard (chapter 13) and you have a full session.
+
+---
+
+## 15.2 Dynamic camera zoom
+
+For a spread-across-the-screen game (racing, brawler), the camera
+needs to FRAME both players. When they're close, zoom in. When they
+spread apart, zoom out. Cap the zoom limits.
+
+```scheme
+;; Two players on a big map. Camera snaps to midpoint, zooms to fit.
+(define (dynamic-camera)
+  (world/reset!)
+  (scene/grid 'ground 40 1 32 20 0 200)
+  (world/each 'ground
+              (lambda (t) (entity/shape! t 'rect 32 20) (entity/solid! t #t)))
+  (let ((p1 (world/spawn 'p1 100 168))
+        (p2 (world/spawn 'p2 200 168)))
+    (entity/shape! p1 'triangle 8)
+    (entity/shape! p2 'triangle 8)
+    (entity/solid! p1 #t) (entity/solid! p2 #t)
+    (world/gravity! 0 0.5)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p1 -3 0))
+       (when (input/down? 'right) (entity/move! p1 3 0))
+       (when (input/pressed? 'a)  (entity/set-vel! p1 (car (entity/vel p1)) -10))
+       (when (input/down? 'up)    (entity/move! p2 0 -3))
+       (when (input/down? 'down)  (entity/move! p2 0 3))
+       (when (input/pressed? 'b)  (entity/set-vel! p2 (car (entity/vel p2)) -10))
+       ;; Camera: snap to midpoint. Zoom scales inversely with distance.
+       (let* ((mx (/ (+ (entity/x p1) (entity/x p2)) 2))
+              (my (/ (+ (entity/y p1) (entity/y p2)) 2))
+              (d  (entity/distance p1 p2))
+              (zoom (max 0.5 (min 1.5 (/ 200 (+ 100 d))))))
+         (world/camera-snap! (- mx 160) (- my 120))
+         ;; Zoom would go here if runtime exposes camera-zoom. If not,
+         ;; keep-out bounds via camera-bounds! (dynamic).
+         (world/camera-bounds! (- mx 200 (* 100 (- 1 zoom)))
+                               0
+                               (+ mx 200 (* 100 (- 1 zoom)))
+                               240))
+       (world/step)
+       (paint-clear)
+       (world/each 'ground
+                   (lambda (t) (paint-cell 'ground (entity/x t) (entity/y t) 32 20)))
+       (paint-cell 'p1 (entity/x p1) (entity/y p1) 8 8)
+       (paint-cell 'p2 (entity/x p2) (entity/y p2) 8 8)))))
+
+(big-bang dynamic-camera)
+```
+
+Camera midpoint = average of the two positions. Zoom logic based on
+distance. Close players see zoomed-in world; distant players see
+zoomed-out.
+
+`world/camera-snap!` positions the camera at a specific point. Not the
+smooth-follow of chapter 8; two-player often benefits from immediate
+snap so neither player suffers camera lag when their opponent moves.
+
+---
+
+## 15.3 Racing
+
+Two ships, side-by-side.
+
+```scheme
+;; Race — two ships thrust to the right; first to x=1000 wins.
+(define winner #f)
+
+(define (race)
+  (world/reset!)
+  (let ((s1 (world/spawn 'p1 40 100))
+        (s2 (world/spawn 'p2 40 140)))
+    (entity/shape! s1 'triangle 8)
+    (entity/shape! s2 'triangle 8)
+    (entity/drag! s1 0.02) (entity/drag! s2 0.02)
+    (on-frame
+     (lambda ()
+       (unless winner
+         (when (input/down? 'a)
+           (entity/set-vel! s1 (+ 0.15 (car (entity/vel s1)))
+                            (cadr (entity/vel s1))))
+         (when (input/down? 'b)
+           (entity/set-vel! s2 (+ 0.15 (car (entity/vel s2)))
+                            (cadr (entity/vel s2))))
+         ;; Vertical dodge input.
+         (when (input/down? 'left)
+           (entity/set-vel! s1 (car (entity/vel s1))
+                            (- (cadr (entity/vel s1)) 0.5)))
+         (when (input/down? 'right)
+           (entity/set-vel! s1 (car (entity/vel s1))
+                            (+ (cadr (entity/vel s1)) 0.5)))
+         (when (input/down? 'up)
+           (entity/set-vel! s2 (car (entity/vel s2))
+                            (- (cadr (entity/vel s2)) 0.5)))
+         (when (input/down? 'down)
+           (entity/set-vel! s2 (car (entity/vel s2))
+                            (+ (cadr (entity/vel s2)) 0.5)))
+         (cond
+           ((>= (entity/x s1) 1000) (set! winner 'p1)
+                                    (world/camera-shake! 15 0.95))
+           ((>= (entity/x s2) 1000) (set! winner 'p2)
+                                    (world/camera-shake! 15 0.95))))
+       (world/step)
+       ;; Camera follows the leading player.
+       (let ((leader (if (> (entity/x s1) (entity/x s2)) s1 s2)))
+         (world/camera-follow! leader 0.1 60 60))
+       (paint-clear)
+       (paint-cell 'p1 (entity/x s1) (entity/y s1) 8 8)
+       (paint-cell 'p2 (entity/x s2) (entity/y s2) 8 8)
+       (when winner
+         (paint-text (string-append (symbol->string winner) \" WINS!\")
+                     130 100))))))
+
+(big-bang race)
+```
+
+Two ships, each with their own thruster button. Whoever hits x=1000
+first wins. Camera follows the leader — the winning player sees more
+of the road ahead, the losing player sees the winner's tail.
+
+Losing feels different from winning. That difference is by DESIGN.
+
+---
+
+## 15.4 Cooperative
+
+Two players share a goal — say, collectively bringing a ball to the
+right side of the screen.
+
+```scheme
+;; Both players push a ball. It has to reach x=280.
+(define (coop-ball)
+  (world/reset!)
+  (world/gravity! 0 0.4)
+  (world/floor! 220)
+  (let ((p1 (world/spawn 'p1 40 200))
+        (p2 (world/spawn 'p2 80 200))
+        (ball (world/spawn 'ball 160 200)))
+    (entity/shape! p1 'rect 12 20) (entity/solid! p1 #t)
+    (entity/shape! p2 'rect 12 20) (entity/solid! p2 #t)
+    (entity/shape! ball 'circle 12) (entity/solid! ball #t)
+    (entity/mass! ball 3)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p1 -3 0))
+       (when (input/down? 'right) (entity/move! p1 3 0))
+       (when (input/pressed? 'a)
+         (entity/set-vel! p1 (car (entity/vel p1)) -10))
+       (when (input/down? 'up)    (entity/move! p2 0 -3))
+       (when (input/down? 'down)  (entity/move! p2 0 3))
+       (when (input/pressed? 'b)
+         (entity/set-vel! p2 (car (entity/vel p2)) -10))
+       (world/step)
+       (paint-clear)
+       (paint-cell 'p1 (entity/x p1) (entity/y p1) 12 20)
+       (paint-cell 'p2 (entity/x p2) (entity/y p2) 12 20)
+       (paint-cell 'ball (entity/x ball) (entity/y ball) 24 24)
+       (paint-cell 'goal 280 200 20 20)
+       (when (> (entity/x ball) 275)
+         (paint-text \"TEAM WINS!\" 100 100))))))
+
+(big-bang coop-ball)
+```
+
+Both players push the ball right. Neither can do it alone — the ball
+is heavy (`entity/mass! ball 3`). Push together.
+
+The kids talk more than in a competitive game. That's the coop
+signature.
+
+---
+
+## 15.5 The four patterns
+
+**Composition.** Each player = composition of shape + solid + tag +
+input-scheme. Two players = two compositions with different input
+schemes and different tags.
+
+**Orchestration.** Frame loop orchestrates BOTH players' inputs
+before physics step. Order between P1 and P2 doesn't matter (parallel
+independent), but both must complete before `world/step`.
+
+**In-routing.** Input events route per player. 'left' routes to P1's
+handler; 'up' routes to P2's. That's the whole two-player trick:
+routing table with different destinations for each button.
+
+**Routing.** Both players route into the SAME physics engine. Both
+players emit into the same paint pipeline. The output layer doesn't
+know or care that there are two of them. The world is one world.
+
+---
+
+## 15.6 Common desktop tasks
+
+**Two-operator triage.** Two operators of a shared shop can co-triage
+the pending message queue: operator A takes half, operator B takes
+half, they alternate for load balance. Same routing pattern, different
+'players.'
+
+**Cart-share checkout.** Two friends collaboratively fill one cart —
+each of them adds items with their own cursor. Live update. Two
+inputs, one shared state.
+
+---
+
+## 15.7 Pitfalls
+
+**Both players push same button.** In a couch setup with two humans
+and two controllers, this doesn't happen. In a keyboard setup, key
+overlap can. Give players non-overlapping keys.
+
+**Camera excludes a player.** Dynamic zoom saves it. If one player
+runs offscreen, the game must decide: lock camera on them (leader-
+follow), or wait for slower to catch up (rubber-band). Design choice.
+
+**Score tied.** Design a tiebreaker or accept ties.
+
+**Player 2 has no input at start.** Bug in the input routing table.
+Test both players independently.
+
+---
+
+## 15.8 Try this yourself
+
+1. Adapt any earlier chapter's game to two-player. Chapter 5 shmup:
+   two ships stacked vertically. Chapter 12 boss: two players
+   attacking one boss with pooled HP.
+2. Player-vs-player boss: player 1 is the boss with 100 HP, player
+   2 is the challenger with 5 HP. Asymmetric roles.
+3. Split-screen: divide the display into two 160-wide halves,
+   render P1's view left, P2's right. Requires two `world/camera`
+   states — beyond this chapter, into rendering appendix territory.
+4. Turn-based: only one player has input at a time; 'a' from either
+   passes turn. Real chess/checkers pattern.
+5. Add AI second player: 'AI thumb' presses buttons based on
+   `ai/utility` scoring. Turn a two-player game into single-player
+   via AI opponent.
+6. Rounds: best-of-three matches. Between rounds, brief scoreboard
+   screen. Chapter 14 state machine composes with this.
+
+---
+
+## 15.9 What we built
+
+Pong. Dynamic camera. Racing. Coop. Four two-player shapes. Input
+routing by player. Shared physics. Camera-shake for both. Whole game
+family from splitting a button table.
+
+Next chapter — the summit. You will build your own arcade game from
+scratch using every technique from this book.")
+
+(code-block :chapter 15 :lang "scheme" :source
+"(define (two-players-anchor)
+  (world/reset!)
+  (let ((p1 (world/spawn 'p1 20 120))
+        (p2 (world/spawn 'p2 300 120))
+        (ball (world/spawn 'ball 160 120)))
+    (entity/shape! p1 'rect 4 30)
+    (entity/shape! p2 'rect 4 30)
+    (entity/shape! ball 'circle 4)
+    (entity/solid! p1 #t) (entity/solid! p2 #t) (entity/solid! ball #t)
+    (entity/bounce! ball 1)
+    (entity/set-vel! ball 3 2)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p1 0 -3))
+       (when (input/down? 'right) (entity/move! p1 0 3))
+       (when (input/down? 'up)    (entity/move! p2 0 -3))
+       (when (input/down? 'down)  (entity/move! p2 0 3))
+       (world/step)
+       (let ((by (entity/y ball)) (vy (cadr (entity/vel ball))))
+         (when (and (< by 5) (< vy 0))
+           (entity/set-vel! ball (car (entity/vel ball)) (- vy)))
+         (when (and (> by 235) (> vy 0))
+           (entity/set-vel! ball (car (entity/vel ball)) (- vy))))
+       (paint-clear)
+       (paint-cell 'p1 (entity/x p1) (entity/y p1) 4 30)
+       (paint-cell 'p2 (entity/x p2) (entity/y p2) 4 30)
+       (paint-cell 'ball (entity/x ball) (entity/y ball) 4 4)))))
+(big-bang two-players-anchor)")

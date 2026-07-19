@@ -1,0 +1,406 @@
+;; ch10-enemies-that-react.book.slatl
+;; Book of Arcade Games — Chapter 10: Enemies That React
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Arcade Games"
+  :chapter-number      10
+  :title               "Enemies That React"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + game-design"
+  :book-version        "1.0.0"
+  :draws-from-preserved (:book "book-of-games-preserved" :ch 4 :ch 9)
+  :prose
+"An enemy that stands still is furniture. An enemy that reacts is a
+character. The gap between the two is about fifteen lines of AI code.
+
+Arcade enemies do not need to plan. They do not need utility functions,
+minimax, neural nets. They need to LOOK like they are thinking, and
+LOOK IS ENOUGH. A goomba that turns around when it reaches a ledge
+feels smarter than an enemy that walks off. A ghost that chases you
+when close and gives up when far feels alive. That's the whole trick.
+
+This chapter builds five enemy archetypes with the `ai/*` library:
+the wanderer, the chaser, the fleer, the patroller, and the ambusher.
+Each is 10 to 30 lines. All are runnable. Between them they cover
+about 80% of the enemies in any 2D arcade game.
+
+---
+
+## 10.1 The wanderer
+
+Aimless drift with slight direction changes.
+
+```scheme
+;; A wandering blob. Doesn't care about the player. Just moves.
+(define (wanderer)
+  (world/reset!)
+  (let ((blob (world/spawn 'enemy 100 100)))
+    (entity/shape! blob 'circle 8)
+    (entity/max-speed! blob 1.5)
+    (ai/wander blob 0.05)                ;; slight direction jitter each frame
+    (on-frame
+     (lambda ()
+       (world/step)
+       (paint-clear)
+       (paint-cell 'enemy (entity/x blob) (entity/y blob) 8 8)))))
+
+(big-bang wanderer)
+```
+
+`ai/wander id amount` sets the entity to steer with random small
+direction changes each frame. Amount tunes how erratic — small values
+(0.02) look almost purposeful; large values (0.2) look drunk.
+
+`entity/max-speed!` caps velocity. Without it, `ai/wander` can
+accelerate the blob past playable speeds.
+
+---
+
+## 10.2 The chaser
+
+Comes toward the player when close; loses interest when far.
+
+```scheme
+;; An enemy that chases when within 80 pixels.
+(define (chaser)
+  (world/reset!)
+  (let ((p (world/spawn 'player 160 120))
+        (e (world/spawn 'enemy 60 60)))
+    (entity/shape! p 'triangle 8)
+    (entity/shape! e 'circle 6)
+    (entity/max-speed! e 1.2)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/down? 'up)    (entity/move! p 0 -3))
+       (when (input/down? 'down)  (entity/move! p 0 3))
+       ;; If enemy within 80 px of player: seek. Else wander.
+       (if (< (entity/distance e p) 80)
+           (ai/seek e p)
+           (ai/wander e 0.05))
+       (world/step)
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       (paint-cell 'enemy (entity/x e) (entity/y e) 6 6)))))
+
+(big-bang chaser)
+```
+
+`ai/seek e p` sets `e` to steer toward `p`. Every frame.
+`entity/distance a b` is Euclidean distance. Cheap to compute.
+
+Watch the enemy. When you drift close, it starts to home. When you
+run past 80 pixels away, it goes back to wandering. That two-line
+conditional produces distinct enemy 'moods' the player reads
+instantly.
+
+---
+
+## 10.3 The fleer
+
+Low HP? Run.
+
+```scheme
+;; Enemy chases when healthy, flees when hurt.
+(define (fleer)
+  (world/reset!)
+  (let ((p (world/spawn 'player 160 120))
+        (e (world/spawn 'enemy 60 60)))
+    (entity/shape! p 'triangle 8)
+    (entity/shape! e 'circle 8)
+    (entity/hp! e 3)
+    (entity/max-speed! e 1.5)
+    ;; Press 'a' to damage the enemy.
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/pressed? 'a)
+         (when (< (entity/distance e p) 30)
+           (entity/damage! e 1)
+           (world/camera-shake! 3 0.9)))
+       (if (< (entity/hp! e 0) 2)
+           (ai/flee e p)
+           (ai/seek e p))
+       (world/step)
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       (when (entity/alive? e)
+         (paint-cell 'enemy (entity/x e) (entity/y e) 8 8))
+       (paint-text (string-append \"Enemy HP: \"
+                                  (number->string (entity/hp! e 0)))
+                   10 10)))))
+
+(big-bang fleer)
+```
+
+`ai/flee e p` is the negative of seek — steer away. When the enemy's
+hp drops below 2, it panics and runs.
+
+`entity/hp! e 0` with argument 0 READS the current hp without changing
+it. If instead you called `entity/hp! e 5` you would SET hp to 5.
+(This is a common Motoi-Scheme convention: getter and setter share a
+name, disambiguated by argument arity.)
+
+---
+
+## 10.4 The patroller
+
+Walks a fixed path.
+
+```scheme
+;; Patrols between (x=40, y=100) and (x=280, y=100).
+(define patrol-target 'right)
+
+(define (patroller)
+  (world/reset!)
+  (let ((e (world/spawn 'enemy 40 100)))
+    (entity/shape! e 'rect 12 12)
+    (entity/max-speed! e 1)
+    (on-frame
+     (lambda ()
+       ;; Decide target end based on current x.
+       (cond
+         ((and (eq? patrol-target 'right) (> (entity/x e) 275))
+          (set! patrol-target 'left))
+         ((and (eq? patrol-target 'left)  (< (entity/x e) 45))
+          (set! patrol-target 'right)))
+       (if (eq? patrol-target 'right)
+           (entity/set-vel! e 1 0)
+           (entity/set-vel! e -1 0))
+       (world/step)
+       (paint-clear)
+       (paint-cell 'enemy (entity/x e) (entity/y e) 12 12)))))
+
+(big-bang patroller)
+```
+
+Simplest possible AI: a state variable, a switch condition, a velocity
+set. No `ai/*` verbs at all. Sometimes the cleanest reactive enemy is
+just a `cond`.
+
+You can make patrol paths from lists of waypoints and use
+`ai/waypoints` + `ai/follow-path` for more complex routes. The
+guarding-a-corridor kind of enemy is this pattern plus a `ai/seek` on
+seeing the player.
+
+---
+
+## 10.5 The ambusher
+
+Waits invisible. Springs when the player crosses a line.
+
+```scheme
+;; Waits at y=200 (offscreen). When player crosses x=180, springs up.
+(define ambush-triggered #f)
+
+(define (ambusher)
+  (world/reset!)
+  (let ((p (world/spawn 'player 40 120))
+        (a (world/spawn 'enemy 180 220)))
+    (entity/shape! p 'triangle 8)
+    (entity/shape! a 'rect 14 14)
+    (entity/max-speed! a 3)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (and (not ambush-triggered) (> (entity/x p) 180))
+         (set! ambush-triggered #t)
+         (world/camera-shake! 5 0.9))
+       (if ambush-triggered
+           (ai/seek a p)
+           (entity/set-vel! a 0 0))
+       (world/step)
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       (when ambush-triggered
+         (paint-cell 'enemy (entity/x a) (entity/y a) 14 14))))))
+
+(big-bang ambusher)
+```
+
+The ambusher is a trap disguised as an enemy. `ai/seek` doesn't fire
+until the trigger. When it does, camera-shake tells the player: THIS
+was intentional. You have entered someone's plan.
+
+---
+
+## 10.6 Enemy memory — the blackboard
+
+Enemies benefit from remembering things across frames. Where did they
+last see the player? How long since combat? `ai/bb-set!` /
+`ai/bb-get` provide per-entity memory (blackboard).
+
+```scheme
+;; Enemy remembers last-seen player position. Chases toward it even
+;; after losing sight.
+(define (memory-enemy)
+  (world/reset!)
+  (let ((p (world/spawn 'player 160 120))
+        (e (world/spawn 'enemy 40 40)))
+    (entity/shape! p 'triangle 8)
+    (entity/shape! e 'circle 6)
+    (entity/max-speed! e 1.5)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/down? 'up)    (entity/move! p 0 -3))
+       (when (input/down? 'down)  (entity/move! p 0 3))
+       (if (< (entity/distance e p) 100)
+           ;; See player: chase directly AND remember.
+           (begin
+             (ai/bb-set! e 'last-seen-x (entity/x p))
+             (ai/bb-set! e 'last-seen-y (entity/y p))
+             (ai/seek e p))
+           ;; Lost sight: head toward last-seen if remembered.
+           (if (ai/bb-has? e 'last-seen-x)
+               (let ((lx (ai/bb-get e 'last-seen-x))
+                     (ly (ai/bb-get e 'last-seen-y)))
+                 (if (< (geom/distance (entity/x e) (entity/y e) lx ly) 5)
+                     (ai/wander e 0.05)   ;; arrived — wander
+                     (entity/set-vel! e
+                                      (* 1.2 (geom/cos
+                                              (geom/atan2
+                                               (- ly (entity/y e))
+                                               (- lx (entity/x e)))))
+                                      (* 1.2 (geom/sin
+                                              (geom/atan2
+                                               (- ly (entity/y e))
+                                               (- lx (entity/x e))))))))
+               (ai/wander e 0.05)))
+       (world/step)
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       (paint-cell 'enemy (entity/x e) (entity/y e) 6 6)))))
+
+(big-bang memory-enemy)
+```
+
+The enemy chases when it sees you. When it loses sight (>100 px), it
+heads toward where it LAST saw you. Reaches that spot, gives up,
+wanders. Same reaction sequence as a real guard.
+
+---
+
+## 10.7 The four patterns
+
+**Composition.** Each enemy = shape + max-speed + hp + AI behavior +
+blackboard memory. Swap any one to get a different enemy.
+
+**Orchestration.** Per-frame: decide behavior (mode selector), apply
+steering (ai/seek/flee/wander), step physics, draw. The mode selector
+IS the enemy's brain — often just a `cond` on distance and hp.
+
+**In-routing.** Combat inputs (player attacks) route to
+`entity/damage!` which routes to hp change which routes to the mode
+selector. Chains all the way through.
+
+**Routing.** Enemies route their intent through the ai/ verbs. `ai/seek`
+routes 'go toward this' to the physics engine as continuous force
+application. Layered on top of raw velocity control.
+
+---
+
+## 10.8 Common desktop tasks
+
+**Attention-getting scoreboard entity.** A shop's live activity
+scoreboard has a small blob that wanders during quiet times and dashes
+across the screen when a sale happens. `ai/wander` most of the time,
+`ai/seek` a target position (the sale-notification widget) when an
+event fires.
+
+**Auto-follow tutorial guide.** A tutorial character that pursues the
+customer's cursor as they navigate a shop for the first three visits,
+pointing at things. Uses `ai/pursue` (pursue = seek with lookahead)
+to feel less lockstep than direct follow.
+
+---
+
+## 10.9 Pitfalls
+
+**Chaser jitters when close.** `ai/seek` doesn't gracefully stop. When
+enemy overshoots player, it turns 180, overshoots back. Fix: use
+`ai/arrive` instead — same as seek but decelerates near target. Or
+switch to `ai/wander` inside 15 px.
+
+**Ambusher fires before player is in position.** Trigger condition
+too permissive. Add a compound check: `x > 180 AND y > 100 AND
+x-vel > 0`.
+
+**Blackboard grows without bound.** Enemies accumulate keys forever.
+Add `ai/bb-del!` to expire old keys.
+
+**All enemies do the same thing at the same time.** Their state is
+NOT independent. Check: are you using globals where you should be
+using entity blackboard? `patrol-target` in section 10.4 is a global
+— fine for one enemy, broken for two. For multi-enemy patrol, store
+`patrol-target` on the entity via `ai/bb-set!`.
+
+**Fleer flees INTO a wall.** `ai/flee` steers directly away with no
+obstacle avoidance. Add `ai/wall!` around walls, and enemies avoid.
+
+---
+
+## 10.10 Try this yourself
+
+1. Combine chaser + fleer + patroller into ONE enemy with three
+   modes. The mode selector: 'default patrol; if player < 80 px,
+   chase; if hp < 2, flee.'
+2. Give the enemy vision cone: only see player if the vector
+   enemy-to-player is within 60 degrees of enemy's facing.
+3. Make an enemy that mimics the player's last three inputs (via
+   blackboard). It follows your moves on a 10-frame delay.
+4. A herd: 20 enemies with wander + weak cohesion + strong separation.
+   Move as a group. Chapter 5 of the Simulation book covers this in
+   depth.
+5. Enemy learns: on each hit, add 1 to a `hits-taken` blackboard
+   value; after 5 hits, switch to permanent-flee mode.
+6. Sound cues: `audio/play 'growl` when enemy first sees the player
+   (transition from wander to seek). One growl per sighting.
+
+---
+
+## 10.11 What we built
+
+Five enemy archetypes: wanderer, chaser, fleer, patroller, ambusher.
+Distance + hp mode selectors. Blackboard memory for last-seen. The
+`ai/*` steering verbs.
+
+Next chapter: powerups. Coins that magnet to the player. Invincibility
+stars. Hearts. Keys. Chapter 11 is where the game gets GENEROUS.")
+
+(code-block :chapter 10 :lang "scheme" :source
+"(define (enemies-anchor)
+  (world/reset!)
+  (let ((p (world/spawn 'player 160 120))
+        (e (world/spawn 'enemy 60 60)))
+    (entity/shape! p 'triangle 8)
+    (entity/shape! e 'circle 6)
+    (entity/max-speed! e 1.5)
+    (entity/hp! e 3)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/down? 'up)    (entity/move! p 0 -3))
+       (when (input/down? 'down)  (entity/move! p 0 3))
+       (cond
+         ((< (entity/hp! e 0) 2) (ai/flee e p))
+         ((< (entity/distance e p) 80) (ai/seek e p))
+         (else (ai/wander e 0.05)))
+       (world/step)
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       (paint-cell 'enemy (entity/x e) (entity/y e) 6 6)))))
+(big-bang enemies-anchor)")

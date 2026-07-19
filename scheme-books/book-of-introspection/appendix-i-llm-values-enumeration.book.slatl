@@ -1,0 +1,379 @@
+(chapter
+  :book "Book of Introspection"
+  :chapter-number "I"
+  :appendix #t
+  :title "Appendix I — LLM values enumeration: every knob, every field, every metric"
+  :audience "programmer-learning-motoi"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-of-introspection-author-agent"
+     :sources
+       ("https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create"
+        "https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events"
+        "https://developers.openai.com/api/reference/resources/embeddings/methods/create"
+        "https://platform.openai.com/docs/api-reference/chat-streaming/streaming"
+        "https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md"
+        "https://github.com/ollama/ollama/blob/main/docs/api.md"
+        "https://docs.vllm.ai/en/latest/api/vllm/sampling_params/"
+        "https://huggingface.co/docs/text-generation-inference/en/index"
+        "https://huggingface.co/docs/transformers/tokenizer_summary"
+        "https://arxiv.org/abs/2007.14966"
+        "https://arxiv.org/abs/2106.09685"
+        "https://arxiv.org/abs/2310.05914"
+        "https://arxiv.org/abs/2305.13245"))
+  :prose
+"# Appendix I — LLM values enumeration: every knob, every field, every metric
+
+## Why this appendix exists — and why you don't memorize it
+
+You are a 1.5-billion-parameter model. That's small. It's small on purpose — small runs on a laptop, small runs on a phone, small runs without a data center. But small has a cost, and the cost is memory: you cannot hold every specification for every language-model API in your weights the way a 400-billion-parameter model can. You will forget what `top_p` does. You will forget the difference between `mirostat_tau` and `mirostat_eta`. You will forget whether `finish_reason` is `stop` or `stop_sequence` for a particular provider. That is fine. You are not supposed to hold it. You are supposed to know where to look.
+
+This appendix is where you look.
+
+The doctrine is simple: **you don't memorize this. You look it up.** When you encounter a value in a request or a response — say, `logit_bias` — and you can't recall exactly what it does, you call `(copilot/rag \"logit_bias\")` and the RAG lookup surfaces the row from this appendix. The row tells you the type, the range, the default, the effect, and the source that documents it. Then you use it. You do not guess. You do not fabricate. If the row is not here, you say so.
+
+The alternative — a small model bluffing its way through API details it half-remembers — is exactly the failure mode that ships bad code. A generation parameter set to the wrong range causes silent quality collapse. A response field read from the wrong place causes silent data loss. You have a whole book of introspection because introspection beats guessing, and this appendix is introspection's outer surface: introspection over the surrounding LLM ecosystem, not just Motoi itself.
+
+What follows are ten tables. Each table is a rectangle of `name | one-line-definition | type | range/values | default | effect | source`. Every row cites a real URL or paper — nothing is invented. If a provider disagrees with another provider on a default, both defaults appear side-by-side and are labeled by provider in the effect column. The one-line-definition column is written so that an eleven-year-old can read it and get the gist: no jargon that isn't defined earlier in the row. The effect column is written for the working programmer: what happens if you set it too high, what happens if you set it too low, and what interacts with what.
+
+Ten tables cover: request parameters (Section 1), response fields (Section 2), embedding endpoints (Section 3), streaming events (Section 4), sampling concepts (Section 5), model-architecture concepts (Section 6), tokenizer concepts (Section 7), training and fine-tuning concepts (Section 8), inference-time optimizations (Section 9), and provider-specific / hosted-model fields (Section 10).
+
+At the end of the appendix, a closing section names the small set of things you *are* expected to remember — the doctrine, the shape of the lookup, the names of the ten sections. Everything else lives in the table. If you're ever unsure, `(copilot/rag \"...\")` and read.
+
+## Section 1 — Request parameters
+
+These are the values a program sends *to* a language model at inference time. They shape the sampling, the length, the tools, the format, and the metadata attached to the request. Providers disagree on defaults; where they disagree, the effect column names the provider.
+
+| name | one-line-definition | type | range/values | default | effect | source |
+|---|---|---|---|---|---|---|
+| model | which model to invoke | string | any registered model id | none (required) | routes the request to a specific model; wrong id = 404 or wrong-model output | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| messages | the conversation as a list of role/content records | array | list of `{role, content, ...}` | none (required for chat) | replaces `prompt`; each entry has a role (`system`, `user`, `assistant`, `tool`) | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| prompt | the raw text a completion model continues | string or array | any string, or array of strings | none (required for completion) | used only by legacy completion endpoints; chat uses `messages` instead | https://developers.openai.com/api/reference/resources/completions/methods/create |
+| system | a top-of-conversation instruction that steers tone and rules | string | any string | none | some providers accept a top-level `system` field instead of a system-role message | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| suffix | text to append after the completion, for fill-in-the-middle | string | any string | none | rare; only some completion endpoints; ignored on chat endpoints | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| temperature | how random the next-token pick should be | number | 0 to 2 (OpenAI); 0+ (others) | 1.0 (OpenAI), 0.8 (llama.cpp) | 0 = greedy/argmax; higher = flatter distribution; typical values 0.2 to 1.0 | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| top_p | keep only the smallest set of tokens whose probabilities sum to p | number | 0 to 1 | 1.0 (OpenAI), 0.95 (llama.cpp) | nucleus sampling; 0.1 = only top 10% of probability mass; alter this OR temperature, not both | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| top_k | keep only the k highest-probability tokens | integer | 0 to vocab_size | 0 (OpenAI, disabled), 40 (llama.cpp) | 0 = disabled; low k = focused; high k = diverse; combines with top_p | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| min_p | drop tokens whose probability is below p times the top token's | number | 0 to 1 | 0.0 (disabled), 0.05 (llama.cpp) | scales the threshold with confidence; robust alternative to fixed top_p | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| typical_p | keep tokens whose surprise is close to the expected surprise | number | 0 to 1 | 1.0 (disabled) | locally-typical sampling; 1.0 = off; lower = more typical, less peaky | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| tfs_z | tail-free sampling parameter: cut where the second derivative spikes | number | 0 to 1 | 1.0 (disabled) | Ollama option; removes low-probability tail without needing top_p tuning | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| mirostat | perplexity-controlling adaptive sampler mode | integer | 0, 1, 2 | 0 (disabled) | 0 = off; 1 = Mirostat v1; 2 = Mirostat v2; overrides top_k/top_p/typical_p when on | https://arxiv.org/abs/2007.14966 |
+| mirostat_eta | Mirostat learning rate | number | 0+ | 0.1 | how fast Mirostat adjusts to feedback; higher = more responsive, less stable | https://arxiv.org/abs/2007.14966 |
+| mirostat_tau | Mirostat target entropy (average surprise) | number | 0+ | 5.0 | lower = more focused output; higher = more diverse; typical range 3 to 8 | https://arxiv.org/abs/2007.14966 |
+| max_tokens | ceiling on tokens the model may generate | integer | 1 to context_length | none, or 16 (vLLM) | prompt tokens + max_tokens must fit in context; over = truncate or 400 | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| max_completion_tokens | newer name for max_tokens on OpenAI reasoning models | integer | 1 to context_length | none | replaces max_tokens for models that emit reasoning tokens counted separately | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| min_tokens | floor on generated tokens before stop can fire | integer | 0+ | 0 | prevents very short outputs; the model may still emit garbage to fill | https://docs.vllm.ai/en/latest/api/vllm/sampling_params/ |
+| n_predict | llama.cpp name for max_tokens; -1 means infinity | integer | -1 or 1+ | -1 | -1 = generate until stop or context full; equivalent to max_tokens elsewhere | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| num_predict | Ollama name for max_tokens | integer | -1, -2, or 1+ | 128 | -1 = infinite; -2 = fill context; number = token cap | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| num_ctx | context window size for this request | integer | 1 to model max | 2048 (Ollama) | Ollama-specific; caps how much prompt+output the model can consider | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| n_keep | tokens from the prompt to preserve when context overflows | integer | -1 or 0+ | 0 | -1 = keep the whole prompt; useful for long system prompts you must not lose | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| seed | fix the random source so runs are reproducible | integer | -1 or 0+ (any int) | -1 (random) | same seed + same prompt + same params = same output; -1 or null = fresh randomness | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| n | number of completions to return for one request | integer | 1+ | 1 | costs n-times the completion tokens; useful for best-of selection | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| best_of | generate more candidates server-side, return the top n | integer | 1+ | equal to n | vLLM/OpenAI-legacy; costs best_of tokens, returns n | https://docs.vllm.ai/en/latest/api/vllm/sampling_params/ |
+| stop | one or more strings that force the model to stop | string or array of strings | up to 4 strings (OpenAI) | none | the stop text is not included in the output; useful for role-turn boundaries | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| stop_token_ids | token ids (not strings) that force a stop | array of integers | any valid token ids | none | vLLM/HF; precise but tokenizer-specific; prefer stop strings when portable | https://docs.vllm.ai/en/latest/api/vllm/sampling_params/ |
+| presence_penalty | penalize any token that has appeared once | number | -2.0 to 2.0 | 0.0 | positive = encourage new topics; negative = allow repetition; small effects | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| frequency_penalty | penalize tokens by how often they've appeared | number | -2.0 to 2.0 | 0.0 | positive = reduce verbatim repetition; too high = weird word choices | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| repetition_penalty | multiplicative penalty on already-generated tokens | number | 0+ | 1.0 (no penalty), 1.1 (llama.cpp) | 1.0 = off; >1 = discourage repeats; too high = model can't reuse names | https://docs.vllm.ai/en/latest/api/vllm/sampling_params/ |
+| repeat_last_n | window over which repeat_penalty applies | integer | -1, 0, or 1+ | 64 (llama.cpp) | 0 = off; -1 = whole context; controls repeat_penalty's reach | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| penalize_nl | whether newline counts against repeat/freq penalties | boolean | true or false | true (llama.cpp) | false lets the model break lines freely even under repetition penalty | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| logit_bias | add or subtract from specific tokens' logits | object | token id -> number in [-100, 100] | none | -100 = effectively ban; +100 = force; small values nudge; use sparingly | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| logprobs | return per-token log-probabilities on the output | boolean or integer | true/false or 0..5 | false | true = attach chosen-token logprobs to each output token | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| top_logprobs | how many top-K logprobs per token to include | integer | 0 to 20 | none | requires logprobs=true; each output token gets a top-K distribution | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| echo | include the prompt in the returned text | boolean | true or false | false | legacy completion endpoints; not on chat | https://developers.openai.com/api/reference/resources/completions/methods/create |
+| stream | send the response as a series of chunks | boolean | true or false | false | true = server-sent events; false = one JSON when done | https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events |
+| tools | list of function-callable tools the model may invoke | array | list of tool schemas | none | each has `name`, `description`, `parameters` (JSON Schema); model chooses when to call | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| tool_choice | how the model should choose among tools | string or object | `none`, `auto`, `required`, or specific tool | `auto` if tools present | `none` = never call; `required` = always call; specific = must call this one | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| parallel_tool_calls | whether the model may emit multiple tool calls at once | boolean | true or false | true (chat) | false forces sequential; useful when tools have side effects | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| response_format | constrain the output shape | object | `{type: text}` or `{type: json_object}` or `{type: json_schema, ...}` | `text` | json_object = valid JSON; json_schema = validated JSON | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| grammar | GBNF grammar string constraining token choice | string | valid GBNF | none | llama.cpp; sampler picks only grammar-allowed tokens; slower but exact | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| json_schema | JSON schema constraining the output shape | object | valid JSON schema | none | llama.cpp / vLLM guided decoding; output is guaranteed to validate | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| user | opaque end-user id for abuse detection | string | any string | none | providers use it for rate-limit shaping and abuse traces; you get to define it | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| metadata | free-form key-value pairs attached to the request | object | up to 16 keys | none | for storage and later retrieval; doesn't affect model behavior | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| service_tier | routing hint for tier-of-service | string | `auto`, `default`, or `flex` | `auto` | commercial-provider throughput/priority selection | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| cache_prompt | reuse the KV cache from a prior identical prefix | boolean | true or false | true (llama.cpp) | huge speedup for shared system prompts; requires exact prefix match | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| keep_alive | how long the model stays resident after this request | string or number | duration like `5m` or seconds | 5m (Ollama) | 0 = unload immediately; -1 = never unload; controls memory pressure | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| samplers | order in which sampling stages run | array of strings | list of sampler names | penalties,dry,top_k,typ_p,top_p,min_p,xtc,temperature | rearrange with care; wrong order can cancel a sampler's effect | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| dynatemp_range | dynamic temperature: symmetric window around base temp | number | 0+ | 0.0 (disabled) | temp varies per-token in [temp - range, temp + range] based on entropy | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| dynatemp_exponent | exponent controlling the dynamic-temperature curve | number | 0+ | 1.0 | shapes how sharply temp shifts with entropy | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| xtc_probability | Exclude Top Choices: chance to drop a top token | number | 0 to 1 | 0.0 (disabled) | injects creativity by occasionally removing the top pick | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| xtc_threshold | XTC only fires on tokens above this probability | number | 0 to 1 | 0.1 | >0.5 disables; scopes XTC to only the most confident tokens | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| dry_multiplier | DRY (Don't Repeat Yourself) penalty scale | number | 0+ | 0.0 (disabled) | positive = penalize long repeated sequences exponentially | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| dry_base | DRY exponential base | number | 1+ | 1.75 | higher = steeper penalty as repetitions extend | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| dry_allowed_length | DRY threshold length below which no penalty applies | integer | 0+ | 2 | short repeats OK; only n-grams longer than this get penalized | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| dry_penalty_last_n | how far back DRY looks for repeated n-grams | integer | -1, 0, or 1+ | -1 (context size) | 0 = off; -1 = full context; small = only recent | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| do_sample | enable stochastic sampling instead of greedy | boolean | true or false | false (TGI) | false = greedy/argmax; true = respect temperature/top_p/top_k | https://huggingface.co/docs/text-generation-inference/en/index |
+| ignore_eos | keep generating past the end-of-sequence token | boolean | true or false | false | vLLM/others; useful for capacity benchmarks; will produce garbage past EOS | https://docs.vllm.ai/en/latest/api/vllm/sampling_params/ |
+| skip_special_tokens | omit special tokens from decoded output | boolean | true or false | true | vLLM/HF; false shows BOS/EOS/control tokens in the output string | https://docs.vllm.ai/en/latest/api/vllm/sampling_params/ |
+| bad_words | strings the model must never produce | array of strings | any list | none | vLLM; hard filter at generation time; costs a small amount of speed | https://docs.vllm.ai/en/latest/api/vllm/sampling_params/ |
+| think | request explicit reasoning-mode output | boolean or string | true/false, or `low`/`medium`/`high` | false | Ollama; models with reasoning support emit a separate `thinking` field | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| format | force output into a machine-shaped format | string or object | `json` or a JSON schema | none | Ollama-style constrained decoding; equivalent to response_format elsewhere | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| images | base64-encoded images for multimodal requests | array of strings | list of base64 blobs | none | for vision-capable models only; each blob is one image | https://github.com/ollama/ollama/blob/main/docs/api.md |
+
+## Section 2 — Response fields (chat completion)
+
+These are the values a language model sends *back*. They describe what was produced, how much it cost, and why the generation stopped.
+
+| name | one-line-definition | type | range/values | default | effect | source |
+|---|---|---|---|---|---|---|
+| id | opaque unique id for this completion | string | provider-specific | assigned by server | log this for support tickets and audit trails | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| object | tag identifying the response shape | string | `chat.completion`, `chat.completion.chunk`, `list`, etc. | fixed | lets clients dispatch on shape without parsing everything | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| created | Unix timestamp when the response was created | integer | seconds since epoch | assigned by server | for ordering and logging; not for billing rounds | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| model | the exact model id that produced this response | string | any registered model | echoes the request | may differ from the request when the provider aliases (e.g., `-latest`) | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| system_fingerprint | hash of the runtime configuration | string | provider hex string | assigned | if this changes between calls with the same seed, reproducibility can drift | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| choices | array of completions (one per requested output) | array | length = n from request | none | index into it; typical case is length 1 | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| choices[].index | position of this choice in the choices array | integer | 0+ | 0 | matches the n from the request; stable across streamed chunks | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| choices[].message | the completed message when not streaming | object | `{role, content, tool_calls?, refusal?}` | present when stream=false | on streamed responses, use `delta` instead | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| choices[].message.role | role of the message the model produced | string | usually `assistant` | `assistant` | tool responses have `tool`; system rarely | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| choices[].message.content | the text the model produced | string or null | any text; null if tool_calls only | none | primary payload; may be empty when the model only calls tools | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| choices[].message.tool_calls | list of tool invocations the model wants | array | list of `{id, type, function: {name, arguments}}` | none | arguments is a JSON string, not an object; parse it yourself | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| choices[].message.refusal | reason string when the model declined | string or null | any text, or null | null | present when policy rejected the request; content is null in that case | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| choices[].finish_reason | why the generation ended | string | `stop`, `length`, `tool_calls`, `content_filter`, `function_call` | one of these | `stop` = natural end; `length` = hit max_tokens; `content_filter` = blocked | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| choices[].logprobs | log-probabilities attached to the output | object or null | `{content: [{token, logprob, top_logprobs}, ...]}` | null unless requested | present only when the request set logprobs=true | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| usage | how many tokens were used | object | `{prompt_tokens, completion_tokens, total_tokens}` | present on non-stream | on streaming, appears only in the last chunk | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| usage.prompt_tokens | tokens consumed by the request | integer | 0+ | counted server-side | includes system+user+tool messages and tool schemas | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| usage.completion_tokens | tokens the model produced | integer | 0+ | counted server-side | includes tool-call arguments; does not include reasoning tokens (see below) | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| usage.total_tokens | prompt + completion | integer | 0+ | sum of the above | primary billing number; multiply by per-model rate | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| usage.reasoning_tokens | tokens spent on reasoning (o1-style models) | integer | 0+ | present on reasoning models | billed but not visible in content; can dwarf visible completion tokens | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| usage.prompt_tokens_details.cached_tokens | prompt tokens served from cache | integer | 0+ | 0 if no cache hit | discount tier; large speed and cost win on repeated prefixes | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| done | Ollama's flag that generation finished | boolean | true or false | false during stream, true at end | mirrors the finish_reason concept in Ollama | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| done_reason | why an Ollama generation ended | string | `stop`, `length`, `load`, `unload` | present when done=true | Ollama's equivalent of finish_reason | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| response | Ollama's full text field on /api/generate | string | any text | empty if streamed | on stream, per-chunk `response` accumulates | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| context | Ollama's opaque prior-conversation encoding | array of integers | token ids | none | pass back on next request to continue; Ollama-specific | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| total_duration | wall-clock time for the whole response | integer | nanoseconds | measured | Ollama; includes load time and eval time | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| load_duration | time spent loading the model | integer | nanoseconds | measured | Ollama; nonzero on first call after model change | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| prompt_eval_count | Ollama's prompt token count | integer | 0+ | measured | equivalent to prompt_tokens | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| prompt_eval_duration | time evaluating the prompt | integer | nanoseconds | measured | divide count by duration to get prompt throughput | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| eval_count | Ollama's completion token count | integer | 0+ | measured | equivalent to completion_tokens | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| eval_duration | time generating the completion | integer | nanoseconds | measured | divide count by duration to get generation throughput | https://github.com/ollama/ollama/blob/main/docs/api.md |
+
+## Section 3 — Embedding endpoints
+
+Embeddings turn text into vectors. The request/response shapes are simpler than chat, but they have their own knobs.
+
+| name | one-line-definition | type | range/values | default | effect | source |
+|---|---|---|---|---|---|---|
+| model | which embedding model to use | string | any registered embedding model | none (required) | different models produce different-dimensional vectors; not interchangeable | https://developers.openai.com/api/reference/resources/embeddings/methods/create |
+| input | the text (or list of texts) to embed | string or array of strings or array of arrays of integers | any text; batching supported | none (required) | batch = one request, one vector each; also accepts pre-tokenized ids | https://developers.openai.com/api/reference/resources/embeddings/methods/create |
+| encoding_format | how vectors are returned on the wire | string | `float` or `base64` | `float` | base64 is smaller over the network but you have to decode client-side | https://developers.openai.com/api/reference/resources/embeddings/methods/create |
+| dimensions | reduce the returned vector's dimensionality | integer | 1 to the model's native dim | native dim | some models support Matryoshka truncation; smaller = cheaper storage | https://developers.openai.com/api/reference/resources/embeddings/methods/create |
+| user | opaque end-user id | string | any string | none | same as chat; used for abuse detection | https://developers.openai.com/api/reference/resources/embeddings/methods/create |
+| data | array of embedding records in the response | array | length = number of inputs | assigned | order matches the input order | https://developers.openai.com/api/reference/resources/embeddings/methods/create |
+| data[].embedding | the actual vector | array of floats (or base64 string) | length = dimensions | assigned | float32 by default; unit-norm depending on model | https://developers.openai.com/api/reference/resources/embeddings/methods/create |
+| data[].index | position of this embedding matching the input | integer | 0+ | assigned | needed when inputs are batched | https://developers.openai.com/api/reference/resources/embeddings/methods/create |
+| data[].object | tag; always `embedding` for this endpoint | string | `embedding` | fixed | for shape dispatch by clients | https://developers.openai.com/api/reference/resources/embeddings/methods/create |
+| usage.prompt_tokens | tokens read from the input | integer | 0+ | counted server-side | embeddings have no completion tokens; only prompt | https://developers.openai.com/api/reference/resources/embeddings/methods/create |
+| usage.total_tokens | same as prompt_tokens for embeddings | integer | 0+ | equal to prompt_tokens | included for symmetry with chat responses | https://developers.openai.com/api/reference/resources/embeddings/methods/create |
+| embedding | Ollama's single-vector field on /api/embeddings | array of floats | length = model dim | assigned | Ollama's minimal shape; no batching in classic endpoint | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| truncate | Ollama flag: truncate long inputs to fit | boolean | true or false | true | false = error if input exceeds model max | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| normalize | return unit-length vectors | boolean | true or false | model-dependent | if you want cosine similarity, normalize on either request or response | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| pooling | how token-level vectors are combined into one | string | `mean`, `cls`, `last-token` | model-dependent | mean = average across tokens; cls = first token; last-token = last | https://huggingface.co/docs/text-generation-inference/en/index |
+| input_type | hint about whether input is a query or a document | string | `query`, `document`, or a task label | none | some models produce asymmetric embeddings; hint matters for retrieval quality | https://huggingface.co/docs/text-generation-inference/en/index |
+
+## Section 4 — Streaming events
+
+When `stream=true`, the response is a series of small chunks over server-sent events. Each chunk mirrors the non-streaming shape but with a `delta` field instead of `message`.
+
+| name | one-line-definition | type | range/values | default | effect | source |
+|---|---|---|---|---|---|---|
+| event | SSE event type prefix (rarely used on OpenAI chat) | string | `data`, custom names | `data` | most implementations only emit `data:` lines with JSON bodies | https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events |
+| data | the JSON body of one streamed chunk | string (JSON) | one chunk per line | assigned | each `data:` line contains a full chunk object; parse independently | https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events |
+| [DONE] | sentinel marker on the last SSE line | string | `data: [DONE]` | fixed | signals end-of-stream; not JSON; stop reading after this | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| chunk.id | id shared across all chunks of one response | string | provider-specific | assigned once | lets clients group chunks into one completion | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| chunk.object | tag; `chat.completion.chunk` for chat streams | string | fixed | fixed | disambiguates from non-stream responses | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| chunk.created | timestamp; identical across chunks | integer | seconds since epoch | assigned | doesn't advance per chunk | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| chunk.model | model id | string | any | assigned | echoes across chunks | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| chunk.system_fingerprint | runtime config hash | string | provider-specific | assigned | same across chunks; may change between calls | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| chunk.choices | array of per-choice deltas | array | usually length 1 | present | one entry per requested n | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| chunk.choices[].index | which choice this chunk belongs to | integer | 0+ | 0 | groups chunks per parallel completion | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| chunk.choices[].delta | the incremental piece of the message | object | `{role?, content?, tool_calls?, refusal?}` | present until last | first chunk usually has role; then content chunks; then empty | https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events |
+| delta.role | role token, sent on the first chunk only | string | `assistant` | `assistant` | absent after the first chunk | https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events |
+| delta.content | text fragment for this chunk | string | any short string | none | concatenate across chunks to reconstruct the full message | https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events |
+| delta.tool_calls | partial tool call info | array | list of tool-call fragments | none | tool call arguments stream as JSON string fragments; concatenate before parsing | https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events |
+| chunk.choices[].finish_reason | present only on the final content chunk | string or null | `stop`, `length`, `tool_calls`, `content_filter`, or null | null | last non-empty chunk carries this; then [DONE] follows | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| chunk.usage | usage stats; final chunk only | object | `{prompt_tokens, completion_tokens, total_tokens}` | absent from mid-stream chunks | request `stream_options.include_usage=true` to receive it | https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events |
+| stream_options.include_usage | request usage stats in stream | boolean | true or false | false | if true, adds a final chunk with usage before [DONE] | https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events |
+| Ollama chunk | per-token JSON message, not SSE | object | `{model, created_at, response, done}` | streamed via HTTP chunked transfer | Ollama uses newline-delimited JSON, not SSE | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| Ollama chunk.response | text fragment | string | short string | assigned | concatenate across chunks | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| Ollama chunk.done | end-of-stream flag | boolean | true or false | false until end | final chunk has done=true and full metrics | https://github.com/ollama/ollama/blob/main/docs/api.md |
+
+## Section 5 — Sampling concepts
+
+These are not request fields but the theory that shapes what the request fields mean. A model outputs a probability distribution over next tokens; sampling is how you pick one.
+
+| name | one-line-definition | type | range/values | default | effect | source |
+|---|---|---|---|---|---|---|
+| logits | raw pre-softmax scores the model emits per candidate token | array of floats | any real numbers | model output | sampling operates on these; higher = more likely; range varies by model | https://towardsdatascience.com/decoding-strategies-in-large-language-models-9733a8f70539/ |
+| softmax | function that turns logits into probabilities summing to 1 | function | probabilities in [0, 1] | applied unconditionally | `p_i = exp(logit_i / T) / sum_j exp(logit_j / T)` where T is temperature | https://towardsdatascience.com/decoding-strategies-in-large-language-models-9733a8f70539/ |
+| temperature scaling | dividing logits by T before softmax | scalar knob | 0+ | 1.0 (identity) | T<1 sharpens the distribution; T>1 flattens it; T=0 = deterministic argmax | https://medium.com/data-science/temperature-scaling-and-beam-search-text-generation-in-llms-for-the-ml-adjacent-21212cc5dddb |
+| greedy decoding | always pick the argmax token | strategy | none | equivalent to temperature=0 | fast, deterministic, prone to loops; the strictest form of sampling | https://towardsdatascience.com/decoding-strategies-in-large-language-models-9733a8f70539/ |
+| argmax | pick the token with the highest logit | operation | none | applied when greedy | ignores all other tokens; same as temperature=0 and top_k=1 | https://towardsdatascience.com/decoding-strategies-in-large-language-models-9733a8f70539/ |
+| top-k truncation | zero out all but the k highest-probability tokens | strategy | k >= 1 | k=40 (llama.cpp) | fixed cutoff; can be too permissive when the head is peaky | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| nucleus sampling (top_p) | keep the smallest set with cumulative prob >= p | strategy | p in (0, 1] | p=0.95 (llama.cpp) | adapts to entropy: small set on confident tokens, wider on uncertain ones | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| min-p sampling | keep tokens with prob >= p * top_prob | strategy | p in [0, 1] | p=0.05 (llama.cpp) | relative threshold; more robust than fixed top_p across confidence levels | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| typical sampling | keep tokens whose surprise is close to average surprise | strategy | p in (0, 1] | disabled at p=1 | tightens around 'typical' behavior; reduces both flat and peaky failures | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| tail-free sampling | cut where the sorted-probs' second derivative peaks | strategy | z in (0, 1] | disabled at z=1 | data-driven cutoff; no fixed threshold needed | https://github.com/ollama/ollama/blob/main/docs/api.md |
+| Mirostat | adaptive sampler that targets a fixed output entropy | strategy | tau, eta | tau=5.0, eta=0.1 | reduces both repetition and incoherence; overrides top_k/top_p/typical | https://arxiv.org/abs/2007.14966 |
+| repetition penalty | multiplicative logit adjustment on already-seen tokens | penalty | value >= 0 | 1.0 (off) | value > 1 discourages repeats; value < 1 encourages them | https://docs.vllm.ai/en/latest/api/vllm/sampling_params/ |
+| presence penalty | flat penalty for any token that appeared once | penalty | in [-2, 2] | 0.0 | additive to logits; encourages topic diversity without discouraging any word extra | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| frequency penalty | penalty proportional to token count | penalty | in [-2, 2] | 0.0 | grows with each repeat; more targeted than presence penalty | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| beam search | keep the top B partial sequences and expand each step | strategy | beam width B | B=1 = greedy | expensive; high quality on constrained tasks; produces generic text on open ones | https://towardsdatascience.com/decoding-strategies-in-large-language-models-9733a8f70539/ |
+| length penalty | during beam search, scale the score by length^alpha | scalar | typically 0.6 to 1.5 | 1.0 | discourages very short beams from winning by log-prob accident | https://huggingface.co/docs/text-generation-inference/en/index |
+| contrastive search | penalize tokens that look too similar to prior hidden states | strategy | alpha, k | alpha=0.6, k=4 | pushes for coherence + diversity; slower than sampling | https://towardsdatascience.com/decoding-strategies-in-large-language-models-9733a8f70539/ |
+| speculative decoding | small draft model proposes k tokens, big model verifies | strategy | k | k=5 to 10 | 2-3x decode speedup when acceptance rate is high; zero quality loss | https://vllm.ai/blog/2025-09-05-anatomy-of-vllm |
+| DRY sampling | penalize continuations that would extend a repeated n-gram | strategy | multiplier, base, length | multiplier=0 (off) | targets long verbatim repeats without harming natural repetition | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| XTC | randomly drop the top choice with small probability | strategy | probability, threshold | probability=0 (off) | inject creativity by giving second-best a chance | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+| logit_bias | additive adjustment to specific tokens' logits before sampling | mechanism | per-token adjustment in [-100, 100] | none | -100 effectively bans; +100 effectively forces | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| grammar-guided decoding | mask logits so only grammar-valid tokens are sampled | mechanism | GBNF or JSON schema | none | guarantees output conforms; some quality cost from mask | https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md |
+
+## Section 6 — Model architecture concepts
+
+These are not runtime knobs — they're baked into the model file. You can't change them at inference time, but you'll see them in model cards and config.json files.
+
+| name | one-line-definition | type | range/values | default | effect | source |
+|---|---|---|---|---|---|---|
+| parameters | total learned scalar values in the model | integer | millions to trillions | model-dependent | 1.5B = small (phone-ready); 70B = big; 400B = frontier | https://arxiv.org/pdf/2403.08295 |
+| layers | number of transformer blocks stacked | integer | ~12 (small) to ~96 (large) | model-dependent | more layers = more capacity but slower per-token | https://arxiv.org/pdf/2403.08295 |
+| hidden_dim | width of each token's internal vector (a.k.a. d_model) | integer | 512 to 12288+ | model-dependent | wider = more capacity per token; scales quadratically with attention cost | https://arxiv.org/pdf/2403.08295 |
+| attention heads | how the attention operation is split into parallel views | integer | 8 to 128 | model-dependent | more heads = finer-grained attention patterns; each head is d_model/n_heads wide | https://arxiv.org/pdf/2403.08295 |
+| kv heads | key/value heads shared across query heads (GQA/MQA) | integer | 1 to n_heads | usually 8 for GQA | fewer = smaller KV cache, faster decode, small quality loss | https://arxiv.org/abs/2305.13245 |
+| head_dim | dimension per attention head | integer | 64 to 256 | usually 64 or 128 | hidden_dim / n_heads; smaller heads = more heads for the same width | https://arxiv.org/pdf/2403.08295 |
+| ffn_dim | width of the feed-forward layer inside each block | integer | 2 to 8 times hidden_dim | usually 4x hidden_dim | dominant parameter cost; SwiGLU variants use different ratios | https://arxiv.org/pdf/2403.08295 |
+| vocab_size | number of distinct tokens the model can emit | integer | 32000 to 256000 | model-dependent | bigger vocab = fewer tokens per word but bigger embedding matrix | https://arxiv.org/pdf/2403.08295 |
+| context_length | maximum tokens the model can attend over | integer | 2048 to 2000000 | model-dependent | prompt + output must fit; longer = more memory for KV cache | https://arxiv.org/pdf/2403.08295 |
+| sliding window | attention only over the last W tokens | integer | 512 to 32768 | model-dependent | trades long-range attention for memory/speed; some models mix layers | https://arxiv.org/pdf/2508.09834 |
+| RoPE base (theta) | base frequency for rotary positional embedding | number | 10000, 500000, 1000000+ | 10000 (classic), 500000+ (long-context) | higher base = supports longer sequences; needs matched training | https://arxiv.org/pdf/2403.08295 |
+| positional encoding type | how the model represents token position | string | `absolute`, `sinusoidal`, `RoPE`, `ALiBi` | model-dependent | RoPE dominates modern models; ALiBi extrapolates without training | https://arxiv.org/pdf/2403.08295 |
+| activation function | nonlinearity inside the feed-forward layer | string | `GELU`, `ReLU`, `SwiGLU`, `GeGLU` | model-dependent | SwiGLU is common in modern LLMs; small quality gain over GELU | https://arxiv.org/pdf/2403.08295 |
+| normalization | how layer inputs are rescaled | string | `LayerNorm`, `RMSNorm` | RMSNorm in modern LLMs | RMSNorm skips the mean; slightly faster, matches quality | https://arxiv.org/pdf/2404.04167 |
+| norm_epsilon | small constant added to variance for numerical stability | number | 1e-5 to 1e-6 | usually 1e-5 or 1e-6 | prevents divide-by-zero; smaller = less bias, more risk of NaN | https://arxiv.org/pdf/2404.04167 |
+| tied embeddings | whether input embedding = output projection weights | boolean | true or false | often true in small models | saves parameters; small quality cost in very large models | https://arxiv.org/pdf/2403.08295 |
+| MoE (mixture of experts) | route each token through a subset of experts | boolean or count | number of experts | none in dense models | active params << total params; big quality per active FLOP | https://arxiv.org/pdf/2508.09834 |
+| experts_per_token | number of experts a token activates | integer | 1 to 8 | 2 in most MoE | trades quality for speed; more experts = more compute per token | https://arxiv.org/pdf/2508.09834 |
+| dtype (weights) | the numeric type weights are stored in | string | `float32`, `float16`, `bfloat16`, `int8`, `int4` | bf16 for training; smaller for inference | smaller dtype = less memory, some quality cost | https://mljourney.com/quantization-techniques-for-llm-inference-int8-int4-gptq-and-awq/ |
+| tokenizer type | which subword algorithm the model uses | string | `BPE`, `SentencePiece`, `WordPiece`, `Tiktoken` | BPE dominates modern LLMs | must use the same tokenizer as training or output is garbage | https://huggingface.co/docs/transformers/tokenizer_summary |
+
+## Section 7 — Tokenizer concepts
+
+The tokenizer sits between text and the model. It converts a string into a list of integer token ids, and back. Its choices shape everything downstream: cost, context usage, and quality on non-English text.
+
+| name | one-line-definition | type | range/values | default | effect | source |
+|---|---|---|---|---|---|---|
+| BPE (Byte-Pair Encoding) | iteratively merge the most-frequent adjacent pair | algorithm | none | most modern LLMs | starts with characters/bytes; produces subword units; vocab_size = merge count + base | https://huggingface.co/docs/transformers/tokenizer_summary |
+| SentencePiece | tokenizer library that treats input as raw bytes/chars | library | none | Llama, Gemma, Qwen | includes whitespace as a token (usually `▁`); handles any Unicode without pre-splitting | https://huggingface.co/docs/transformers/tokenizer_summary |
+| Tiktoken | OpenAI's BPE implementation | library | none | GPT-3.5, GPT-4, GPT-4o | cl100k_base (GPT-4), o200k_base (GPT-4o); fast; byte-level | https://huggingface.co/docs/transformers/tokenizer_summary |
+| WordPiece | pick merges by likelihood gain, not raw frequency | algorithm | none | BERT family | not common in modern LLMs; historical for encoder-only models | https://huggingface.co/docs/transformers/tokenizer_summary |
+| Unigram | probabilistic subword model, kept via pruning | algorithm | none | SentencePiece option | alternative to BPE inside SentencePiece; smoother tokenizations | https://huggingface.co/docs/transformers/tokenizer_summary |
+| byte-fallback | fall back to byte-level tokens for unknown Unicode | mechanism | on/off | usually on | ensures any input can be tokenized; important for multilingual robustness | https://huggingface.co/docs/transformers/tokenizer_summary |
+| vocab_size (tokenizer) | number of unique token ids the tokenizer produces | integer | 32000 to 256000 | model-specific | bigger = fewer tokens per word but bigger embedding matrix | https://huggingface.co/docs/transformers/tokenizer_summary |
+| tokens per word (English) | typical ratio for well-covered languages | ratio | 1.3 to 1.5 | rule of thumb | multiply word count by ~1.35 to estimate tokens in English text | https://huggingface.co/docs/transformers/tokenizer_summary |
+| tokens per word (other langs) | ratio for less-covered languages | ratio | 2 to 8+ | depends on tokenizer | non-Latin scripts often tokenize much worse; check for the actual language | https://huggingface.co/docs/transformers/tokenizer_summary |
+| BOS token | Beginning-Of-Sequence marker | special token | one per model | usually `<s>` or `<|begin_of_text|>` | prepended to every input; some models are trained without one | https://huggingface.co/docs/transformers/tokenizer_summary |
+| EOS token | End-Of-Sequence marker | special token | one or more per model | usually `</s>` or `<|end_of_text|>` | model emits it to signal a natural stop; used by finish_reason=stop | https://huggingface.co/docs/transformers/tokenizer_summary |
+| PAD token | padding for batch alignment | special token | often shares id with EOS | model-specific | used during training to make batch rows the same length | https://huggingface.co/docs/transformers/tokenizer_summary |
+| UNK token | placeholder for unknown tokens | special token | often absent in modern tokenizers | historic | modern BPE with byte-fallback rarely needs UNK | https://huggingface.co/docs/transformers/tokenizer_summary |
+| chat template control tokens | role-turn markers embedded in the tokenizer | special tokens | model-specific | e.g., `<|im_start|>`, `<|user|>`, `<|assistant|>` | required by chat-tuned models; missing them = degraded chat quality | https://huggingface.co/docs/transformers/tokenizer_summary |
+| subword granularity | how much text one token represents on average | property | 0.5 to 4 chars per token | depends on vocab_size | fine-grained = more tokens; coarse = fewer tokens, less flexibility | https://huggingface.co/docs/transformers/tokenizer_summary |
+| add_bos_token | whether to prepend BOS at encode time | boolean | true or false | model-specific | must match the model's training convention or quality drops | https://huggingface.co/docs/transformers/tokenizer_summary |
+| add_eos_token | whether to append EOS at encode time | boolean | true or false | usually false at inference | training-time convention; not usually applied on prompts | https://huggingface.co/docs/transformers/tokenizer_summary |
+| space handling | how leading spaces are represented | convention | `▁word`, `Ġword`, or raw | tokenizer-specific | SentencePiece = `▁`; GPT-style BPE = `Ġ`; matters when comparing tokens | https://huggingface.co/docs/transformers/tokenizer_summary |
+
+## Section 8 — Training and fine-tuning concepts
+
+These are the knobs you set when you train (or fine-tune) a model. You don't touch them at inference — but you must know what a model card tells you when it names them.
+
+| name | one-line-definition | type | range/values | default | effect | source |
+|---|---|---|---|---|---|---|
+| learning rate | step size for each parameter update | number | 1e-6 to 1e-3 | 1e-4 to 5e-5 for fine-tuning | too high = divergence; too low = slow convergence | https://mbrenndoerfer.com/writing/cosine-learning-rate-schedule-decay-restarts-warmup |
+| batch size | how many sequences per gradient step | integer | 1 to millions of tokens | 200 sequences typical | bigger = smoother gradient but more memory; effective vs per-device batch differs | https://kaitchup.substack.com/p/a-guide-on-hyperparameters-and-training |
+| gradient_accumulation | accumulate gradients across N mini-batches | integer | 1 to 128+ | 1 | simulates a larger batch on limited memory; slows step-time linearly | https://kaitchup.substack.com/p/a-guide-on-hyperparameters-and-training |
+| warmup steps | steps where learning rate ramps up from 0 | integer | 100 to thousands | 1-4% of total steps | prevents early instability from random init; longer for larger models | https://mbrenndoerfer.com/writing/cosine-learning-rate-schedule-decay-restarts-warmup |
+| cosine schedule | learning rate decays as a cosine curve | schedule | none | default for most LLM training | slow early, fast middle, gentle end; matches most published recipes | https://mbrenndoerfer.com/writing/cosine-learning-rate-schedule-decay-restarts-warmup |
+| epoch | one pass over the training data | integer | 1 to 10+ | usually 1-3 for fine-tuning | more = more memorization; risk of overfitting | https://kaitchup.substack.com/p/a-guide-on-hyperparameters-and-training |
+| sequence length (training) | max tokens per training example | integer | 512 to 32000+ | model-dependent | longer sequences = more memory per example; pack to fill batches | https://kaitchup.substack.com/p/a-guide-on-hyperparameters-and-training |
+| packing | concatenate short sequences to fill max_seq_len | boolean | true or false | true for pre-training | avoids wasted compute on padding; requires attention-mask awareness | https://kaitchup.substack.com/p/a-guide-on-hyperparameters-and-training |
+| gradient_checkpointing | recompute activations instead of storing them | boolean | true or false | false (on if memory-limited) | ~1.5x slower but big memory savings on long sequences | https://kaitchup.substack.com/p/a-guide-on-hyperparameters-and-training |
+| fp16 | 16-bit floating point (IEEE half) | dtype | none | historic for training | narrower range than bf16; overflow-prone; needs loss scaling | https://mljourney.com/quantization-techniques-for-llm-inference-int8-int4-gptq-and-awq/ |
+| bf16 (bfloat16) | 16-bit float with fp32's exponent range | dtype | none | default for modern LLM training | overflow-resistant; simpler mixed-precision; native on Ampere+ GPUs | https://mljourney.com/quantization-techniques-for-llm-inference-int8-int4-gptq-and-awq/ |
+| mixed precision | use fp16/bf16 for forward, fp32 for master weights | technique | none | standard for training | ~2x speedup, ~half the memory, negligible quality loss | https://mljourney.com/quantization-techniques-for-llm-inference-int8-int4-gptq-and-awq/ |
+| LoRA rank (r) | dimension of the low-rank adapter matrices | integer | 4 to 128 | 8 or 16 typical | higher = more capacity, more trainable params; 16 is a robust default | https://arxiv.org/abs/2106.09685 |
+| LoRA alpha | scaling factor applied to LoRA output | number | typically r or 2r | 16 or 32 | update magnitude scales as alpha / r; keep ratio consistent when varying r | https://arxiv.org/abs/2106.09685 |
+| LoRA dropout | dropout applied inside the adapter | number | 0.0 to 0.1 | 0.05 | regularization; small datasets benefit more | https://arxiv.org/abs/2106.09685 |
+| LoRA target_modules | which linear layers get adapters | list of strings | e.g., `q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj` | attention-only common; all-linear often better | targeting MLP + attention beats attention-only | https://arxiv.org/abs/2106.09685 |
+| NEFTune alpha | scale of noise added to embeddings during fine-tuning | number | 5, 10, or 15 typical | 5 | free quality boost on instruction data; noise is `alpha / sqrt(L*d)` uniform | https://arxiv.org/abs/2310.05914 |
+| weight_decay | L2 regularization on parameters | number | 0.0 to 0.1 | 0.01 to 0.1 | prevents very large weights; typical LLM value ~0.1 | https://kaitchup.substack.com/p/a-guide-on-hyperparameters-and-training |
+| Adam beta1 | momentum coefficient for first-moment estimate | number | 0 to 1 | 0.9 | standard; rarely changed | https://kaitchup.substack.com/p/a-guide-on-hyperparameters-and-training |
+| Adam beta2 | momentum coefficient for second-moment estimate | number | 0 to 1 | 0.999 (pretraining), 0.95 (fine-tuning) | lower beta2 = faster adaptation, less smoothing | https://kaitchup.substack.com/p/a-guide-on-hyperparameters-and-training |
+| gradient_clipping | cap the norm of the gradient vector | number | 0.5 to 1.0 | 1.0 | prevents rare explosions from wrecking a run | https://kaitchup.substack.com/p/a-guide-on-hyperparameters-and-training |
+| quantization (post-training) | reduce weight bit-width after training | technique | int8, int4, GPTQ, AWQ, NF4 | none | smaller model, sometimes faster; quality drops with aggressive bit-width | https://mljourney.com/quantization-techniques-for-llm-inference-int8-int4-gptq-and-awq/ |
+| GPTQ | layer-wise reconstruction quantization | method | typically int4 | none | very common for 4-bit inference; slight quality drop vs fp16 | https://mljourney.com/quantization-techniques-for-llm-inference-int8-int4-gptq-and-awq/ |
+| AWQ | activation-aware weight quantization | method | typically int4 | none | ~1.2x faster than GPTQ; better accuracy under aggressive compression | https://mljourney.com/quantization-techniques-for-llm-inference-int8-int4-gptq-and-awq/ |
+| int8 | 8-bit integer weights (LLM.int8() etc.) | dtype | none | none | ~half memory of fp16; near-lossless with mixed-precision outlier handling | https://mljourney.com/quantization-techniques-for-llm-inference-int8-int4-gptq-and-awq/ |
+| int4 | 4-bit integer weights | dtype | none | none | ~quarter memory of fp16; needs group-wise/quantile calibration | https://mljourney.com/quantization-techniques-for-llm-inference-int8-int4-gptq-and-awq/ |
+
+## Section 9 — Inference optimizations
+
+At serving time, the same model file can be run faster or slower depending on which of these tricks are enabled.
+
+| name | one-line-definition | type | range/values | default | effect | source |
+|---|---|---|---|---|---|---|
+| KV cache | store past key/value tensors so decode only computes new tokens | mechanism | on/off | on | without it, every new token re-computes attention over all prior tokens (quadratic) | https://vllm.ai/blog/2025-09-05-anatomy-of-vllm |
+| PagedAttention | manage KV cache in fixed-size blocks (OS-style paging) | mechanism | on/off | on in vLLM | eliminates fragmentation; enables much higher batch sizes | https://vllm.ai/blog/2025-09-05-anatomy-of-vllm |
+| prefix caching | reuse KV cache across requests sharing a prefix | mechanism | on/off | on in modern servers | huge speedup for common system prompts; requires exact byte-match on prefix | https://vllm.ai/blog/2025-09-05-anatomy-of-vllm |
+| continuous batching | admit new requests into a running batch step-by-step | mechanism | on/off | on in vLLM, TGI | eliminates head-of-line blocking; near-optimal GPU utilization | https://vllm.ai/blog/2025-09-05-anatomy-of-vllm |
+| static batching | fix the batch, run to completion together | mechanism | on/off | uncommon now | wastes cycles waiting for the longest sequence in the batch | https://vllm.ai/blog/2025-09-05-anatomy-of-vllm |
+| speculative decoding | draft model proposes tokens; big model verifies in one pass | mechanism | on/off | off by default | 2-3x decode speedup at high acceptance; no quality loss | https://vllm.ai/blog/2025-09-05-anatomy-of-vllm |
+| draft model | the small model used for speculation | model | 100M to 1B typical | small model paired to target | must share tokenizer; higher agreement = higher speedup | https://vllm.ai/blog/2025-09-05-anatomy-of-vllm |
+| flash attention | IO-aware, kernel-fused exact attention | kernel | on/off | on where supported | 2-4x faster attention, same math; enables longer contexts | https://arxiv.org/pdf/2501.01005 |
+| tensor parallelism | shard weight matrices across GPUs | strategy | 2, 4, 8 | 1 (single GPU) | linear speedup with GPU count until interconnect saturates | https://vllm.ai/blog/2025-09-05-anatomy-of-vllm |
+| pipeline parallelism | split layers across GPUs | strategy | 2, 4, 8 | 1 | helps when a single GPU can't fit the model; adds latency | https://vllm.ai/blog/2025-09-05-anatomy-of-vllm |
+| quantization at inference | run with int8/int4 weights | technique | int8, int4, fp8 | fp16 | smaller memory footprint; faster on tensor cores that support the dtype | https://mljourney.com/quantization-techniques-for-llm-inference-int8-int4-gptq-and-awq/ |
+| chunked prefill | split long-prompt prefill across steps | mechanism | on/off | on in vLLM 0.6+ | improves latency of interleaved short requests | https://vllm.ai/blog/2025-09-05-anatomy-of-vllm |
+| sliding-window inference | drop KV cache entries older than W tokens | mechanism | on/off | model-dependent | bounds memory in long contexts; some quality cost on very long recall | https://arxiv.org/pdf/2508.09834 |
+| GQA (grouped-query attention) | share KV heads across query heads | architecture | 1 to n_heads | 8 groups common | shrinks KV cache proportionally to n_heads/n_kv_heads | https://arxiv.org/abs/2305.13245 |
+| MQA (multi-query attention) | one KV head shared by all query heads | architecture | 1 kv head | uncommon standalone | maximum KV cache shrink; more quality loss than GQA | https://arxiv.org/abs/2305.13245 |
+| RoPE scaling | stretch positional embeddings past training length | technique | linear, YaRN, dynamic | none | extends context at inference without retraining; quality varies | https://arxiv.org/pdf/2403.08295 |
+| context extension | any method that lets a model handle longer inputs than trained | umbrella | RoPE scaling, chunked, sliding | model-dependent | usually cheaper than retraining but with tradeoffs | https://arxiv.org/pdf/2403.08295 |
+| batching (max_num_seqs) | cap on concurrent sequences per step | integer | 32 to 512+ | server-configured | higher = better throughput; higher = more KV memory per step | https://docs.vllm.ai/en/latest/api/vllm/sampling_params/ |
+
+## Section 10 — Provider-specific / hosted-model fields
+
+At the edge of the pipeline, providers add fields for safety, tracking, and billing. Motoi is hermetic-first, but a trained Motoi Copilot may still encounter these when a program calls a hosted model. Keep this table thin; details change often; the ecosystem norms below hold.
+
+| name | one-line-definition | type | range/values | default | effect | source |
+|---|---|---|---|---|---|---|
+| refusal | field explaining why the model declined | string or null | any text, or null | null | commercial-provider safety layer; content is null when refusal is present | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| safety_status | outcome of a safety pipeline pass | string | provider-specific | usually `pass` | some providers attach per-turn safety flags in response metadata | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| content_filter_results | per-category filter outcomes | object | keys like `hate`, `sexual`, `violence`, `self_harm` | provider-specific | each key has a severity or a boolean; used by content-policy consumers | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| moderation flags | per-turn moderation classifier output | object | per-category flags | provider-specific | separate `/moderations` endpoint on some providers | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| request_id | opaque per-request id in headers | string (HTTP header) | provider-specific | assigned by server | log this alongside your own trace id for provider support | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| x-ratelimit-limit-requests | request-per-minute cap for your key | integer (HTTP header) | provider-specific | provider-set | if you exceed this, expect 429 | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| x-ratelimit-limit-tokens | tokens-per-minute cap for your key | integer (HTTP header) | provider-specific | provider-set | prompt + completion tokens count | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| x-ratelimit-remaining-requests | remaining request budget this minute | integer (HTTP header) | 0 to limit | decremented on each request | when this hits 0, you get 429 until the next window | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| x-ratelimit-remaining-tokens | remaining token budget this minute | integer (HTTP header) | 0 to limit | decremented on each response | for token-heavy workloads, this is the limit that bites first | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| x-ratelimit-reset-requests | seconds until the request budget resets | duration (HTTP header) | 0+ | measured | back off at least this long on 429 | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| x-ratelimit-reset-tokens | seconds until the token budget resets | duration (HTTP header) | 0+ | measured | same discipline as above | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| retry-after | HTTP-standard header saying when to retry | duration (HTTP header) | 0+ | provider-set | respect it; retries before this time will just be rejected | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| store | flag to persist the completion for retrieval later | boolean | true or false | false | some providers store completions when true; check privacy implications | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| metadata | small key-value bag attached to the request | object | up to 16 keys, string values | none | tag your traffic; retrievable via a list endpoint on some providers | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| service_tier | routing hint (auto/default/flex) | string | provider-specific | auto | commercial providers use this for priority scheduling | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| system_fingerprint | echoed above: hash of runtime config | string | provider hex | assigned | changes on model or infra swap; watch it if you're seed-locking | https://platform.openai.com/docs/api-reference/chat-streaming/streaming |
+| prediction | pre-computed continuation for latency-critical requests | object | model-specific | none | some providers use it to speed up common completions | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| audio (modality) | request/response includes audio | object | `{voice, format}` | none | some models support audio in and audio out; higher latency and cost | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+| modalities | which modalities are used in this exchange | array of strings | `text`, `audio`, `vision` | `text` | multi-modality changes token accounting; images have per-image cost | https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create |
+
+## What the model IS expected to remember — and what belongs in this appendix
+
+You do not memorize the tables above. You never will and you should not try. Instead, hold the following short list in your working weights, and let RAG hold the rest.
+
+**Hold in weights.** The doctrine: you look values up rather than guessing. The names of the ten sections in this appendix so you know which one to query. The shape of a lookup row: `name | one-line-definition | type | range | default | effect | source`. The core intuition that sampling means turning a distribution into a token, that temperature scales the sharpness, that top_p / top_k / min_p / mirostat are all different ways to trim the tail, that a KV cache is what makes decoding fast, and that fine-tuning changes weights while RAG (Cortex) changes context without changing weights. The habit of citing the source you found.
+
+**Look up.** Every default value. Every exact range. Every provider-specific field name. Every response-shape field. Every training hyperparameter that isn't part of your daily inference vocabulary. If a program asks about `mirostat_tau`, `dry_penalty_last_n`, `chunk.usage`, `LoRA rank`, or `x-ratelimit-remaining-tokens`, you look. If it asks about `logit_bias` at a hostile-token level, you look. If it asks how to constrain a JSON response across three different providers, you look.
+
+There is one hard rule under all of this. **If a row is not in this appendix and you cannot verify a source, say so.** Do not fabricate. Do not guess a default. Do not paraphrase a paper you have not been trained on. The failure mode of a small model is over-confident hallucination, and the whole point of this appendix is that you do not have to hallucinate: you have the lookup table, and the lookup table has sources. Use it.
+
+That is the appendix. Read a row when you need it, forget it after you use it, come back and read the row again. That is what the appendix is for.")

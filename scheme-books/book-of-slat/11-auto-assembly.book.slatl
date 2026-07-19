@@ -1,0 +1,334 @@
+;; 11-auto-assembly.slat
+;; Book of SLAT — Chapter 11 — Auto-assembly
+
+(chapter
+  :book             "Book of SLAT"
+  :chapter-number   11
+  :title            "Chapter 11 — Auto-assembly"
+  :size             8337
+  :sha256           "e8b9b3cb5cf4296d"
+  :prose
+"---
+slug: book-of-slat-ch11
+title: Auto-assembly
+book: slat
+chapter: 11
+of: 16
+part: III
+app: scheme-repl
+palette: book-standard
+canonical: true
+owner: docs-team (Jess)
+status: draft
+last-reviewed: 2026-07-12
+---
+
+# Chapter 11 — Auto-assembly
+
+When the runtime reads a mailbox line whose head is `event`, she wants a
+native `Event` object with a `.ts` property and a `.kind` property
+and a `.by` property. She doesn't want to walk the record with
+`slat-key` every time.
+
+Auto-assembly is what turns the generic record into the native
+object. And it does it without a schema file. Without a code-gen
+step. Without a compile phase.
+
+**When the head is a symbol the runtime knows, the runtime calls a
+registered builder to produce a native object. When the head is
+unknown, the runtime returns a generic record. Both paths work.**
+
+## The three-tier registry
+
+Auto-assembly has three tiers.
+
+**Tier 0 — baseline.** The fifteen types from Chapter 5. Ship in every
+binding. Fifteen builders, no configuration needed.
+
+**Tier 1 — session.** Consumers register additional types at runtime.
+Per-process. Not persisted.
+
+**Tier 2 — inferred.** When the reader sees a batch of records with an
+unknown head, it can offer to build a spec from the observed shapes
+and register a builder. Opt-in.
+
+## Tier 0 in action
+
+```motoi-scheme
+(define rec
+  (slat-loads \"(event :ts 1 :kind \\\"card.opened\\\" :by 'motoi)\"))
+
+(event? rec)
+```
+
+`#t`. The reader recognized `event` as a registered type and returned
+an `Event` object. `event?` is the type predicate.
+
+```motoi-scheme
+(event-ts rec)
+```
+
+Returns `1`. Native accessor. No `slat-key` needed.
+
+```motoi-scheme
+(event-kind rec)
+```
+
+Returns `\"card.opened\"`. Also native.
+
+The generic record is still available if you want it:
+
+```motoi-scheme
+(->slat rec)
+```
+
+Returns the underlying slat-record shape. Useful for canonicalization,
+hashing, or forwarding.
+
+## Registering a new type — Tier 1
+
+The one form that does it:
+
+```motoi-scheme
+(define-slat-type weather-observation
+  (fields
+    (temp     :type float    :required)
+    (humidity :type float    :required)
+    (pressure :type float    :optional)
+    (station  :type string   :optional))
+  (positional ())
+  (builder (lambda (rec) (make-weather-observation rec))))
+```
+
+One form. Now the reader recognizes `(weather-observation :temp …
+:humidity … …)` records and produces `WeatherObservation` objects.
+
+No file. No code-gen. The registry lives in memory.
+
+You can undo it too:
+
+```motoi-scheme
+(undefine-slat-type 'weather-observation)
+```
+
+After this, records with head `weather-observation` come back as
+generic records again. Old records still parse — you just don't get
+native rehydration.
+
+## Validation
+
+Every registered type gets a checker for free.
+
+```motoi-scheme
+(slat-check :type 'weather-observation rec)
+```
+
+Returns either:
+
+```
+(check-result
+  :pass #t
+  :missing ()
+  :type-errors ()
+  :extras ())
+```
+
+...or:
+
+```
+(check-result
+  :pass #f
+  :missing (:humidity)
+  :type-errors ((:temp \"expected float, got string\"))
+  :extras ())
+```
+
+Errors are structured, not stringly. Consumers pattern-match to
+decide whether to reject, coerce, or log.
+
+## Inference — Tier 2
+
+If you have a big batch of slats with the same head symbol and no
+registered type, the inferrer can propose a spec:
+
+```motoi-scheme
+(define batch
+  (slat-load (open-input-file \"unknown-events.slatl\")))
+
+(define spec (slat-infer batch))
+```
+
+The inferrer:
+
+1. Collects all keyword names seen.
+2. Computes which keys are required (in ≥95% of records) vs. optional.
+3. Infers each keyword's type as the join of observed value types.
+4. Detects positional arity.
+5. Emits a `(spec :id 'inferred/… :required (…) :optional (…))` record.
+
+You can register the spec:
+
+```motoi-scheme
+(slat-register-spec spec)
+```
+
+...and from then on, records matching that shape auto-assemble to
+generic records with the inferred fields. If you want native objects
+too, define a builder on top.
+
+The inferrer is a describer, not a proposer of new subtypes. It sees a
+lot of records and describes what it saw. Nothing more.
+
+## What auto-assembly does not do
+
+- **Not a type checker.** SLAT does not enforce types on record fields
+  except at `slat-check` time.
+- **Not a validator DSL.** Constraints (regex, ranges, uniqueness) are
+  consumer-owned. Register a custom `builder` that does the checks.
+- **Not code-gen.** No stub generation. No source files. The runtime
+  is the truth.
+- **Not automatic.** You have to call `define-slat-type` or
+  `slat-register-spec`. It doesn't happen behind your back.
+
+## Unknown records don't break things
+
+The most important property of auto-assembly:
+
+```motoi-scheme
+(define unknown
+  (slat-loads \"(new-thing :field-a 1 :field-b \\\"hello\\\")\"))
+
+(slat-record? unknown)
+```
+
+`#t`. The runtime didn't panic. It returned a generic record.
+
+```motoi-scheme
+(slat-key unknown 'field-a)
+```
+
+`1`. You can still walk it.
+
+```motoi-scheme
+(slat-dumps unknown)
+```
+
+Round-trips fine. You can forward the record without understanding
+it.
+
+**This is the key extensibility property.** New head symbols travel
+through the system without a coordinated change. Each consumer decides
+whether to register a builder for the new type. Old consumers see
+generic records. New consumers see native objects. Both keep working.
+
+## Writing an auto-assembled type
+
+The writer runs the reverse. Given a native `Event` object, it
+canonicalizes to `(event :ts … :kind … …)`.
+
+```motoi-scheme
+(define e (make-event :ts 1 :kind \"card.opened\" :by 'motoi))
+
+(slat-dumps e)
+```
+
+Produces the canonical string form. The writer knew the shape because
+`define-slat-type` registered both the builder (for reads) and the
+inverse (for writes).
+
+For record-shaped types, the inverse is derived automatically from
+the fields. You don't have to write it.
+
+## The `define-slat-type` grammar
+
+```
+(define-slat-type <head-symbol>
+  (fields
+    (<name> :type <type-name> :required|:optional)
+    ...)
+  (positional (<pos-types>))
+  (builder <function>)
+  [ (writer <function>) ]
+  [ (predicate <function>) ])
+```
+
+- `head-symbol` — the type name.
+- `fields` — the keyword fields, each with a type and a required/optional
+  flag.
+- `positional` — the types of the positional tail.
+- `builder` — a function from generic record to native object.
+- `writer` — optional. Only needed if the automatic writer doesn't
+  work for you.
+- `predicate` — optional. Defaults to `#{head}-?`. Override if you
+  want a different name.
+
+## Try this
+
+Define a small type. Read a record. Verify auto-assembly worked.
+
+```motoi-scheme
+(define-slat-type greeting
+  (fields
+    (from :type symbol :required)
+    (to   :type symbol :required)
+    (text :type string :required))
+  (positional ())
+  (builder (lambda (rec)
+             (list 'greeting-obj
+                   (slat-key rec 'from)
+                   (slat-key rec 'to)
+                   (slat-key rec 'text)))))
+
+(slat-loads \"(greeting :from 'motoi :to 'alfred :text \\\"hi\\\")\")
+```
+
+You should see:
+
+```
+(greeting-obj motoi alfred \"hi\")
+```
+
+The builder ran. The record became a tagged list.
+
+Now try an unknown type.
+
+```motoi-scheme
+(slat-loads \"(farewell :from 'motoi :to 'alfred :text \\\"bye\\\")\")
+```
+
+You get a generic record. No builder registered. The reader hands you
+back the shape.
+
+## The auto-assembly rule
+
+**Known head → native object. Unknown head → generic record. Both
+paths safe.**
+
+That's the extensibility story. Systems evolve additively. Nobody
+breaks. New types travel.
+
+## Where next
+
+Chapter 12 walks tagged extensions — the OTHER extensibility path.
+Where auto-assembly is about record types, tagged extensions are about
+scalar-ish values (a UUID, an instant, a byte string). Both are
+mechanisms for \"we didn't include this in the language, but you can
+add it.\"
+
+Then Chapter 13 walks the mailbox pattern — the concrete \"how records
+travel between processes\" chapter. That's where all the theory turns
+into a running system.
+
+## Cross-links
+
+- [[appendix-h]] — auto-assembly cookbook with `define-slat-type`
+  recipes.
+- [[book-of-motoi-scheme]] Chapter 6 — Records and types, at the
+  language level.
+- [[book-of-systems]] Chapter 3 — Service catalog, which uses
+  auto-assembly for L1/L2 registry entries.
+
+---
+
+Turn the page.
+")

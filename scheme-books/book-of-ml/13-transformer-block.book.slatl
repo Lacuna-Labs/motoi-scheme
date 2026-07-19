@@ -1,0 +1,313 @@
+(chapter
+  :book "Book of ML"
+  :chapter-number 13
+  :title "A transformer block"
+  :audience "kid-and-adult operators"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-19"
+     :sources ((:paper "Vaswani et al. 2017 — Attention Is All You Need, NeurIPS"
+                :arxiv "1706.03762"
+                :used-for "the transformer block architecture")
+               (:paper "Ba, Kiros, Hinton 2016 — Layer Normalization"
+                :arxiv "1607.06450"
+                :used-for "layernorm derivation")
+               (:paper "He et al. 2015 — Deep Residual Learning for Image Recognition (residual connections)"
+                :arxiv "1512.03385")))
+  :prose
+"# Chapter 13 — A transformer block
+
+A transformer BLOCK is not the whole transformer. It is one unit,
+one 'floor' of the tower. A full transformer stacks N of these blocks
+on top of each other (12 for a small model, 96 for GPT-3). Each block
+has the same structure. The stack does more or less computation
+depending on how tall it is.
+
+A block has four ingredients wired together:
+
+1. **Attention** (from chapter 12).
+2. **A feed-forward network** (from chapter 8 — two-layer MLP).
+3. **Residual connections** (add the input back to the output — skip
+   connections).
+4. **Layer normalization** (rescale so activations stay in a healthy
+   range).
+
+Every real transformer has all four. Skip any and training breaks
+or gets much slower.
+
+## The block structure
+
+Here is the shape, in pseudocode:
+
+```
+input: x        (a sequence of embeddings, shape (seq_len, embed_dim))
+
+output_1 = LayerNorm(x + Attention(x))
+output_2 = LayerNorm(output_1 + FeedForward(output_1))
+return output_2
+```
+
+The `x + Attention(x)` and `output_1 + FeedForward(output_1)` are
+the residual connections. You compute a transformation, then add the
+INPUT back in. That way if the transformation learned to do
+'nothing', the block is still the identity — no harm done.
+
+## Problem 1 — Layer normalization
+
+Layer norm takes a vector and shifts + scales it so the mean is 0 and
+the variance is 1, then applies a learned per-dimension gain and
+bias.
+
+```
+;; Given a vector, subtract mean, divide by stddev, then apply gamma and beta.
+(define (layernorm v gamma beta)
+  (define d (vec/dim v))
+  (define components (map (lambda (i) (vec/ref v i)) (iota d)))
+  (define mean (/ (reduce + 0 components) d))
+  (define centered (map (lambda (x) (- x mean)) components))
+  (define variance (/ (reduce + 0 (map (lambda (c) (* c c)) centered)) d))
+  (define stddev (math/sqrt (+ variance 0.00001)))   ;; 0.00001 for numerical safety
+  (define normalized (map (lambda (c) (/ c stddev)) centered))
+  (map (lambda (i)
+         (+ (* (list-ref normalized i) (list-ref gamma i))
+            (list-ref beta i)))
+       (iota d)))
+
+(define v (list 1 2 3 4 5))
+(define gamma (list 1 1 1 1 1))   ;; no scaling
+(define beta (list 0 0 0 0 0))    ;; no shift
+
+(display (layernorm v gamma beta))
+;; A vector with mean 0 and stddev 1.
+;; components: something like (-1.41 -0.71 0 0.71 1.41)
+```
+
+Layer norm keeps activations from exploding or vanishing as the
+signal passes through many layers. It is applied to each token's
+embedding independently — not across the whole sequence.
+
+`gamma` and `beta` are LEARNED. Every layernorm has its own gamma
+and beta vectors, trained by gradient descent like everything else.
+Usually initialized to gamma=1, beta=0.
+
+## Problem 2 — Feed-forward network
+
+The FF part of a transformer block is exactly a 2-layer MLP with
+ReLU (or GELU in some models) between the two linear layers. The
+hidden dimension is usually 4x the embed dimension.
+
+```
+;; Feed-forward: input dim d, hidden dim 4d, output dim d
+;; f(x) = W2 * relu(W1 * x + b1) + b2
+
+(define (matvec rows v) (map (lambda (r) (vec/dot r v)) rows))
+(define (relu-vec v)
+  (vec/make (map (lambda (i)
+                   (let ((x (vec/ref v i)))
+                     (if (> x 0) x 0)))
+                 (iota (vec/dim v)))))
+
+(define (feed-forward W1 b1 W2 b2 x)
+  (define hidden (relu-vec (vec/make (map + (matvec W1 x) b1))))
+  (vec/make (map + (matvec W2 hidden) b2)))
+
+;; Example: d=2, hidden=8
+(define embed-dim 2)
+(define hidden-dim 8)
+
+(define (rand-vec n) (vec/make (map (lambda (_) (- (* (random) 0.3) 0.15)) (iota n))))
+(define W1 (map (lambda (_) (rand-vec embed-dim)) (iota hidden-dim)))
+(define b1 (map (lambda (_) 0.0) (iota hidden-dim)))
+(define W2 (map (lambda (_) (rand-vec hidden-dim)) (iota embed-dim)))
+(define b2 (map (lambda (_) 0.0) (iota embed-dim)))
+
+(define x (list 1.0 -0.5))
+(display (feed-forward W1 b1 W2 b2 x))
+;; => a 2-vector (some transformed version of x)
+```
+
+FF is applied INDEPENDENTLY per token position. Each token's embedding
+goes through the same feed-forward network. No mixing between
+positions in the FF layer — that mixing already happened in attention.
+
+## Problem 3 — Residual connections
+
+Given input `x` and a transformation `T`, the residual output is
+`x + T(x)`. Very simple.
+
+```
+(define (residual x transform)
+  (vec/add x (transform x)))
+```
+
+Why does this matter? Two reasons.
+
+**Gradient flow.** In a very deep network, gradients have to
+backpropagate through many layers. Without residuals, the gradient
+gets multiplied by many small numbers and vanishes. With residuals,
+the gradient can flow around the transformation — the '+ x' path
+preserves the original signal.
+
+**Identity default.** With residuals, if a layer learns to do
+nothing (weights near zero), the block is still the identity. Adding
+more layers can't hurt — only help. Without residuals, an untrained
+layer can DAMAGE the signal.
+
+He et al. 2015 (ResNets) showed residuals were the key to training
+very deep networks. Vaswani et al. 2017 kept them in the transformer
+and they've been there ever since.
+
+## Problem 4 — Put it together — a full block
+
+Now compose. Attention + residual + layernorm. FF + residual +
+layernorm. That is one transformer block.
+
+```
+;; Assume these are already defined:
+;;   (attention-block W-q W-k W-v embeddings)
+;;   (feed-forward W1 b1 W2 b2 x)
+;;   (layernorm v gamma beta)
+
+(define (transformer-block
+          W-q W-k W-v          ;; attention projections
+          W1-ff b1-ff W2-ff b2-ff  ;; feed-forward
+          gamma1 beta1         ;; layernorm after attention
+          gamma2 beta2         ;; layernorm after feed-forward
+          embeddings)
+  ;; 1. Attention with residual and layernorm
+  (define attn-out (attention-block W-q W-k W-v embeddings))
+  (define after-attn
+    (map (lambda (x a) (layernorm (vec/add x a) gamma1 beta1))
+         embeddings attn-out))
+  ;; 2. Feed-forward with residual and layernorm
+  (define ff-out
+    (map (lambda (x) (feed-forward W1-ff b1-ff W2-ff b2-ff x)) after-attn))
+  (define after-ff
+    (map (lambda (x f) (layernorm (vec/add x f) gamma2 beta2))
+         after-attn ff-out))
+  after-ff)
+```
+
+Read the block. Two sub-blocks. Each is: apply transformation, add
+the input back, layer-normalize. First sub-block does attention.
+Second sub-block does feed-forward. Both have residuals. Both are
+layer-normed.
+
+## Problem 5 — Pre-norm vs post-norm
+
+Above I did LayerNorm AFTER adding the residual (post-norm). Modern
+transformers (GPT-2 onward) do LayerNorm BEFORE the transformation
+(pre-norm):
+
+```
+;; Pre-norm variant:
+;;   attn_out = x + Attention(LayerNorm(x))
+;;   final   = attn_out + FeedForward(LayerNorm(attn_out))
+```
+
+Pre-norm trains more stably. Post-norm (as in the original 2017
+paper) requires more careful learning-rate schedules. Both work; both
+are still used. Our chapter 16 tiny LLM will use pre-norm because it
+is easier to get right.
+
+## Problem 6 — Parameter count of a block
+
+For an embed dimension d, hidden dimension 4d, one attention head:
+
+- Attention projections: 3 matrices of shape (d, d) plus 3 bias
+  vectors = 3d^2 + 3d parameters.
+- Feed-forward: (d, 4d) matrix + 4d bias + (4d, d) matrix + d bias
+  = 8d^2 + 5d parameters.
+- Two layernorms: 2 * 2d = 4d parameters.
+
+Total: 11d^2 + 12d.
+
+For d=768 (BERT-base): 11 * 589824 + 12 * 768 ≈ 6.5 million per
+block. Twelve blocks: ~78 million. Plus the embedding table
+(~24 million) plus the output projection (~24 million). BERT-base
+was ~110 million total. Numbers check out.
+
+For d=12288 (GPT-3): 11 * 150 million + 12 * 12288 ≈ 1.66 BILLION per
+block. Ninety-six blocks: ~159 billion. Plus embeddings. GPT-3 was
+175 billion. Same math, just bigger tensors.
+
+## Capstone — Run a whole block on a small sequence
+
+Assemble the full block and run it. We won't train — that is
+chapter 16. But we can verify the shapes work end to end.
+
+```
+;; Small dimensions for a runnable demo.
+(define d 4)     ;; embed dim
+(define ff-hidden 8)
+(define seq-len 3)
+
+(define (rand-vec n) (vec/make (map (lambda (_) (- (* (random) 0.2) 0.1)) (iota n))))
+
+;; Attention projections
+(define W-q (map (lambda (_) (rand-vec d)) (iota d)))
+(define W-k (map (lambda (_) (rand-vec d)) (iota d)))
+(define W-v (map (lambda (_) (rand-vec d)) (iota d)))
+
+;; Feed-forward
+(define W1-ff (map (lambda (_) (rand-vec d)) (iota ff-hidden)))
+(define b1-ff (map (lambda (_) 0.0) (iota ff-hidden)))
+(define W2-ff (map (lambda (_) (rand-vec ff-hidden)) (iota d)))
+(define b2-ff (map (lambda (_) 0.0) (iota d)))
+
+;; Layernorms — gamma=1, beta=0
+(define gamma1 (map (lambda (_) 1.0) (iota d)))
+(define beta1  (map (lambda (_) 0.0) (iota d)))
+(define gamma2 (map (lambda (_) 1.0) (iota d)))
+(define beta2  (map (lambda (_) 0.0) (iota d)))
+
+;; Sequence: three token embeddings
+(define embeddings
+  (list (rand-vec d) (rand-vec d) (rand-vec d)))
+
+(define out
+  (transformer-block W-q W-k W-v
+                     W1-ff b1-ff W2-ff b2-ff
+                     gamma1 beta1
+                     gamma2 beta2
+                     embeddings))
+
+(display (length out))
+;; => 3   (one output vector per input token)
+(display (vec/dim (car out)))
+;; => 4   (each output vector has the same dim as the input)
+```
+
+The block returned three vectors of dimension 4 from three input
+vectors of dimension 4. The shape is preserved — that is the point
+of the residuals. You can stack these blocks any number of times and
+the shapes still line up.
+
+## Why this matters
+
+The transformer block is the modular unit that made deep language
+models tractable. Stack 12 of them and you have BERT. Stack 96 of
+them and you have GPT-3. Every block does the same thing: mix
+information across positions (attention), transform per-position
+(feed-forward), and add layer norm and residuals to keep gradients
+flowing. You have built the atomic unit. In chapter 16 we stack a
+couple and train.
+
+## What's next
+
+Chapter 14 solves two problems attention has:
+
+1. **No sense of order.** Attention treats a sequence like a set —
+   swap positions and the output is the same. That is fine for a bag
+   of words but terrible for language, where 'dog bites man' and
+   'man bites dog' mean different things. Positional encoding fixes
+   this.
+
+2. **Peeking at the future.** In a causal (next-token-prediction)
+   language model, position `i` must not see positions `> i`. Causal
+   masking enforces this during training. Otherwise the model just
+   copies the answer and doesn't learn.
+")

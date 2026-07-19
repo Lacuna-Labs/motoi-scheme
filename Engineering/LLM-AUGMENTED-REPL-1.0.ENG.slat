@@ -1,0 +1,540 @@
+(engineering-doc
+  :name "LLM-Augmented REPL + IDE Feature Set"
+  :version "1.0"
+  :date "2026-07-17"
+  :audience "Motoi + Sakura language teams; Book of Introspection authors"
+  :status "spec-frozen-for-book-of-introspection"
+  :authored-by "Motoi Copilot lane, first pass"
+  :provenance
+    (:asked-by "Alfred"
+     :ask "Give me the feature set the REPL + IDE can have now that we have an LLM — non-UI-dependent."
+     :date "2026-07-17"
+     :feeds-into "Book of Introspection (Motoi + Sakura lanes)")
+  :doctrine
+"# Why non-UI-dependent
+
+Every feature is a verb. A verb takes S-expressions in and returns S-expressions out. Any surface — terminal REPL, web IDE, iOS app, voice, notebook — can render the verb's result however it likes. The verb doesn't know or care about the surface.
+
+If a feature required a specific UI (a popover, a right-click menu, a modal), it would be a UI feature, not a language feature. Language features endure across surfaces; UI features don't. We build the language features.
+
+Every verb below satisfies three properties:
+
+  1. **Callable from Scheme.** `(fix err)` works from the REPL, from a script, from another verb, from a cart, from Sakura's or Motoi's runtime alike.
+  2. **Composable.** Results feed other verbs. `(fix (last-error))` → `(rewrite ,it :goal 'shorter)` → `(critique ,it)` reads like a pipeline because it is one.
+  3. **Renderable anywhere.** Every result is data (string, form, alist, record). A terminal prints it. A web IDE styles it. A phone reads it aloud.
+
+The features are grouped for teaching, not implementation. In the runtime they are all just verbs with metadata.
+
+# The four families
+
+  1. **LLM primitives** — the raw ask/complete/embed/stream layer.
+  2. **Introspection-augmented** — LLM combined with the verb registry + reference manual.
+  3. **Session-aware** — LLM combined with Cortex + REPL history.
+  4. **Generative + pedagogical** — LLM writes code + teaches.
+
+Everything else is a composition of these four."
+
+  :families
+    (family-1-primitives
+      :title "LLM primitives"
+      :purpose "The foundation. Every other verb calls one of these."
+      :verbs
+        ((llm/ask
+           :arity "(prompt . options)"
+           :perm "read"
+           :contract "(string . plist) -> string"
+           :doc "Ask the model a question. Options include :context, :max-tokens, :temperature, :system."
+           :example "(llm/ask \"What does map do?\")"
+           :notes "The absolute minimum LLM interface. Every higher-level verb bottoms out here.")
+         (llm/complete
+           :arity "(partial . options)"
+           :perm "read"
+           :contract "(string . plist) -> string"
+           :doc "Complete a partial expression or text. Options include :max-tokens, :stop, :temperature."
+           :example "(llm/complete \"(define (fact n) (if (zero? n) 1 (* n (fact\")"
+           :notes "Distinct from llm/ask because completions want raw continuation, not chat-style response.")
+         (llm/stream
+           :arity "(prompt callback . options)"
+           :perm "read"
+           :contract "(string procedure . plist) -> boolean"
+           :doc "Stream tokens to a callback. Callback receives (token) each tick, then (#!eof) at end."
+           :example "(llm/stream \"explain closures\" (lambda (t) (display t)))"
+           :notes "Streaming is a runtime concern. The verb hands you tokens; how you render them is your surface's job.")
+         (llm/embed
+           :arity "(text . options)"
+           :perm "read"
+           :contract "(string . plist) -> vector"
+           :doc "Return an embedding vector for retrieval / similarity. Options include :model, :dim."
+           :example "(llm/embed \"cortex is a memory store\")"
+           :notes "Enables (rag ...) and semantic-search verbs. Vector shape is documented in the reference.")
+         (llm/config
+           :arity "()"
+           :perm "read"
+           :contract "() -> alist"
+           :doc "Return the current LLM configuration (model, endpoint, temperature defaults). Not the API key."
+           :example "(llm/config)"
+           :notes "Introspection of the LLM binding itself — a verb that describes the model behind the model."))
+      :closing
+"These five are the entire raw surface. `llm/ask` for chat, `llm/complete` for continuation, `llm/stream` for realtime, `llm/embed` for similarity, `llm/config` for self-knowledge. Everything higher up is a composition of these plus the registry, reference, and Cortex.")
+
+    (family-2-introspection-augmented
+      :title "Introspection-augmented (LLM + registry + reference)"
+      :purpose "The LLM sees the verb metadata and the reference manual. Answers are grounded, not free-associated."
+      :verbs
+        ((what-is
+           :arity "(sym)"
+           :perm "read"
+           :contract "(symbol) -> record"
+           :doc "Unified lookup. Checks the registry (verb metadata), the reference (docs + examples + contract), and if nothing matches asks the LLM for a best-guess description with :confidence."
+           :example "(what-is 'car)"
+           :composes-with "help, describe, docOf"
+           :notes "Alfred's 'IN ONE PLACE' — a kid types a word, one verb returns everything known about it.")
+         (explain
+           :arity "(x)"
+           :perm "read"
+           :contract "(any) -> string"
+           :doc "Prose explanation. If x is a symbol → explain the verb. If x is a form → explain what it does. If x is a value → describe its shape and origin (from Cortex if known)."
+           :example "(explain '(map + '(1 2 3) '(4 5 6)))"
+           :composes-with "annotate, tell-story"
+           :notes "The LLM sees the verb docs for every symbol in the form. Grounded prose, not confabulation.")
+         (rewrite
+           :arity "(form . options)"
+           :perm "read"
+           :contract "(form . plist) -> form"
+           :doc "LLM rewrites the form. Options: :goal (idiomatic | shorter | safer | faster | more-explicit | more-pedagogical | more-terse), :preserve (list of subforms to keep intact)."
+           :example "(rewrite '(if (null? xs) '() (cons (f (car xs)) (map-f (cdr xs)))) :goal 'idiomatic)"
+           :composes-with "critique, paraphrase"
+           :notes "Returns a form — evaluable in the REPL. UI surfaces show diffs; the verb just returns code.")
+         (critique
+           :arity "(form)"
+           :perm "read"
+           :contract "(form) -> alist"
+           :doc "LLM points out issues: bugs, style, edge cases, missing guards. Returns an alist keyed :severity :kind :location :message :suggestion."
+           :example "(critique '(define (avg xs) (/ (apply + xs) (length xs))))"
+           :notes "Non-blocking. Nothing enforces the critique — you read it and decide.")
+         (annotate
+           :arity "(form)"
+           :perm "read"
+           :contract "(form) -> form-with-comments"
+           :doc "LLM returns the form with per-subform inline comments explaining each piece. Preserves shape."
+           :example "(annotate '(let loop ((n 10) (acc 1)) (if (zero? n) acc (loop (- n 1) (* acc n)))))"
+           :notes "For teaching. The IDE renders comments in the gutter; the terminal prints them inline.")
+         (paraphrase
+           :arity "(form . options)"
+           :perm "read"
+           :contract "(form . plist) -> form"
+           :doc "LLM writes an equivalent form using different constructs. Options: :using (a list of forms to prefer, e.g. '(let cond)) or :avoiding (forms to avoid)."
+           :example "(paraphrase '(map (lambda (x) (* x x)) xs) :using '(for/list))"
+           :notes "Distinct from rewrite: paraphrase asks for stylistic variety, not improvement.")
+         (shape-of
+           :arity "(value)"
+           :perm "read"
+           :contract "(any) -> record"
+           :doc "Describe the runtime shape of a value. Combines native type introspection (type-of, length, keys) with LLM prose (:what-you-see :probable-origin :common-uses)."
+           :example "(shape-of some-hash)"
+           :notes "Bridges type-of (mechanical) with description (interpretive). Both come back in one record.")
+         (compare
+           :arity "(a b)"
+           :perm "read"
+           :contract "(any any) -> record"
+           :doc "LLM contrasts two values or two forms. Returns :structural-diff :semantic-diff :when-they-diverge."
+           :example "(compare (rewrite x :goal 'shorter) x)"
+           :notes "Great after a rewrite: (compare original rewritten) tells you what actually changed.")
+         (disambiguate
+           :arity "(sym)"
+           :perm "read"
+           :contract "(symbol) -> list"
+           :doc "For overloaded or ambiguous names, LLM returns list of plausible meanings with :context and :example each. Grounded in registry lookups."
+           :example "(disambiguate 'car)"
+           :notes "Complements what-is for names that have multiple registered meanings across namespaces.")
+         (did-you-mean
+           :arity "(sym)"
+           :perm "read"
+           :contract "(symbol) -> list"
+           :doc "Ranked list of nearest verbs, using string distance + LLM semantic similarity. Used inside errors."
+           :example "(did-you-mean 'crdr)"
+           :notes "The error-record :did-you-mean field calls this. A verb because it's useful outside of errors too."))
+      :closing
+"This family fuses the LLM with the registry so answers stay honest. `(what-is 'car)` returns the verb record if it exists, escalates to the LLM only for things the registry doesn't know about, and never invents a signature.")
+
+    (family-3-session-aware
+      :title "Session-aware (LLM + Cortex + REPL history)"
+      :purpose "The LLM has access to what has happened in this session and what has been recorded in Cortex."
+      :verbs
+        ((reason-about
+           :arity "(value)"
+           :perm "read"
+           :contract "(any) -> string"
+           :doc "LLM reasons about where a value came from. Reads Cortex records mentioning it, REPL history producing it, and the registry lookups it depended on."
+           :example "(reason-about (cortex/query :predicate 'preferred-color))"
+           :notes "The 'why is this value what it is' verb. Answer includes provenance, not just description.")
+         (next-step
+           :arity "()"
+           :perm "read"
+           :contract "() -> list"
+           :doc "LLM suggests plausible next moves given the session's arc. Returns a list of :form :reason pairs."
+           :example "(next-step)"
+           :notes "A gentle nudge, not a demand. The REPL prints options; the user picks or ignores.")
+         (reflect
+           :arity "()"
+           :perm "read"
+           :contract "() -> string"
+           :doc "LLM summarizes what happened in this session. Reads history + evaluated forms + errors + Cortex writes."
+           :example "(reflect)"
+           :notes "Useful at the end of a session — commit-message-quality prose about what was accomplished.")
+         (mentor
+           :arity "(form)"
+           :perm "read"
+           :contract "(form) -> string"
+           :doc "LLM hints without giving the answer. Reads the form + session context; returns a nudge in the direction of a working solution."
+           :example "(mentor '(define (sum xs) (if (null? xs) ??? (+ (car xs) (sum (cdr xs))))))"
+           :notes "Distinct from fix: mentor keeps the user in the driver's seat.")
+         (what-changed
+           :arity "((:since time))"
+           :perm "read"
+           :contract "(plist) -> alist"
+           :doc "LLM enumerates what changed in the registry, Cortex, and env since a timestamp. Grounded — reads the actual records."
+           :example "(what-changed :since '20-minutes-ago)"
+           :notes "Runs a diff, then narrates it. Useful after coming back from a break.")
+         (diff-explain
+           :arity "(a b)"
+           :perm "read"
+           :contract "(any any) -> string"
+           :doc "LLM explains the meaning of a diff between two runs, two configs, two Cortex records. compare returns structure; diff-explain returns why-it-matters."
+           :example "(diff-explain last-run-log this-run-log)"
+           :notes "For pipelines, tests, and Cortex-tracked values.")
+         (surface-invariant
+           :arity "(fn)"
+           :perm "read"
+           :contract "(procedure) -> list"
+           :doc "LLM proposes invariants of a function. Returns a list of :claim :confidence :test-idea. Reads the source, the tests, and past Cortex observations of the function's outputs."
+           :example "(surface-invariant sort)"
+           :notes "For teaching + property-based testing. The LLM guesses; you accept, edit, or reject.")
+         (who-uses
+           :arity "(sym)"
+           :perm "read"
+           :contract "(symbol) -> list"
+           :doc "Enumerate call sites in the current project + recent Cortex-recorded evaluations. Returns list of :where :context each."
+           :example "(who-uses 'cortex/write)"
+           :notes "Grep-plus. LLM ranks by likely relevance, not just count."))
+      :closing
+"Session-aware verbs all read the same three sources: Cortex records, REPL history, and the live env. They differ in what they do with the reading. `reflect` narrates; `next-step` recommends; `who-uses` enumerates; `reason-about` explains.")
+
+    (family-4-generative-and-pedagogical
+      :title "Generative + pedagogical (LLM writes code and teaches)"
+      :purpose "The LLM produces artifacts (code, tests, examples, quizzes) that land as data the user can read, run, or reject."
+      :verbs
+        ((complete
+           :arity "(partial)"
+           :perm "read"
+           :contract "(form) -> form"
+           :doc "Given a partial S-expression (with #!hole placeholders or a trailing gap), return a plausible completion."
+           :example "(complete '(define (fact n) (if (zero? n) 1 (* n #!hole))))"
+           :notes "For scaffolding, teaching, and tab-complete-in-the-editor. Returns a form the REPL can eval.")
+         (scaffold
+           :arity "(kind . options)"
+           :perm "state-change"
+           :contract "(symbol . plist) -> string"
+           :doc "Scaffold a new artifact of `kind`: 'verb, 'cart, 'test, 'module, 'chapter, 'appendix. Options: :name :purpose :dir. Writes a stub to disk, returns the path."
+           :example "(scaffold 'verb :name 'shop/list-items :purpose \"enumerate items in the current shop\")"
+           :notes "The one verb that touches disk. Perm state-change; obeys sandbox limits.")
+         (propose-verb
+           :arity "(purpose . options)"
+           :perm "read"
+           :contract "(string . plist) -> record"
+           :doc "LLM proposes a new verb signature (name, arity, contract, doc, examples) given a purpose. Returns a record you can pass to scaffold."
+           :example "(propose-verb \"convert a color to its hex string\")"
+           :notes "Distinct from scaffold: propose-verb doesn't touch disk; it just returns the metadata blob.")
+         (build-example
+           :arity "(sym . options)"
+           :perm "read"
+           :contract "(symbol . plist) -> form"
+           :doc "LLM constructs a fresh runnable example for a verb. Options: :level ('novice | 'intermediate | 'expert), :count (integer). Returns a form."
+           :example "(build-example 'map :level 'novice)"
+           :notes "Feeds the reference: every verb should have three tiered examples; this verb generates fresh ones on demand.")
+         (fix
+           :arity "(error-or-form)"
+           :perm "read"
+           :contract "((or error form)) -> form"
+           :doc "LLM suggests a fix. Input can be an error record (from the last raised error) or a form the user thinks is broken."
+           :example "(fix (last-error))"
+           :notes "Returns a form. The REPL shows diff; the user decides whether to eval.")
+         (test-idea
+           :arity "(form)"
+           :perm "read"
+           :contract "(form) -> list"
+           :doc "LLM generates test cases for a form or a function. Returns list of :input :expected :rationale each."
+           :example "(test-idea sort)"
+           :notes "The user runs them or files them under tests/. Never runs them automatically.")
+         (imagine-input
+           :arity "(sym)"
+           :perm "read"
+           :contract "(symbol) -> form"
+           :doc "LLM invents plausible input for a verb, matching its contract. Useful for exploration when you don't have data handy."
+           :example "(imagine-input 'shop/list-items)"
+           :notes "Grounded in the verb's contract field; returns a form the user can eval or edit.")
+         (imagine-output
+           :arity "(sym args)"
+           :perm "read"
+           :contract "(symbol list) -> any"
+           :doc "LLM predicts what a verb will return before you call it. For teaching + sanity-checking."
+           :example "(imagine-output 'sort '((3 1 2)))"
+           :notes "Distinct from `apply` — apply runs the verb; imagine-output describes what it would return.")
+         (port
+           :arity "(form . options)"
+           :perm "read"
+           :contract "(form . plist) -> form-or-string"
+           :doc "Translate a form between languages. Options: :from :to. Supported: 'scheme 'python 'javascript 'clojure 'ruby."
+           :example "(port some-python :from 'python :to 'scheme)"
+           :notes "For teaching by comparison. Book of Jesse relies on this pattern in prose; the verb does it live.")
+         (tell-story
+           :arity "(form)"
+           :perm "read"
+           :contract "(form) -> string"
+           :doc "LLM narrates the evaluation of a form as a walk-through. What binds, what evaluates first, what the intermediate values are."
+           :example "(tell-story '(let ((x 1)) (+ x 2)))"
+           :notes "Prose. For teaching. Not the trace — the story of the trace.")
+         (step
+           :arity "(form)"
+           :perm "read"
+           :contract "(form) -> list"
+           :doc "LLM returns a list of :form :env :note records — one per evaluation step. Similar to a trace but pedagogically annotated."
+           :example "(step '(let ((x 1)) (+ x 2)))"
+           :notes "Distinct from tell-story: step returns a structured list; tell-story returns prose narrating that list.")
+         (quiz
+           :arity "(topic)"
+           :perm "read"
+           :contract "(symbol) -> record"
+           :doc "LLM asks the user a question about a topic. Returns :question :expected-shape :hints. The user's answer can be passed to `(grade-quiz answer)` for feedback."
+           :example "(quiz 'closures)"
+           :notes "Pedagogy. Grounded in the current book chapter if the user is reading one.")
+         (grade-quiz
+           :arity "(quiz-record answer)"
+           :perm "read"
+           :contract "(record any) -> record"
+           :doc "LLM evaluates the user's quiz answer. Returns :correct? :feedback :next-hint."
+           :example "(grade-quiz last-quiz '(lambda (x) (lambda (y) (+ x y))))"
+           :notes "Follow-up to quiz. The two together make the REPL a tutor.")
+         (review-my-code
+           :arity "(file-or-form)"
+           :perm "read"
+           :contract "((or string form)) -> list"
+           :doc "LLM reviews a file or form. Returns list of :location :kind :severity :message. Kinds include 'bug 'style 'security 'perf 'unclear."
+           :example "(review-my-code \"carts/my-cart.slat\")"
+           :notes "Read-only, non-blocking. Programmer decides whether to act.")
+         (pair-with
+           :arity "(topic)"
+           :perm "read"
+           :contract "(string) -> handle"
+           :doc "Start a turn-taking pair-programming session. Handle is passed to `(pair-turn answer)` and `(pair-end)`."
+           :example "(pair-with \"write a Fibonacci generator\")"
+           :notes "Session-shaped verb. Multiple back-and-forths, ended by pair-end."))
+      :closing
+"Every verb here returns data. `complete` returns a form; `scaffold` returns a path; `test-idea` returns a list of case records. No verb here forces the user to accept output. Rejection is a first-class outcome — the REPL just moves on.")
+
+    (family-5-meta
+      :title "Meta (LLM as coordinator, error narrator, log summarizer)"
+      :purpose "Verbs that use the LLM to make the REPL friendlier, not to write new code."
+      :verbs
+        ((pretty-error
+           :arity "(error-record)"
+           :perm "read"
+           :contract "(record) -> string"
+           :doc "LLM rewrites a cryptic error into plain language. Reads the error's :message :location :context and returns a paragraph a beginner can act on."
+           :example "(pretty-error (last-error))"
+           :notes "Every error record already has structure; this verb turns it into empathy.")
+         (reduce-noise
+           :arity "(log)"
+           :perm "read"
+           :contract "((or string list)) -> list"
+           :doc "LLM summarizes a log stream, collapsing repeats, highlighting anomalies. Returns list of :kind :count :first :last :note."
+           :example "(reduce-noise (last-run-log))"
+           :notes "For debugging + release notes.")
+         (rag
+           :arity "(question)"
+           :perm "read"
+           :contract "(string) -> record"
+           :doc "Retrieval-augmented answer. Embeds the question (via llm/embed), searches Cortex + reference + books, hands top matches + question to the LLM. Returns :answer :sources."
+           :example "(rag \"how does the fold pipeline handle held-out contract?\")"
+           :notes "Grounded answers with citations. Refuses to answer if no source scores above :confidence-threshold.")
+         (book
+           :arity "((:chapter n) . options)"
+           :perm "read"
+           :contract "(plist) -> record"
+           :doc "Answer a question grounded in a specific book chapter. Options: :book :chapter :section :question."
+           :example "(book :book 'introspection :chapter 3 :question \"why does describe compose with type-of?\")"
+           :notes "Same shape as rag but scoped to one book. Kids ask their book questions; the book answers.")
+         (name-of
+           :arity "(value)"
+           :perm "read"
+           :contract "(any) -> symbol"
+           :doc "LLM suggests a good name for an anonymous binding. Reads shape + likely purpose from context."
+           :example "(name-of (map (lambda (x) (* x 2)) xs))"
+           :notes "Small verb, big impact. Especially useful after a chain of let-bindings you meant to name.")
+         (golf
+           :arity "(form)"
+           :perm "read"
+           :contract "(form) -> form"
+           :doc "Shorter equivalent. Not always readable; useful for aha-moments in teaching."
+           :example "(golf '(if (null? xs) '() (cons (f (car xs)) (map-f (cdr xs)))))"
+           :notes "Composes with critique: (critique (golf form)) tells you what you gave up for the shortness.")
+         (expand
+           :arity "(form)"
+           :perm "read"
+           :contract "(form) -> form"
+           :doc "Inverse of golf. LLM expands a terse form into a pedagogically clear version."
+           :example "(expand '(reduce + 0 xs))"
+           :notes "Useful when reading unfamiliar code — expand shows what each combinator does step by step."))
+      :closing
+"Meta verbs make errors readable, logs digestible, questions answerable, and code approachable. They're low-drama but high-frequency.")
+
+  :composition-rules
+"# How they compose
+
+The verbs are designed to chain. Common patterns:
+
+  ;; fix + rewrite: repair, then improve
+  (rewrite (fix (last-error)) :goal 'idiomatic)
+
+  ;; propose + scaffold: design a verb, then write the stub
+  (scaffold 'verb (propose-verb \"convert color to hex\"))
+
+  ;; explain + annotate: prose plus inline comments
+  (list :prose (explain form) :annotated (annotate form))
+
+  ;; imagine-output + apply: predict, then verify
+  (let ((predicted (imagine-output 'sort '((3 1 2))))
+        (actual (sort '(3 1 2))))
+    (compare predicted actual))
+
+  ;; rag + book: general vs chapter-scoped answer
+  (list :general (rag q) :in-context (book :chapter n :question q))
+
+  ;; mentor + fix + rewrite: incremental scaffold
+  (let ((hint (mentor form)))
+    (display hint)
+    ;; user tries, fails, then:
+    (rewrite (fix (last-error)) :goal 'idiomatic))
+
+# The pipeline model
+
+Each verb takes a value + options and returns a value. `->` is the natural composition. The REPL should surface `->` as a thread macro (`(-> form (rewrite :goal 'idiomatic) (critique))`) so pipelines read left-to-right.
+
+# What doesn't compose
+
+- Verbs with `perm 'state-change` (only `scaffold` in this doc) must appear at the end of a pipeline, not the middle. Rewriting after a scaffold makes no sense.
+- Verbs that consult Cortex should not be interleaved with heavy Cortex writes — the read might miss the write. The runtime enforces read-your-writes within a session; the user should still avoid the pattern for clarity."
+
+  :non-ui-dependence-audit
+"# Every verb passes the four-surface test
+
+Each verb was audited against four rendering surfaces:
+
+  1. **Terminal REPL** — verb returns a value; REPL uses default pretty-printer.
+  2. **Web IDE** — verb returns a value; IDE styles per :kind field.
+  3. **iOS app** — verb returns a value; app renders as card / list / text as appropriate.
+  4. **Voice interface** — verb returns a value; voice reads the :prose field (or falls back to a text representation).
+
+Any verb that requires a specific UI (a popover, a drag-and-drop area, a modal, a click) fails the audit and doesn't ship here. Every verb above passes.
+
+The only render-hint metadata on any verb is optional :kind (in critique) and :severity (in review-my-code). These are advisory — a surface can style by them or ignore them.
+
+# What we deliberately don't do
+
+- No `(open-file :in-editor ...)`. The verb `(edit-file path)` returns the path or content; the surface handles the actual editing UI.
+- No `(popover ...)`. Popovers are UI; the verb equivalent is `(explain ...)` returning a string.
+- No `(highlight :range ...)`. The web IDE can highlight; the terminal can't. So highlighting is surface-side.
+- No `(click 'button)`. Verbs don't fire user actions in reverse — the user fires the verb.
+
+This keeps the language surface-agnostic and the surfaces language-agnostic. Both evolve independently."
+
+  :implementation-tiers
+"# Tier 0 (v1.0 minimum) — RENAMED 2026-07-17 per Alfred, matches sakura/* pattern
+
+The five primitives (llm/ask, llm/complete, llm/stream, llm/embed, llm/config) plus:
+- copilot/ask (persona wrapper over llm/ask, prepends Motoi Copilot persona + registry snapshot for mentioned verbs)
+- copilot/what-is, copilot/explain, copilot/fix, copilot/complete, copilot/scaffold, copilot/pretty-error, copilot/rag
+
+That's 13 verbs. Enough to have a useful LLM-augmented REPL.
+
+## Rename note (2026-07-17)
+
+The seven bare-named introspection/generative/meta verbs — what-is, explain, fix, complete, scaffold, pretty-error, rag — moved under the `copilot/` namespace so the persona name is visible at the call site. Mirrors the `sakura/ask` pattern in the Sakura dialect. `llm/*` primitives stay as the raw model surface. New `copilot/ask` verb prepends a Motoi Copilot persona (fun coder, terse, no world knowledge outside the language, technical but warm) plus a registry snapshot for symbols mentioned in the prompt, then routes to `llm/ask`.
+
+## Also added Tier-0 (v1.0-completions, 2026-07-17)
+
+Completion verb family — Tier A (free, local registry lookups) + Tier B (LLM-augmented, metered tokens):
+- Tier A: completions/at-point, completions/import-suggestions, completions/next-arg
+- Tier B: completions/smart-at-point, completions/body
+- Config: completions/mode
+
+# Tier 1 (v1.1)
+
+Add: rewrite, critique, annotate, shape-of, compare, propose-verb, build-example, test-idea, review-my-code, reflect, next-step, mentor, book, name-of.
+
+That's 14 more. Now the REPL feels like a peer.
+
+# Tier 2 (v1.2)
+
+Add: paraphrase, disambiguate, did-you-mean, reason-about, what-changed, diff-explain, surface-invariant, who-uses, imagine-input, imagine-output, port, tell-story, step, quiz, grade-quiz, pair-with, reduce-noise, golf, expand.
+
+That's 19 more. Full family. This is where teaching + code-writing genuinely feel first-class.
+
+# Total shipped verb count
+
+At v1.2: 45 verbs. Every one non-UI-dependent. Every one composable. Every one grounded in the registry / reference / Cortex where possible."
+
+  :consequences-for-runtime
+"# What the runtime must provide
+
+  1. **A model binding** — llm/config returns something. The runtime picks Motoi Copilot for Motoi, Sakura 4B for Sakura, or a user-configured model.
+  2. **A Cortex handle** — session-aware verbs read Cortex. Every runtime already has this from Book of Jesse Ch 13.
+  3. **A history log** — REPL history + Cortex writes + evaluated forms. Verbs like reflect + who-uses read from this.
+  4. **A registry snapshot** — verb metadata as data. Introspection-augmented verbs read from this. Every runtime already exposes it.
+  5. **An embedding endpoint** — llm/embed returns a vector. If the runtime has no embedding model, embed can return nil and rag can fall back to keyword search.
+
+Fallback behavior: every verb should degrade gracefully. If the LLM is offline, `what-is 'car` still returns the registry record; only the LLM-only fields (:probable-origin, :suggestion) are omitted. This is the same principle as Sakura's atomic-facts: retrieval augments, doesn't replace."
+
+  :cross-language-consistency
+"# Same verbs, same shapes, both languages
+
+Every verb in this doc ships with the SAME name and SAME contract in both Motoi and Sakura. A Scheme programmer moves between the two and finds the introspection layer identical.
+
+Differences are in the model:
+- Motoi runs `motoi-copilot` (Qwen2.5-Coder-1.5B fine-tune, fun/jokes coder persona, no world knowledge).
+- Sakura runs `sakura-4b` (4B parameter, 17-lens philosophical weave, character voice).
+
+Same verbs, different personalities. The programmer's fingers work the same; the answers feel different. That's the fork model.
+
+Dialect-specific extensions live in dialect-specific verb layers. If Sakura wants a `(lens 'jung form)` verb that returns a Jungian reading of a form, it lives in the Sakura dialect layer — not here."
+
+  :what-this-doc-is-not
+"# Not a UI spec
+
+Nothing here says how the REPL should draw a critique. Terminal, web, phone — surface's problem.
+
+# Not an API spec
+
+Endpoint URLs, retry policies, rate limits — those are runtime concerns. This is the language surface.
+
+# Not the trainer's problem
+
+The book that teaches these verbs (Book of Introspection) will show examples of every verb in every family, but the training pairs come from the book, not from this spec.
+
+# Not final
+
+Names + arities are proposals. Alfred + the language teams should read this and push back before implementation begins."
+
+  :next-actions
+"# What happens after this doc lands
+
+  1. Book of Introspection lanes (Motoi + Sakura) consume this doc as their spec for the LLM-augmented chapters (~4-6 chapters worth).
+  2. Runtime lane implements Tier 0 verbs behind `(llm/ask ...)`.
+  3. Reference manual gains an :llm-augmented tag on affected verbs.
+  4. Books already authored (Book of Jesse, Book of Values) get appendices showing the LLM-augmented workflow.
+  5. Cart Catalog gains an 'LLM-companion carts' section demonstrating pair-with, mentor, review-my-code."
+
+  :closing-doctrine
+"Every feature above is what a working programmer would want at their fingertips once they know an LLM sits behind their language. Nothing here requires a specific IDE or terminal. Everything here is a verb. That is the whole point of this doc."
+
+  :status "SPEC-FROZEN-2026-07-17; feeds Book of Introspection lanes.")

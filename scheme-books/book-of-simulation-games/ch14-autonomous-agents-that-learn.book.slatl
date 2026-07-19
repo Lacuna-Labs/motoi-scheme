@@ -1,0 +1,307 @@
+;; ch14-autonomous-agents-that-learn.book.slatl
+;; Book of Simulation Games — Chapter 14: Autonomous Agents That Learn
+;; Authored 2026-07-16 by simulation-games-engineer-lane.
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Simulation Games"
+  :chapter-number      14
+  :title               "Autonomous Agents That Learn"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "simulation-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + physics-simulation-emergent"
+  :book-version        "1.0.0"
+  :draws-from-preserved (:book "book-of-games-preserved" :ch 11)
+  :provenance          ((:authored-by "Engineer") (:date "2026-07-16"))
+  :prose
+"An agent that reacts is not the same as an agent that learns. A
+reacting agent has fixed behaviors — 'if enemy close, flee.' A
+learning agent has behaviors it CAN change over time based on what
+worked in the past. Not through a neural network the size of a
+whale, but through a small policy: a table of preferences that
+nudges toward actions that historically kept the agent alive.
+
+This chapter builds a tiny world where agents live short lives, die,
+respawn, and each life's ending nudges the policy toward doing more
+of what kept the agent alive. Across a hundred generations we watch
+the policy converge — not to genius, but to competence. The agent
+becomes better at surviving.
+
+Then we discuss, at kid-level, what 'learning' means when there is
+no teacher. Only feedback from the world. This is reinforcement
+learning at its simplest, without the machinery of neural networks
+or gradient descent, and it works.
+
+---
+
+## 14.1 The world
+
+A grid with hazards and safe zones. An agent moves. Living long
+scores; dying resets the agent.
+
+```scheme
+(define WORLD-COLS 20)
+(define WORLD-ROWS 15)
+(define hazards '((5 5) (5 6) (5 7) (10 3) (10 4) (15 10) (15 11)))
+(define safe-zones '((2 2) (18 12)))
+
+(define (safe? cell)
+  (not (member cell hazards)))
+```
+
+The agent has a policy: for each observed state (its cell), a set of
+preferences over actions (up, down, left, right). Higher preference =
+more likely to be chosen.
+
+```scheme
+(define (init-policy)
+  ;; policy is a table: state -> alist of (action . weight)
+  ;; Initialize uniformly.
+  (let ((p (make-hash-table)))
+    (let loop-c ((c 0))
+      (when (< c WORLD-COLS)
+        (let loop-r ((r 0))
+          (when (< r WORLD-ROWS)
+            (hash-set! p (list c r)
+              '((up . 1.0) (down . 1.0) (left . 1.0) (right . 1.0)))
+            (loop-r (+ r 1))))
+        (loop-c (+ c 1))))
+    p))
+```
+
+## 14.2 One life
+
+The agent moves. Each step, it picks an action according to policy
+weights, executes, and either continues or dies. The life ends when
+it hits a hazard or reaches a fixed step limit.
+
+```scheme
+(define (live-one-life policy start max-steps)
+  (let loop ((cell start) (steps 0) (visited '()))
+    (cond
+      ((>= steps max-steps)
+       (list 'survived steps (reverse visited)))
+      ((not (safe? cell))
+       (list 'died steps (reverse visited)))
+      (else
+       (let* ((weights   (hash-ref policy cell))
+              (action    (ai/policy-act weights))
+              (next-cell (move cell action)))
+         (loop next-cell (+ steps 1)
+               (cons (list cell action) visited)))))))
+
+(define (move cell action)
+  (case action
+    ((up)    (list (car cell) (- (cadr cell) 1)))
+    ((down)  (list (car cell) (+ (cadr cell) 1)))
+    ((left)  (list (- (car cell) 1) (cadr cell)))
+    ((right) (list (+ (car cell) 1) (cadr cell)))))
+```
+
+`ai/policy-act` samples an action according to weights — higher-
+weighted actions are chosen more often. It's a softmax sampler under
+the hood, but for our first version it's just weighted-random-choice.
+
+## 14.3 Learning: update the policy from a life's outcome
+
+If the agent died, reduce the weight of every action it took
+recently. If it survived, increase the weights.
+
+```scheme
+(define (update-policy! policy outcome)
+  (let ((verdict (car outcome))
+        (visited (caddr outcome)))
+    (let ((delta (if (eq? verdict 'survived) 0.1 -0.1)))
+      (for-each
+        (lambda (sv)
+          (let* ((state    (car sv))
+                 (action   (cadr sv))
+                 (weights  (hash-ref policy state))
+                 (updated  (map (lambda (aw)
+                                  (if (eq? (car aw) action)
+                                      (cons (car aw)
+                                            (max 0.01 (+ (cdr aw) delta)))
+                                      aw))
+                                weights)))
+            (hash-set! policy state updated)))
+        visited))))
+```
+
+Every visited (state, action) pair in a surviving life gets a small
+nudge up. Every one in a dying life gets a small nudge down (with a
+floor at 0.01 so we don't zero out an option forever). Simple, but
+effective.
+
+## 14.4 Run many generations
+
+```scheme
+(define (run-generations n)
+  (let ((policy (init-policy)))
+    (let loop ((gen 0) (survival-history '()))
+      (if (>= gen n)
+          (list policy (reverse survival-history))
+          (let ((outcome (live-one-life policy '(1 . 1) 100)))
+            (update-policy! policy outcome)
+            (loop (+ gen 1)
+                  (cons (list gen (car outcome) (cadr outcome))
+                        survival-history)))))))
+
+(define result (run-generations 100))
+```
+
+Plot the survival history. In generation 1 the agent dies quickly —
+random moves, hits a hazard within 15 steps. By generation 50, the
+survival rate is much higher — the agent has learned to avoid the
+hazard cells around (5, 5)-(5, 7) and (10, 3)-(10, 4). By generation
+100, it survives the full 100 steps most of the time. It's not
+navigating to a goal — it's just staying alive — but that's exactly
+what its feedback signal told it to do.
+
+## 14.5 Add a goal — the agent learns to reach it
+
+Change the outcome: survival is good, but reaching (18, 12) is
+better. Update the delta:
+
+```scheme
+(define (update-policy-goal! policy outcome goal)
+  (let* ((verdict  (car outcome))
+         (visited  (caddr outcome))
+         (last     (car (last-pair visited)))
+         (last-cell (car last))
+         (reached? (equal? last-cell goal))
+         (delta    (cond (reached?                  0.3)
+                         ((eq? verdict 'survived)   0.05)
+                         (else                     -0.1))))
+    (for-each
+      (lambda (sv)
+        (let* ((state    (car sv))
+               (action   (cadr sv))
+               (weights  (hash-ref policy state))
+               (updated  (map (lambda (aw)
+                                (if (eq? (car aw) action)
+                                    (cons (car aw)
+                                          (max 0.01 (+ (cdr aw) delta)))
+                                    aw))
+                              weights)))
+          (hash-set! policy state updated)))
+      visited)))
+```
+
+Now the strongest positive signal is 'reached the goal.' The agent's
+policy converges toward moves that (a) avoid hazards and (b) trend
+toward the goal. Not because we programmed 'go to goal' — we didn't.
+Because reaching the goal is the highest-payoff outcome, and the
+policy learns.
+
+## 14.6 Persistence: Cortex remembers across sessions
+
+```scheme
+;; Save the trained policy so next launch we start from experience.
+(cortex/write 'grid-hunter-policy result)
+
+;; Next session, load it.
+(define policy (cortex/read 'grid-hunter-policy))
+```
+
+Now the agent doesn't restart from ignorant every time. It picks up
+where it left off. This is how the runtime keeps learning across
+conversations — each session's outcomes update her policies for how
+to phrase things, what topics interest which operators, when to be
+brief and when to be lengthy.
+
+## 14.7 What is learning?
+
+We just built something that gets better without being taught. It has
+no plans. It has no goals it wrote down. It has only weights and
+feedback. Over time the weights shift toward what worked. That is
+learning, in the narrowest sense.
+
+Is it thinking? No. There's no representation of the world beyond
+'cell -> action-preferences.' The agent doesn't know WHY (5, 5) is
+bad — it just knows that going to (5, 5) has historically led to
+death.
+
+Is it useful? Yes. Real problems (routing packages, playing games,
+tuning a bicycle motor) can be attacked this way. Full reinforcement
+learning adds neural networks that generalize across states, so the
+agent doesn't need to visit every state; but the shape of learning is
+the same as our tiny example.
+
+Kid version: 'You know how you learned not to touch the hot stove?
+Nobody had to tell you it was a bad idea a hundred times. You
+touched it, it hurt, and you didn't touch it again. That's what our
+agent is doing, except with a whole lot more forgiving and a whole
+lot more retries.'
+
+---
+
+## 14.8 The four routing patterns
+
+**Composition.** The learning agent is composed of policy + action
+sampler + move function + life-runner + outcome-based update. Each
+is a small verb.
+
+**Orchestration.** Generational learning IS an orchestration: run
+life → update policy → run life again → ... Stop when survival
+stabilizes or max generations reached. Real RL adds an epsilon-
+greedy exploration schedule that decays over time — another
+orchestration knob.
+
+**In-routing.** The action sampler routes based on weights. When the
+agent dies, the death event routes to `update-policy!` with the
+negative delta.
+
+**Routing.** The trained policy routes to Cortex for persistence.
+The survival history routes to a plot. The runtime-side reasoning
+chain: 'user's routing script isn't converging → maybe learning rate
+too high → suggest smaller delta.' Chain of inference over policy
+behavior.
+
+---
+
+## 14.9 Common desktop tasks
+
+An operator running a spreadsheet-heavy shop asked the runtime: 'when
+customers ask multiple questions in one email, what order should we
+answer them? By importance? By ease? By your usual reading order?'
+the Cortex has records of past outcomes — which responses got
+follow-up questions, which got 'thanks that was helpful.' She's been
+running a slow-loop policy update on 'what response ordering leads
+to no follow-up.' The policy converges toward 'answer the buying
+question first, then answer clarifying questions in the order they
+were asked.' This is exactly what our tiny agent above does — with
+a bigger state space and slower generations.
+
+## 14.10 Try this
+
+1. Make the initial policy random instead of uniform. Does convergence
+   change?
+2. Reduce the death penalty to -0.02. Does learning still work?
+3. Add a second goal at (2, 12). Does the agent learn to reach both?
+4. Add random walls that appear and disappear. Does the agent adapt?
+5. Two agents sharing a policy. Does that help or hurt?
+
+## 14.11 Pitfalls
+
+**Local minima.** The agent finds a good-enough policy and stops
+exploring. Add small random jitter to weights each generation
+(exploration).
+
+**Catastrophic forgetting.** If the world changes and the old policy
+is very strong, updates take many generations to overcome. Cap
+weights (e.g., max 10.0) to keep the policy plastic.
+
+**Reward shaping.** Getting the reward signal right is the hardest
+part. Reward the wrong thing and the agent learns the wrong thing.
+
+---
+
+Next: the simulation IS the game. Ecosystems, digital gardens,
+Lotka-Volterra emerging from micro-rules. Not every game has a win
+state.")

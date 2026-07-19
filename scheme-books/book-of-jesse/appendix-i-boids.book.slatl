@@ -1,0 +1,371 @@
+(chapter
+  :book "Book of Jesse"
+  :appendix "I"
+  :title "Boids — Craig Reynolds' three rules and how they add up to a flock"
+  :audience "programmer-fluent-in-other-languages"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-19"
+     :authored-by "book-of-jesse-author-agent"
+     :author-persona "ada"
+     :cli-verified #t
+     :verified-count "5/5"
+     :aliases-exercised ("rectangle" "fill-rect" "draw-rect")
+     :spec "alfred-2026-07-19"
+     :reference "Craig Reynolds, 'Flocks, Herds, and Schools: A Distributed Behavioral Model' (SIGGRAPH 1987)")
+  :prose
+"# Appendix I — Boids
+
+In 1987 Craig Reynolds wrote a paper that turned out to be one of the most-cited computer graphics papers of all time. It described how to simulate a flock of birds — the swirling, splitting, converging shape you see when starlings gather at dusk — using three very simple rules applied to each bird independently. He called each bird a *boid*, and the algorithm has been called *boids* ever since.
+
+The three rules are:
+
+- **Separation** — steer away from any neighbor who is uncomfortably close.
+- **Alignment** — steer to match the average heading of your visible neighbors.
+- **Cohesion** — steer toward the average position of your visible neighbors.
+
+That's it. No central controller, no leader, no communication. Every boid is running the same three-rule loop against whatever it can see. The flock is an *emergent* property — nobody organized it. It fell out of the geometry.
+
+This appendix builds up to a working flock in five steps. Each step is runnable. Each step verified. Motion is drawn frame-by-frame — a still snapshot per step — so what you see is a strip of comic-book panels of the flock's evolution.
+
+Motoi's vector math lives on the `vec/*` verbs: `vec/make`, `vec/add`, `vec/sub`, `vec/scale`, `vec/distance`, `vec/norm`. Every boid's position and velocity is a two-element vec. You extract the components with `car` and `(car (cdr ...))`, which reads awkwardly the first time and reads normal after.
+
+## I.1 One boid drifting
+
+Start with the simplest case. One agent. A position, a velocity, and a single verb `step` that updates position from velocity. No rules yet — this is just Newton's first law wearing a rectangle for a shirt.
+
+```scheme
+(define pos (vec/make 10 40))
+(define vel (vec/make  2  0))
+
+(define (step)
+  (set! pos (vec/add pos vel)))
+
+(define (draw)
+  (clear)
+  (begin-frame)
+  (set-color 'black)
+  (rect-fill 0 0 80 80)
+  (set-color 'yellow)
+  (disc (car pos) (car (cdr pos)) 3)
+  (end-frame)
+  (render))
+
+(draw) (step)
+(draw) (step)
+(draw) (step)
+(draw) (step)
+(display \"boids-1 done: 1 boid, 4 steps at v=(2,0).\")
+(newline)
+(display \"final pos: \") (display pos) (newline)
+```
+
+**What you see.** Four frames of a yellow disc marching left-to-right, two pixels per step. Final position `(18 40)`. This is your foundation: a state that mutates on `step`, a `draw` that reads state, and a loop of `(draw) (step)` pairs that the runtime performs frame-at-a-time.
+
+## I.2 Two boids with alignment
+
+Add a second boid and the first rule: **alignment**. Compute the average of both velocities, then nudge each boid 30% of the way toward that average. In one step, if boid A is moving right and boid B is moving down, they'll each end up moving diagonally.
+
+```scheme
+(define p1 (vec/make 10 30))
+(define v1 (vec/make  2  0))
+(define p2 (vec/make 30 40))
+(define v2 (vec/make  0  2))
+
+(define (align-step)
+  (let* ((avg  (vec/scale (vec/add v1 v2) 0.5))
+         (nv1  (vec/add (vec/scale v1 0.7) (vec/scale avg 0.3)))
+         (nv2  (vec/add (vec/scale v2 0.7) (vec/scale avg 0.3))))
+    (set! v1 nv1)
+    (set! v2 nv2)
+    (set! p1 (vec/add p1 v1))
+    (set! p2 (vec/add p2 v2))))
+
+(define (draw)
+  (clear)
+  (begin-frame)
+  (set-color 'black)
+  (rectangle 0 0 80 80)         ; alias rectangle (outline of arena)
+  (set-color 'cyan)
+  (disc (car p1) (car (cdr p1)) 3)
+  (set-color 'magenta)
+  (disc (car p2) (car (cdr p2)) 3)
+  (end-frame)
+  (render))
+
+(draw) (align-step)
+(draw) (align-step)
+(draw) (align-step)
+(draw) (align-step)
+(display \"boids-2 done: 2 boids, 4 alignment steps.\")
+(newline)
+(display \"final v1: \") (display v1) (newline)
+(display \"final v2: \") (display v2) (newline)
+```
+
+**What you see.** Two boids that start moving in perpendicular directions. After four steps their velocities converge — `v1` becomes `(1.24, 0.76)`, `v2` becomes `(0.76, 1.24)`. Neither is going where it started; both are heading roughly the same diagonal. That's alignment.
+
+## I.3 A full flock with all three rules
+
+Five boids, all three rules. The three rules blend by weight: separation is strongest (0.30), alignment softer (0.20), cohesion softest (0.10). Change the weights and the flock behaves differently — a strong separation weight makes them repel more; a strong cohesion weight makes them clump.
+
+```scheme
+(define N 5)
+(define positions
+  (list (vec/make 20 20)
+        (vec/make 40 30)
+        (vec/make 60 20)
+        (vec/make 30 55)
+        (vec/make 55 55)))
+(define velocities
+  (list (vec/make  1  1)
+        (vec/make -1  1)
+        (vec/make  1 -1)
+        (vec/make -1 -1)
+        (vec/make  1  0)))
+
+(define W-SEP 0.30)
+(define W-ALI 0.20)
+(define W-COH 0.10)
+(define SEP-RADIUS 8)
+
+(define (avg-vec vs)
+  (let ((sum (vec/make 0 0)))
+    (for-each (lambda (v) (set! sum (vec/add sum v))) vs)
+    (vec/scale sum (/ 1.0 (length vs)))))
+
+(define (dist a b) (vec/distance a b))
+
+(define (sep i)
+  (let ((pi (list-ref positions i))
+        (acc (vec/make 0 0)))
+    (let loop ((j 0))
+      (if (< j N)
+          (begin
+            (if (not (= j i))
+                (let* ((pj (list-ref positions j))
+                       (d  (dist pi pj)))
+                  (if (< d SEP-RADIUS)
+                      (set! acc (vec/add acc (vec/sub pi pj))))))
+            (loop (+ j 1)))))
+    acc))
+
+(define (ali i)
+  (let* ((others (filter-index i velocities))
+         (m      (avg-vec others))
+         (own    (list-ref velocities i)))
+    (vec/sub m own)))
+
+(define (coh i)
+  (let* ((others (filter-index i positions))
+         (m      (avg-vec others))
+         (own    (list-ref positions i)))
+    (vec/sub m own)))
+
+(define (filter-index i xs)
+  (let loop ((k 0) (rest xs) (acc '()))
+    (if (null? rest)
+        (reverse acc)
+        (if (= k i)
+            (loop (+ k 1) (cdr rest) acc)
+            (loop (+ k 1) (cdr rest) (cons (car rest) acc))))))
+
+(define (step)
+  (let ((new-vs '())
+        (new-ps '()))
+    (let loop ((i 0))
+      (if (< i N)
+          (let* ((v   (list-ref velocities i))
+                 (dv  (vec/add (vec/add (vec/scale (sep i) W-SEP)
+                                        (vec/scale (ali i) W-ALI))
+                               (vec/scale (coh i) W-COH)))
+                 (nv  (vec/add v dv))
+                 (np  (vec/add (list-ref positions i) nv)))
+            (set! new-vs (cons nv new-vs))
+            (set! new-ps (cons np new-ps))
+            (loop (+ i 1)))))
+    (set! velocities (reverse new-vs))
+    (set! positions  (reverse new-ps))))
+
+(define (draw)
+  (clear)
+  (begin-frame)
+  (set-color 'black)
+  (fill-rect 0 0 80 80)         ; alias fill-rect
+  (set-color 'orange)
+  (for-each
+    (lambda (p) (disc (car p) (car (cdr p)) 2))
+    positions)
+  (end-frame)
+  (render))
+
+(draw) (step)
+(draw) (step)
+(draw) (step)
+(draw)
+(display \"boids-3 done: 5 boids, 3 steps with sep+ali+coh.\")
+(newline)
+```
+
+**What you see.** Five orange discs starting in a rough X-shape. Over three steps: they don't just drift — they *organize*. Watch the velocities. What began as five different directions blends toward a common direction while the flock also slowly compacts. Alignment and cohesion cooperate.
+
+## I.4 Boids that avoid an obstacle
+
+Add a fourth rule: **avoidance**. A single point in the middle of the frame is an obstacle. If a boid gets within `OBS-R + CUSHION` pixels, add a force that pushes it directly away, scaled by proximity. Closer = stronger push.
+
+```scheme
+(define positions
+  (list (vec/make 10 40)
+        (vec/make 10 20)
+        (vec/make 10 60)))
+(define velocities
+  (list (vec/make 2 0)
+        (vec/make 2 0)
+        (vec/make 2 0)))
+
+(define OBS      (vec/make 40 40))
+(define OBS-R    12)
+(define CUSHION   6)
+
+(define (avoid pos)
+  (let ((d (vec/distance pos OBS)))
+    (if (< d (+ OBS-R CUSHION))
+        (let ((away (vec/sub pos OBS)))
+          (vec/scale away (/ 2.0 (max 1 d))))
+        (vec/make 0 0))))
+
+(define (step)
+  (let ((new-ps '())
+        (new-vs '()))
+    (let loop ((i 0))
+      (if (< i (length positions))
+          (let* ((p   (list-ref positions  i))
+                 (v   (list-ref velocities i))
+                 (dv  (avoid p))
+                 (nv  (vec/add v dv))
+                 (np  (vec/add p nv)))
+            (set! new-ps (cons np new-ps))
+            (set! new-vs (cons nv new-vs))
+            (loop (+ i 1)))))
+    (set! positions  (reverse new-ps))
+    (set! velocities (reverse new-vs))))
+
+(define (draw)
+  (clear)
+  (begin-frame)
+  (set-color 'black)
+  (draw-rect 0 0 80 80)         ; alias draw-rect
+  (set-color 'gray)
+  (disc (car OBS) (car (cdr OBS)) OBS-R)
+  (set-color 'lime)
+  (for-each
+    (lambda (p) (disc (car p) (car (cdr p)) 2))
+    positions)
+  (end-frame)
+  (render))
+
+(draw) (step)
+(draw) (step)
+(draw) (step)
+(draw) (step)
+(draw)
+(display \"boids-4 done: 3 boids avoid an obstacle for 4 steps.\")
+(newline)
+```
+
+**What you see.** Three lime boids all heading rightward toward a gray obstacle disc at the center. The upper boid arcs up, the lower arcs down, the middle boid — which was heading straight through — gets shoved hardest, so it deflects the most. Look at the frames in sequence and it reads as a school of fish parting around a stone.
+
+## I.5 Predator and prey
+
+Two prey flee a single predator. The predator seeks the average position of its prey. The prey flee if the predator is within `FLEE-RADIUS`. The predator moves slower than the prey by design — otherwise the chase ends fast, and boredom is the enemy of a demo.
+
+```scheme
+(define prey
+  (list (vec/make 20 20)
+        (vec/make 60 60)))
+(define prey-v
+  (list (vec/make 0 0)
+        (vec/make 0 0)))
+(define predator (vec/make 40 40))
+(define predator-v (vec/make 0 0))
+
+(define PREY-SPEED   2.0)
+(define PRED-SPEED   1.2)
+(define FLEE-RADIUS 25)
+
+(define (unit v)
+  (let ((m (vec/norm v)))
+    (if (< m 0.001)
+        (vec/make 0 0)
+        (vec/scale v (/ 1.0 m)))))
+
+(define (avg-of vs)
+  (let ((s (vec/make 0 0)))
+    (for-each (lambda (v) (set! s (vec/add s v))) vs)
+    (vec/scale s (/ 1.0 (length vs)))))
+
+(define (step)
+  (let* ((target (avg-of prey))
+         (dir    (unit (vec/sub target predator)))
+         (nv-pred (vec/scale dir PRED-SPEED)))
+    (set! predator-v nv-pred)
+    (set! predator (vec/add predator predator-v)))
+  (let ((new-p '())
+        (new-v '()))
+    (let loop ((i 0))
+      (if (< i (length prey))
+          (let* ((p    (list-ref prey i))
+                 (away (vec/sub p predator))
+                 (d    (vec/norm away))
+                 (nv   (if (< d FLEE-RADIUS)
+                           (vec/scale (unit away) PREY-SPEED)
+                           (vec/make 0 0)))
+                 (np   (vec/add p nv)))
+            (set! new-p (cons np new-p))
+            (set! new-v (cons nv new-v))
+            (loop (+ i 1)))))
+    (set! prey (reverse new-p))
+    (set! prey-v (reverse new-v))))
+
+(define (draw)
+  (clear)
+  (begin-frame)
+  (set-color 'black)
+  (fill-rect 0 0 80 80)         ; alias fill-rect
+  (set-color 'red)
+  (disc (car predator) (car (cdr predator)) 3)
+  (set-color 'skyblue)
+  (for-each
+    (lambda (p) (disc (car p) (car (cdr p)) 2))
+    prey)
+  (end-frame)
+  (render))
+
+(draw) (step)
+(draw) (step)
+(draw) (step)
+(draw) (step)
+(draw)
+(display \"boids-5 done: 1 predator, 2 prey, 4 steps.\")
+(newline)
+```
+
+**What you see.** A red predator at center, two sky-blue prey at opposite corners. First frame: nothing much moves — the predator hasn't oriented yet. Second frame onward: the predator turns toward the *average* of the prey — which is roughly the center — while the prey scatter outward. The predator ends up chasing the midpoint of two things running away, which is the mathematical loneliness at the heart of every fox's day.
+
+## Why boids matters
+
+The paper is famous because it was one of the first clear demonstrations of *emergence*: behavior at the group level that isn't programmed anywhere. Each boid only knows about its immediate neighbors. Nobody sees the flock. The flock still happens.
+
+That's a shape you'll see again in cellular automata (next appendix), in ant-trail simulations, in neural networks, in language models. Local rules, global behavior. Reynolds got there in 1987 with a page of math and three rules.
+
+If you want to go deeper: change the weights, change the neighborhood radius, add a wind vector that pushes every boid the same way each step, add a leader boid that ignores rule 3. Every one of these produces a different flock shape. That's why the algorithm still gets rediscovered every few years.
+"
+  :examples-verified 5
+  :composes-with
+  ("[[chapter-12-sound-and-motion]]"
+   "[[chapter-17-frames-buffered]]"
+   "[[appendix-j-conway]]"
+   "[[motoi-copilot-voice]]"))

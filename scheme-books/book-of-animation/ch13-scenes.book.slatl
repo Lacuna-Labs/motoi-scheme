@@ -1,0 +1,763 @@
+;; ch13-scenes.slat
+;; Book of Animation — Chapter 13: Scenes
+
+(chapter
+  :book             "Book of Animation"
+  :chapter-number   null
+  :title            "Chapter 13: Scenes"
+  :source-path      "/Users/alfred/code/curator/BOOK/A-branch-scheme-books/new-anim/ch13-scenes.md"
+  :size             23552
+  :sha256           "a0392c5803161739"
+  :prose
+"# Chapter 13: Scenes
+
+*In which we compose everything we've learned into multi-part worlds — prefabs, scenes, and the game loop that holds them.*
+
+---
+
+We've built particles that drift (Chapter 7), sprites that express (Chapter 8), creatures that walk (Chapter 9), steer (Chapter 10), flock (Chapter 11), and find their way (Chapter 12). Each example so far has been a *sketch* — a single idea, running until we stop it.
+
+Real animation is not a single idea. It's a *composition* of many:
+- A flock of birds that scatter when a walker approaches.
+- A garden where flowers sway, particles drift, and a camera follows the action.
+- A scene that *changes* — one set of actors exits, another enters, the world resets.
+
+This chapter teaches **scenes** — the structures that let you compose, organize, and control complexity. You'll learn:
+- **Prefabs**: templates for spawning many entities with shared behavior.
+- **Scenes**: named collections of prefabs, initial state, and rules.
+- **The game loop**: `big-bang` and its event handlers, the heartbeat of interactive worlds.
+- **Scene transitions**: loading, clearing, resetting — the flow between acts.
+
+By the end, you'll build a multi-part composed scene: a garden where one group of creatures forages, another guards, particles rain, and the camera frames the action. Every prior chapter will come together.
+
+---
+
+## 13.1 The Game Loop
+
+Until now, every example has run in an implicit loop: spawn some entities, let the world step forward, paint each frame. That loop has been invisible — the engine ran it for us.
+
+To *control* a scene — to respond to input, update state, check win conditions, stop when done — we need to make the loop explicit. The runtime gives us **`big-bang`**, the function that starts a game loop and wires its handlers.
+
+### The Shape of `big-bang`
+
+```scheme
+(big-bang initial-state
+  [on-tick tick-fn]
+  [on-key key-fn]
+  [to-draw draw-fn]
+  [stop-when stop-fn]
+  [check-with check-fn]
+  [with-seed seed])
+```
+
+- **`initial-state`**: any Scheme value (a number, a list, a struct) — the state at frame 0.
+- **`on-tick tick-fn`**: called every frame; takes the old state, returns the new state.
+- **`on-key key-fn`**: called on keypress (live apps only); takes `(key state)`, returns new state.
+- **`to-draw draw-fn`**: called after tick; takes state, performs side effects (spawn, paint), returns `state` unchanged.
+- **`stop-when stop-fn`**: a predicate; the loop stops when `(stop-fn state)` is true.
+- **`check-with check-fn`**: a predicate that must hold every frame (assertion).
+- **`with-seed seed`**: integer; deterministic RNG seed for the scene.
+
+The loop:
+1. Calls `(tick-fn state)` → new state.
+2. Calls `(draw-fn new-state)` → side effects (spawn, paint, etc.).
+3. Checks `(stop-fn new-state)` → if true, stops.
+4. Repeats.
+
+---
+
+### Example 13.1: A Counter
+
+The simplest loop: a counter that increments each frame and stops at 100.
+
+```scheme
+(big-bang 0
+  [on-tick (lambda (n) (+ n 1))]
+  [to-draw (lambda (n)
+             (paint-cell 8 4 (number->string n) \"fg-green\")
+             n)]
+  [stop-when (lambda (n) (>= n 100))])
+```
+
+**What happens:**
+- Frame 0: state is `0`. `on-tick` returns `1`. `to-draw` paints \"0\" at (8,4).
+- Frame 1: state is `1`. `on-tick` returns `2`. `to-draw` paints \"1\".
+- ...
+- Frame 100: `stop-when` returns `#t`, loop stops.
+
+[VISUAL: A canvas with a single green digit at center, incrementing from 0 to 99, then stopping.]
+
+<!-- BUILD: wire Example 13.1 runnable in harness; ensure big-bang returns final state. -->
+
+---
+
+### Example 13.2: A Drifting Dot
+
+State can be anything. Here, state is a position vector `(x y)`. Each frame, the dot drifts right and down.
+
+```scheme
+(define (tick pos)
+  (let ([x (car pos)]
+        [y (cadr pos)])
+    (list (+ x 0.1) (+ y 0.05))))
+
+(define (draw pos)
+  (world/reset!)
+  (world/spawn (car pos) (cadr pos) 'dot)
+  pos)
+
+(big-bang (list 8.0 4.0)
+  [on-tick tick]
+  [to-draw draw]
+  [stop-when (lambda (pos) (> (car pos) 72.0))])
+```
+
+**Key insight:** `to-draw` resets the world and spawns the dot at the new position each frame. The *state* is the position; the *world* is ephemeral, rebuilt each frame. This is a valid (if inefficient) pattern for simple sketches.
+
+[VISUAL: A dot starting at center-left, drifting diagonally right-down across the canvas, stopping at the right edge.]
+
+<!-- BUILD: wire Example 13.2 runnable; ensure world/reset! clears entities before spawn. -->
+
+---
+
+### Example 13.3: A Bouncing Dot (State as World ID)
+
+For physics, we *don't* rebuild the world each frame — we spawn once, then let `world/step` handle motion. State becomes an entity ID or a counter.
+
+```scheme
+(define (setup)
+  (world/reset!)
+  (let ([id (world/spawn 8.0 2.0 'dot)])
+    (entity/set-vel! id 0.2 0.0)
+    (entity/bounce! id 0.8)
+    (world/floor! 16.0)
+    id))
+
+(define (tick id)
+  (world/step)
+  id)
+
+(define (draw id)
+  id)
+
+(big-bang (setup)
+  [on-tick tick]
+  [to-draw draw]
+  [stop-when (lambda (id) (> (world/frame) 300))])
+```
+
+**What changed:**
+- `setup` spawns the dot, sets velocity + bounce, installs a floor, and returns its ID.
+- `on-tick` steps the world (which integrates velocity, applies gravity, resolves collisions).
+- `to-draw` does nothing — the world paints itself.
+- `stop-when` stops after 300 frames.
+
+[VISUAL: A dot bouncing horizontally, settling on a floor line at y=16.]
+
+<!-- BUILD: wire Example 13.3 runnable; ensure world/floor! and entity/bounce! work in headless. -->
+
+---
+
+### Why `big-bang`?
+
+You could write your own loop:
+
+```scheme
+(let loop ([state init])
+  (if (stop? state)
+      state
+      (loop (tick state))))
+```
+
+`big-bang` gives you:
+- **Event handlers** (`on-key`, `on-touch` — live apps only).
+- **Deterministic replay**: `with-seed` + frame-by-frame tick guarantees the same output for the same inputs.
+- **Integration with the harness**: the test runner knows how to run a `big-bang` cart and snapshot its final state.
+
+For training corpus, `big-bang` is the *canonical shape* of a scene. The runtime learns: \"a scene is a `big-bang` with handlers.\"
+
+---
+
+## 13.2 Prefabs: Templates for Spawning
+
+A **prefab** is a template for an entity — a function that takes parameters and returns a spawned entity ID, with all its properties configured.
+
+### Example 13.4: A Wanderer Prefab
+
+From Chapter 10, we spawned wandering creatures by hand:
+
+```scheme
+(let ([id (world/spawn x y 'blossom-1)])
+  (entity/sprite! id 'blossom-1)
+  (ai/wander id 0.5 1.0)
+  (entity/max-speed! id 0.3)
+  id)
+```
+
+Wrap it in a function:
+
+```scheme
+(define (make-wanderer x y)
+  (let ([id (world/spawn x y 'wanderer)])
+    (entity/sprite! id 'blossom-1)
+    (ai/wander id 0.5 1.0)
+    (entity/max-speed! id 0.3)
+    id))
+```
+
+Now spawn many:
+
+```scheme
+(world/reset!)
+(make-wanderer 4.0 4.0)
+(make-wanderer 12.0 8.0)
+(make-wanderer 20.0 4.0)
+
+(big-bang 0
+  [on-tick (lambda (n)
+             (world/step)
+             (+ n 1))]
+  [stop-when (lambda (n) (>= n 200))])
+```
+
+[VISUAL: Three blossom sprites wandering independently, jittering in smooth arcs.]
+
+<!-- BUILD: wire Example 13.4 runnable; ensure ai/wander works in headless. -->
+
+---
+
+### Example 13.5: Parameterized Prefabs
+
+Add parameters for sprite type, speed, wander radius:
+
+```scheme
+(define (make-wanderer x y sprite-id speed radius)
+  (let ([id (world/spawn x y 'wanderer)])
+    (entity/sprite! id sprite-id)
+    (ai/wander id radius 1.0)
+    (entity/max-speed! id speed)
+    id))
+
+(world/reset!)
+(make-wanderer 4.0 4.0 'blossom-1 0.3 0.5)
+(make-wanderer 12.0 8.0 'blossom-5 0.5 1.0)
+(make-wanderer 20.0 4.0 'blossom-9 0.2 0.3)
+
+(big-bang 0
+  [on-tick (lambda (n)
+             (world/step)
+             (+ n 1))]
+  [stop-when (lambda (n) (>= n 200))])
+```
+
+**Three wanderers, three personalities**: slow+tight, fast+wide, slow+tighter. Same prefab, different parameters.
+
+[VISUAL: Three blossom sprites (different flowers), each wandering with distinct arc tightness and speed.]
+
+<!-- BUILD: wire Example 13.5 runnable. -->
+
+---
+
+### `prefab/define` and `prefab/spawn`
+
+For training corpus, the runtime provides **`prefab/define`** and **`prefab/spawn`** — a registry for named prefabs.
+
+```scheme
+(prefab/define 'wanderer
+  (lambda (x y sprite speed radius)
+    (let ([id (world/spawn x y 'wanderer)])
+      (entity/sprite! id sprite)
+      (ai/wander id radius 1.0)
+      (entity/max-speed! id speed)
+      id)))
+
+(prefab/spawn 'wanderer 4.0 4.0 'blossom-1 0.3 0.5)
+(prefab/spawn 'wanderer 12.0 8.0 'blossom-5 0.5 1.0)
+```
+
+**Why bother?** Two reasons:
+1. **Training data**: when the runtime sees `(prefab/spawn 'wanderer ...)`, she learns \"this is an instance of the 'wanderer template.\" Paraphrases like \"spawn a wanderer at (4,4)\" map cleanly.
+2. **Scene composition**: `scene/load` (next section) can reference prefabs by name in a data structure, not inline code.
+
+You can still use plain functions (`make-wanderer`) — both work. `prefab/define` is for scenes that need symbolic names.
+
+---
+
+## 13.3 Scenes: Named Worlds
+
+A **scene** is a named collection of:
+- Initial entities (prefabs + positions + parameters).
+- World config (gravity, wind, floors, camera).
+- Handlers (on-tick, stop-when).
+
+### Example 13.6: A Scene as Data
+
+```scheme
+(define garden-scene
+  '((prefabs
+      (wanderer 4.0 4.0 blossom-1 0.3 0.5)
+      (wanderer 12.0 8.0 blossom-5 0.5 1.0)
+      (wanderer 20.0 4.0 blossom-9 0.2 0.3))
+    (world
+      (gravity 0.0 0.0)
+      (camera-bounds 0.0 0.0 80.0 24.0))))
+```
+
+This is a **data structure**, not code. `scene/load` interprets it:
+
+```scheme
+(prefab/define 'wanderer
+  (lambda (x y sprite speed radius)
+    (let ([id (world/spawn x y 'wanderer)])
+      (entity/sprite! id sprite)
+      (ai/wander id radius 1.0)
+      (entity/max-speed! id speed)
+      id)))
+
+(define (setup)
+  (world/reset!)
+  (scene/load garden-scene)
+  0)
+
+(big-bang (setup)
+  [on-tick (lambda (n)
+             (world/step)
+             (+ n 1))]
+  [stop-when (lambda (n) (>= n 200))])
+```
+
+**What `scene/load` does:**
+1. For each `(prefab-name x y ...)` in `prefabs`, calls `(prefab/spawn prefab-name x y ...)`.
+2. For each `(key val ...)` in `world`, calls the corresponding world config verb.
+
+[VISUAL: Same as Example 13.5 — three wandering blossoms.]
+
+<!-- BUILD: wire Example 13.6 runnable; implement scene/load prefab+world interpreter. -->
+
+---
+
+### Example 13.7: Scene with Particles
+
+Add a particle emitter from Chapter 7.
+
+```scheme
+(prefab/define 'emitter
+  (lambda (x y)
+    (let ([id (world/spawn x y 'emitter)])
+      (entity/set! id 'emit-rate 5)
+      (entity/set! id 'particle-life 120)
+      id)))
+
+(define garden-with-particles
+  '((prefabs
+      (wanderer 4.0 4.0 blossom-1 0.3 0.5)
+      (wanderer 12.0 8.0 blossom-5 0.5 1.0)
+      (emitter 40.0 2.0))
+    (world
+      (gravity 0.0 0.05)
+      (camera-bounds 0.0 0.0 80.0 24.0))))
+
+(define (emit-particles id)
+  (when (entity/alive? id)
+    (let ([rate (entity/get id 'emit-rate)]
+          [life (entity/get id 'particle-life)]
+          [pos (entity/pos id)]
+          [x (car pos)]
+          [y (cadr pos)])
+      (let loop ([i 0])
+        (when (< i rate)
+          (let ([pid (world/spawn x y 'particle)])
+            (entity/set-vel! pid (* 0.1 (- (world/hash i) 0.5)) -0.2)
+            (entity/set! pid 'life life))
+          (loop (+ i 1)))))))
+
+(define (tick-particles)
+  (world/each
+    (lambda (id)
+      (when (eq? (entity/kind id) 'particle)
+        (let ([life (entity/get id 'life)])
+          (if (<= life 0)
+              (entity/despawn! id)
+              (entity/set! id 'life (- life 1))))))))
+
+(define (setup)
+  (world/reset!)
+  (scene/load garden-with-particles)
+  0)
+
+(big-bang (setup)
+  [on-tick (lambda (n)
+             (world/each
+               (lambda (id)
+                 (when (eq? (entity/kind id) 'emitter)
+                   (emit-particles id))))
+             (tick-particles)
+             (world/step)
+             (+ n 1))]
+  [stop-when (lambda (n) (>= n 300))])
+```
+
+**What's new:**
+- An `emitter` prefab stores emit-rate and particle-life as entity properties.
+- `on-tick` iterates all emitters, spawns particles, ages/despawns old particles.
+- Particles fall (gravity 0.05), spread horizontally (random vx from hash).
+
+[VISUAL: Two wandering blossoms below; a fountain of tiny dots raining from top-center, scattering left/right as they fall.]
+
+<!-- BUILD: wire Example 13.7 runnable; ensure world/each + entity/kind filtering works. -->
+
+---
+
+### Why Scenes as Data?
+
+1. **Reusable**: define once, `scene/load` many times (restart, reset, next level).
+2. **Editable**: a scene file can live in a `.scm` quoted list, a JSON import, a tool-generated map.
+3. **Training corpus**: the runtime learns \"a scene is a list of prefabs + world config + handlers.\"
+
+You don't *have* to use `scene/load` — you can spawn everything by hand in `setup`. For simple sketches, that's fine. For multi-scene games, data-driven scenes scale better.
+
+---
+
+## 13.4 Scene Transitions
+
+Load a scene, run it, stop, load another.
+
+### Example 13.8: Two Scenes, Sequential
+
+```scheme
+(define scene-a
+  '((prefabs
+      (wanderer 8.0 8.0 blossom-1 0.3 0.5))
+    (world
+      (gravity 0.0 0.0))))
+
+(define scene-b
+  '((prefabs
+      (wanderer 4.0 4.0 blossom-5 0.5 1.0)
+      (wanderer 12.0 4.0 blossom-9 0.5 1.0))
+    (world
+      (gravity 0.0 0.0))))
+
+(prefab/define 'wanderer
+  (lambda (x y sprite speed radius)
+    (let ([id (world/spawn x y 'wanderer)])
+      (entity/sprite! id sprite)
+      (ai/wander id radius 1.0)
+      (entity/max-speed! id speed)
+      id)))
+
+(define (run-scene scene frames)
+  (world/reset!)
+  (scene/load scene)
+  (big-bang 0
+    [on-tick (lambda (n)
+               (world/step)
+               (+ n 1))]
+    [stop-when (lambda (n) (>= n frames))]))
+
+;; Run scene A for 100 frames, then scene B for 100 frames.
+(run-scene scene-a 100)
+(run-scene scene-b 100)
+```
+
+**What happens:**
+- `run-scene` loads a scene, runs `big-bang` until `frames` elapsed, returns final state.
+- First call: one wanderer (blossom-1).
+- Second call: `world/reset!` clears the first, two wanderers (blossom-5, blossom-9).
+
+[VISUAL: First 100 frames — one blossom. Canvas clears. Next 100 frames — two blossoms.]
+
+<!-- BUILD: wire Example 13.8 runnable; ensure big-bang can be called sequentially in same execution. -->
+
+---
+
+### `scene/clear` and Scene State
+
+For transitions *within* a single `big-bang`, use **`scene/clear`** (despawns all entities, keeps camera/world config) or **`world/reset!`** (despawns + clears config).
+
+```scheme
+(define (transition-tick state)
+  (let ([phase (car state)]
+        [frame (cadr state)])
+    (cond
+      [(and (eq? phase 'a) (>= frame 100))
+       (scene/clear)
+       (scene/load scene-b)
+       (list 'b 0)]
+      [(and (eq? phase 'b) (>= frame 100))
+       (list 'done frame)]
+      [else
+       (world/step)
+       (list phase (+ frame 1))])))
+
+(define (setup)
+  (world/reset!)
+  (scene/load scene-a)
+  (list 'a 0))
+
+(big-bang (setup)
+  [on-tick transition-tick]
+  [stop-when (lambda (state) (eq? (car state) 'done))])
+```
+
+**State is now `(phase frame)`**: starts `'a 0`, transitions to `'b 0` at frame 100, stops at `'done`.
+
+[VISUAL: Same as Example 13.8, but without canvas clear between phases — entities vanish/appear smoothly.]
+
+<!-- BUILD: wire Example 13.9 (inline above) runnable; ensure scene/clear works. -->
+
+---
+
+## 13.5 Spawn Grids and Patterns
+
+Spawning one-by-one is tedious. **`scene/spawn-many`** and **`scene/grid`** spawn prefabs in bulk.
+
+### Example 13.9: A Grid of Wanderers
+
+```scheme
+(prefab/define 'wanderer
+  (lambda (x y sprite speed radius)
+    (let ([id (world/spawn x y 'wanderer)])
+      (entity/sprite! id sprite)
+      (ai/wander id radius 1.0)
+      (entity/max-speed! id speed)
+      id)))
+
+(define (setup)
+  (world/reset!)
+  (scene/grid 'wanderer 4.0 4.0 4 3 4.0 4.0
+              'blossom-1 0.3 0.5)
+  0)
+
+(big-bang (setup)
+  [on-tick (lambda (n)
+             (world/step)
+             (+ n 1))]
+  [stop-when (lambda (n) (>= n 200))])
+```
+
+**`(scene/grid prefab x0 y0 cols rows dx dy ...args)`**:
+- Spawns `(* cols rows)` instances of `prefab`.
+- Top-left at `(x0, y0)`, spaced `dx` apart horizontally, `dy` vertically.
+- Each gets `...args` as remaining parameters.
+
+Here: 4 columns, 3 rows, spacing 4.0×4.0 → 12 wanderers in a grid.
+
+[VISUAL: A 4×3 grid of blossom-1 sprites, all wandering within their local neighborhoods.]
+
+<!-- BUILD: wire Example 13.9 runnable; implement scene/grid as a loop over prefab/spawn. -->
+
+---
+
+### Example 13.10: Varied Grid
+
+Pass a list of sprites instead of a single one; `scene/grid` cycles through them.
+
+```scheme
+(define (setup)
+  (world/reset!)
+  (scene/grid 'wanderer 4.0 4.0 4 3 4.0 4.0
+              (list 'blossom-1 'blossom-5 'blossom-9)
+              0.3 0.5)
+  0)
+
+(big-bang (setup)
+  [on-tick (lambda (n)
+             (world/step)
+             (+ n 1))]
+  [stop-when (lambda (n) (>= n 200))])
+```
+
+**Result:** First row: blossom-1, blossom-5, blossom-9, blossom-1. Second row: blossom-5, blossom-9, blossom-1, blossom-5. Third row: blossom-9, blossom-1, blossom-5, blossom-9.
+
+[VISUAL: A 4×3 grid, flowers cycling through three types.]
+
+<!-- BUILD: wire Example 13.10 runnable; ensure scene/grid accepts lists for cycled params. -->
+
+---
+
+## 13.6 Putting It Together: The Garden Scene
+
+We have all the pieces. Now compose them.
+
+**The scenario:**
+- A 3×3 grid of flowers, swaying (Chapter 3's `part/sway`).
+- A flock of 8 wanderers (Chapter 10's `ai/wander`).
+- Two seekers (Chapter 10's `ai/seek`) that chase the nearest wanderer.
+- A particle emitter raining pollen (Chapter 7).
+- A camera that follows the centroid of the seekers (Chapter 14 preview: `world/camera-follow!`).
+
+### Prefabs
+
+```scheme
+(prefab/define 'flower
+  (lambda (x y)
+    (let ([id (world/spawn x y 'flower)])
+      (entity/sprite! id 'blossom-3)
+      (entity/set! id 'sway-phase (world/hash id))
+      id)))
+
+(prefab/define 'wanderer
+  (lambda (x y)
+    (let ([id (world/spawn x y 'wanderer)])
+      (entity/sprite! id 'blossom-1)
+      (ai/wander id 0.8 1.0)
+      (entity/max-speed! id 0.4)
+      (entity/tag! id 'prey)
+      id)))
+
+(prefab/define 'seeker
+  (lambda (x y)
+    (let ([id (world/spawn x y 'seeker)])
+      (entity/sprite! id 'blossom-7)
+      (entity/max-speed! id 0.6)
+      (entity/tag! id 'predator)
+      id)))
+
+(prefab/define 'emitter
+  (lambda (x y)
+    (let ([id (world/spawn x y 'emitter)])
+      (entity/set! id 'emit-rate 3)
+      (entity/set! id 'particle-life 180)
+      id)))
+```
+
+### Scene Data
+
+```scheme
+(define garden
+  '((prefabs
+      (emitter 40.0 2.0))
+    (world
+      (gravity 0.0 0.02)
+      (camera-bounds 0.0 0.0 80.0 24.0))))
+```
+
+We'll spawn flowers, wanderers, seekers in code (to use `scene/grid` and `scene/spawn-many`).
+
+### Tick Logic
+
+```scheme
+(define (emit-particles id)
+  (when (entity/alive? id)
+    (let ([rate (entity/get id 'emit-rate)]
+          [life (entity/get id 'particle-life)]
+          [pos (entity/pos id)]
+          [x (car pos)]
+          [y (cadr pos)])
+      (let loop ([i 0])
+        (when (< i rate)
+          (let ([pid (world/spawn x y 'particle)])
+            (entity/set-vel! pid (* 0.15 (- (world/hash (+ i (* 1000 (world/frame)))) 0.5)) 0.0)
+            (entity/set! pid 'life life))
+          (loop (+ i 1)))))))
+
+(define (tick-particles)
+  (world/each
+    (lambda (id)
+      (when (eq? (entity/kind id) 'particle)
+        (let ([life (entity/get id 'life)])
+          (if (<= life 0)
+              (entity/despawn! id)
+              (entity/set! id 'life (- life 1))))))))
+
+(define (sway-flowers)
+  (world/each
+    (lambda (id)
+      (when (eq? (entity/kind id) 'flower)
+        (let ([phase (entity/get id 'sway-phase)])
+          (part/sway id 'stem (* 8.0 (dsin (+ phase (* 0.05 (world/frame)))))))))))
+
+(define (seekers-chase)
+  (world/each
+    (lambda (id)
+      (when (entity/tag! id 'predator)
+        (let ([target (world/nearest id 'prey)])
+          (when target
+            (ai/seek id (entity/x target) (entity/y target))))))))
+
+(define (camera-follow-seekers)
+  (let ([predators (group/find 'predator)])
+    (when (> (group/count predators) 0)
+      (let ([cx 0.0]
+            [cy 0.0]
+            [n (group/count predators)])
+        (group/each predators
+          (lambda (id)
+            (set! cx (+ cx (entity/x id)))
+            (set! cy (+ cy (entity/y id)))))
+        (world/camera-follow! (/ cx n) (/ cy n) 0.05)))))
+```
+
+*(Note: `set!` is a Scheme mutation primitive; we use it here for centroid accumulation. If your Scheme subset forbids `set!`, accumulate via recursion + cons instead.)*
+
+### Setup and Loop
+
+```scheme
+(define (setup)
+  (world/reset!)
+  (scene/load garden)
+  ;; Spawn flowers in a 3×3 grid
+  (scene/grid 'flower 8.0 8.0 3 3 8.0 4.0)
+  ;; Spawn 8 wanderers scattered
+  (scene/spawn-many 'wanderer
+    (list 12.0 4.0)
+    (list 20.0 8.0)
+    (list 28.0 6.0)
+    (list 36.0 10.0)
+    (list 44.0 5.0)
+    (list 52.0 12.0)
+    (list 60.0 7.0)
+    (list 68.0 9.0))
+  ;; Spawn 2 seekers
+  (prefab/spawn 'seeker 8.0 16.0)
+  (prefab/spawn 'seeker 72.0 16.0)
+  0)
+
+(big-bang (setup)
+  [on-tick (lambda (n)
+             (world/each
+               (lambda (id)
+                 (when (eq? (entity/kind id) 'emitter)
+                   (emit-particles id))))
+             (tick-particles)
+             (sway-flowers)
+             (seekers-chase)
+             (camera-follow-seekers)
+             (world/step)
+             (+ n 1))]
+  [stop-when (lambda (n) (>= n 600))])
+```
+
+[VISUAL: A wide canvas. Three columns of flowers swaying in the lower-left. Eight small blossoms wandering across the middle. Two larger blossoms (seekers) chasing the nearest wanderer. Particles raining from top-center, drifting down. Camera pans smoothly to keep both seekers in frame.]
+
+<!-- BUILD: wire Example 13.11 (the garden scene) runnable; ensure all prefabs, scene/load, scene/grid, scene/spawn-many, camera-follow, and ai verbs work. Mark *[needs: camera-follow!, ai/seek headless gap]* if not yet wired. -->
+
+**What you've learned:**
+- **Prefabs**: templates for entities.
+- **Scenes**: data-driven world setup.
+- **`big-bang`**: the game loop with handlers.
+- **Composition**: flowers (ch3) + particles (ch7) + sprites (ch8) + steering (ch10) + camera (ch14 preview).
+
+This is the shape of every animated scene in Motoi. Every cart you build from here will follow this structure.
+
+---
+
+## End-of-Chapter Questions
+
+1. **Concept recall:** What are the five main clauses in a `big-bang` form, and what does each do?
+
+2. **Concept recall:** What is a prefab? Why use `prefab/define` instead of a plain `define` for an entity constructor?
+
+3. **Make it do X:** Modify Example 13.8 to add a *third* scene (scene C) with 3 wanderers in a line, and run all three scenes sequentially (100 frames each).
+
+4. **Make it do X:** In the garden scene (Example 13.11), change the seekers so they *flee* from the nearest wanderer instead of chasing it. (Hint: use `ai/flee` instead of `ai/seek`.)
+
+5. **Composition:** Add a **floor** at y=20 to the garden scene, and give the wanderers a small downward velocity so they bounce on it. (Hint: `world/floor!` + `entity/bounce!` from Chapter 5.)
+
+6. **Challenge:** Write a scene that spawns 5 wanderers, and every 100 frames, despawns the oldest wanderer and spawns a new one at a random position. (Hint: keep a list of entity IDs in state, use `entity/despawn!` and `world/spawn` in `on-tick`.)
+
+---
+
+*Next: Chapter 14 — **The Camera**, where we learn to frame, follow, and shake the view — the cinematographer's toolkit.*
+")

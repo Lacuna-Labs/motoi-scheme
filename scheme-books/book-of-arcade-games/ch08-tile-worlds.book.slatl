@@ -1,0 +1,438 @@
+;; ch08-tile-worlds.book.slatl
+;; Book of Arcade Games — Chapter 8: Tile Worlds
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Arcade Games"
+  :chapter-number      8
+  :title               "Tile Worlds"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + game-design"
+  :book-version        "1.0.0"
+  :draws-from-preserved (:book "book-of-games-preserved" :ch 14)
+  :prose
+"So far every game has fit on one screen. Chapter 8 breaks out of the
+box. A tile world is a grid of small squares — ground, wall, sky —
+laid across a canvas larger than the display. The camera pans; the
+player walks; the world unfolds under their character's feet.
+
+Tile worlds are how a small computer punches above its weight. Instead
+of storing pixels for every part of the map, you store one small
+sprite per TYPE of tile and paint them in a grid. A 40x15 map of 32x32
+tiles is 600 tiles, which is 1200 bytes of tile-index data, and paints
+a 1280x480 pixel world.
+
+This chapter lays out a tile world, walks a character across it, sets
+camera bounds so the view stays inside the map, and lets the kid TYPE
+a level as a string list and see it come alive. The last part is what
+turns 'a game' into 'a game the kid made.'
+
+---
+
+## 8.1 The tile grid
+
+The simplest possible tile world: a ground row.
+
+```scheme
+;; A 40-tile-wide ground row across the bottom of a larger world.
+(define (ground-row)
+  (world/reset!)
+  ;; scene/grid 'ground columns rows cell-w cell-h origin-x origin-y
+  (scene/grid 'ground 40 1 32 32 0 200)
+  (world/each 'ground
+              (lambda (t)
+                (entity/shape! t 'rect 32 32)
+                (entity/solid! t #t)))
+  (let ((p (world/spawn 'player 100 168)))
+    (entity/shape! p 'rect 16 32)
+    (entity/solid! p #t)
+    (entity/gravity-scale! p 1)
+    (world/gravity! 0 0.5)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/pressed? 'a)
+         (entity/set-vel! p (car (entity/vel p)) -10))
+       (world/step)
+       (paint-clear)
+       (world/each 'ground
+                   (lambda (t)
+                     (paint-cell 'ground (entity/x t) (entity/y t) 32 32)))
+       (paint-cell 'player (entity/x p) (entity/y p) 16 32)))))
+
+(big-bang ground-row)
+```
+
+`scene/grid 'ground 40 1 32 32 0 200` says: spawn a grid tagged
+'ground, 40 columns × 1 row, tile size 32×32, top-left origin at
+(0, 200). Result: 40 tiles side by side at y=200. Each is a real
+entity you can query and manipulate.
+
+We iterate the tiles once at setup with `world/each` and mark each
+solid. The physics engine now includes them in collision resolution.
+The player, also solid, cannot pass through.
+
+The player can walk left and right along the ground and jump. But
+they can only see the leftmost 320 pixels of the 1280-pixel world.
+Camera time.
+
+---
+
+## 8.2 Camera follow
+
+Move the camera as the player moves.
+
+```scheme
+;; The camera follows the player. Now walking right REVEALS the world.
+(define (scrolling-world)
+  (world/reset!)
+  (scene/grid 'ground 40 1 32 32 0 200)
+  (world/each 'ground
+              (lambda (t) (entity/shape! t 'rect 32 32) (entity/solid! t #t)))
+  ;; Add a few 'wall towers.
+  (world/spawn 'wall 400 168)
+  (world/spawn 'wall 400 136)
+  (world/spawn 'wall 700 168)
+  (world/spawn 'wall 700 136)
+  (world/spawn 'wall 700 104)
+  (world/each 'wall
+              (lambda (t) (entity/shape! t 'rect 32 32) (entity/solid! t #t)))
+  (let ((p (world/spawn 'player 100 168)))
+    (entity/shape! p 'rect 16 32)
+    (entity/solid! p #t)
+    (world/gravity! 0 0.5)
+    (world/camera-follow! p 0.1 60 40)     ;; smooth follow, 60x40 dead
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/pressed? 'a)
+         (entity/set-vel! p (car (entity/vel p)) -10))
+       (world/step)
+       (paint-clear)
+       (world/each 'ground
+                   (lambda (t)
+                     (paint-cell 'ground (entity/x t) (entity/y t) 32 32)))
+       (world/each 'wall
+                   (lambda (t)
+                     (paint-cell 'wall (entity/x t) (entity/y t) 32 32)))
+       (paint-cell 'player (entity/x p) (entity/y p) 16 32)))))
+
+(big-bang scrolling-world)
+```
+
+`world/camera-follow! p 0.1 60 40` says: follow entity `p` with lag
+factor 0.1 (10% of the way each frame — smooth), only re-centering
+when the player leaves a 60×40 pixel deadzone. Walk right, the world
+slides left under you. Walk back, it slides right.
+
+The paint calls did not change. `paint-cell` takes world coordinates,
+and the runtime subtracts the camera position before drawing. The kid
+does not have to think about screen-vs-world coordinates — the engine
+handles it.
+
+---
+
+## 8.3 Camera bounds
+
+The camera should not scroll past the edge of the world.
+
+```scheme
+;; Constrain the camera to a rectangle so you never see 'outside'.
+(define (bounded-world)
+  (world/reset!)
+  (scene/grid 'ground 40 1 32 32 0 200)
+  (world/each 'ground
+              (lambda (t) (entity/shape! t 'rect 32 32) (entity/solid! t #t)))
+  (let ((p (world/spawn 'player 100 168)))
+    (entity/shape! p 'rect 16 32)
+    (entity/solid! p #t)
+    (world/gravity! 0 0.5)
+    (world/camera-follow! p 0.1 60 40)
+    ;; World is 40 tiles wide (1280 px) tall enough for jumps up to y=0.
+    (world/camera-bounds! 0 0 1280 480)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/pressed? 'a)
+         (entity/set-vel! p (car (entity/vel p)) -10))
+       (world/step)
+       (paint-clear)
+       (world/each 'ground
+                   (lambda (t)
+                     (paint-cell 'ground (entity/x t) (entity/y t) 32 32)))
+       (paint-cell 'player (entity/x p) (entity/y p) 16 32)))))
+
+(big-bang bounded-world)
+```
+
+At the left edge, camera stops even as the player walks further left
+(they leave the deadzone). At the right edge, camera stops. This is
+the standard sidescroller camera. It costs one line of code
+(`world/camera-bounds!`).
+
+---
+
+## 8.4 Levels as strings
+
+The powerful part: type your level as a string of characters, one
+character per tile. Parse it into entities.
+
+```scheme
+;; A little level design language.
+;;   #  ground/wall
+;;   .  air (nothing)
+;;   P  player start
+;;   G  goal
+
+(define level-1
+  '(\"..............................\"
+    \"..............................\"
+    \"..............................\"
+    \"..............................\"
+    \"..............#####...........\"
+    \"..............................\"
+    \"........########..............\"
+    \"..............................\"
+    \"...##...................######\"
+    \"..............................\"
+    \"P........................#...G\"
+    \"##############################\"))
+
+(define (parse-level lines)
+  (world/reset!)
+  (let ((rows (length lines))
+        (player-spawn #f)
+        (goal-spawn #f))
+    (let loop-r ((row 0))
+      (when (< row rows)
+        (let ((line (list-ref lines row)))
+          (let loop-c ((col 0))
+            (when (< col (string-length line))
+              (let ((ch (string-ref line col))
+                    (x (* col 32))
+                    (y (* row 20)))
+                (cond
+                  ((char=? ch #\\#)
+                   (let ((t (world/spawn 'ground x y)))
+                     (entity/shape! t 'rect 32 20)
+                     (entity/solid! t #t)))
+                  ((char=? ch #\\P)
+                   (set! player-spawn (list x y)))
+                  ((char=? ch #\\G)
+                   (set! goal-spawn (list x y))))
+                (loop-c (+ col 1)))))
+          (loop-r (+ row 1)))))
+    (list player-spawn goal-spawn)))
+
+(define (play-level)
+  (let* ((spawns (parse-level level-1))
+         (player-spawn (car spawns))
+         (goal-spawn   (cadr spawns))
+         (p (world/spawn 'player (car player-spawn) (cadr player-spawn))))
+    (when goal-spawn
+      (let ((g (world/spawn 'goal (car goal-spawn) (cadr goal-spawn))))
+        (entity/shape! g 'rect 20 20)
+        (entity/sensor! g #t)))
+    (entity/shape! p 'rect 16 20)
+    (entity/solid! p #t)
+    (world/gravity! 0 0.5)
+    (world/camera-follow! p 0.1 60 40)
+    (world/camera-bounds! 0 0 960 240)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/pressed? 'a)
+         (entity/set-vel! p (car (entity/vel p)) -8))
+       (world/step)
+       ;; Check goal collision.
+       (for-each
+        (lambda (pair)
+          (let ((a (car pair)) (b (cadr pair)))
+            (when (or (and (eq? (entity/kind a) 'player)
+                           (eq? (entity/kind b) 'goal))
+                      (and (eq? (entity/kind b) 'player)
+                           (eq? (entity/kind a) 'goal)))
+              (paint-text \"YOU WIN!\" 120 100))))
+        (world/collisions))
+       (paint-clear)
+       (world/each 'ground
+                   (lambda (t)
+                     (paint-cell 'ground (entity/x t) (entity/y t) 32 20)))
+       (world/each 'goal
+                   (lambda (g)
+                     (paint-cell 'goal (entity/x g) (entity/y g) 20 20)))
+       (paint-cell 'player (entity/x p) (entity/y p) 16 20)))))
+
+(big-bang play-level)
+```
+
+Read the level string. It looks like a picture of the level. That is
+the point. The kid can literally SEE the world in the source. Change
+a `.` to a `#` and a wall appears. Move `P` to change spawn. Move `G`
+to change goal. That IS level design, no editor needed.
+
+`char=?` compares characters. `#\\#` is Scheme's character literal for
+'#'. `string-ref` indexes into a string. `list-ref` indexes into a
+list. These are R7RS standards; every Motoi runtime has them.
+
+---
+
+## 8.5 A level to walk
+
+Ten sample levels live in Appendix J (ASCII-to-Tile Level Format).
+Here is a tiny one you can play right now — copy the string list, save
+the file, run it.
+
+```
+'(\"........................\"
+  \"........................\"
+  \"...#####................\"
+  \"........................\"
+  \"........................\"
+  \"...............#####....\"
+  \"........................\"
+  \"........#####...........\"
+  \"........................\"
+  \"P.......................G\"
+  \"########################\")
+```
+
+Eleven lines, twenty-four columns. Three floating platforms, a ground
+row, a spawn, a goal. Playable in fifteen seconds.
+
+Appendix J has ten more like this — some tricky, some breezy, all
+runnable with the parser above.
+
+---
+
+## 8.6 The four patterns in a tile world
+
+**Composition.** A world is composed of tiles. A tile is composed of
+shape and solid. A level is composed of tiles arranged by the parser
+from a string. Composition happens at three scales: tile, world, game.
+
+**Orchestration.** The frame loop orchestrates: input, physics, tile
+paint, entity paint. Tiles are stationary; you could paint them once
+to a background buffer and skip re-painting each frame. Optimization
+for later.
+
+**In-routing.** Input routes to player movement. The level string
+routes to entity spawns via the parser — a static in-routing, done
+once at level load. `world/collisions` routes goal-touches to a
+win-check.
+
+**Routing.** Paint calls route to the framebuffer, adjusted by the
+camera position under the hood. `world/camera-follow!` routes the
+player's position to the camera every frame. Tile-load routes strings
+to entities.
+
+---
+
+## 8.7 Common desktop tasks
+
+**Shop-as-map.** A shop with lots of product categories can be
+represented as a small tile world: each category is a room, walls
+between them, doors to open. The kid navigates by walking rather than
+clicking. Not for every shop, but for the whimsical ones.
+
+**Save-navigation game.** After a shop sale ends, run a small
+'find-your-favorite' minigame: your last three viewed items are goals
+at scattered positions; you navigate a tile world to touch them all.
+Completion = a bonus coupon.
+
+---
+
+## 8.8 Pitfalls
+
+**Player sinks into the floor.** Your tile shape doesn't match the
+grid cell size. Tile is 32×32; you set `entity/shape! t 'rect 32 20`.
+Fix: match the shape to the visual.
+
+**Camera stops before the player reaches an edge.** Your camera
+bounds are too tight. `world/camera-bounds! 0 0 world-w world-h`
+should use the FULL world dimensions.
+
+**Level appears offset.** Your parser uses `(* col 32)` but you spawn
+tiles at `y = (* row 20)` — mismatched tile size in x vs y. Use the
+same number.
+
+**One giant tile row.** Your loop broke early. Check the `loop-c`
+termination condition — you want `<`, not `<=` (or `string-length` +
+1, off by one).
+
+**Player warps to spawn but never falls.** Player spawned INSIDE a
+tile; the physics resolves by pushing them out (probably up) instantly.
+Spawn one tile-row above ground.
+
+---
+
+## 8.9 Try this yourself
+
+1. Add a `C` character for coin. Parse into a sensor entity. Collect
+   on touch. Score in a counter.
+2. Add a `E` character for enemy. Parse into an entity that patrols
+   left-right on its row.
+3. Add a `S` character for spring. Parse into an entity that on
+   player-contact sets player vy to -14 (super-jump).
+4. Write your own level. Save it as `my-level.slat` in the same
+   directory. Load it in the parser.
+5. Add a scrolling background parallax layer (chapter 9 will make
+   this beautiful).
+6. Add a level-select screen: three levels; arrow to pick; 'a' to
+   play; on win, back to select.
+
+---
+
+## 8.10 What we built
+
+`scene/grid` for cheap grid-generated worlds. `world/camera-follow!`
++ `world/camera-bounds!` for scrolling. A string-based level format
+that a kid can read and write. A goal sensor. Ten sample levels in
+Appendix J.
+
+Next chapter: three layers of scrolling background, each at a
+different rate. The world gains depth without gaining a Z-axis.")
+
+(code-block :chapter 8 :lang "scheme" :source
+"(define (tile-worlds-anchor)
+  (world/reset!)
+  (scene/grid 'ground 40 1 32 32 0 200)
+  (world/each 'ground
+              (lambda (t) (entity/shape! t 'rect 32 32) (entity/solid! t #t)))
+  (world/spawn 'wall 400 168)
+  (world/spawn 'wall 700 168) (world/spawn 'wall 700 136)
+  (world/each 'wall
+              (lambda (t) (entity/shape! t 'rect 32 32) (entity/solid! t #t)))
+  (let ((p (world/spawn 'player 100 168)))
+    (entity/shape! p 'rect 16 32)
+    (entity/solid! p #t)
+    (world/gravity! 0 0.5)
+    (world/camera-follow! p 0.1 60 40)
+    (world/camera-bounds! 0 0 1280 480)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -3 0))
+       (when (input/down? 'right) (entity/move! p 3 0))
+       (when (input/pressed? 'a)
+         (entity/set-vel! p (car (entity/vel p)) -10))
+       (world/step)
+       (paint-clear)
+       (world/each 'ground
+                   (lambda (t)
+                     (paint-cell 'ground (entity/x t) (entity/y t) 32 32)))
+       (world/each 'wall
+                   (lambda (t)
+                     (paint-cell 'wall (entity/x t) (entity/y t) 32 32)))
+       (paint-cell 'player (entity/x p) (entity/y p) 16 32)))))
+(big-bang tile-worlds-anchor)")

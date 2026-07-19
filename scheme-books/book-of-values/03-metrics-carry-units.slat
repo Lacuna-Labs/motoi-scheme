@@ -1,0 +1,643 @@
+;; 03-metrics-carry-units.slat
+;; Book of Values — Chapter 3
+
+(chapter
+  :book              "Book of Values"
+  :chapter-number    3
+  :title             "Metrics Carry Units"
+  :audience          :engineer
+  :dialect           "motoi"
+  :book-version      "1.1"
+  :provenance        "book-of-values-author-2026-07-16 book-of-values-expander-2026-07-17"
+  :training-eligible #t
+  :content-rating    :G
+  :prose
+"# Chapter 3 — Metrics Carry Units
+
+Money has units. Currency codes are units. That was Chapter 2. The rest
+of the world has units too, and most of the world does not use the same
+ones as you.
+
+Distance. Weight. Volume. Speed. Temperature. Pressure. Energy. Time.
+Data size. Screen resolution. Angle. Frequency. Every one of these
+comes in at least two flavors, and mixing them silently is exactly the
+same bug as mixing dollars and euros — just harder to spot because both
+sides look like the same number.
+
+Money at least has one polite convention. Every bank in the world
+prints the currency symbol next to the amount, so if you look at the
+receipt you can see `€10.00` and *know* it isn't ten dollars. Metrics
+have no such politeness. The label lives in a comment three files
+away, or in your head, or in the head of the person who typed the
+number six weeks ago. Then somebody adds two numbers.
+
+## The Mars Climate Orbiter
+
+In 1999 a spacecraft that cost about $125 million dollars got destroyed
+because one team's software worked in pound-force-seconds and another
+team's software worked in newton-seconds. The number went across the
+boundary unlabeled. The receiving code trusted it. The thrusters fired
+harder than intended. The orbiter dipped too far into the Martian
+atmosphere and burned.
+
+That is the metric-units bug. The same shape as money-in-cents-vs-money-
+in-dollars, at planetary scale.
+
+The instructive part is not that a rocket was destroyed. The instructive
+part is that the interface between two teams' code carried a bare
+number. If the number had been `(force 'newton-second 4)` on both
+sides, the type mismatch would have shown up on the ground, cheap.
+Instead it showed up on approach to Mars, expensive.
+
+Every unit bug in your programs has the same architecture. Two people
+(or one person, six months apart) agreed on a unit informally, then
+one of them changed their mind, then the boundary carried a bare
+number. Bare numbers *strip the argument*.
+
+## Shape a distance
+
+Same trick as Chapter 2. Tag the value.
+
+```
+(define (dist unit magnitude) (list 'dist unit magnitude))
+(define (dist-unit d) (cadr d))
+(define (dist-mag  d) (caddr d))
+(define (dist? x) (and (pair? x) (eq? (car x) 'dist)))
+
+(dist 'm 100)
+;; -> (dist m 100)
+
+(dist? (dist 'ft 10))
+;; -> #t
+```
+
+`'m` for meters. `'ft` for feet. `'km` for kilometers. `'mi` for miles.
+Symbols. Not strings. Symbols are cheap to compare with `eq?` and they
+render nicely at the REPL.
+
+DO: use symbols for unit names — `'m`, `'kg`, `'sec`, `'byte`.
+DON'T: use strings — `\"m\"` looks fine until you compare with `equal?`
+across two files with two different spellings (`\"m\"` vs `\"meter\"`
+vs `\"metre\"`).
+WHY: symbols intern. `(eq? 'm 'm)` is `#t`, cheap, and can't drift.
+
+## The unit disagreement bug
+
+Here is the bug in miniature. A ship reports its position in nautical
+miles. A sonar reports depth in feet. A program that plots them both
+just uses numbers.
+
+```
+(+ 100 100)
+;; -> 200
+```
+
+200 of what? 200 nothing. 200 fictions. The number lies with a straight
+face.
+
+With shape:
+
+```
+(define (bad-add a b)
+  (if (eq? (dist-unit a) (dist-unit b))
+      (dist (dist-unit a) (+ (dist-mag a) (dist-mag b)))
+      (list 'error 'unit-mismatch (dist-unit a) (dist-unit b))))
+
+(bad-add (dist 'nmi 100) (dist 'ft 100))
+;; -> (error unit-mismatch nmi ft)
+```
+
+The bug becomes visible. That is the whole game. Not *the code is
+guaranteed correct* — nothing guarantees that — but *the wrong combo
+produces a value you cannot accidentally use as a good distance*. The
+error record has a different shape than a `dist` record. Any function
+downstream that expected `dist` will refuse it.
+
+## SI is a system
+
+The Système International — SI — is a set of units that share a
+scaling rule. You go up or down by factors of 1000 with a prefix.
+
+- `k` = 10^3 (kilo)
+- `M` = 10^6 (mega)
+- `G` = 10^9 (giga)
+- `T` = 10^12 (tera)
+- `m` = 10^-3 (milli)
+- `u` = 10^-6 (micro)
+- `n` = 10^-9 (nano)
+
+Kilometers, kilograms, kilojoules, kilopascals. All the same prefix
+because it is the same *scale*. That is the point of SI: one rule,
+applied uniformly.
+
+The Motoi arithmetic verbs cover this fine.
+
+```
+(define (km->m km) (* km 1000))
+(define (m->km m)  (/ m 1000))
+
+(km->m 5)
+;; -> 5000
+
+(m->km 5000)
+;; -> 5
+```
+
+Simple. Cheap. Correct.
+
+You can push the same rule up and down the whole SI ladder. Milliseconds
+to seconds, seconds to minutes (that's the point where SI stops
+because minutes and hours are *not* SI — see the imperial section):
+
+```
+(define (ms->s ms) (/ ms 1000))
+(define (s->ms s)  (* s 1000))
+(define (us->s us) (/ us 1000000))
+(define (kg->g kg) (* kg 1000))
+(define (mg->g mg) (/ mg 1000))
+
+(ms->s 5000)   ;; five seconds
+;; -> 5
+
+(kg->g 3)      ;; three kilos in grams
+;; -> 3000
+```
+
+Notice these are one-line functions. That is deliberate. Each one is a
+*named conversion*. Naming the conversion is 80% of the value. Six
+weeks from now, when someone reads `(km->m distance)`, they know
+exactly what happened. When they read `(* distance 1000)` they have
+to reconstruct intent from context.
+
+DO: name every conversion. `km->m`, `min->sec`, `f->c`.
+DON'T: sprinkle magic multipliers through business logic.
+WHY: a named function is grep-able. A magic constant is not.
+
+## Imperial is not a system, it's a scrapbook
+
+Imperial units evolved. A mile is 5,280 feet. A foot is 12 inches. An
+inch is 2.54 centimeters. A yard is 3 feet. A rod is 16.5 feet. A
+furlong is 660 feet. A fathom is 6 feet. A league is 3 miles.
+
+None of these have a clean scaling rule. Each one is a historical
+accident. Converting between them is a lookup, not a formula.
+
+```
+(define (ft->in ft) (* ft 12))
+(define (in->cm inches) (* inches 2.54))
+(define (mi->ft mi) (* mi 5280))
+
+(ft->in 6)
+;; -> 72
+
+(in->cm 12)
+;; -> 30.48
+
+(mi->ft 1)
+;; -> 5280
+```
+
+Every one of those constants — 12, 2.54, 5280 — is memorization. There
+is no derivation. The constants are the system. That's fine. Just
+don't pretend the units are interchangeable.
+
+Chain conversions carefully. If you go feet → inches → cm → m, the
+float trap sneaks in.
+
+```
+(/ (* (* 100 12) 2.54) 100)   ;; 100 ft → m
+;; -> 30.48
+```
+
+That happens to land clean because `2.54` × `12` × `100` is exact in
+this size. For distances big enough to hit float precision limits,
+convert via integer minor units and round at the end. Chapter 6 has
+the full story.
+
+## Temperature is not linear across systems
+
+Fahrenheit, Celsius, and Kelvin all measure the same thing. Their
+conversion is not just a scale factor. It has an *offset*.
+
+```
+(define (c->f c) (+ (quotient (* c 9) 5) 32))
+
+(c->f 100)   ;; boiling
+;; -> 212
+
+(c->f 0)     ;; freezing
+;; -> 32
+```
+
+Notice the offset of 32. That offset is where scalar-brained bugs live.
+If you write `(* c 1.8)` you get a scale factor but no offset. 100 C
+comes out as 180. That is wrong. 100 C is 212 F.
+
+The reverse:
+
+```
+(define (f->c f) (quotient (* (- f 32) 5) 9))
+
+(f->c 32)    ;; freezing
+;; -> 0
+
+(f->c 212)   ;; boiling
+;; -> 100
+```
+
+Kelvin is Celsius with a different offset — 273.15 to be exact. Motoi
+uses integer math cleanly, so if you want fractional precision, work
+in tenths or hundredths of a degree and format at display time.
+
+```
+(define (c->k c) (+ c 273))         ;; approximate
+
+(c->k 0)     ;; freezing in kelvin (approx)
+;; -> 273
+
+(c->k 100)   ;; boiling in kelvin (approx)
+;; -> 373
+```
+
+**Averaging temperatures across scales is meaningless.** The average of
+32 F and 100 C is a number that names nothing. Convert both to one
+scale first. Then average. Then, if you want, convert back.
+
+```
+(define (safe-temp-avg t-list)
+  ;; assumes t-list is a list of celsius numbers
+  (/ (math/sum t-list) (length t-list)))
+
+(safe-temp-avg (list 20 22 24 26))
+;; -> 23
+```
+
+If you want to enforce that all temperatures in the list are in the
+same unit, wrap them.
+
+```
+(define (temp unit degrees) (list 'temp unit degrees))
+(define (temp-unit t) (cadr t))
+(define (temp-deg  t) (caddr t))
+
+(define (temps-all-same-unit? ts)
+  (or (null? ts)
+      (null? (cdr ts))
+      (and (eq? (temp-unit (car ts)) (temp-unit (cadr ts)))
+           (temps-all-same-unit? (cdr ts)))))
+
+(temps-all-same-unit?
+  (list (temp 'c 20) (temp 'c 22) (temp 'c 24)))
+;; -> #t
+
+(temps-all-same-unit?
+  (list (temp 'c 20) (temp 'f 68) (temp 'c 24)))
+;; -> #f
+```
+
+Shape checks. They cost you three lines. They save you from writing an
+average of freezing water and boiling water and getting a number that
+suggests mild summer weather.
+
+DO: refuse to combine temperatures across scales; convert first.
+DON'T: assume a list of temperatures is homogeneous just because it
+came from one API.
+WHY: sensor networks routinely mix Celsius and Kelvin; the number
+looks reasonable in either.
+
+## Base-10 vs Base-2: the MB / MiB story
+
+Data sizes are the same bug in a different suit.
+
+- **1 KB** = 1,000 bytes  (base 10, disk manufacturers)
+- **1 KiB** = 1,024 bytes (base 2, operating systems)
+- **1 MB** = 1,000,000 bytes
+- **1 MiB** = 1,048,576 bytes
+- **1 GB** = 1,000,000,000 bytes
+- **1 GiB** = 1,073,741,824 bytes
+
+Same word, different number. A hard drive advertised as *500 GB* holds
+about *465 GiB*. Your file system reports the second number. You think
+you lost 35 GB to firmware. You didn't. The units were different.
+
+Shape it.
+
+```
+(define (size unit magnitude) (list 'size unit magnitude))
+(define (size-bytes s)
+  (let ((u (cadr s)) (n (caddr s)))
+    (cond
+      ((eq? u 'B)   n)
+      ((eq? u 'KB)  (* n 1000))
+      ((eq? u 'MB)  (* n 1000000))
+      ((eq? u 'GB)  (* n 1000000000))
+      ((eq? u 'KiB) (* n 1024))
+      ((eq? u 'MiB) (* n 1048576))
+      ((eq? u 'GiB) (* n 1073741824))
+      (else (list 'error 'unknown-size-unit u)))))
+
+(size-bytes (size 'GB  500))
+;; -> 500000000000
+
+(size-bytes (size 'GiB 500))
+;; -> 536870912000
+```
+
+Now the numbers cannot be added without going through this function.
+The function does the accounting. You do not have to remember which is
+which.
+
+The percentage difference between a `KB` and a `KiB` is 2.4%. Between
+a `MB` and a `MiB`, 4.9%. Between a `GB` and a `GiB`, 7.4%. Between a
+`TB` and a `TiB`, 10.0%. The gap widens as you go up because you're
+compounding the same 2.4% at each rung of the ladder. That's why disk
+manufacturer marketing and OS reporting drift apart more the bigger
+the drive.
+
+## Rate vs quantity — the composition question
+
+A kilometer is a distance. A kilometer *per hour* is a speed. These are
+different units. You cannot add a distance to a speed. Adding rates
+is also a mess — see the appendix on rates and ratios — but the
+first-order rule is simple: don't collapse `km/h` back to `km` by
+dropping the `/h`.
+
+```
+(define (rate quantity-unit time-unit magnitude)
+  (list 'rate quantity-unit time-unit magnitude))
+
+(define fast (rate 'km 'h 100))
+;; -> (rate km h 100)
+```
+
+Now `fast` is a value that means *100 km/h*. You know from the shape
+that you cannot add it to a distance without multiplying by a time
+first. That's Appendix M — this chapter just plants the flag.
+
+## Angles: degrees vs radians vs revolutions
+
+Angles are unitless in a strict sense — they're ratios — but they
+come in three practical flavors:
+
+- **Degrees.** 360 in a full turn. Human friendly.
+- **Radians.** `2π` (≈ 6.283) in a full turn. Math-library native.
+- **Revolutions / turns.** 1 in a full turn. Occasionally used in
+  animation code where *one turn* is the natural unit.
+
+Motoi's `geom/sin`, `geom/cos`, `geom/tan`, and `geom/atan2` all use
+radians. Motoi's `geom/->radians` and `geom/->degrees` convert.
+
+```
+(geom/->radians 180)
+;; -> 3.141592653589793
+
+(geom/->degrees 3.141592653589793)
+;; -> 180
+```
+
+Round trip. If you're wiring a UI that lets a user type an angle in
+degrees, convert at the boundary once and store in radians. Radians
+are the *canonical form*. Degrees are the *display form*. Chapter 14
+has more on that split.
+
+DO: store angles in radians internally; convert to degrees at the UI.
+DON'T: pass degrees straight into `geom/sin` — you'll get sensible-
+looking numbers that are wrong by a factor of about 57.
+WHY: `(geom/sin 90)` is `0.893…`, because the argument is treated as
+radians (about 5,157°). If you meant 90°, write `(geom/sin (geom/->radians 90))`.
+
+Try it and see:
+
+```
+(geom/sin 90)                          ;; wrong (90 radians)
+;; -> 0.8939966636005579
+
+(geom/sin (geom/->radians 90))         ;; right (90 degrees → π/2)
+;; -> 1
+```
+
+The second result is 1 because sin(90°) = 1. Every angle bug in
+graphics code is a version of this.
+
+## Frequency: Hz, cycles-per-second, radians-per-second
+
+A frequency is a rate. `440 Hz` means *440 cycles per second* — the
+concert-pitch A. Kids love this because you can hear the difference
+between numbers.
+
+```
+(define (freq magnitude) (list 'freq 'hz magnitude))
+
+(freq 440)                              ;; A above middle C
+;; -> (freq hz 440)
+
+(freq 880)                              ;; A one octave up
+;; -> (freq hz 880)
+```
+
+Doubling a frequency = up one octave. That's a musical unit imposed
+on top of a physical one. You can compute the ratio between two
+notes with a straight division:
+
+```
+(/ 880 440)
+;; -> 2
+```
+
+Two. One octave. Any frequency and its double are one octave apart.
+That is a *musical fact* about a *physical measurement*.
+
+Angular frequency is `2π × Hz` and shows up in oscillator code:
+
+```
+(* 2 (math/pi) 440)                     ;; ω for A440
+;; -> 2764.601535159018
+```
+
+The three flavors of frequency — `Hz`, `rad/s`, `cycles/frame` (for
+game loops) — are conversions of each other. Pick one canonical
+form and stick with it. Music code usually likes Hz. Physics code
+likes rad/s. Game code likes cycles/frame. Pick one at the boundary.
+
+## Pressure, energy, power — the compound units
+
+Pressure = force ÷ area. `Pa` (pascal) is `N/m²`.
+Energy = force × distance. `J` (joule) is `N·m`.
+Power = energy ÷ time. `W` (watt) is `J/s`.
+
+These compound units are why unit-checking pays back. If you multiply
+`(N)` by `(m)` in your head, you get *joules*. If your code multiplies
+a number labeled `newton` by a number labeled `meter`, it should
+produce a value labeled `joule`. When you build a small dimensional-
+analysis system in Motoi, this is the payoff.
+
+The full framework is more than a chapter — dimensional analysis
+libraries in serious languages get big — but the *habit* is available
+to you today: tag every physical quantity with its unit, refuse
+combinations you didn't sanction, and write helper functions that
+name the compound units.
+
+```
+(define (energy joules)
+  (list 'energy 'j joules))
+
+(define (force-times-distance f d)
+  ;; f is (force n magnitude), d is (dist m magnitude)
+  (cond
+    ((not (and (eq? (car f) 'force) (eq? (cadr f) 'n)))
+       (list 'error 'force-times-distance 'bad-force f))
+    ((not (and (eq? (car d) 'dist)  (eq? (cadr d) 'm)))
+       (list 'error 'force-times-distance 'bad-dist d))
+    (else
+       (energy (* (caddr f) (caddr d))))))
+
+(force-times-distance (list 'force 'n 10) (dist 'm 3))
+;; -> (energy j 30)
+
+(force-times-distance (list 'force 'n 10) (dist 'ft 3))
+;; -> (error force-times-distance bad-dist (dist ft 3))
+```
+
+The multiplication rule — force × distance = energy — is *inside the
+function*. The caller cannot bypass it by writing `(* force distance)`
+with bare numbers. The unit accounting is the code.
+
+## What symbols to use
+
+Pick a small set of unit symbols and use them consistently. A
+suggestion for Motoi programs:
+
+- Length: `'mm 'cm 'm 'km 'in 'ft 'yd 'mi 'nmi`
+- Mass:   `'mg 'g 'kg 't 'oz 'lb`
+- Volume: `'ml 'l 'gal 'qt 'pt 'floz`
+- Time:   `'us 'ms 's 'min 'h 'd`
+- Angle:  `'deg 'rad 'grad`
+- Data:   `'B 'KB 'MB 'GB 'TB 'KiB 'MiB 'GiB 'TiB`
+- Temp:   `'c 'f 'k`
+- Force:  `'n 'lbf`
+- Energy: `'j 'kj 'cal 'kcal 'kwh`
+- Power:  `'w 'kw 'hp`
+- Pressure: `'pa 'kpa 'bar 'psi`
+- Freq:   `'hz 'khz 'mhz 'ghz`
+
+Appendix B has a fuller table. If you find yourself wanting a unit
+symbol that isn't in the table, add it once, at the boundary of your
+program, and be consistent inside.
+
+DO: agree on the symbol set with your team before writing conversion code.
+DON'T: mix `'sec`, `'s`, `'second`, `'seconds` — pick one and refuse the others.
+WHY: one canonical symbol per unit means one conversion table.
+
+## The percent trap
+
+Percent is a unit too. And it lies more often than the rest.
+
+Say a stock drops 10% from `$100`. It's at `$90`. The next day it
+rises 10%. What is it worth?
+
+```
+(* 100 0.9 1.1)
+;; -> 99.00000000000001
+```
+
+$99 (plus a float ghost — see Chapter 6). Not $100. A 10% drop
+followed by a 10% rise does not get you back to where you started.
+Percentages compound multiplicatively; they don't add. This is why
+the appendix on rates and ratios exists.
+
+The safer shape is *basis points* — integer hundredths of a percent.
+`10%` is `1000 bp`. Store in bp, convert at the boundary. Basis
+points let you add and subtract without ambiguity, and there's no
+float involved.
+
+## Recap
+
+- Every metric carries a unit. Bare numbers do not.
+- Tag the value with a shape: `(list 'kind unit magnitude)`.
+- SI units scale by factors of 1000 with letter prefixes.
+- Imperial units are historical scrapbooks. Constants are the system.
+- Temperature has an *offset*, not just a scale factor.
+- Data sizes come in base-10 (`MB`) and base-2 (`MiB`). They are
+  different numbers. Handle explicitly.
+- Angles ship in radians internally in Motoi; convert to degrees
+  only for display.
+- Compound units — pressure, energy, power — are *products and
+  quotients* of base units. Name the compound units.
+- Refuse to combine mismatched units. Convert first (Chapter 4).
+
+Next chapter: conversion itself, and its hidden costs.")
+
+(example :ref "ch3-dist-ctor"
+         :code "(begin (define (dist u m) (list 'dist u m)) (dist 'm 100))"
+         :expected "(dist m 100)")
+(example :ref "ch3-dist-pred"
+         :code "(begin (define (dist u m) (list 'dist u m)) (define (dist? x) (and (pair? x) (eq? (car x) 'dist))) (dist? (dist 'ft 10)))"
+         :expected #t)
+(example :ref "ch3-plain-add-lies"
+         :code "(+ 100 100)"
+         :expected 200)
+(example :ref "ch3-km-to-m"
+         :code "(* 5 1000)"
+         :expected 5000)
+(example :ref "ch3-c-to-f-boil"
+         :code "(+ (quotient (* 100 9) 5) 32)"
+         :expected 212)
+(example :ref "ch3-c-to-f-freeze"
+         :code "(+ (quotient (* 0 9) 5) 32)"
+         :expected 32)
+(example :ref "ch3-safe-avg"
+         :code "(/ (math/sum (list 20 22 24 26)) 4)"
+         :expected 23)
+(example :ref "ch3-size-gb"
+         :code "(* 500 1000000000)"
+         :expected 500000000000)
+(example :ref "ch3-size-gib"
+         :code "(* 500 1073741824)"
+         :expected 536870912000)
+(example :ref "ch3-ms-to-s"
+         :code "(/ 5000 1000)"
+         :expected 5)
+(example :ref "ch3-kg-to-g"
+         :code "(* 3 1000)"
+         :expected 3000)
+(example :ref "ch3-ft-to-in"
+         :code "(* 6 12)"
+         :expected 72)
+(example :ref "ch3-in-to-cm"
+         :code "(* 12 2.54)"
+         :expected 30.48)
+(example :ref "ch3-100ft-to-m"
+         :code "(/ (* (* 100 12) 2.54) 100)"
+         :expected 30.48)
+(example :ref "ch3-f-to-c-freeze"
+         :code "(quotient (* (- 32 32) 5) 9)"
+         :expected 0)
+(example :ref "ch3-f-to-c-boil"
+         :code "(quotient (* (- 212 32) 5) 9)"
+         :expected 100)
+(example :ref "ch3-c-to-k-freeze"
+         :code "(+ 0 273)"
+         :expected 273)
+(example :ref "ch3-c-to-k-boil"
+         :code "(+ 100 273)"
+         :expected 373)
+(example :ref "ch3-rad-180"
+         :code "(geom/->radians 180)"
+         :expected 3.141592653589793)
+(example :ref "ch3-deg-pi"
+         :code "(geom/->degrees 3.141592653589793)"
+         :expected 180)
+(example :ref "ch3-sin-90-wrong"
+         :code "(geom/sin 90)"
+         :expected 0.8939966636005579
+         :teaching "geom/sin takes RADIANS. Passing 90 gives sin of 90 radians (~5157°), not sin of 90°.")
+(example :ref "ch3-sin-90-right"
+         :code "(geom/sin (geom/->radians 90))"
+         :expected 1)
+(example :ref "ch3-octave-ratio"
+         :code "(/ 880 440)"
+         :expected 2)
+(example :ref "ch3-percent-round-trip"
+         :code "(* 100 0.9 1.1)"
+         :expected 99.00000000000001
+         :teaching "Down 10% then up 10% doesn't get you back — you're at ~99 (plus a float ghost). Percentages compound multiplicatively.")

@@ -1,0 +1,330 @@
+;; 10-composability.slat
+;; Book of Values — Chapter 10
+
+(chapter
+  :book              "Book of Values"
+  :chapter-number    10
+  :title             "Composability"
+  :audience          :engineer
+  :dialect           "motoi"
+  :book-version      "1.1"
+  :provenance        "book-of-values-author-2026-07-16 book-of-values-expander-2026-07-17"
+  :training-eligible #t
+  :content-rating    :G
+  :prose
+"# Chapter 10 — Composability
+
+Shape lets you compare. Composability is the next step: putting shaped
+values together — adding them, aggregating them, transforming lists
+of them — without silently corrupting anything.
+
+The rule is short. **Values compose when their shapes agree.** When
+shapes don't agree, refuse. Do not guess. Do not coerce.
+
+## Sum a list of money
+
+The naive way: `math/sum` on the raw amounts.
+
+```
+(define usd-100 (list 'money 'usd 100))
+(define usd-200 (list 'money 'usd 200))
+(define usd-300 (list 'money 'usd 300))
+
+(math/sum (list (caddr usd-100) (caddr usd-200) (caddr usd-300)))
+;; -> 600
+```
+
+That gave you a *number*, not a money. If you insert one euro amount
+in the middle, the total is still a number. The shape has been
+thrown away and can't be recovered.
+
+The composable way: sum with a shape check.
+
+```
+(define (money-list-sum lst)
+  ;; Returns a money value or an error.
+  (cond
+    ((null? lst) (list 'error 'sum-empty))
+    (else
+       (let* ((first (car lst))
+              (currency (cadr first)))
+         (let loop ((rest (cdr lst)) (total (caddr first)))
+           (cond
+             ((null? rest)
+                (list 'money currency total))
+             ((not (eq? (cadr (car rest)) currency))
+                (list 'error 'currency-mismatch
+                      currency (cadr (car rest))))
+             (else
+                (loop (cdr rest)
+                      (+ total (caddr (car rest)))))))))))
+
+(money-list-sum (list usd-100 usd-200 usd-300))
+;; -> (money usd 600)
+
+(money-list-sum
+  (list usd-100 (list 'money 'eur 200) usd-300))
+;; -> (error currency-mismatch usd eur)
+```
+
+The function returns *money* on success and *an error record* on
+failure. It never returns a bare number. There is no silent
+degradation.
+
+## The Motoi verbs are shape-blind
+
+`math/sum` and `math/avg` don't know about your shapes. They know
+about numbers. That's a *feature* — they should be small, general,
+and predictable. The composition rules for your shaped values live
+in your code, not in the base env.
+
+The pattern:
+
+- **Extract** the numeric field from each shaped value.
+- **Validate** that every value has the same shape.
+- **Reduce** with the base numeric verb.
+- **Re-wrap** in the shape.
+
+```
+(define (money-avg lst)
+  (cond
+    ((null? lst) (list 'error 'avg-empty))
+    (else
+       (let ((s (money-list-sum lst)))
+         (cond
+           ((and (pair? s) (eq? (car s) 'error)) s)
+           (else
+              (list 'money (cadr s)
+                    (quotient (caddr s) (length lst))))))))))
+
+;; correction: extra paren
+```
+
+Let me rewrite that cleaner:
+
+```
+(define (money-avg lst)
+  (let ((s (money-list-sum lst)))
+    (if (and (pair? s) (eq? (car s) 'error))
+        s
+        (list 'money (cadr s) (quotient (caddr s) (length lst))))))
+
+(money-avg (list usd-100 usd-200 usd-300))
+;; -> (money usd 200)
+```
+
+Notice `quotient` (integer division) rather than `/`. The average of
+$1, $2, $3 is $2 exactly. The average of $1, $2, $3, $4 would be
+$2.50, which as cents is 250. Let's confirm:
+
+```
+(money-avg
+  (list (list 'money 'usd 100)
+        (list 'money 'usd 200)
+        (list 'money 'usd 300)
+        (list 'money 'usd 400)))
+;; -> (money usd 250)
+```
+
+Right. But what if the average doesn't divide evenly?
+
+```
+(money-avg
+  (list (list 'money 'usd 100)
+        (list 'money 'usd 200)
+        (list 'money 'usd 400)))
+;; -> (money usd 233)
+```
+
+Total is 700 cents, divided by 3 people is 233.33 cents. `quotient`
+truncated to 233. **The last cent has to go somewhere.** This is the
+same remainder story as Chapter 2. If the average is presented as-is
+you're one cent shy of the sum. If it is used to compute individual
+shares that must sum back to the total, you need a residual
+allocation rule.
+
+## The largest-remainder allocation
+
+A classic pattern for splitting a total exactly:
+
+```
+;; Split total-cents into n parts such that:
+;;   * every part is an integer,
+;;   * the sum of parts equals total-cents,
+;;   * parts differ by at most 1 cent.
+(define (allocate total-cents n)
+  (let* ((base (quotient  total-cents n))
+         (rem  (remainder total-cents n)))
+    ;; The first `rem` parts get `base + 1`.
+    ;; The remaining parts get `base`.
+    (let loop ((i 0) (out '()))
+      (cond
+        ((= i n) (reverse out))
+        ((< i rem) (loop (+ i 1) (cons (+ base 1) out)))
+        (else      (loop (+ i 1) (cons base       out)))))))
+
+(allocate 100 3)
+;; -> (34 33 33)
+
+(math/sum (allocate 100 3))
+;; -> 100
+```
+
+Three shares of 100 cents. The first person pays 34, the other two
+pay 33. The sum is exactly 100. The house never eats the penny and
+never gives away the penny.
+
+**Composability rule: when you split, you must recompose to the
+same total.** Any allocation function you write should satisfy
+`(math/sum (allocate T N)) = T`. Test it.
+
+## Aggregating over a mixed list
+
+What if the input list has multiple currencies? You need to group
+first.
+
+```
+(define (money-group-by-currency lst)
+  (let loop ((in lst) (buckets '()))
+    (cond
+      ((null? in) buckets)
+      (else
+        (let* ((m (car in))
+               (cur (cadr m))
+               (amt (caddr m))
+               (found (assoc cur buckets)))
+          (cond
+            (found
+              (loop (cdr in)
+                    (cons (list cur (+ amt (cadr found)))
+                          (filter (lambda (b) (not (eq? (car b) cur))) buckets))))
+            (else
+              (loop (cdr in)
+                    (cons (list cur amt) buckets)))))))))
+
+(money-group-by-currency
+  (list (list 'money 'usd 100)
+        (list 'money 'eur 200)
+        (list 'money 'usd 300)
+        (list 'money 'eur 400)))
+;; -> ((eur 600) (usd 400))
+```
+
+Order of buckets is not guaranteed. That's fine — the *content* is.
+Now you have a per-currency total and can present each on its own.
+Do **not** convert-and-sum unless you explicitly want to, and if
+you do, name the fx rate that was used (Chapter 4).
+
+## Composability across time
+
+Adding a duration to an instant produces an instant. Two durations
+add. Two instants do not. The rule from Chapter 8 is a composability
+rule.
+
+Aggregating over a list of instants doesn't make sense either. What
+does the *sum* of five wall-clock times mean? Nothing. The
+*average* means nothing. What *does* mean something:
+
+- The *earliest* or *latest* instant (min/max).
+- The *range* between them (a duration).
+- The *count* of instants in a window.
+- The *sequence* of gaps between them (list of durations).
+
+None of those are `+`. All of them respect the shape.
+
+## Composability across sensors
+
+Two sensor readings from the same sensor at different times: the
+difference is a *change*. Adding the two readings is meaningless.
+Same rule as instants.
+
+Two sensor readings from *different* sensors at the same time: not
+even comparable unless the sensors measure the same quantity in the
+same unit. Same rule as money in different currencies.
+
+## Composability across vectors
+
+Same rule shows up in vector code. Two positions cannot be added.
+The *difference* of two positions is a displacement. A displacement
+plus a position is a position. Appendix I develops this in detail —
+here we're just noting that the composability rule is the *same*
+rule as instants and durations. It is not accidental. It's the
+general shape of *point vs delta* values.
+
+```
+(vec/add (vec/make 100 50) (vec/make 3 4))
+;; -> (103 54)
+```
+
+That's arithmetic. It is meaningful only if the second vector is a
+displacement, not a position. Motoi's `vec/*` verbs cannot tell.
+The shape wrapper (`(pos ...)` vs `(disp ...)`) does the telling.
+
+DO: use the same shape-refusal pattern for vectors as for money
+and time.
+DON'T: assume that because two things are 'both vectors' they add.
+Two positions are both vectors; adding them is nonsense.
+WHY: the composability rule is not about the *representation* — it's
+about the *meaning*. Same representation, different meaning, different
+arithmetic.
+
+## Composability across colors
+
+Colors compose. Not by addition. By *blending*. Two RGB colors mixed
+50/50 don't literally add — you can't have `(rgb 500 300 100)`. You
+lerp between them, clamped, and (for perceptually correct results)
+in a linear color space, not sRGB. Appendix L covers the traps.
+
+```
+(vec/lerp (vec/make 255 0 0) (vec/make 0 0 255) 0.5)
+;; -> (127.5 0 127.5)
+```
+
+Halfway between red and blue is purple. The values are what you'd
+expect if you're comfortable with `vec/lerp`. The rounding-to-integer
+and the linear-vs-gamma question are the composability rules that
+would go on top.
+
+## Recap
+
+- Sum, average, and aggregate operations lose shape unless you
+  wrap them.
+- Extract, validate, reduce, re-wrap.
+- When you split, respect the invariant `(sum (allocate T N)) = T`.
+- Largest-remainder allocation splits exactly.
+- Mixed-currency lists: group first, aggregate per bucket.
+- Time and sensor composability follow the same shape rules.
+- Vector positions vs displacements follow the same rules again.
+- Colors compose via `lerp` in a linear space, not by naive addition.
+
+Next: rounding modes. Which rounding rule to pick, when, and why it
+matters.")
+
+(example :ref "ch10-naive-sum"
+         :code "(math/sum (list 100 200 300))"
+         :expected 600)
+(example :ref "ch10-money-sum-ok"
+         :code "(begin (define (mls lst) (let* ((first (car lst)) (cur (cadr first))) (let loop ((rest (cdr lst)) (total (caddr first))) (cond ((null? rest) (list 'money cur total)) ((not (eq? (cadr (car rest)) cur)) (list 'error 'currency-mismatch cur (cadr (car rest)))) (else (loop (cdr rest) (+ total (caddr (car rest))))))))) (mls (list (list 'money 'usd 100) (list 'money 'usd 200) (list 'money 'usd 300))))"
+         :expected "(money usd 600)")
+(example :ref "ch10-money-sum-refuse"
+         :code "(begin (define (mls lst) (let* ((first (car lst)) (cur (cadr first))) (let loop ((rest (cdr lst)) (total (caddr first))) (cond ((null? rest) (list 'money cur total)) ((not (eq? (cadr (car rest)) cur)) (list 'error 'currency-mismatch cur (cadr (car rest)))) (else (loop (cdr rest) (+ total (caddr (car rest))))))))) (mls (list (list 'money 'usd 100) (list 'money 'eur 200))))"
+         :expected "(error currency-mismatch usd eur)")
+(example :ref "ch10-money-avg"
+         :code "(quotient (+ 100 200 300 400) 4)"
+         :expected 250)
+(example :ref "ch10-money-avg-uneven"
+         :code "(quotient (+ 100 200 400) 3)"
+         :expected 233)
+(example :ref "ch10-allocate"
+         :code "(begin (define (allocate T n) (let* ((base (quotient T n)) (rem (remainder T n))) (let loop ((i 0) (out '())) (cond ((= i n) (reverse out)) ((< i rem) (loop (+ i 1) (cons (+ base 1) out))) (else (loop (+ i 1) (cons base out))))))) (allocate 100 3))"
+         :expected "(34 33 33)")
+(example :ref "ch10-allocate-sums"
+         :code "(begin (define (allocate T n) (let* ((base (quotient T n)) (rem (remainder T n))) (let loop ((i 0) (out '())) (cond ((= i n) (reverse out)) ((< i rem) (loop (+ i 1) (cons (+ base 1) out))) (else (loop (+ i 1) (cons base out))))))) (math/sum (allocate 100 3)))"
+         :expected 100
+         :teaching "The invariant: allocation sums back to the total.")
+(example :ref "ch10-vec-add-displacement"
+         :code "(vec/add (vec/make 100 50) (vec/make 3 4))"
+         :expected "(103 54)")
+(example :ref "ch10-color-lerp"
+         :code "(vec/lerp (vec/make 255 0 0) (vec/make 0 0 255) 0.5)"
+         :expected "(127.5 0 127.5)")

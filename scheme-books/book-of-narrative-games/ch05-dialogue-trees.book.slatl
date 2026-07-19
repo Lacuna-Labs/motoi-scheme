@@ -1,0 +1,464 @@
+;; ch05-dialogue-trees.book.slatl
+;; Book of Narrative Games — Chapter 5: Dialogue Trees
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Narrative Games"
+  :chapter-number      5
+  :title               "Dialogue Trees"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "narrative-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + narrative-craft"
+  :book-version        "1.0.0"
+  :prose
+"A dialogue tree is a story tree scaled down to one conversation. Mira
+says something. You pick a reply from a small list. Mira responds. That
+loops until someone walks away. Every good NPC in a role-playing game
+is one of these trees under the hood.
+
+We built the story-tree engine in chapter 2. The dialogue-tree engine
+is the same idea, one level of magnification finer. Nodes are lines an
+NPC speaks. Choices are lines the player says back. Everything else is
+identical.
+
+The interesting part of dialogue trees is not the code — it is the
+craft. What makes a dialogue tree feel like a conversation and not a
+menu? Body language on both sides. Silences that mean something.
+Choices that stay open long enough for the player to think but not so
+long she loses the thread. That is what this chapter is about.
+
+---
+
+## 5.1 The shape of a dialogue node
+
+```scheme
+(define chat-with-mira
+  '((:id opening
+     :npc \"How are you today?\"
+     :npc-reaction (nod smile)
+     :replies ((:label \"I'm fine.\"        :goto fine-branch)
+               (:label \"Tired, actually.\" :goto tired-branch)
+               (:label \"I'd rather not say.\" :goto quiet-branch)))
+
+    (:id fine-branch
+     :npc \"Good. Come sit.\"
+     :npc-reaction (wave-in)
+     :replies ((:label \"[sit down]\" :goto seated)))
+
+    (:id tired-branch
+     :npc \"Long night? Or long year?\"
+     :npc-reaction (tilt lean-forward)
+     :replies ((:label \"Long year.\"  :goto year-branch)
+               (:label \"Long night.\" :goto night-branch)))
+
+    (:id quiet-branch
+     :npc \"Okay. We can just be quiet.\"
+     :npc-reaction (nod-slow)
+     :replies ((:label \"[sit down anyway]\" :goto seated)
+               (:label \"[walk away]\"       :goto ending-walk-away)))
+
+    (:id year-branch
+     :npc \"Tell me about it.\"
+     :npc-reaction (settle-in)
+     :replies ((:label \"[start telling]\" :goto ending-listened)))
+
+    (:id night-branch
+     :npc \"Sleep here if you need. There's a bed upstairs.\"
+     :npc-reaction (soft-smile)
+     :replies ((:label \"[thanks]\" :goto ending-warmth)))
+
+    (:id seated
+     :npc \"Better. What did you come to talk about?\"
+     :npc-reaction (steady)
+     :replies ())    ;; ends the conversation
+
+    (:id ending-listened
+     :npc \"[listens for a long time]\"
+     :npc-reaction (attentive)
+     :replies ())
+
+    (:id ending-warmth
+     :npc \"Anytime.\"
+     :npc-reaction (soft-smile)
+     :replies ())
+
+    (:id ending-walk-away
+     :npc \"[nods]\"
+     :npc-reaction (nod)
+     :replies ())))
+```
+
+Nine nodes. Four ways the conversation can end. The reactions are
+listed as a small vocabulary — nod, tilt, lean-forward, settle-in —
+that our engine will translate into `part/*` verb calls.
+
+Notice that some 'replies' are actions rather than words. `[sit
+down]` is not something you say, it is something you do. Bracketed
+labels convey action. This is a text-adventure convention borrowed by
+every serious RPG. The kid understands the bracket-convention
+immediately.
+
+---
+
+## 5.2 The engine that runs a dialogue tree
+
+Reusing the story-tree pattern, one small extension: the NPC's
+reactions.
+
+```scheme
+(define (play-dialogue tree npc-entity id)
+  (let ((node (node-lookup tree id)))
+    (scene/imagine)
+    (surface/paper)
+
+    ;; Paint the NPC.
+    (paint-character npc-entity 300 180)
+
+    ;; Do the NPC's reaction gestures.
+    (apply-reactions npc-entity (node-get node :npc-reaction))
+
+    ;; Paint the NPC's line.
+    (paint-text 20 40 (string-append (npc-name npc-entity) \": \\\"\"
+                                     (node-get node :npc) \"\\\"\"))
+
+    ;; If there are no replies, the conversation is over.
+    (let ((replies (node-get node :replies)))
+      (if (null? replies)
+          (paint-text 20 400 \"[press any key to end]\")
+          (paint-choices replies 20 400))
+
+      (on-key
+        (lambda (k)
+          (if (null? replies)
+              (end-dialogue)
+              (let ((chosen (choice-for-key replies k)))
+                (if chosen
+                    (play-dialogue tree npc-entity
+                                   (node-get chosen :goto))
+                    (play-dialogue tree npc-entity id)))))))))
+
+(define (apply-reactions entity reactions)
+  (for-each
+    (lambda (r)
+      (case r
+        ((nod)          (part/nod entity))
+        ((smile)        (part/expression entity 'smile))
+        ((soft-smile)   (part/expression entity 'soft-smile))
+        ((tilt)         (part/tilt entity 10))
+        ((lean-forward) (part/lean entity 8))
+        ((wave-in)      (part/wave entity 'right))
+        ((nod-slow)     (part/nod entity))       ;; runtime uses default speed
+        ((settle-in)    (part/lean entity -4))
+        ((steady)       (part/lean entity 0))
+        ((attentive)    (part/tilt entity 4))
+        (else #f)))
+    reactions))
+```
+
+The engine paints the NPC's body (with breath from the character
+signature we set earlier), applies whatever reaction gestures the
+node calls for, paints the line, and offers the replies. The kid
+picks A/B/C. The engine jumps to the target node and does it again.
+
+`apply-reactions` is a small vocabulary translator. When the tree
+says `(nod smile)`, that becomes `(part/nod mira)` and `(part/expression
+mira 'smile)`. You can add reactions to the vocabulary by adding cases
+to `apply-reactions`. Twelve to fifteen reactions cover 95% of what
+a scene needs.
+
+---
+
+## 5.3 Highlighting the currently-focused reply
+
+When the kid is picking a reply, the currently-highlighted one should
+be visible. `paint-highlight` is designed for this.
+
+```scheme
+(define (paint-replies-highlighted replies focus x y0)
+  (let loop ((rs replies) (i 0))
+    (when (not (null? rs))
+      (let ((label (string-append \"[\" (number->letter (+ i 1)) \"] \"
+                                  (node-get (car rs) :label)))
+            (y (+ y0 (* i 25))))
+        (if (= i focus)
+            (paint-highlight x y (+ x 400) (+ y 22)  :color 'soft-yellow)
+            #f)
+        (paint-text x y label))
+      (loop (cdr rs) (+ i 1)))))
+```
+
+`paint-highlight` draws a soft-yellow rectangle behind the text at
+the given bounds. The currently-focused reply gets highlighted; the
+others do not. The kid moves the focus with up/down arrows and
+presses ENTER to select. This feels more like a real dialogue system
+than press-A-B-C.
+
+Note: at the time of this writing, `paint-highlight` is a
+substrate-required verb — it returns a placeholder error record if the
+consumer has not wired the substrate. Fall back to a `paint-text` with
+a prefix `->` for the focused reply if you need portability:
+
+```scheme
+(paint-text x y
+  (if (= i focus)
+      (string-append \"-> \" label)
+      (string-append \"   \" label)))
+```
+
+---
+
+## 5.4 Fallbacks when the player hesitates
+
+A dialogue tree that waits forever feels dead. If the player has not
+picked a reply within 20 seconds, the NPC should say something. Not
+'HELLO?' — something in character. 'Take your time.' Or a quiet look.
+
+```scheme
+;; Set a timer at the start of each dialogue node.
+(define hesitation-timer 0)
+
+(define (play-dialogue-with-timeout tree npc-entity id)
+  (let ((node (node-lookup tree id)))
+    ;; ... (paint node as before) ...
+    (set! hesitation-timer 0)
+    (on-frame
+      (lambda ()
+        (set! hesitation-timer (+ hesitation-timer 1))
+        (cond
+          ((= hesitation-timer (* 60 20))
+           (npc-gentle-check npc-entity))    ;; 20 seconds
+          ((= hesitation-timer (* 60 40))
+           (npc-second-check npc-entity))     ;; 40 seconds
+          ((= hesitation-timer (* 60 90))
+           (npc-give-up npc-entity)))))))     ;; 90 seconds — walks away
+
+(define (npc-gentle-check entity)
+  (part/tilt entity 5)
+  (paint-text 20 500 \"MIRA: 'Take your time.'\"))
+
+(define (npc-second-check entity)
+  (part/lean entity -4)
+  (paint-text 20 530 \"MIRA: 'You alright?'\"))
+
+(define (npc-give-up entity)
+  (part/turn entity 'front)
+  (paint-text 20 560 \"MIRA: 'Come find me when you know.' [walks away]\"))
+```
+
+Three tiers of check-in. Twenty seconds — a soft prompt. Forty seconds
+— a concerned check. Ninety seconds — the NPC leaves. Each with a
+matching body-language beat.
+
+The 20/40/90 numbers are not universal. A scene where the player is
+supposed to be thinking hard about a big choice should give them 60/120/300.
+A rapid-fire conversation might use 5/10/20. Tune to the mood.
+
+---
+
+## 5.5 Storing dialogue history
+
+You want the NPC to remember what the player said last time. Cortex
+handles this beautifully.
+
+```scheme
+;; After each reply, log it.
+(define (log-reply npc-id reply-label)
+  (let* ((key (dialogue-log-key npc-id))
+         (log (or (cortex/read key) '())))
+    (cortex/write key (cons reply-label log))))
+
+(define (dialogue-log-key npc-id)
+  (string->symbol
+    (string-append \"dialogue-log/\" (symbol->string npc-id))))
+
+;; Later, an NPC can consult the log:
+(define (mira-recall-something)
+  (let* ((log (or (cortex/read (dialogue-log-key 'mira)) '()))
+         (last-time (if (null? log) #f (car log))))
+    (cond
+      ((equal? last-time \"I'd rather not say.\")
+       \"MIRA: 'You said last time you'd rather not — no pressure now either.'\")
+      ((equal? last-time \"Tired, actually.\")
+       \"MIRA: 'Are you still tired? Let me put a kettle on.'\")
+      (else
+       \"MIRA: 'Good to see you.'\"))))
+```
+
+Cortex stores every reply keyed by NPC. Mira's next scene reads the
+log and adjusts her opening line. The kid feels seen because the game
+saw her.
+
+Do not overuse this either. Mira should probably not open with 'you
+said the following twelve things last time.' She should recall one
+detail if it is emotionally relevant. Restraint is design.
+
+---
+
+## 5.6 A worked scene: twenty lines the kid designs
+
+The exercise for the chapter: the kid writes a full 20-line dialogue
+tree with three endings. Here is one, so she has a template.
+
+```scheme
+(define chat-with-the-fisherman
+  '((:id start
+     :npc \"You have not been out here at dawn before.\"
+     :npc-reaction (glance-up)
+     :replies ((:label \"I couldn't sleep.\"        :goto sleepless)
+               (:label \"I wanted to see you.\"     :goto wanted)
+               (:label \"Just passing by.\"          :goto passing)))
+
+    (:id sleepless
+     :npc \"That is the dock's job, is it not. Sit.\"
+     :npc-reaction (pat-the-plank)
+     :replies ((:label \"[sit]\"                    :goto sitting)))
+
+    (:id wanted
+     :npc \"Why now?\"
+     :npc-reaction (still)
+     :replies ((:label \"You said you were leaving.\" :goto leaving-branch)
+               (:label \"Nothing specific.\"          :goto nothing-branch)))
+
+    (:id passing
+     :npc \"Long walk for a passing.\"
+     :npc-reaction (small-smile)
+     :replies ((:label \"Alright, alright.\"         :goto sitting)))
+
+    (:id leaving-branch
+     :npc \"I said maybe.\"
+     :npc-reaction (look-out-at-water)
+     :replies ((:label \"Are you?\"                  :goto answering)))
+
+    (:id nothing-branch
+     :npc \"There's always something.\"
+     :npc-reaction (small-smile)
+     :replies ((:label \"Alright — I wanted to know if you were staying.\" :goto answering)))
+
+    (:id answering
+     :npc \"I have not decided.\"
+     :npc-reaction (long-look-at-you)
+     :replies ((:label \"Take your time.\"           :goto ending-patience)
+               (:label \"Please stay.\"               :goto ending-plea)
+               (:label \"I'd stay if you did.\"      :goto ending-commit)))
+
+    (:id sitting
+     :npc \"Nothing to say for a while. That's alright too.\"
+     :npc-reaction (breathe-with-you)
+     :replies ((:label \"[stay for a while]\"       :goto ending-quiet)))
+
+    (:id ending-patience
+     :npc \"Thank you. That's what I needed to hear.\"
+     :npc-reaction (breath-out-relieved)
+     :replies ())
+
+    (:id ending-plea
+     :npc \"Then I will think harder.\"
+     :npc-reaction (nod)
+     :replies ())
+
+    (:id ending-commit
+     :npc \"That is a different question.\"
+     :npc-reaction (long-look-eyes-shining)
+     :replies ())
+
+    (:id ending-quiet
+     :npc \"The sun's up. You'd better go.\"
+     :npc-reaction (soft-smile)
+     :replies ())))
+```
+
+Eleven nodes, four endings. Every reaction is a specific gesture that
+would translate through `apply-reactions` into `part/*` calls. Every
+reply the player picks pushes the conversation into a different
+emotional room.
+
+This is what dialogue trees can do when the writer takes them
+seriously. It is not 'yes/no/maybe.' It is people saying things they
+have been thinking about for weeks.
+
+---
+
+## 5.7 Common desktop tasks — the customer-service dialogue
+
+An operator handles a return. Rather than a flat form, she writes a
+five-line dialogue between the customer and 'the shopkeeper's voice.'
+
+```scheme
+(define returns-dialogue
+  '((:id start
+     :npc \"Hi — sorry to hear something's off. What happened?\"
+     :npc-reaction (attentive)
+     :replies ((:label \"It arrived damaged.\"        :goto damaged)
+               (:label \"It's not what I expected.\"  :goto wrong-fit)
+               (:label \"I changed my mind.\"          :goto changed-mind)))
+
+    (:id damaged
+     :npc \"That is on me. Photo when you can — same-day refund or replacement, your call.\"
+     :npc-reaction (regretful-nod)
+     :replies ((:label \"Replacement.\"                :goto ending-replace)
+               (:label \"Refund.\"                     :goto ending-refund)))
+
+    (:id wrong-fit
+     :npc \"I want you to have something you love. Full return within 14 days, I cover ship.\"
+     :npc-reaction (gentle-lean)
+     :replies ((:label \"Start the return.\"           :goto ending-return-start)))
+
+    (:id changed-mind
+     :npc \"Totally fine — no explanation needed. Return within 14 days works.\"
+     :npc-reaction (no-judgment)
+     :replies ((:label \"Thanks.\"                     :goto ending-return-start)))
+
+    (:id ending-replace       :npc \"Replacement out today. Watch your email.\"    :replies ())
+    (:id ending-refund        :npc \"Refund is instant. Should show tonight.\"     :replies ())
+    (:id ending-return-start  :npc \"Label in your inbox in a moment.\"            :replies ())))
+```
+
+Six nodes. Three endings. The customer feels handled by a person, not
+a form. The operator wrote the whole thing in her own voice. The
+'shopkeeper's voice' NPC has body-language reactions coded — regretful
+nod, gentle lean, no-judgment (which is a slight `part/turn` to
+'front' and a `part/expression 'neutral`).
+
+This dialogue tree is one of dozens the shopkeeper writes for her
+common customer situations. Each one takes ten minutes. Each one
+handles the customer better than a form field. This is why operators
+who take narrative games seriously end up with more repeat business —
+their customers feel like guests, not tickets.
+
+---
+
+## 5.8 Routing patterns
+
+Three shapes worth naming:
+
+**The interview.** NPC asks; player answers; NPC asks again. Every
+reply funnels into the next NPC question. Good for onboarding, for
+confessions, for negotiations. All-forward, no loops.
+
+**The wandering.** A node has replies that all loop back to a hub
+node, from which new replies branch again. Good for bar conversations,
+for asking a wise character many questions in any order.
+
+**The escape.** Every non-terminal node has a `[walk away]` reply
+that ends the conversation. Good for social scenes where the player
+must feel free to leave without penalty. Do this by default; the
+absence of an exit reply is a design smell.
+
+---
+
+## 5.9 Closing
+
+You have a dialogue engine. You have a template for a 20-line
+conversation. You have body-language reactions coded into the tree.
+Write your first tree tonight. Make it 15 nodes. Make it about
+somebody you know. Do not use their real name; use a pretend name.
+Play it. It will probably surprise you.
+
+Chapter 6 gives you the camera. Right now the scene is a static frame.
+Next we make the frame move.")

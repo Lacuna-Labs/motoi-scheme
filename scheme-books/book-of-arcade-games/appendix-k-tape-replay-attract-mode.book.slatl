@@ -1,0 +1,267 @@
+;; appendix-k-tape-replay-attract-mode.book.slatl
+
+(dialect :applies ("motoi" "sakura"))
+
+(appendix
+  :book "Book of Arcade Games"
+  :letter "K"
+  :title "Tape Replay for Attract Mode"
+  :dialect "motoi"
+  :audience :kid
+  :also-for :adult
+  :content-rating :G
+  :author-lane "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible #t
+  :confidentiality "public"
+  :book-version "1.0.0"
+  :prose
+"An arcade cabinet without an attract mode is a cabinet nobody
+walks up to. When the machine is idle, a recording of the game
+plays. The passer-by sees action, imagines themselves playing, drops
+in a coin.
+
+Motoi Scheme exposes tape recording and playback:
+
+- `world/tape-record! tape-id` — start recording input to tape-id
+- `world/tape-save tape-id path` — save the tape to persistent storage
+- `world/tape-replay tape-id-or-path` — play the tape back
+- `world/tape-stop! tape-id` — stop recording
+- `world/tape-frames tape-id` — get length of recording
+- `world/tape-hash tape-id` — checksum for determinism
+
+This appendix wires tapes into an attract mode.
+
+## Basic recording
+
+Start a game, record inputs, save.
+
+```scheme
+(define (record-play-session)
+  (world/reset!)
+  (world/tape-record! 'demo)
+  ;; ... your game runs, inputs are captured ...
+  (world/spawn 'player 160 210)
+  (on-frame
+   (lambda ()
+     (when (input/down? 'left) ...)
+     (when (input/down? 'right) ...)
+     ;; ... game logic ...
+     )))
+
+;; When done:
+(world/tape-stop! 'demo)
+(world/tape-save 'demo 'saved-demo)
+```
+
+Every input during recording is captured. The tape stores WHAT WAS
+PRESSED WHEN, not the resulting game state.
+
+## Playback
+
+```scheme
+(define (attract-mode)
+  (world/reset!)
+  (world/spawn 'player 160 210)
+  ;; Same setup as recorded game.
+  (world/tape-replay 'saved-demo)
+  (on-frame
+   (lambda ()
+     ;; The tape drives input automatically.
+     (world/step)
+     (paint-clear)
+     (world/each 'player
+                 (lambda (p)
+                   (paint-cell 'player (entity/x p) (entity/y p) 8 8))))))
+```
+
+During replay, `input/down?` and `input/pressed?` return the
+recorded values instead of live inputs. Same game, same outcomes,
+no player needed.
+
+## Wiring into the cabinet
+
+Chapter 14's cabinet had attract → title → play → game-over →
+attract. Now populate attract with tape playback.
+
+```scheme
+(define game-state 'attract)
+(define state-timer 0)
+
+(define (transition new-state)
+  (set! game-state new-state)
+  (set! state-timer 0)
+  (case new-state
+    ((attract)
+     (world/reset!)
+     (world/tape-replay 'saved-demo))
+    ((play)
+     (world/reset!)
+     (world/tape-record! 'current-play)
+     (init-play))))
+
+(define (game-frame)
+  (set! state-timer (+ state-timer 1))
+  (case game-state
+    ((attract)
+     ;; Watch the demo. Real-player button press interrupts.
+     (game-step-and-paint)
+     (when (input/pressed? 'a)     ;; Real player input
+       (transition 'play)))
+    ((play)
+     (game-step-and-paint)
+     (when (game-over?)
+       (world/tape-stop! 'current-play)
+       ;; Optionally: overwrite the demo with this session if score > threshold.
+       (when (> current-score demo-threshold)
+         (world/tape-save 'current-play 'saved-demo))
+       (transition 'game-over)))
+    ((game-over)
+     (paint-game-over-screen)
+     (when (> state-timer 180) (transition 'attract)))))
+```
+
+**Nice property:** the attract-mode demo automatically UPGRADES over
+time. Every session that scores higher than the previous demo
+replaces it. Kids see progressively better demos. The machine
+learns to advertise itself.
+
+## Determinism concerns
+
+Tape replay works cleanly only if game outcomes are DETERMINISTIC —
+same inputs, same seed → same result. Sources of nondeterminism:
+
+- `world/hash` returns a pseudo-random each call. Seed it at level
+  start with the tape's own seed so replay reproduces.
+- Frame timing variance in the runtime. Usually the runtime
+  handles this — replay locks to logical-frame count, not
+  wallclock.
+- Cortex writes to persistent storage. If a demo writes, on replay
+  it writes again. Guard writes with a `(replay?)` predicate.
+
+## Handling nondeterminism
+
+```scheme
+(define (replay-active?)
+  (world/tape-frames 'saved-demo) 0)  ; > 0 if replay in progress
+
+(when (input/pressed? 'a)
+  (unless (replay-active?)
+    (cortex/write 'session-score current-score)))
+```
+
+Only write during live play, not during replay.
+
+## Verifying deterministic replay
+
+`world/tape-hash` returns a checksum of world state at each frame.
+Compare across runs.
+
+```scheme
+(define (checksum-after-frames n)
+  (let loop ((i 0))
+    (when (< i n) (world/step) (loop (+ i 1))))
+  (world/tape-hash 'current-play))
+
+;; Record.
+(world/tape-record! 'test)
+(let ((hash1 (checksum-after-frames 60)))
+  (world/tape-stop! 'test)
+  (world/tape-save 'test 'saved)
+  ;; Replay.
+  (world/reset!)
+  (world/tape-replay 'saved)
+  (let ((hash2 (checksum-after-frames 60)))
+    (if (equal? hash1 hash2)
+        (display \"Determinism OK\")
+        (display \"Determinism BROKEN\"))))
+```
+
+Fails? Find the nondeterministic call and seed it.
+
+## Two-tape shuffle
+
+Store two demos and alternate between them for variety.
+
+```scheme
+(define demo-index 0)
+(define demos '(saved-demo-1 saved-demo-2))
+
+(define (start-attract)
+  (world/tape-replay (list-ref demos demo-index))
+  (set! demo-index (modulo (+ demo-index 1) (length demos))))
+```
+
+Every attract cycle, next demo. Passers-by see fresh action.
+
+## Common desktop tasks
+
+**Shop tour recorder.** A shop can record its owner's 'ideal tour'
+of the product catalog. New visitors see an auto-tour on landing.
+Same tape mechanism.
+
+**Onboarding replay.** A new user's first session is recorded. They
+can replay it later to see their own progress.
+
+**Bug-report tapes.** When a user reports a bug, ask them to
+record the session. The tape reproduces the exact issue for the
+developer. Better than 'it happened once, I can't remember what I
+did.'
+
+## Pitfalls
+
+**Tape includes real-life pauses.** If the recording paused for
+tea, the replay pauses for tea. Use tape-editing (not always
+exposed by runtime) or record shorter sessions.
+
+**Replay diverges after N seconds.** Nondeterminism sneaked in.
+Debug with `world/tape-hash` checkpoints.
+
+**Tape file huge.** Long sessions can produce large tapes. Cap
+recording at 60 seconds for attract mode. Or record only
+'interesting' segments.
+
+**Real-player input during replay.** Chapter 14 handles this:
+`input/pressed? 'a` from a REAL player interrupts and transitions
+to 'play. Otherwise you'd have both replayed and live inputs
+fighting each other.
+
+## The 30-second attract loop
+
+Cabinet defaults:
+
+```scheme
+(define attract-max-frames (* 60 30))  ; 30 seconds
+
+((eq? game-state 'attract)
+ (game-step-and-paint)
+ (when (or (input/pressed? 'a) (> state-timer attract-max-frames))
+   (if (input/pressed? 'a) (transition 'play) (transition 'title))))
+```
+
+30 seconds is the sweet spot: long enough to convey the game,
+short enough that a bored bystander sees the loop restart. Then
+title screen for 5 seconds. Then attract again.
+
+## Legendary tapes
+
+If you record a player crushing your game (say, 100k+ score), save
+that tape as a 'legendary demo' and play it occasionally. Kids
+LOVE seeing extraordinary play. Motivates them to try harder.
+
+Save with:
+```scheme
+(when (> current-score 100000)
+  (world/tape-save 'current-play (string->symbol
+                                  (string-append \"legend-\"
+                                                 (number->string current-score)))))
+```
+
+Load a random legendary demo:
+```scheme
+(let ((legend-tapes (cortex/read 'legend-tapes)))
+  (when (pair? legend-tapes)
+    (world/tape-replay (list-ref legend-tapes
+                                 (modulo (world/hash) (length legend-tapes))))))
+```
+
+The game becomes its own museum.")

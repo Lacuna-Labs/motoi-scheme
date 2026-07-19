@@ -1,0 +1,288 @@
+;; 14-displaying-vs-storing.slat
+;; Book of Values — Chapter 14
+
+(chapter
+  :book              "Book of Values"
+  :chapter-number    14
+  :title             "Displaying vs Storing"
+  :audience          :engineer
+  :dialect           "motoi"
+  :book-version      "1.1"
+  :provenance        "book-of-values-author-2026-07-16 book-of-values-expander-2026-07-17"
+  :training-eligible #t
+  :content-rating    :G
+  :prose
+"# Chapter 14 — Displaying vs Storing
+
+A value has two lives.
+
+- The **canonical** form is how you store it in memory, in a file,
+  in a database, on the wire. It is precise, unambiguous, and
+  designed for arithmetic.
+
+- The **display** form is how you show it to a person. It is
+  friendly, formatted, localized, and often approximate.
+
+Confuse the two and either the arithmetic breaks or the humans get
+confused. Usually both, one after the other.
+
+## The Chapter 2 rule, applied
+
+Money is stored as `(money 'usd 12345)` — currency plus integer
+minor units. That's canonical.
+
+Money is *displayed* as `$123.45` — currency symbol plus dollars
+plus cents plus a decimal point. That's display.
+
+Building the display from the canonical:
+
+```
+(define (money-display m)
+  (let ((cur (cadr m))
+        (min (caddr m)))
+    (string-append
+      (cond ((eq? cur 'usd) \"$\")
+            ((eq? cur 'eur) \"€\")
+            ((eq? cur 'gbp) \"£\")
+            ((eq? cur 'jpy) \"¥\")
+            (else (string-append (symbol->string cur) \" \")))
+      (number->string (quotient min 100))
+      (if (eq? cur 'jpy)
+          \"\"
+          (string-append \".\"
+                         (let ((c (remainder min 100)))
+                           (if (< c 10)
+                               (string-append \"0\" (number->string c))
+                               (number->string c))))))))
+
+(money-display (list 'money 'usd 12345))
+;; -> \"$123.45\"
+
+(money-display (list 'money 'usd 5))
+;; -> \"$0.05\"
+
+(money-display (list 'money 'jpy 1000))
+;; -> \"¥1000\"
+```
+
+Storage stays integer cents. Display becomes a formatted string. The
+same value can be displayed several ways for different contexts — a
+compact `$0.05` for a table cell, a written `five cents` for a
+receipt, a scientific `5.0e-2 USD` for a report — without changing
+the storage.
+
+DO: store canonical, format at the boundary.
+DON'T: store the formatted string and try to do math on it later.
+WHY: formatting is one-way lossy. `$0.05` might have started as
+`0.049` — you can't recover.
+
+## The three canonical/display splits you'll meet
+
+**Money.** Canonical is `(money currency minor)`. Display is `$X.YY`.
+
+**Time.** Canonical is Unix milliseconds UTC. Display is your
+locale's *July 17, 3:14 PM*.
+
+**Angle.** Canonical is radians. Display is degrees.
+
+The pattern is always: one exact representation for math and
+storage, many friendly representations for humans. The conversion
+between them happens *once*, at the edge of your program, in a
+function you write on purpose.
+
+## The reverse trip: display back to canonical
+
+Parsing user input is the mirror of display. The user types
+`$12.34` or `12.34` or `12,34` (European) or `12.3` (short by a
+zero) — all in the display domain. You have to bring it back to
+canonical.
+
+```
+(define (parse-usd-simple s)
+  ;; Accept a string like \"12.34\" or \"12\" and return cents.
+  ;; Refuse anything else.
+  (let ((num (string->number s)))
+    (cond
+      ((not num) (list 'error 'parse 'not-a-number s))
+      (else
+        ;; scale to cents; still float-tainted, snap to integer
+        (math/round-half-up (* num 100))))))
+
+(parse-usd-simple \"12.34\")
+;; -> 1234
+
+(parse-usd-simple \"12\")
+;; -> 1200
+
+(parse-usd-simple \"hello\")
+;; -> (error parse not-a-number \"hello\")
+```
+
+Real currency parsers do more: strip currency symbols, handle
+thousands separators, handle European comma decimals, refuse
+overflow, and so on. The parser is a boundary object. Chapter 15
+covers interop boundaries in general.
+
+## Times: canonical vs display
+
+Chapter 8 said: store times as UTC instants. Display in the user's
+timezone.
+
+The canonical form is `1784258622855` (ms since epoch) or the ISO
+string `\"2026-07-17T03:23:42.945Z\"` — both machine-friendly and
+timezone-independent.
+
+The display form is `Wednesday, July 16, 2026 at 8:23 PM PDT` — or
+whatever the user's locale prefers. Never store this form. Always
+render it from the canonical.
+
+Motoi does not ship a full locale-aware date formatter in the base
+env. What you have:
+
+- `time/now` — canonical instant (ms).
+- `time/iso` — canonical ISO 8601 string.
+- `time/from-ms`, `time/to-ms` — canonical conversions.
+
+For human-friendly formatting you build strings from the ISO or ms
+values. The point stands: the canonical form is what you *store*.
+The display form is what you *render*.
+
+## Distances: canonical vs display
+
+Canonical: integer millimeters (or micrometers, if you need more).
+Display: `1.5 m`, `4 ft 11 in`, `1500 mm`, `59.06 in` — all
+different renderings of the same 1500 mm.
+
+```
+(define (display-mm-as-m mm)
+  (let ((m-whole (quotient mm 1000))
+        (m-remainder (remainder mm 1000)))
+    (string-append (number->string m-whole)
+                   \".\"
+                   (cond
+                     ((< m-remainder 10)  (string-append \"00\" (number->string m-remainder)))
+                     ((< m-remainder 100) (string-append \"0\"  (number->string m-remainder)))
+                     (else                (number->string m-remainder)))
+                   \" m\")))
+
+(display-mm-as-m 1500)
+;; -> \"1.500 m\"
+
+(display-mm-as-m 42)
+;; -> \"0.042 m\"
+
+(display-mm-as-m 1234567)
+;; -> \"1234.567 m\"
+```
+
+Zero-padding is a real thing. `1.5 m` and `1.05 m` display the same
+digit count only if you pad. Otherwise `1.5` and `1.5` could
+represent 1500 mm or 1050 mm and the reader can't tell.
+
+## Percentages
+
+Canonical: basis points. `100 bp = 1%`. Integers.
+Display: `0.5%`, `50%`, `123.45%`.
+
+Same rule. Store canonical, render for humans.
+
+```
+(define (display-bp bp)
+  (let ((pct-int    (quotient  bp 100))
+        (pct-frac   (remainder bp 100)))
+    (string-append (number->string pct-int)
+                   (cond
+                     ((= pct-frac 0) \"\")
+                     ((< pct-frac 10) (string-append \".0\" (number->string pct-frac)))
+                     (else            (string-append \".\"  (number->string pct-frac))))
+                   \"%\")))
+
+(display-bp 50)
+;; -> \"0.50%\"
+
+(display-bp 100)
+;; -> \"1%\"
+
+(display-bp 12345)
+;; -> \"123.45%\"
+```
+
+## Rendering to different display forms
+
+The same canonical can be rendered in short form, long form,
+positive-only form, or accessible form. Do not multiply the
+storage. Multiply the *rendering functions*.
+
+```
+(define bill (list 'money 'usd 12345))
+
+(money-display bill)          ;; -> \"$123.45\"
+
+(define (money-display-long m)
+  (let ((dollars (quotient  (caddr m) 100))
+        (cents   (remainder (caddr m) 100)))
+    (string-append (number->string dollars)
+                   \" dollars and \"
+                   (number->string cents)
+                   \" cents\")))
+
+(money-display-long bill)
+;; -> \"123 dollars and 45 cents\"
+```
+
+One canonical value, two display forms. If you need a third
+(bracketed for negatives, or accessible for a screen reader), add
+another renderer. The stored value never changes.
+
+## Never round the storage
+
+The most common bug in this area: rounding the *storage* to make
+display easier. Now the storage is lossy. All future arithmetic
+carries a small error. All future displays render *from the lossy
+storage*, so they look precise but they are approximations of
+approximations.
+
+**Round for display. Never round for storage.**
+
+If your canonical is `12345 cents` and you round it to `12300 cents`
+in storage to display `$123`, you have lost 45 cents forever. If you
+sum a hundred of these you have lost real money.
+
+## Recap
+
+- Canonical form is for storage, wire, arithmetic. Precise.
+- Display form is for humans. Friendly.
+- Never store display form. Never round for storage.
+- One canonical, many displays.
+- Parsing user input is a boundary operation. Handle it there and
+  produce canonical.
+- Zero-pad displays where digit count carries meaning.
+
+Next: interop. What happens when the canonical form has to cross
+into another system that has its own opinions?")
+
+(example :ref "ch14-money-display-usd"
+         :code "(begin (define (mdisp m) (let ((cur (cadr m)) (min (caddr m))) (string-append (cond ((eq? cur 'usd) \"$\") (else \"?\")) (number->string (quotient min 100)) \".\" (let ((c (remainder min 100))) (if (< c 10) (string-append \"0\" (number->string c)) (number->string c)))))) (mdisp (list 'money 'usd 12345)))"
+         :expected "$123.45")
+(example :ref "ch14-money-display-zero-pad"
+         :code "(begin (define (mdisp m) (let ((cur (cadr m)) (min (caddr m))) (string-append (cond ((eq? cur 'usd) \"$\") (else \"?\")) (number->string (quotient min 100)) \".\" (let ((c (remainder min 100))) (if (< c 10) (string-append \"0\" (number->string c)) (number->string c)))))) (mdisp (list 'money 'usd 5)))"
+         :expected "$0.05")
+(example :ref "ch14-parse-ok"
+         :code "(math/round-half-up (* (string->number \"12.34\") 100))"
+         :expected 1234)
+(example :ref "ch14-parse-int"
+         :code "(math/round-half-up (* (string->number \"12\") 100))"
+         :expected 1200)
+(example :ref "ch14-parse-refuse"
+         :code "(string->number \"hello\")"
+         :expected #f
+         :teaching "string->number returns #f on non-numeric input. Wrap for a nicer error.")
+(example :ref "ch14-display-mm-as-m"
+         :code "(begin (define (dmm mm) (let ((w (quotient mm 1000)) (r (remainder mm 1000))) (string-append (number->string w) \".\" (cond ((< r 10) (string-append \"00\" (number->string r))) ((< r 100) (string-append \"0\" (number->string r))) (else (number->string r))) \" m\"))) (dmm 1500))"
+         :expected "1.500 m")
+(example :ref "ch14-display-mm-tiny"
+         :code "(begin (define (dmm mm) (let ((w (quotient mm 1000)) (r (remainder mm 1000))) (string-append (number->string w) \".\" (cond ((< r 10) (string-append \"00\" (number->string r))) ((< r 100) (string-append \"0\" (number->string r))) (else (number->string r))) \" m\"))) (dmm 42))"
+         :expected "0.042 m")
+(example :ref "ch14-money-display-long"
+         :code "(begin (define (mdl m) (let ((d (quotient (caddr m) 100)) (c (remainder (caddr m) 100))) (string-append (number->string d) \" dollars and \" (number->string c) \" cents\"))) (mdl (list 'money 'usd 12345)))"
+         :expected "123 dollars and 45 cents")

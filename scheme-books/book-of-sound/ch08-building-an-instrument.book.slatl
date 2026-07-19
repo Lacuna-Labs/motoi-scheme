@@ -1,0 +1,1098 @@
+;; ch08-building-an-instrument.slat
+;; Book of Sound — Chapter 8: Building an Instrument
+
+(chapter
+  :book             "Book of Sound"
+  :chapter-number   null
+  :title            "Chapter 8: Building an Instrument"
+  :source-path      "/Users/alfred/code/curator/BOOK/A-branch-scheme-books/new-sound/ch08-building-an-instrument.md"
+  :size             31856
+  :sha256           "7496e6088805e3a7"
+  :prose
+"# Chapter 8: Building an Instrument
+
+You've made waveforms. You've stacked harmonics, swept filters, shaped envelopes, added noise, and colored sound with formants. Each tool works alone, but real instruments need all of them at once—a string that breathes, a bell with inharmonic shimmer, a pad that swells and falls. This chapter assembles the parts into *one voice*.
+
+We'll drill **composition**: osc + harmonics + filter + envelope + body + noise → a single playable profile. By the end, you'll write `(define-instrument ...)` and call that voice by name, the way you'd call a piano or a cello. The chapter crescendos with instruments that *feel* like real things, built from scratch.
+
+---
+
+## The simplest instrument: a pure tone
+
+An instrument is a function that takes a note and returns sound. The absolute simplest version is a wrapper around `tone`.
+
+```scheme
+(define (pure-sine freq dur)
+  (tone freq dur))
+
+(pure-sine 440 0.5)
+```
+
+It plays. It's an instrument. But it has no character—no attack, no harmonics, no body. Let's add them one layer at a time.
+
+---
+
+## Add an envelope
+
+A pluck needs shape. Wrap the tone in an ADSR envelope so the sound has a fast attack and a decay.
+
+```scheme
+(define (plucked-sine freq dur)
+  (let ((sound (tone freq dur)))
+    (adsr sound :a 0.01 :d 0.3 :s 0.0 :r 0.1)))
+
+(plucked-sine 330 0.6)
+```
+
+*[needs: adsr]*  
+<!-- BUILD: adsr — multiply amplitude by attack/decay/sustain/release curve -->
+
+The envelope changes the *feel* of the same tone. It's the difference between a struck string and an organ.
+
+---
+
+## Add harmonics
+
+A sine wave is pure, but instruments have *timbre*—upper partials that color the sound. A square wave adds odd harmonics.
+
+```scheme
+(define (plucked-square freq dur)
+  (let ((sound (wave 'square freq dur)))
+    (adsr sound :a 0.01 :d 0.3 :s 0.0 :r 0.1)))
+
+(plucked-square 220 0.5)
+```
+
+*[needs: wave]*  
+<!-- BUILD: wave — oscillator with waveform choice (square, saw, triangle) -->
+
+The same envelope, but the waveform gives it a buzzy, hollow character.
+
+---
+
+## Stack custom partials
+
+Instead of a fixed waveform, specify the harmonic recipe yourself. A fundamental plus a third and a fifth partial makes a bright, open sound.
+
+```scheme
+(define (bright-pluck freq dur)
+  (let* ((partials-list (list 1.0 3.0 5.0))
+         (sound (partials partials-list freq dur)))
+    (adsr sound :a 0.01 :d 0.4 :s 0.0 :r 0.1)))
+
+(bright-pluck 294 0.6)
+```
+
+*[needs: partials, adsr]*  
+<!-- BUILD: partials — additive synthesis from list of harmonic ratios -->
+
+You're *designing* the timbre, not picking from a menu.
+
+---
+
+## Add a lowpass filter
+
+Real plucked strings lose brightness as they ring. A lowpass filter with a moderate cutoff softens the attack without losing the fundamental.
+
+```scheme
+(define (filtered-pluck freq dur)
+  (let* ((partials-list (list 1.0 2.0 3.0 4.0))
+         (sound (partials partials-list freq dur))
+         (shaped (adsr sound :a 0.01 :d 0.5 :s 0.0 :r 0.1))
+         (filtered (filter shaped 'lowpass :cutoff 1200 :q 1.0)))
+    filtered))
+
+(filtered-pluck 196 0.8)
+```
+
+*[needs: partials, adsr, filter]*  
+<!-- BUILD: filter — biquad lowpass/highpass/bandpass with cutoff + Q -->
+
+The filter is the final stage in the chain: oscillator → envelope → filter → output.
+
+---
+
+## Compose all the layers: a marimba
+
+A marimba has inharmonic partials (not integer multiples), a sharp attack, and a woody body. We'll use custom partials, a double-decay envelope, and a bandpass filter to simulate the resonance.
+
+```scheme
+(define (marimba freq dur)
+  (let* ((partials-list (list 1.0 2.76 5.4 8.93))
+         (sound (partials partials-list freq dur))
+         (shaped (adsr sound :a 0.005 :d 0.15 :s 0.3 :r 0.4))
+         (resonant (filter shaped 'bandpass :cutoff (* freq 4.0) :q 2.5)))
+    resonant))
+
+(marimba 330 1.0)
+```
+
+*[needs: partials, adsr, filter]*
+
+The inharmonic partials (2.76, 5.4, 8.93) are measured from real mallet instruments. The bandpass filter at 4× the fundamental mimics the wooden bar's resonance.
+
+---
+
+## Add noise for attack texture
+
+A marimba's mallet strike has a percussive *thud*—a brief burst of noise at the attack. Layer white noise with a very short envelope onto the tonal body.
+
+```scheme
+(define (textured-marimba freq dur)
+  (let* ((partials-list (list 1.0 2.76 5.4 8.93))
+         (tonal (partials partials-list freq dur))
+         (shaped-tone (adsr tonal :a 0.005 :d 0.15 :s 0.3 :r 0.4))
+         (resonant (filter shaped-tone 'bandpass :cutoff (* freq 4.0) :q 2.5))
+         (thud (noise 'white 0.03))
+         (shaped-noise (adsr thud :a 0.001 :d 0.02 :s 0.0 :r 0.01))
+         (mixed (+ resonant (* 0.4 shaped-noise))))
+    mixed))
+
+(textured-marimba 294 1.2)
+```
+
+*[needs: partials, adsr, filter, noise]*  
+<!-- BUILD: noise — white/pink noise generator -->
+
+The noise layer is shorter and quieter than the tonal layer. Mixing them `(+)` gives the strike a percussive front and a resonant tail.
+
+---
+
+## A bell: very inharmonic partials
+
+Bell partials are *strongly* inharmonic—ratios like 1.0, 2.35, 3.87, 5.43. The envelope has a long release. No filter, just the shimmer of clashing overtones.
+
+```scheme
+(define (bell freq dur)
+  (let* ((partials-list (list 1.0 2.35 3.87 5.43 7.12))
+         (sound (partials partials-list freq dur))
+         (shaped (adsr sound :a 0.01 :d 0.8 :s 0.5 :r 2.5)))
+    shaped))
+
+(bell 220 3.0)
+```
+
+*[needs: partials, adsr]*
+
+The long release and inharmonic stack give the bell its characteristic *bong* and lingering shimmer.
+
+---
+
+## A pad: slow attack, sustained release
+
+Pads swell in slowly and hold. The envelope has a long attack, high sustain, and gentle release. Use a sine or a soft waveform with few harmonics.
+
+```scheme
+(define (soft-pad freq dur)
+  (let* ((partials-list (list 1.0 2.0))
+         (sound (partials partials-list freq dur))
+         (shaped (adsr sound :a 0.8 :d 0.3 :s 0.7 :r 1.5)))
+    shaped))
+
+(soft-pad 261.63 4.0)
+```
+
+*[needs: partials, adsr]*
+
+The same partials as a pluck, but the envelope turns it into a wash of sound.
+
+---
+
+## A brass stab: bright harmonics, punchy envelope
+
+Brass has a bright harmonic stack (many upper partials) and a sharp, sustained attack. The envelope hits hard and holds.
+
+```scheme
+(define (brass-stab freq dur)
+  (let* ((partials-list (list 1.0 2.0 3.0 4.0 5.0 6.0 7.0))
+         (sound (partials partials-list freq dur))
+         (shaped (adsr sound :a 0.02 :d 0.1 :s 0.8 :r 0.2)))
+    shaped))
+
+(brass-stab 349.23 0.6)
+```
+
+*[needs: partials, adsr]*
+
+Seven partials give the bright, brassy edge. The short attack and high sustain make it punchy.
+
+---
+
+## A warm bass: fundamental-heavy, filtered
+
+Bass instruments emphasize the fundamental and roll off the top. Use a sine-heavy partial stack and a lowpass filter with a low cutoff.
+
+```scheme
+(define (warm-bass freq dur)
+  (let* ((partials-list (list 1.0 0.5 0.25))
+         (sound (partials partials-list freq dur))
+         (shaped (adsr sound :a 0.02 :d 0.3 :s 0.6 :r 0.3))
+         (filtered (filter shaped 'lowpass :cutoff 400 :q 0.7)))
+    filtered))
+
+(warm-bass 110 1.0)
+```
+
+*[needs: partials, adsr, filter]*
+
+The second and third partials are *quieter* than the fundamental (0.5, 0.25 amplitude). The lowpass filter at 400 Hz keeps the sound deep and round.
+
+---
+
+## A plucked string with body resonance
+
+A guitar string has harmonics from the string *and* formants from the body. Add formants to color the partials.
+
+```scheme
+(define (guitar-pluck freq dur)
+  (let* ((partials-list (list 1.0 2.0 3.0 4.0 5.0))
+         (sound (partials partials-list freq dur))
+         (shaped (adsr sound :a 0.005 :d 0.6 :s 0.0 :r 0.2))
+         (with-body (add-formant shaped (list 200 400 800))))
+    with-body))
+
+(guitar-pluck 196 1.5)
+```
+
+*[needs: partials, adsr, add-formant]*  
+<!-- BUILD: add-formant — apply resonant peaks (formants) at given frequencies -->
+
+The formants at 200, 400, and 800 Hz mimic the resonances of a wooden guitar body. They color the string's partials without changing the pitch.
+
+---
+
+## A flute: breathy attack, soft harmonics
+
+A flute has a soft harmonic stack (mostly fundamental) and a breathy attack from air noise. Layer filtered noise with a tonal body.
+
+```scheme
+(define (flute freq dur)
+  (let* ((partials-list (list 1.0 0.3 0.1))
+         (tonal (partials partials-list freq dur))
+         (shaped-tone (adsr tonal :a 0.05 :d 0.2 :s 0.7 :r 0.3))
+         (breath (noise 'white 0.1))
+         (shaped-breath (adsr breath :a 0.03 :d 0.05 :s 0.0 :r 0.01))
+         (filtered-breath (filter shaped-breath 'highpass :cutoff 2000 :q 1.0))
+         (mixed (+ shaped-tone (* 0.2 filtered-breath))))
+    mixed))
+
+(flute 523.25 1.0)
+```
+
+*[needs: partials, adsr, noise, filter]*
+
+The breath layer is highpass-filtered (cutoff 2000 Hz) so it's airy but not muddy. It's quieter (0.2×) than the tonal layer and very short.
+
+---
+
+## A snare drum: all noise, shaped and filtered
+
+A snare is almost all noise—white noise for the rattle, shaped by an envelope and filtered to taste.
+
+```scheme
+(define (snare dur)
+  (let* ((rattle (noise 'white dur))
+         (shaped (adsr rattle :a 0.001 :d 0.08 :s 0.0 :r 0.05))
+         (filtered (filter shaped 'bandpass :cutoff 1200 :q 1.5)))
+    filtered))
+
+(snare 0.15)
+```
+
+*[needs: noise, adsr, filter]*
+
+The bandpass filter tightens the snare's sound around 1200 Hz. The envelope is very short—snares are percussive.
+
+---
+
+## A kick drum: low sine with pitch drop
+
+A kick drum is a low sine wave with a fast pitch drop from ~150 Hz to ~40 Hz, shaped by a tight envelope.
+
+```scheme
+(define (kick dur)
+  (let* ((start-freq 150)
+         (end-freq 40)
+         (sound (tone end-freq dur))
+         (shaped (adsr sound :a 0.001 :d 0.15 :s 0.0 :r 0.05)))
+    shaped))
+
+(kick 0.2)
+```
+
+*[needs: adsr]*  
+<!-- BUILD: pitch-drop — frequency envelope over time; for now we use the end freq -->
+
+The pitch drop is a crucial part of a kick's *thump*. Without frequency-envelope support, we approximate with the end frequency. The fast decay gives the punch.
+
+---
+
+## A hi-hat: filtered noise, very short
+
+A hi-hat is highpass-filtered white noise with a very short decay.
+
+```scheme
+(define (hihat dur)
+  (let* ((hiss (noise 'white dur))
+         (shaped (adsr hiss :a 0.001 :d 0.05 :s 0.0 :r 0.03))
+         (bright (filter shaped 'highpass :cutoff 7000 :q 0.5)))
+    bright))
+
+(hihat 0.08)
+```
+
+*[needs: noise, adsr, filter]*
+
+The highpass cutoff at 7000 Hz makes the hi-hat bright and metallic. The envelope is extremely short.
+
+---
+
+## Abstracting the pattern: `define-instrument`
+
+Every instrument so far is a `(define (name freq dur) ...)` function. We can formalize that pattern with `define-instrument`, a macro that captures the recipe.
+
+```scheme
+(define-instrument pluck
+  (partials (list 1.0 2.0 3.0))
+  (adsr :a 0.01 :d 0.4 :s 0.0 :r 0.1)
+  (filter 'lowpass :cutoff 1500 :q 1.0))
+
+(pluck 440 0.5)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*  
+<!-- BUILD: define-instrument — macro that composes oscillator/envelope/filter/noise layers into a named voice -->
+
+`define-instrument` takes a name and a body of transformations, then builds a function `(name freq dur)` that applies them in sequence. This is the *instrument profile*.
+
+---
+
+## Play a phrase with the defined instrument
+
+Once an instrument is defined, you can call it like any other function. Play a melodic phrase.
+
+```scheme
+(define-instrument pluck
+  (partials (list 1.0 2.0 3.0))
+  (adsr :a 0.01 :d 0.4 :s 0.0 :r 0.1)
+  (filter 'lowpass :cutoff 1500 :q 1.0))
+
+(pluck 330 0.5)
+(pluck 392 0.5)
+(pluck 440 0.5)
+(pluck 523 1.0)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+Four notes, same voice. The instrument is the *tool*; the notes are the *material*.
+
+---
+
+## Define a second instrument and compare
+
+Define a second instrument—a soft pad—and play the same phrase. Hear how the voice changes the feel.
+
+```scheme
+(define-instrument pluck
+  (partials (list 1.0 2.0 3.0))
+  (adsr :a 0.01 :d 0.4 :s 0.0 :r 0.1)
+  (filter 'lowpass :cutoff 1500 :q 1.0))
+
+(define-instrument pad
+  (partials (list 1.0 2.0))
+  (adsr :a 0.6 :d 0.3 :s 0.7 :r 1.2))
+
+(pluck 330 0.5)
+(pluck 392 0.5)
+(pad 330 2.0)
+(pad 392 2.0)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+Same notes, different instruments. The pluck is percussive; the pad is a wash.
+
+---
+
+## A cello: bowed string with vibrato
+
+A cello has a slow attack (the bow drawing across the string), rich harmonics, and body formants. We'll approximate vibrato with a slight amplitude modulation in the envelope.
+
+```scheme
+(define-instrument cello
+  (partials (list 1.0 2.0 3.0 4.0 5.0 6.0))
+  (adsr :a 0.1 :d 0.3 :s 0.8 :r 0.4)
+  (add-formant (list 250 600 2400))
+  (filter 'lowpass :cutoff 3000 :q 0.8))
+
+(cello 196 2.0)
+```
+
+*[needs: define-instrument, partials, adsr, add-formant, filter]*
+
+The slow attack and high sustain mimic the bow. The formants give the cello's woody resonance.
+
+---
+
+## A piano: complex partials, fast attack, long decay
+
+A piano has many inharmonic partials (slightly stretched), a very fast attack, and a decay that rings for seconds.
+
+```scheme
+(define-instrument piano
+  (partials (list 1.0 2.01 3.03 4.05 5.08 6.11))
+  (adsr :a 0.002 :d 2.5 :s 0.0 :r 1.0)
+  (filter 'lowpass :cutoff 4000 :q 0.6))
+
+(piano 261.63 3.0)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+The partials are *slightly* off integer ratios (2.01 instead of 2.0)—this is inharmonicity from the stiff string. The fast attack and long decay are the piano's signature.
+
+---
+
+## An organ: no decay, pure sustain
+
+An organ holds a note at constant amplitude for as long as the key is pressed. The envelope has instant attack, no decay, full sustain, and instant release.
+
+```scheme
+(define-instrument organ
+  (partials (list 1.0 2.0 3.0 4.0 5.0))
+  (adsr :a 0.01 :d 0.0 :s 1.0 :r 0.05))
+
+(organ 440 2.0)
+```
+
+*[needs: define-instrument, partials, adsr]*
+
+No decay, no release (except a tiny tail to avoid clicks). The organ *holds*.
+
+---
+
+## A vibraphone: inharmonic, with tremolo
+
+A vibraphone has inharmonic metal-bar partials and a slow amplitude tremolo (the rotating discs). We'll use inharmonic partials and a slow envelope modulation.
+
+```scheme
+(define-instrument vibraphone
+  (partials (list 1.0 2.76 5.4 8.93 13.8))
+  (adsr :a 0.01 :d 1.5 :s 0.5 :r 2.0)
+  (filter 'bandpass :cutoff 1200 :q 2.0))
+
+(vibraphone 294 3.0)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*  
+<!-- BUILD: tremolo — amplitude LFO modulation (future layer) -->
+
+The bandpass filter and inharmonic partials give the metallic shimmer. Tremolo would add the characteristic wobble, but we flag that for a future layer.
+
+---
+
+## A xylophone: very short, very inharmonic
+
+A xylophone has a sharp attack, very short decay, and inharmonic wooden-bar partials.
+
+```scheme
+(define-instrument xylophone
+  (partials (list 1.0 3.2 6.8 12.1))
+  (adsr :a 0.002 :d 0.08 :s 0.0 :r 0.05)
+  (filter 'bandpass :cutoff 2000 :q 1.5))
+
+(xylophone 523.25 0.15)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+The very short envelope and inharmonic partials (3.2, 6.8, 12.1) give the xylophone its dry, percussive *tock*.
+
+---
+
+## A synthesizer lead: sawtooth, resonant filter
+
+A classic synth lead uses a sawtooth wave (all harmonics), a lowpass filter with high resonance, and a punchy envelope.
+
+```scheme
+(define-instrument synth-lead
+  (wave 'saw)
+  (adsr :a 0.01 :d 0.2 :s 0.7 :r 0.1)
+  (filter 'lowpass :cutoff 2000 :q 8.0))
+
+(synth-lead 440 1.0)
+```
+
+*[needs: define-instrument, wave, adsr, filter]*  
+<!-- BUILD: wave — oscillator with sawtooth waveform -->
+
+The high Q (8.0) makes the filter *resonate*—it emphasizes frequencies near the cutoff, giving the lead a sharp, singing quality.
+
+---
+
+## A bass synth: square wave, low cutoff
+
+A bass synth uses a square wave (odd harmonics) and a very low lowpass cutoff for a deep, fat sound.
+
+```scheme
+(define-instrument bass-synth
+  (wave 'square)
+  (adsr :a 0.02 :d 0.3 :s 0.6 :r 0.2)
+  (filter 'lowpass :cutoff 300 :q 1.0))
+
+(bass-synth 110 0.8)
+```
+
+*[needs: define-instrument, wave, adsr, filter]*
+
+The square wave gives the bass presence; the low cutoff keeps it deep.
+
+---
+
+## A choir: multiple detuned voices
+
+A choir is many voices slightly detuned from each other. We'll layer three copies of the same note at slightly different frequencies.
+
+```scheme
+(define-instrument choir-voice
+  (partials (list 1.0 2.0 3.0))
+  (adsr :a 0.3 :d 0.2 :s 0.8 :r 0.6))
+
+(define (choir freq dur)
+  (let ((v1 (choir-voice (* freq 0.995) dur))
+        (v2 (choir-voice freq dur))
+        (v3 (choir-voice (* freq 1.005) dur)))
+    (+ v1 v2 v3)))
+
+(choir 330 2.5)
+```
+
+*[needs: define-instrument, partials, adsr]*
+
+The three voices are detuned by ±0.5%. When mixed, they create a slow *beating* that sounds like multiple people singing.
+
+---
+
+## A Rhodes electric piano: bell-like partials, soft attack
+
+A Rhodes has a bell-like harmonic stack (slightly inharmonic), a soft attack, and a long decay.
+
+```scheme
+(define-instrument rhodes
+  (partials (list 1.0 2.1 3.3 4.5 5.7))
+  (adsr :a 0.01 :d 1.0 :s 0.4 :r 0.8)
+  (filter 'lowpass :cutoff 3500 :q 0.7))
+
+(rhodes 261.63 2.0)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+The slightly-off partials (2.1, 3.3, 4.5, 5.7) give the Rhodes its *glassy* character.
+
+---
+
+## A harpsichord: bright, instant decay
+
+A harpsichord plucks the string—instant attack, very short decay, no sustain.
+
+```scheme
+(define-instrument harpsichord
+  (partials (list 1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0))
+  (adsr :a 0.001 :d 0.4 :s 0.0 :r 0.1)
+  (filter 'highpass :cutoff 800 :q 0.5))
+
+(harpsichord 349.23 0.6)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+The many upper partials and highpass filter make the harpsichord bright and dry.
+
+---
+
+## A wind chime: random inharmonic partials, long release
+
+A wind chime has random inharmonic partials and a very long, gentle release.
+
+```scheme
+(define-instrument chime
+  (partials (list 1.0 2.37 4.91 7.53 11.2))
+  (adsr :a 0.02 :d 2.0 :s 0.3 :r 4.0)
+  (filter 'bandpass :cutoff 1800 :q 2.5))
+
+(chime 392 5.0)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+The long release and inharmonic partials give the chime its ethereal, ringing quality.
+
+---
+
+## A timpani: pitched drum with pitch drop
+
+A timpani is a pitched drum—a low fundamental with inharmonic overtones and a pitch drop at the attack.
+
+```scheme
+(define-instrument timpani
+  (partials (list 1.0 1.5 2.0 2.65 3.1))
+  (adsr :a 0.005 :d 0.8 :s 0.2 :r 0.6)
+  (filter 'lowpass :cutoff 400 :q 1.2))
+
+(timpani 110 1.5)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*  
+<!-- BUILD: pitch-drop — frequency envelope for drum pitch decay -->
+
+The inharmonic partials (1.5, 2.65, 3.1) and low filter cutoff give the timpani its deep, resonant boom.
+
+---
+
+## A glass harmonica: very pure, slow attack, long release
+
+A glass harmonica (rubbed glass) has very few harmonics—almost a pure sine—with a slow attack and long release.
+
+```scheme
+(define-instrument glass-harmonica
+  (partials (list 1.0 0.1))
+  (adsr :a 0.5 :d 0.3 :s 0.7 :r 2.5)
+  (filter 'lowpass :cutoff 2500 :q 0.8))
+
+(glass-harmonica 523.25 3.5)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+The fundamental is 10× louder than the first overtone (0.1 amplitude). The slow attack and long release mimic the friction of a wet finger on glass.
+
+---
+
+## A music box: very short, high, bright
+
+A music box has a very short, bright pluck in the high register.
+
+```scheme
+(define-instrument music-box
+  (partials (list 1.0 2.0 3.0 4.0 5.0))
+  (adsr :a 0.002 :d 0.15 :s 0.0 :r 0.08)
+  (filter 'highpass :cutoff 1500 :q 0.6))
+
+(music-box 1046.5 0.2)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+The highpass filter brightens the sound. The very short envelope gives the mechanical *tink*.
+
+---
+
+## A gong: very inharmonic, slow swell, long decay
+
+A gong has chaotic inharmonic partials, a slow attack swell, and a decay that lasts many seconds.
+
+```scheme
+(define-instrument gong
+  (partials (list 1.0 1.71 2.43 3.89 5.12 7.31))
+  (adsr :a 0.3 :d 3.0 :s 0.4 :r 6.0)
+  (filter 'lowpass :cutoff 600 :q 0.5))
+
+(gong 98 8.0)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+The wildly inharmonic partials (1.71, 2.43, 3.89, 5.12, 7.31) and long envelope give the gong its characteristic deep, shimmering crash.
+
+---
+
+## A trumpet: bright, brassy, slow release
+
+A trumpet has a bright harmonic stack, a moderate attack, and a slow release.
+
+```scheme
+(define-instrument trumpet
+  (partials (list 1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0))
+  (adsr :a 0.05 :d 0.2 :s 0.8 :r 0.3)
+  (filter 'lowpass :cutoff 3500 :q 1.2))
+
+(trumpet 349.23 1.0)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+The many upper partials and moderate filter cutoff give the trumpet its bright, brassy sound.
+
+---
+
+## A clarinet: odd harmonics only
+
+A clarinet is a cylindrical bore, so it produces *only* odd harmonics (1, 3, 5, 7...). The timbre is hollow and woody.
+
+```scheme
+(define-instrument clarinet
+  (partials (list 1.0 0.0 3.0 0.0 5.0 0.0 7.0))
+  (adsr :a 0.05 :d 0.2 :s 0.7 :r 0.3)
+  (filter 'lowpass :cutoff 2500 :q 0.9))
+
+(clarinet 261.63 1.5)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+The zeros in the partials list (0.0 at positions 2, 4, 6) silence the even harmonics. Only the odd harmonics remain.
+
+---
+
+## A tabla: pitched drum with noise layer
+
+A tabla has a pitched membrane (tonal) and a slap noise layer.
+
+```scheme
+(define-instrument tabla
+  (partials (list 1.0 1.8 2.9))
+  (adsr :a 0.002 :d 0.2 :s 0.0 :r 0.1)
+  (noise 'white 0.02)
+  (filter 'bandpass :cutoff 400 :q 1.5))
+
+(tabla 196 0.3)
+```
+
+*[needs: define-instrument, partials, adsr, noise, filter]*  
+<!-- BUILD: noise layer in define-instrument — mix tonal + noise signals -->
+
+The partials give the tabla its pitch; the noise gives the percussive slap.
+
+---
+
+## A synthesized voice vowel: formants
+
+Human vowels are formants—resonant peaks in the spectrum. An \"ah\" vowel has formants around 700, 1220, and 2600 Hz.
+
+```scheme
+(define-instrument vowel-ah
+  (wave 'saw)
+  (adsr :a 0.05 :d 0.1 :s 0.8 :r 0.2)
+  (add-formant (list 700 1220 2600)))
+
+(vowel-ah 130 1.0)
+```
+
+*[needs: define-instrument, wave, adsr, add-formant]*
+
+The sawtooth provides the harmonic-rich source (the vocal cords). The formants color it into an \"ah\" vowel.
+
+---
+
+## A string ensemble: detuned, doubled
+
+A string ensemble is multiple string voices slightly detuned and layered.
+
+```scheme
+(define-instrument string-voice
+  (partials (list 1.0 2.0 3.0 4.0 5.0))
+  (adsr :a 0.15 :d 0.2 :s 0.8 :r 0.5)
+  (filter 'lowpass :cutoff 3000 :q 0.7))
+
+(define (strings freq dur)
+  (let ((v1 (string-voice (* freq 0.997) dur))
+        (v2 (string-voice freq dur))
+        (v3 (string-voice (* freq 1.003) dur))
+        (v4 (string-voice (* freq 1.007) dur)))
+    (+ v1 v2 v3 v4)))
+
+(strings 196 2.5)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+Four voices detuned by ±0.3% and ±0.7% create a lush, chorused string section.
+
+---
+
+## A steel drum: bright inharmonic partials
+
+A steel drum (steel pan) has bright, inharmonic partials from the hammered metal surface.
+
+```scheme
+(define-instrument steel-drum
+  (partials (list 1.0 2.13 3.68 5.42 7.91))
+  (adsr :a 0.005 :d 0.6 :s 0.3 :r 0.8)
+  (filter 'bandpass :cutoff 1500 :q 2.0))
+
+(steel-drum 392 1.2)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+The inharmonic partials and bandpass filter give the steel drum its metallic, tropical brightness.
+
+---
+
+## A dulcimer: hammered string, long decay
+
+A dulcimer is a hammered string—bright harmonics, a sharp attack, and a long ringing decay.
+
+```scheme
+(define-instrument dulcimer
+  (partials (list 1.0 2.0 3.0 4.0 5.0 6.0 7.0))
+  (adsr :a 0.003 :d 1.5 :s 0.0 :r 0.5)
+  (filter 'lowpass :cutoff 4000 :q 0.8))
+
+(dulcimer 440 2.0)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+The many upper partials and sharp attack give the dulcimer its bright, ringing sound.
+
+---
+
+## A synth bass with sub-oscillator
+
+A sub-oscillator is a second oscillator one octave below the main oscillator, mixed in to fatten the bass.
+
+```scheme
+(define-instrument fat-bass
+  (partials (list 1.0 2.0))
+  (adsr :a 0.02 :d 0.3 :s 0.6 :r 0.2)
+  (filter 'lowpass :cutoff 350 :q 1.0))
+
+(define (bass-with-sub freq dur)
+  (let ((main (fat-bass freq dur))
+        (sub (fat-bass (/ freq 2.0) dur)))
+    (+ main (* 0.5 sub))))
+
+(bass-with-sub 110 1.0)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+The sub-oscillator (half the frequency) adds weight to the bass without changing the pitch.
+
+---
+
+## A kalimba: bright pluck, inharmonic
+
+A kalimba (thumb piano) has bright, inharmonic metal-tine partials and a short decay.
+
+```scheme
+(define-instrument kalimba
+  (partials (list 1.0 2.7 5.1 8.6))
+  (adsr :a 0.003 :d 0.25 :s 0.0 :r 0.15)
+  (filter 'bandpass :cutoff 2500 :q 1.8))
+
+(kalimba 523.25 0.4)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+The inharmonic partials and bandpass filter give the kalimba its bright, metallic *plink*.
+
+---
+
+## A sawtooth pad: lush, slow
+
+A pad built from a sawtooth wave (all harmonics) with a slow attack and long release.
+
+```scheme
+(define-instrument saw-pad
+  (wave 'saw)
+  (adsr :a 1.0 :d 0.5 :s 0.8 :r 2.0)
+  (filter 'lowpass :cutoff 1200 :q 0.6))
+
+(saw-pad 220 4.0)
+```
+
+*[needs: define-instrument, wave, adsr, filter]*
+
+The sawtooth gives the pad richness; the slow envelope and lowpass filter soften it into a wash.
+
+---
+
+## A vintage synth pluck: triangle wave, fast decay
+
+A triangle wave has fewer harmonics than a sawtooth—softer, but still present. A fast decay makes it a pluck.
+
+```scheme
+(define-instrument tri-pluck
+  (wave 'triangle)
+  (adsr :a 0.01 :d 0.3 :s 0.0 :r 0.1)
+  (filter 'lowpass :cutoff 2000 :q 1.0))
+
+(tri-pluck 330 0.5)
+```
+
+*[needs: define-instrument, wave, adsr, filter]*
+
+The triangle wave is softer than a sawtooth, but brighter than a sine. The fast decay makes it a classic synth pluck.
+
+---
+
+## A reverse cymbal: noise with reverse envelope
+
+A reverse cymbal swells *into* the hit instead of decaying out. We'll use noise with an envelope that rises instead of falls.
+
+```scheme
+(define-instrument reverse-cymbal
+  (noise 'white 2.0)
+  (adsr :a 1.5 :d 0.0 :s 1.0 :r 0.05)
+  (filter 'highpass :cutoff 5000 :q 0.5))
+
+(reverse-cymbal 2.0)
+```
+
+*[needs: define-instrument, noise, adsr, filter]*  
+<!-- BUILD: reverse envelope — attack IS the swell; sustain holds; release is the hit -->
+
+The long attack swells the cymbal in. The highpass filter keeps it bright.
+
+---
+
+## A tabla bass (bayan): low pitched drum
+
+A bayan (the bass tabla drum) has a lower fundamental and a different inharmonic stack than the treble tabla.
+
+```scheme
+(define-instrument bayan
+  (partials (list 1.0 1.6 2.3))
+  (adsr :a 0.002 :d 0.4 :s 0.0 :r 0.15)
+  (filter 'lowpass :cutoff 300 :q 1.8))
+
+(bayan 98 0.5)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+The low partials and lowpass filter give the bayan its deep, resonant boom.
+
+---
+
+## Composing instruments into a kit
+
+Once you have several instruments, group them into a *kit*—a collection of voices you can call by name.
+
+```scheme
+(define-instrument kick
+  (partials (list 1.0))
+  (adsr :a 0.001 :d 0.15 :s 0.0 :r 0.05)
+  (filter 'lowpass :cutoff 80 :q 1.0))
+
+(define-instrument snare
+  (noise 'white 0.15)
+  (adsr :a 0.001 :d 0.08 :s 0.0 :r 0.05)
+  (filter 'bandpass :cutoff 1200 :q 1.5))
+
+(define-instrument hihat
+  (noise 'white 0.08)
+  (adsr :a 0.001 :d 0.05 :s 0.0 :r 0.03)
+  (filter 'highpass :cutoff 7000 :q 0.5))
+
+(kick 60 0.2)
+(snare 0.15)
+(hihat 0.08)
+```
+
+*[needs: define-instrument, partials, noise, adsr, filter]*
+
+Three instruments—kick, snare, hi-hat—ready to sequence into a beat.
+
+---
+
+## Modifying an instrument: `mod-instrument`
+
+Sometimes you want a *variation* of an existing instrument—same structure, different parameters. `mod-instrument` takes a base instrument and a list of changes (deltas).
+
+```scheme
+(define-instrument pluck
+  (partials (list 1.0 2.0 3.0))
+  (adsr :a 0.01 :d 0.4 :s 0.0 :r 0.1)
+  (filter 'lowpass :cutoff 1500 :q 1.0))
+
+(define-instrument bright-pluck
+  (mod-instrument pluck
+    (filter :cutoff 3000 :q 2.0)))
+
+(pluck 330 0.5)
+(bright-pluck 330 0.5)
+```
+
+*[needs: define-instrument, mod-instrument, partials, adsr, filter]*  
+<!-- BUILD: mod-instrument — clone an instrument and apply deltas -->
+
+The `bright-pluck` is the same as `pluck`, but with a higher cutoff and higher Q. The rest of the recipe is inherited.
+
+---
+
+## A phrase with instrument changes
+
+Play the same melody with different instruments to hear how the voice changes the feel.
+
+```scheme
+(define-instrument pluck
+  (partials (list 1.0 2.0 3.0))
+  (adsr :a 0.01 :d 0.4 :s 0.0 :r 0.1)
+  (filter 'lowpass :cutoff 1500 :q 1.0))
+
+(define-instrument pad
+  (partials (list 1.0 2.0))
+  (adsr :a 0.6 :d 0.3 :s 0.7 :r 1.2))
+
+(define melody (list 330 392 440 523))
+
+(map (lambda (f) (pluck f 0.5)) melody)
+(map (lambda (f) (pad f 2.0)) melody)
+```
+
+*[needs: define-instrument, partials, adsr, filter]*
+
+The same four notes, first as plucks, then as pads. The instrument *is* the interpretation.
+
+---
+
+## Building a full voice: the crescendo example
+
+Pull all the layers together: oscillator, harmonics, envelope, filter, formants, and noise. This is a complex, multi-layered voice—a synthesized vocal \"ooh\" with breath.
+
+```scheme
+(define-instrument vocal-ooh
+  (wave 'saw)
+  (adsr :a 0.08 :d 0.1 :s 0.8 :r 0.3)
+  (add-formant (list 400 800 2600))
+  (filter 'lowpass :cutoff 2500 :q 0.8)
+  (noise 'white 0.05))
+
+(vocal-ooh 196 2.0)
+```
+
+*[needs: define-instrument, wave, adsr, add-formant, filter, noise]*  
+<!-- BUILD: noise layer in define-instrument — mix tonal + noise signals -->
+
+The sawtooth provides the harmonic source. The formants (400, 800, 2600 Hz) shape it into an \"ooh\" vowel. The lowpass filter softens the top. The noise adds breath. The envelope swells it in and holds it.
+
+This is a *complete* instrument—every layer working together.
+
+---
+
+## Exercises
+
+1. **Build a harp**: bright plucked string, many harmonics (1–8), fast attack (0.005 s), long decay (2 s), no sustain, gentle release. Highpass filter at 500 Hz to brighten it.
+
+2. **Build a synth brass section**: sawtooth wave, slow attack (0.1 s), moderate sustain (0.7), punchy release (0.2 s). Lowpass filter at 2500 Hz with moderate Q (2.0). Add three detuned voices (±0.5%) for ensemble width.
+
+3. **Build a rain stick**: filtered white noise with a very long envelope—slow attack (2 s), long decay (3 s), medium sustain (0.4), long release (4 s). Bandpass filter at 1500 Hz.
+
+4. **Build a music-box ballet**: high bright pluck (fundamental at 1046.5 Hz), very short envelope (total duration 0.2 s), highpass filter at 2000 Hz. Play a four-note phrase: 1046.5, 1174.7, 1318.5, 1568.0 Hz.
+
+5. **Modify the `pluck` instrument**: create `dark-pluck` by lowering the filter cutoff to 800 Hz and setting Q to 0.5. Play the same note with both and compare.
+
+6. **Build a three-layer tabla kit**: a high tabla (196 Hz, partials 1.0/1.8/2.9, bandpass 400 Hz), a low bayan (98 Hz, partials 1.0/1.6/2.3, lowpass 300 Hz), and a slap (noise only, bandpass 1200 Hz, very short). Play a four-hit pattern: tabla, bayan, slap, tabla.
+
+---
+
+You've built instruments from the waveform up. You know how to stack partials, shape envelopes, color with filters and formants, and texture with noise. You know how to abstract the pattern into `define-instrument` and how to modify voices with `mod-instrument`. Every instrument you've heard—guitar, bell, synth, drum—is a *composition* of these layers.
+
+In the next chapter, we'll explore **physical models**—instruments built not from layers but from *algorithms* that simulate strings, tubes, and membranes. The sound emerges from the physics.
+")

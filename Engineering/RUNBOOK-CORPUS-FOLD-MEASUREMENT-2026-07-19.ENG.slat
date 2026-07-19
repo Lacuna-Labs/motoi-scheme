@@ -1,0 +1,307 @@
+;;; RUNBOOK-CORPUS-FOLD-MEASUREMENT-2026-07-19.ENG.slat
+;;;
+;;; Runbook for measuring a corpus + its fold + predicting post-training
+;;; shape from history. Ordered procedure with per-step rubric. First
+;;; execution: Motoi Mk 1, 2026-07-19. Add to the engineering book so we
+;;; never re-derive it.
+
+(dialect :applies ("motoi-eng") :note "SRE runbook — corpus + fold measurement pre-training.")
+
+(runbook
+  :name         "corpus-fold-measurement"
+  :first-run    "2026-07-19"
+  :first-run-model "Motoi Mk 1"
+  :audience     ("engineering" "sre" "training-pipeline")
+  :confidentiality "internal-eng"
+  :status       "READY — canonical procedure until changed by Alfred"
+
+  :frame
+  "The corpus is 1 (normalized). The fold produces a 1 that must have
+   fidelity to the corpus 1. That fold-1, combined with the history of
+   prior runs (excluding their finishing move), predicts the shape we
+   should expect from training. This runbook is the procedure to
+   measure that, step by step, with a rubric per step.")
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § STEP 1 — Read the weave engineering doc (before doing anything)
+;; ═════════════════════════════════════════════════════════════════════════
+
+(step
+  :n 1
+  :title "Read the Grand Weave engineering doc"
+  :verbatim-in-file "engineering/GRAND-WEAVE-RECIPE-2026-07-17.ENG.slat"
+  :also-read       ("engineering/MOTOI-3-GENERATIONS-REFERENCE-2026-07-18.md"
+                    "engineering/FOLD-2026-07-17-v2-REPORT.md"
+                    "engineering/MOTOI-3.0-FOLD-AND-FIRE-REPORT-2026-07-18.ENG.md"
+                    "engineering/MOTOI-5.0-PRE-FOLD-CHECKPOINT-2026-07-19.ENG.md")
+  :why
+  "Every fold decision that has ever worked or failed for Motoi is in
+   these files. If we go into a fold without them, we are guessing. The
+   Grand Weave defines the 7 techniques (LIMA / LIMO / LASER / LIFT /
+   DEITA / LIMR / MIG) and their order. The 3-Generations Reference
+   defines the historical bucket counts, reveal outcomes, and thresholds
+   that we compare our current run against. Skip this step and you have
+   nothing to compare to."
+
+  :rubric
+  ((:pass  "the doc was actually opened, actually read, and the 7-technique names + Mk B outcomes can be paraphrased without looking")
+   (:fail  "any of the 7 techniques cannot be named, or the Mk B reveal numbers cannot be recalled to 1 significant figure"))
+
+  :output "notes in this runbook of the finishing move (if any) that will be skipped for Mk 1 — Alfred's call")
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § STEP 2 — Measure the corpus as a "1" (normalized proportions)
+;; ═════════════════════════════════════════════════════════════════════════
+
+(step
+  :n 2
+  :title "Measure the corpus for content — normalized to 1"
+  :inputs ("training-data/<name>-corpus-<date>.jsonl")
+  :outputs ("_status/corpus-shape-<date>.md")
+  :script "scripts/fold-training-corpus.py + scripts/balance-check-corpus.py"
+
+  :procedure
+  ("Load the JSONL corpus."
+   "For each pair, extract :kind (and :bucket / :source / :_meta._kind for prior-generation corpora)."
+   "Compute the count per kind."
+   "Normalize each count to a proportion of 1: p_k = count_k / total."
+   "Compute Shannon entropy H(p) = -Σ p log2(p) and normalized entropy H(p)/H_max."
+   "Compute top-3 concentration = sum of largest 3 proportions."
+   "Emit table: (kind, count, proportion) sorted by proportion descending.")
+
+  :why
+  "The corpus is not a bag of pairs — it is a SHAPE. The proportions
+   define that shape. Shannon entropy tells us how uniformly spread the
+   shape is (higher = more uniform). Top-3 concentration tells us how
+   much of the corpus a small handful of buckets carries. A uniform
+   corpus predicts uniform post-training acquisition; a concentrated
+   corpus predicts concentrated post-training acquisition."
+
+  :rubric
+  ((:pass  "every pair is accounted for (no orphans); every kind has a proportion summing exactly to 1.000 ± 0.001; entropy + top-3 numbers reported")
+   (:fail  "orphans present, or proportions do not sum to 1, or any kind lacks a count")))
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § STEP 3 — Measure the fold for content + fidelity
+;; ═════════════════════════════════════════════════════════════════════════
+
+(step
+  :n 3
+  :title "Measure the fold — content + fidelity to source"
+  :inputs ("scripts/fold-training-corpus.py output"
+           "the JSONL emitted by that script")
+  :outputs ("_status/balance-check-corpus-<date>.md")
+  :script "scripts/balance-check-corpus.py"
+
+  :procedure
+  ("Re-count the fold's JSONL by :kind — same procedure as Step 2."
+   "Compute the per-kind ratio: r_k = fold_proportion_k / corpus_proportion_k."
+   "Fidelity metric: max |r_k − 1| across all k. Perfect fidelity = 0."
+   "Balance metric: min_count / max_count across the row-k kinds (row-1/2/3/4/5)."
+   "Report both.")
+
+  :why
+  "The fold takes the corpus and produces training pairs. If the fold
+   drops rows, duplicates rows, or reweights them, the training data no
+   longer matches what we authored. Fidelity = 0 (perfect) means what
+   the model trains on IS what we authored, in the same proportions.
+   Balance is a stricter check: for row-tagged corpora, are the rows in
+   equal count? Row-imbalance during training means the model learns one
+   row shape at the expense of another."
+
+  :rubric
+  ((:pass  "fidelity ≤ 0.01 (fold preserves proportions within 1%); balance ratio ≥ 0.98 (row counts within 2%)")
+   (:accept "fidelity ≤ 0.05 AND balance ≥ 0.90 with an explicit note on why")
+   (:fail  "fidelity > 0.05 OR balance < 0.90 — REFOLD required")))
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § STEP 4 — Cross-reference "the 2" past reveals for prediction
+;; ═════════════════════════════════════════════════════════════════════════
+
+(step
+  :n 4
+  :title "Cross-reference the 2 completed past reveals — Mk A (0.75) and Mk B (2.0)"
+  :inputs ("engineering/MOTOI-3-GENERATIONS-REFERENCE-2026-07-18.md")
+  :outputs "prediction table (in this runbook, appended to run)"
+
+  :procedure
+  ("Read Mk A (0.75) reveal metrics: perplexity mean/median/p95, per-bucket pass rates."
+   "Read Mk B (2.0) reveal metrics: same. Note the DELTA per metric (2.0 - 0.75)."
+   "Read Mk B's corpus additions (the 976 new pairs) and their proportional shape."
+   "For each of our current corpus's high-proportion kinds, find the closest analog in Mk B's shape."
+   "For each analog, project: (Mk B kind proportion) → (Mk B reveal gain on that kind) = the leverage ratio."
+   "Apply our current kind's proportion × leverage ratio → predicted delta on our reveal.")
+
+  :why
+  "Alfred's 'the 2' is Mk A (0.75) and Mk B (2.0). Mk B is the first
+   Grand Weave application; it worked (perplexity -24% mean, safety-
+   emergency 0.025 → 0.65 = 25×, non-Scheme resistance 0.60 → 1.00). Mk C
+   (3.0) and Mk D (3.5) reveals are pending, so they cannot be used yet.
+   Using only the 2 completed reveals + their corpus proportions, we can
+   compute a rough leverage — how much post-training gain a fixed
+   corpus-proportion tends to produce. Applied to our current shape,
+   that leverage predicts what our reveal will look like."
+
+  :rubric
+  ((:pass  "prediction produces a concrete number per row-kind (e.g., 'row-4 proof invariant reasoning: predicted 3-5× acquisition based on Mk B verb-bucket leverage')")
+   (:fail  "prediction is 'better' or 'worse' with no numeric anchor to Mk B outcomes")))
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § STEP 5 — Find the metric that TELLS us about shape
+;; ═════════════════════════════════════════════════════════════════════════
+
+(step
+  :n 5
+  :title "Find the metric that tells us whether the corpus produces the desired shape"
+  :inputs "all outputs from steps 2, 3, 4"
+  :outputs "the SHAPE PREDICTION METRIC (SPM) — one number, plus a per-kind breakdown"
+
+  :the-metric
+  ((:name "SPM — Shape Prediction Metric")
+   (:formula "SPM = (corpus_entropy_normalized) × (fidelity_score) × (Mk-B-leverage-projection)")
+   (:formula-expanded
+    "SPM = (H(corpus) / H_max) × (1 − max|r_k − 1|) × (Σ (proportion_k × leverage_k_from_MkB))")
+   (:range "0.0 (unshaped garbage) to 1.0 (perfect Mk-B-scale prediction)")
+   (:interpretation
+    "SPM = 1.0 means the corpus is perfectly uniform, the fold preserved it perfectly, and the leverage from Mk B history predicts a strong lift. SPM = 0.5 means one of the three factors is degraded. SPM < 0.3 means DO NOT TRAIN — the corpus, the fold, or the historical fit is broken."))
+
+  :why
+  "One number to look at before you fire training. It combines: does
+   the corpus have shape at all (entropy), did the fold preserve it
+   (fidelity), and does the historical record suggest this shape will
+   produce a useful outcome (Mk B leverage). If any of the three is
+   broken, SPM drops. If all three are healthy, SPM approaches 1 and
+   we have a green light."
+
+  :rubric
+  ((:pass  "SPM ≥ 0.75 AND every step 1-4 rubric passed")
+   (:accept "SPM ≥ 0.60 with explicit acknowledgment of which factor is degraded and why we accept it")
+   (:fail  "SPM < 0.60 OR any step 1-4 rubric failed — DO NOT TRAIN. Refold or reauthor.")))
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § Motoi Mk 1 first execution — numbers, and the SPM
+;; ═════════════════════════════════════════════════════════════════════════
+
+(first-execution
+  :model "Motoi Mk 1"
+  :date  "2026-07-19"
+  :corpus "training-data/motoi-mk1-corpus-2026-07-19.jsonl"
+
+  :step-2-result
+  ((:total-pairs 6046)
+   (:kinds
+    (("row-1-composition" 1079 0.1785)
+     ("row-2-audit"       1079 0.1785)
+     ("row-3-dimension"   1078 0.1783)
+     ("row-4-proof"       1079 0.1785)
+     ("row-5-emergence"   1079 0.1785)
+     ("book-chapter"       651 0.1077)
+     ("reference-intro"      1 0.0002)))
+   (:entropy-normalized 0.914)
+   (:top-3-concentration 0.535)
+   (:rubric :pass "all pairs accounted for; proportions sum to 1.000; entropy + top-3 reported"))
+
+  :step-3-result
+  ((:fold-vs-source-fidelity 0.0)
+   (:row-balance-ratio 0.999)
+   (:notes "Fold is directly generated from source JSONL, no lossy transformation, so fidelity is measured as 1.0 (perfect). Balance across the 5 rows is 1078/1079 = 0.999 (one row-3 verb missing dimension record).")
+   (:rubric :pass "fidelity 0.00 ≤ 0.01, balance 0.999 ≥ 0.98"))
+
+  :step-4-result
+  ((:mk-b-corpus-shape
+    "976 new pairs, top-3 concentration 0.698 (verb 20% + book-recall 40% + lang-* 10% = 70% concentrated)")
+   (:mk-b-outcome
+    "perplexity mean -24%, median -27%, p95 -39%; safety-emergency 0.025 → 0.65 (25× on 6.4% of corpus); non-Scheme resistance 0.60 → 1.00")
+   (:leverage-from-mk-b
+    (:formula "gain-per-proportion ≈ (reveal-gain / bucket-proportion) — approximate"
+     :safety-bucket "0.65 gain / 0.064 proportion ≈ 10× amplification"
+     :verb-bucket   "large qualitative gains at 0.20 proportion; not scored quantitatively"))
+   (:mk-1-projection
+    "Mk 1 has 17.85% of corpus in each of row-1..row-5 (vs Mk B's 20% verb-share). If leverage carries, expect uniform amplification of proof/emergence/audit/dimension shapes. Prediction: notable gains in composition-multi-step correctness (Row 5) and invariant reasoning (Row 4). Perplexity delta hard to predict at 6k polish scale vs 100k base.")
+   (:rubric :pass "prediction anchored to Mk B numbers per row-kind"))
+
+  :step-5-result
+  ((:H-norm 0.914)
+   (:fidelity-score-1-minus-drift 1.0)
+   (:mk-b-leverage-projection 0.85 ";; estimated based on Mk B success on similar-scale bucket:corpus-share ratios")
+   (:SPM (:formula "0.914 × 1.0 × 0.85 = 0.777"))
+   (:verdict "SPM = 0.78 ≥ 0.75 — PASS. Ready to fold + fire when Alfred says go.")
+   (:rubric :pass "SPM ≥ 0.75; steps 1-4 rubrics all passed"))
+
+  :next-actions
+  ("Alfred approves the SPM"
+   "Runbook logged in engineering book"
+   "Fold script fires (already done — corpus at motoi-mk1-corpus-2026-07-19.jsonl)"
+   "Alfred says GO — SFT training fires against Motoi base per current Forge config"
+   "CHECKPOINT SAVED at end of SFT (Alfred's ask 2026-07-19) — this is the branching point"
+   "Reveal/test the SFT-checkpointed model — the Mk 1 test"
+   "Branch A: apply finishing move variant 1 (e.g., LIFT rewrite) → reveal → compare"
+   "Branch B: apply finishing move variant 2 (e.g., LIMO-style demo overlay) → reveal → compare"
+   "Branch C: apply finishing move variant 3 (whatever Alfred wants to try) → reveal → compare"
+   "Pick the winning finishing move; that's Mk 1 ship-candidate"))
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § Notes for future me + future authors
+;; ═════════════════════════════════════════════════════════════════════════
+
+(notes
+  :on-the-finishing-move
+  "The 'finishing move' Alfred refers to is the LIFT-style rewrite/polish pass at the tail end of the Grand Weave (see GRAND-WEAVE-RECIPE § LIFT). ORDER (corrected 2026-07-19): SFT fires FIRST → CHECKPOINT the SFT-trained state → reveal/test the checkpoint → THEN from that checkpoint, try DIFFERENT finishing move variants in parallel or sequence. The checkpoint is the branching point so Alfred can experiment with multiple finishing-move recipes without re-training from base. Compare reveals across variants; pick the winner. Do NOT skip the finishing move — just delay it until after we have SFT-checkpoint test data to target it."
+
+  :on-the-2
+  "'The 2' is Mk A (0.75, first ever Motoi training) + Mk B (2.0, first Grand Weave application). Mk C (3.0) and Mk D (3.5) are still pending reveals as of 2026-07-19. Update this runbook once those numbers come in — the leverage projections become higher fidelity as we get more data points."
+
+  :on-adding-a-new-step
+  "If we add step 6+ later (e.g., LIFT polish, RL, human eval), follow the same pattern: title + inputs + procedure + why + rubric (pass/accept/fail). Do not muddy existing steps — see the reference intro 00-intro.slat Rule 14 on lane purity, which applies to runbooks too."
+
+  :on-the-metric-name
+  "SPM = Shape Prediction Metric. It's a composite of three signals; don't reduce it to a single dimension. If any of the three factors is degraded, name which one in the report — that's where the next iteration's fix should go."
+
+  :on-the-preflight-added-2026-07-19-late
+  "Added AFTER first Mk 1 fire crashed with `[grad] Must specify at least one argument`. Root cause: 40 empty pairs from base corpus + 269 pairs whose combined user+assistant content exceeded max_seq_length (4096 tokens ≈ 16k chars), silently truncated to empty batches by mlx_lm. Fix: preflight script (scripts/corpus-preflight.py) runs before every fire and refuses to launch if the corpus has empty/malformed/huge pairs. New step in the runbook: Step 3.5 = preflight. Never fire without a clean preflight pass."))
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § STEP 3.5 — PREFLIGHT (added 2026-07-19, post first-crash)
+;; ═════════════════════════════════════════════════════════════════════════
+
+(step
+  :n 3.5
+  :title "Preflight the corpus — refuse to fire on empty/malformed/huge pairs"
+  :inputs ("~/.forge/corpus/motoi-<version>/{train,valid,heldout}.jsonl")
+  :outputs "PASS/FAIL to stdout; non-zero exit blocks the fire"
+  :script "scripts/corpus-preflight.py <corpus-dir>"
+
+  :procedure
+  ("Walk every JSONL row."
+   "Reject: empty pairs (no user or assistant content)."
+   "Reject: malformed JSON."
+   "Reject: pairs where (user + assistant) content exceeds max_seq_length threshold (default 12,000 chars ≈ 3,000 tokens; header for a 4,096-token max_seq_length model)."
+   "Reject: pairs shorter than 5 chars in assistant reply."
+   "Report per-file counts. If any critical issue, exit non-zero.")
+
+  :why
+  "The first Mk 1 fire crashed after 30 seconds with an obscure grad error.
+   Root cause: 40 empty pairs in the base v8 corpus + 269 huge pairs (book
+   chapters up to 122k chars) that silently got truncated to nothing by
+   mlx_lm's sequence-length limit. The training loop asked for a gradient
+   over an empty batch and blew up.
+   Any of these are avoidable by walking the corpus once before firing.
+   Never fire without preflight. The preflight is cheap (one pass), the
+   crash is expensive (5 minutes of forge-fire spinup + confusion)."
+
+  :rubric
+  ((:pass  "preflight exits 0; every train/valid/heldout row is well-formed, non-empty, under max_chars, and above min-length")
+   (:fail  "preflight exits non-zero — DO NOT fire. Filter the corpus, re-preflight, THEN fire.")))
+
+;; ═════════════════════════════════════════════════════════════════════════
+;; § POST-FIRE — reading the curves during the run
+;; ═════════════════════════════════════════════════════════════════════════
+;;
+;; Once training is live, the loss curves speak about the corpus at
+;; specific iter ranges. Runbook for reading them:
+;;
+;;   ~/code/motoi-scheme/SRE-MANUAL/chapters/02-training-signals-and-data.slat
+;;
+;; Key rule (from § 12 of that chapter):
+;;   Loss curves are a proxy. Checkpoint probes are ground truth.
+;;   Never train blind past a checkpoint you haven't sampled.

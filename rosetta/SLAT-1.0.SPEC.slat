@@ -1,0 +1,442 @@
+;;; SLAT 1.0 — Formal Specification
+;;;
+;;; SLAT is the record format used across the Motoi Scheme ecosystem for
+;;; documents, corpus records, engineering docs, references, chapters, and
+;;; any structured data that needs to survive round-trip between authoring,
+;;; storage, and consumption.
+;;;
+;;; This file is the authoritative grammar + semantic definition for SLAT
+;;; 1.0. Rosetta ships translators between SLAT and other formats
+;;; (JSONL, TOML, YAML) using this spec as ground truth.
+
+(dialect :applies ("motoi" "sakura" "lacuna") :note "SLAT is dialect-neutral; every dialect authors + reads SLAT.")
+
+(spec
+  :name          "SLAT"
+  :version       "1.0.0"
+  :date          "2026-07-16"
+  :status        "canonical"
+  :owner         "Rosetta (translator layer)"
+  :one-line      "S-expression records with keyword-tagged fields; line-delimited when possible; the working format for all durable Motoi content.")
+
+;; ---------------------------------------------------------------------------
+;; 1. LEXICAL GRAMMAR
+;; ---------------------------------------------------------------------------
+
+(section
+  :n 1
+  :title "Lexical grammar"
+  :prose
+"SLAT tokens are the tokens of Motoi Scheme, restricted:
+
+  - Atoms: symbols, keywords, numbers, strings, booleans, nil.
+  - Structural: '(' and ')' for lists.
+  - Whitespace: space, tab, newline, carriage return.
+  - Comments: `;` to end-of-line. Triple-`;;;` marks a file-level banner.
+
+Extensions to Scheme:
+  - Keywords MUST begin with `:` and are unique tokens (`:name`, `:section`).
+  - Strings use double quotes with backslash escapes for `\\\"`, `\\\\`,
+    `\\n`, `\\r`, `\\t`. Multi-line strings are supported by escaping
+    newlines as `\\n` within a single string literal.
+  - Numbers: integer, rational (`3/7`), decimal, scientific (`1.2e-4`).
+  - Booleans: `#t` and `#f`.
+  - Nil: `nil` (bare symbol; ()-equivalent in list position).")
+
+;; ---------------------------------------------------------------------------
+;; 2. RECORD SHAPE
+;; ---------------------------------------------------------------------------
+
+(section
+  :n 2
+  :title "Record shape"
+  :prose
+"A SLAT record is a Scheme list whose first element is a bare symbol (the
+record 'kind') and whose remaining elements are keyword/value pairs. The
+kind names the record class; the keyword pairs carry the payload.
+
+  (KIND :key1 value1 :key2 value2 ...)
+
+Values may be atoms, strings, numbers, other records (nested lists), or
+lists of same. Keyword order is not significant; readers MUST tolerate
+any order. Writers SHOULD emit stable order for diff-friendliness.
+
+Every record kind's schema is declared elsewhere (in its owning subsystem
+or in a Rosetta translation table). A reader that encounters an unknown
+kind MUST preserve the record verbatim and either skip or route it
+downstream. Never drop unknown records.")
+
+;; ---------------------------------------------------------------------------
+;; 3. FILE VARIANTS
+;; ---------------------------------------------------------------------------
+
+(section
+  :n 3
+  :title "File variants — .slat vs .slatl vs .book.slatl"
+  :prose
+"Three file suffixes exist; all use the same lexical grammar and record
+shape. They differ in intended cardinality and toolchain expectations.
+
+  .slat         — Small single-purpose file. May contain any number of
+                  records but usually one to a few dozen. Records may span
+                  multiple lines freely. Best for specs, engineering docs,
+                  configuration, small manifests.
+
+  .slatl        — Line-delimited SLAT. Each top-level record MUST fit on
+                  exactly one line (newlines within a string literal are
+                  escaped as `\\n`). Enables streaming readers, cheap grep,
+                  large-file scale. Best for corpus files, training data,
+                  event logs.
+
+  .book.slatl   — A .slatl file that participates in the 16-chapter book
+                  invariant. Records typically carry :book, :chapter,
+                  :chapter-number, :dialect, :audience, :provenance,
+                  :training-eligible, :confidentiality. Each book directory
+                  MUST include a MANIFEST.slat declaring the 16 canonical
+                  chapters + any appendices."
+  :notes
+"A single directory MAY mix .slat and .slatl files; they interoperate at
+the record level. Only the file-level toolchain differs (streaming vs
+whole-file).")
+
+;; ---------------------------------------------------------------------------
+;; 4. THE DIALECT HEADER (universal opener)
+;; ---------------------------------------------------------------------------
+
+(section
+  :n 4
+  :title "The dialect header"
+  :prose
+"Every SLAT file that ships as documentation SHOULD open with a `(dialect
+...)` header record declaring which dialects the document targets. This
+header is the reader's cue for how to route the file through Rosetta or
+consumer pipelines.
+
+Canonical shape:
+
+  (dialect :applies (\"motoi\" \"sakura\")
+           :note \"Default: applies to both dialects. When a split exists,
+                  add sibling records tagged with per-record :dialect.\")
+
+Values:
+  :applies    — list of dialect names the document targets. Base names
+                are `motoi` (the base), `sakura` (dialect), `lacuna`
+                (dialect). Fork dialects add their own names.
+  :note       — optional prose about the header's meaning in context.
+
+Per-record `:dialect \"...\"` overrides the file-level `:applies` at
+record granularity. When a document has a genuine split between dialects,
+author two sibling records in the same file, each tagged with its
+dialect override.
+
+Corpus files, training data, and generated artifacts MAY omit the header
+if the records themselves carry `:dialect`.")
+
+;; ---------------------------------------------------------------------------
+;; 5. THE TRAINING-PIPELINE TAG SET (record-level)
+;; ---------------------------------------------------------------------------
+
+(section
+  :n 5
+  :title "The training-pipeline tag set"
+  :prose
+"Records that participate in the training corpus MUST carry the tag set
+below. Missing tags are treated as `:training-eligible #f` by the
+corpus gate.
+
+  :dialect             string    — which dialect this record targets
+                                    (\"motoi\", \"sakura\", \"lacuna\", ...).
+  :audience            keyword   — :kid | :adult | :engineer | :operator
+                                    | :sre | :any.
+  :confidentiality     keyword   — :public | :internal | :sensitive.
+  :training-eligible   boolean   — #t if included in training corpus.
+  :provenance          list      — chain of origin records:
+                                    ((:source-path \"...\")
+                                     (:converted-by \"...\")
+                                     (:conversion-date \"...\"))
+                                    Additional provenance items MAY be
+                                    added; the list is open.
+
+Books add:
+  :book                string    — human-readable book name.
+  :chapter             int|frac  — chapter number (int, or e.g. 5.5 for
+                                    sub-chapter).
+  :chapter-number      int       — canonical chapter number 1..16 for
+                                    the 16-chapter invariant.
+  :title               string    — chapter title.
+  :arc                 string    — optional arc identity for multi-arc
+                                    books.
+
+Engineering docs add:
+  :doc                 string    — doc slug (e.g. \"cortex\").
+  :section             string    — section title.
+  :section-number      int       — H2 index within the doc.
+
+Verb records add:
+  :name                string    — verb name (namespace/action).
+  :namespace           string    — verb namespace (\"card\", \"sys\").
+  :arity               int|list  — arity or [min, max] range.
+  :contract            string    — arg-and-return contract.
+  :doc                 string    — one-line docstring.
+  :examples            list      — list of (:level ... :code ...) records.
+  :atom                string    — reference-manual slug.
+  :tier                keyword   — dispatch tier.
+  :perm                keyword   — permission required.
+  :since               string    — dialect+version introduced.
+
+Redaction rule: records that would leak PII, vendor identifiers, prod
+hostnames, API keys, or attack-surface details MUST be marked
+`:training-eligible #f` + `:confidentiality :sensitive`. A separate
+redacted variant MAY be published with those fields removed or tokenized.")
+
+;; ---------------------------------------------------------------------------
+;; 6. PROSE + CODE COMPOSITION
+;; ---------------------------------------------------------------------------
+
+(section
+  :n 6
+  :title "Prose + code composition"
+  :prose
+"Records carry prose in `:prose \"...\"` — a Scheme string. Long prose is
+escaped with `\\n` newlines. UTF-8 is required.
+
+Runnable code blocks live in SIBLING records adjacent to the record they
+illustrate, not embedded inside the :prose string. The canonical shape:
+
+  (code-block
+    :lang \"scheme\"
+    :source \"(define (square x) (* x x))\\n(square 5)\")
+
+Multiple code blocks MAY appear as siblings. A `:code (...)` field inside
+a chapter record MAY carry a list of code-block records for
+tight-coupling; both patterns are legal.
+
+Rationale: separating prose from code preserves the ability to extract
+runnable examples via `code-extraction` without brittle prose parsing.")
+
+;; ---------------------------------------------------------------------------
+;; 7. PROVENANCE + MERGE-NOT-THROW
+;; ---------------------------------------------------------------------------
+
+(section
+  :n 7
+  :title "Provenance + merge-not-throw"
+  :prose
+"When two versions of the same record exist and must be merged (per the
+merge-not-throw doctrine), the merged record MUST carry:
+
+  :provenance ((:merged-from \"path/1.slat\" \"path/2.slat\")
+               (:merge-date \"2026-07-16\")
+               (:merge-tool \"main-agent-flat-slat-repair\"))
+
+The three merge outcomes:
+  - inline-merge     : overlapping content combined into one record
+  - appendix-defer   : extra content moved to an appendix record
+  - archive-as-alt   : the alternate stays as a sibling record with
+                       `:variant :alt` and `:supersedes \"path\"`
+
+Never delete a record. Preserve every version via provenance or
+appendix.")
+
+;; ---------------------------------------------------------------------------
+;; 8. SUBSYSTEM SCHEMAS (extension points)
+;; ---------------------------------------------------------------------------
+
+(section
+  :n 8
+  :title "Subsystem schemas — each subsystem declares its own"
+  :prose
+"SLAT is intentionally open. The core grammar + record shape + training
+tag set + dialect header are universal. Beyond that, each subsystem
+declares the record kinds it emits + reads:
+
+  Book-of-*         → chapter, appendix, code-block, cross-ref
+  MOTOI-SCHEME-REFERENCE.slat → verb, form, primitive, macro
+  Engineering docs  → book, preamble, chapter, code-block, eng-drift
+  SRE-MANUAL        → sre-chapter, sli, slo, alert, runbook-step,
+                      postmortem, disaster-scenario, budget
+  Corpus records    → pair, prompt, completion, tag, filter
+  Verb metering     → meter, price, quota, receipt
+  Adapter engine    → adapter-rule, dialect-delta, translation-vector
+
+Each subsystem SHOULD document its record schema in that subsystem's
+own directory. The Rosetta translator reads those schemas to route
+records between consumers.
+
+Rosetta itself never invents schemas — it composes existing ones and
+maps between them.")
+
+;; ---------------------------------------------------------------------------
+;; 9. ROSETTA — THE TRANSLATOR LAYER
+;; ---------------------------------------------------------------------------
+
+(section
+  :n 9
+  :title "Rosetta — the translator layer"
+  :prose
+"Rosetta is the translator between SLAT records and downstream
+consumers. It ships default translations for common conversions:
+
+  slat → jsonl          (line-delimited JSON, one record per line)
+  slat → markdown       (rendered chapter or verb page)
+  slat → html           (rendered book page via HelloSurface)
+  slat → toml           (config-friendly subset)
+  slat ↔ python-dict    (via bindings/python/slat/reader.py)
+  slat ↔ javascript-obj (via bindings/js/slat.js)
+  dialect-A ↔ dialect-B (via engine/adapters/*.slat)
+
+Rosetta is authored to be forkable — a consumer that wants a different
+mapping ships its own Rosetta variant. The Motoi ecosystem ignores
+forks (no ecosystem lock-in per Alfred 2026-07-14 doctrine).
+
+Rosetta lives at ~/code/motoi-scheme/Rosetta/, adjacent to the engines
+(src/). SLAT belongs to Rosetta because SLAT is the format Rosetta
+translates.")
+
+;; ---------------------------------------------------------------------------
+;; 10. WHAT SLAT IS NOT
+;; ---------------------------------------------------------------------------
+
+(section
+  :n 10
+  :title "What SLAT is NOT"
+  :prose
+"SLAT is not a general-purpose data-interchange format. It is optimized
+for Motoi/Sakura durable content and has strong opinions:
+
+  - Not JSON. Records are S-expressions with keyword pairs, not
+    curly-brace object literals. Choice deliberate: prose survives
+    round-trip cleanly; Lisp readers parse without a separate schema.
+  - Not YAML. Whitespace is not semantic. Nesting is via parens.
+  - Not TOML. No sections, no dotted keys, no arrays-of-tables. One
+    record kind per file variant is not enforced.
+  - Not a database schema. SLAT records are documents, not rows. There
+    is no primary-key enforcement, no foreign-key resolution, no query
+    language.
+  - Not a serialization format for arbitrary program state. Only
+    literals and record composites survive. Functions, closures,
+    cyclic structures do not serialize.
+
+If you need JSON/YAML/TOML/database features, Rosetta translates SLAT
+into those formats where the mapping is defined.")
+
+;; ---------------------------------------------------------------------------
+;; 11. CONFORMANCE + TEST VECTORS
+;; ---------------------------------------------------------------------------
+
+(section
+  :n 11
+  :title "Conformance"
+  :prose
+"A SLAT 1.0 conformant reader MUST:
+  1. Parse all records in `Rosetta/tests/vectors.slat` (canonical test
+     vectors — TBD; see :status \"needs-authoring\" below).
+  2. Preserve unknown record kinds verbatim on round-trip.
+  3. Preserve keyword-value order OR emit a stable canonical order.
+  4. Emit UTF-8; accept UTF-8 input.
+  5. Handle escaped `\\n` / `\\r` / `\\t` / `\\\"` / `\\\\` in strings.
+  6. Reject syntactically ill-formed records with a clear error citing
+     source position.
+
+A SLAT 1.0 conformant writer MUST:
+  1. Emit only well-formed records per §2.
+  2. Include a `(dialect ...)` header on documentation files.
+  3. Escape special characters in strings correctly.
+  4. Never emit non-UTF-8 bytes.
+
+Round-trip: for all records R in the test vectors,
+`slatLoads(slatDumps(R)) === R` structurally (order of keyword pairs
+may normalize; values MUST NOT change)."
+  :status "needs-authoring — Rosetta/tests/vectors.slat")
+
+;; ---------------------------------------------------------------------------
+;; 12. VERSIONING
+;; ---------------------------------------------------------------------------
+
+(section
+  :n 12
+  :title "Versioning"
+  :prose
+"This spec is SLAT 1.0.0. Semver applies:
+
+  MAJOR  — breaking change to grammar, record shape, or reader contract.
+  MINOR  — new optional fields, new record kinds, new file variants that
+           readers can safely ignore.
+  PATCH  — clarifications, typo fixes, no observable change.
+
+Every conforming reader MUST accept records that carry unknown MINOR-added
+fields without erroring. Forward compatibility across MINOR is required.
+
+The spec version is stored in the file that authored the record via
+`:slat-version \"1.0.0\"` when explicit versioning matters. Absence
+means \"the version current at authoring time.\"")
+
+;; ---------------------------------------------------------------------------
+;; 13. WHERE SLAT LIVES
+;; ---------------------------------------------------------------------------
+
+(section
+  :n 13
+  :title "Where SLAT lives in the tree"
+  :prose
+"  ~/code/motoi-scheme/
+    Rosetta/
+      SLAT-1.0.SPEC.slat        ← this file
+      SLAT-1.0.GRAMMAR.slat     ← formal grammar (BNF-like), TBD
+      adapters/                 ← dialect-to-dialect translators
+      tags/                     ← rosetta stones for tag conversion
+      tests/vectors.slat        ← canonical test vectors, TBD
+
+    src/slat.js                 ← the reader/writer facade
+    src/slat-verbs.js           ← Scheme-level SLAT verbs
+    bindings/js/slat.js         ← canonical JS reader/writer
+    bindings/js/slat/           ← JS test suite
+    bindings/python/slat/       ← Python binding
+    bindings/python/slat/reader.py, writer.py, jsonl.py
+
+Consumer subsystems (books, corpus, eng docs, ref manual) do NOT own
+SLAT — they consume it via Rosetta or the src/ facade.")
+
+;; ---------------------------------------------------------------------------
+;; 14. OPEN ITEMS
+;; ---------------------------------------------------------------------------
+
+(section
+  :n 14
+  :title "Open items in this spec"
+  :prose
+"Deliberately unresolved (needs Alfred + team decision):
+
+  - Rational literal syntax: R7RS allows `3/7`; JS reader currently
+    parses `3` and drops `/7`. Formalize behavior.
+  - Scientific notation exhaustive spec: `1e10`, `1.2e-4`, edge cases.
+  - Multi-line prose auto-wrap: writer's line-length preference.
+  - Comment preservation on round-trip: currently comments are dropped.
+    Should :comment records be introduced for canonical retention?
+  - Namespaced record kinds: `(cortex/chapter ...)` vs `(chapter :kind :cortex ...)`.
+    Pick one convention and stick with it."
+  :status "needs-alfred")
+
+;; ---------------------------------------------------------------------------
+;; 15. THE REASON SLAT EXISTS
+;; ---------------------------------------------------------------------------
+
+(section
+  :n 15
+  :title "The reason SLAT exists"
+  :prose
+"Alfred's 2026-07-14 doctrine (project_the_book_fix_it_part_three_rosetta_dewey_tags_free):
+source tags don't cater to consumers. Books use whatever tags they need;
+consumers convert via Rosetta or ignore. Books ≠ training. Rosetta ships as
+default, open to fork, we ignore forks (no ecosystem lock-in).
+
+SLAT is the format that makes this possible: expressive enough to carry
+rich book/verb/eng structure, simple enough to grep, parse in every
+language, and round-trip without lossy transforms. Prose survives.
+Provenance survives. Every record is inspectable in a text editor.
+
+The training pipeline reads SLAT. The doc renderer reads SLAT. Sakura's
+Cortex writes SLAT for its accretion memory. Every long-lived Motoi
+artifact ends up as SLAT.")
+
+;; End of SLAT 1.0 spec.

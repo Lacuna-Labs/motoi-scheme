@@ -1,0 +1,277 @@
+;; 10-signing.slat
+;; Book of SLAT — Chapter 10 — Signing
+
+(chapter
+  :book             "Book of SLAT"
+  :chapter-number   10
+  :title            "Chapter 10 — Signing"
+  :size             7996
+  :sha256           "76c74e391cf0c749"
+  :prose
+"---
+slug: book-of-slat-ch10
+title: Signing
+book: slat
+chapter: 10
+of: 16
+part: III
+app: scheme-repl
+palette: book-standard
+canonical: true
+owner: docs-team (Jess)
+status: draft
+last-reviewed: 2026-07-12
+---
+
+# Chapter 10 — Signing
+
+You have a slat. You want to prove you wrote it and that nobody
+tampered with it after you did.
+
+Answer: sign the canonical bytes with your private key. The receiver
+verifies with your public key. If the signature matches, the slat is
+authentic and untampered. If it doesn't match, something's wrong —
+either the slat was changed or the signature was forged.
+
+The default signing algorithm in SLAT 1.0 is **ed25519**. Small keys
+(32 bytes), fast, well-understood. `ecdsa-p256` is an option for
+environments that require it.
+
+## The signing envelope
+
+A signed slat is a wrapper record:
+
+```motoi-scheme
+(slat-loads \"
+(signed
+  :body    (event :ts 1751500000 :kind \\\"card.opened\\\")
+  :signed-by \\\"motoi@lacuna\\\"
+  :signature-algo \\\"ed25519\\\"
+  :signature #b64 \\\"signature-bytes-here\\\"
+  :cid       #b64 \\\"canonical-body-hash-here\\\"
+  :nonce     #b64 \\\"128-bit-random\\\"
+  :ts-signed #inst \\\"2026-07-11T18:22:00Z\\\")\")
+```
+
+Six fields, all keywords.
+
+- `:body` — the original slat, unchanged.
+- `:signed-by` — who signed it. A short identifier, not the public
+  key.
+- `:signature-algo` — the algorithm. Almost always `ed25519`.
+- `:signature` — the actual signature bytes, base64-encoded.
+- `:cid` — the sha256 of the canonical body. So the receiver doesn't
+  have to re-canonicalize to check.
+- `:nonce` — 128 random bits. Prevents replay.
+- `:ts-signed` — when the signer signed it.
+
+The signer's process:
+
+1. Canonicalize `:body`.
+2. Hash it. That's `:cid`.
+3. Sign `cid || nonce || ts-signed || signed-by`.
+4. Base64-encode the signature.
+
+The receiver's process:
+
+1. Look up the signer's public key by `:signed-by`.
+2. Canonicalize `:body`.
+3. Hash it. Confirm the hash matches `:cid`.
+4. Verify the signature over `cid || nonce || ts-signed || signed-by`.
+5. If any step fails, the slat is rejected.
+
+## Signing a slat
+
+```motoi-scheme
+(define event
+  '(event :ts 1751500000 :kind \"card.opened\" :by 'motoi))
+
+(define signed
+  (slat-sign event
+             :signer 'motoi@lacuna
+             :key (load-private-key \"motoi.key\")))
+
+(slat-key signed 'signed-by)
+```
+
+You get back `motoi@lacuna`. The record is signed.
+
+## Verifying a slat
+
+```motoi-scheme
+(define ok? (slat-verify signed
+                         :public-key (load-public-key \"motoi.pub\")))
+```
+
+You get back `#t` if the signature verifies, `#f` if not.
+
+If you don't have the right public key, `slat-verify` returns `#f`.
+If the record's bytes were tampered with, `slat-verify` returns `#f`.
+If the signature was forged with a different key, `slat-verify`
+returns `#f`. Only when everything matches do you get `#t`.
+
+## Capability tokens
+
+A capability token is a signed slat wrapping a permission grant:
+
+```motoi-scheme
+(slat-loads \"
+(capability
+  :grants   (:read \\\"atom/*\\\" :write \\\"artifact-state/chat/*\\\")
+  :subject  \\\"motoi@lacuna\\\"
+  :issuer   \\\"cortex@lacuna\\\"
+  :not-before #inst \\\"2026-07-11T00:00:00Z\\\"
+  :not-after  #inst \\\"2026-07-18T00:00:00Z\\\"
+  :nonce     #b64 \\\"random-bytes\\\")\")
+```
+
+The token is wrapped in `(signed :body … :signature … …)`. Consumers
+verify the signature, then check the capability's `:grants` field
+against the operation they want to do.
+
+This is how the runtime gets scoped write access to her own artifact state
+without being handed the operator's full key. The issuer signs a
+narrow capability, ships it, and the runtime's Cortex checks it before
+every write.
+
+## Reader sandbox
+
+Signing works because the reader is inert. The reader doesn't execute
+the `:body`. It just parses it and hands the receiver an inert value.
+The receiver's dispatch logic — which happens after signature
+verification — decides what to do with it.
+
+If the reader executed anything, an attacker could ship a signed slat
+whose signature is genuine but whose body is a malicious payload. But
+signatures verify the CONTENTS, and the contents are inert. So even a
+verified slat is safe to inspect before you act on it.
+
+Two-layer trust:
+
+1. **Signature verifies** → this is what the signer wrote.
+2. **Contents are inspected** → this is what the signer wrote, and I've
+   read it, and I agree with the action it describes.
+
+Both layers matter. A signed slat is not automatically trusted — it's
+authenticated. Trust is a policy decision on top of authentication.
+
+## Merkle attestation over slat sets
+
+For large sets — a training corpus, a manifest, a snapshot — you sign
+once, over the Merkle root, not once per element.
+
+```motoi-scheme
+(slat-loads \"
+(slat-set
+  :root #b64 \\\"the-merkle-root\\\"
+  :count 100
+  :hash-algo \\\"sha256\\\"
+  :merkle-scheme \\\"slat-merkle-v1\\\"
+  :signed-by \\\"cortex@lacuna\\\"
+  :signature #b64 \\\"the-signature\\\")\")
+```
+
+One signature covers all 100 atoms. The receiver:
+
+1. Verifies the signature over the root.
+2. Walks the tree of atoms.
+3. Confirms the root matches by re-hashing the tree.
+
+Any single tampered atom breaks the Merkle path from that leaf to the
+root. The receiver detects it in the walk.
+
+This is how Weave-2 corpora ship. This is why the runtime can trust her
+training data.
+
+## Taint tracking
+
+Bindings expose an optional `tainted=True` mode. Values read from a
+tainted stream carry a `_tainted: True` flag. Consumers that write
+them back propagate the taint.
+
+```motoi-scheme
+(define untrusted-input
+  (slat-loads text :tainted #t))
+```
+
+Any value derived from `untrusted-input` is also tainted. Cortex
+refuses tainted input by default. To de-taint, run through signature
+verification — if it verifies, drop the taint. Otherwise, the taint
+travels.
+
+Taint is per-record. A hand-authored spec quoting a tainted event
+stays tainted.
+
+## What signing does not do
+
+- **Doesn't hide the contents.** Signed slats are still plaintext. If
+  you want secrecy, encrypt (Chapter 10 in the Book of Systems has
+  the encryption verb).
+- **Doesn't prove intent.** A signature says \"I signed this.\" It
+  doesn't say \"I understood everything about it.\" Combine with policy.
+- **Doesn't prove freshness.** The `:ts-signed` claims a time, but a
+  signer can lie about time. Nonces + your own clock give you freshness.
+- **Doesn't stop replay.** The nonce prevents byte-identical replay,
+  but a receiver still needs to track nonces they've seen.
+
+## Try this
+
+Sign a small slat, verify it, then tamper with it and verify again.
+
+```motoi-scheme
+(define event
+  '(event :ts 1751500000 :kind \"card.opened\" :by 'motoi))
+
+(define signed
+  (slat-sign event
+             :signer 'motoi@lacuna
+             :key (load-private-key \"motoi.key\")))
+
+(slat-verify signed
+             :public-key (load-public-key \"motoi.pub\"))
+```
+
+You get `#t`.
+
+Now tamper — change the timestamp inside the signed record's `:body`.
+
+```motoi-scheme
+(define tampered
+  (slat-assoc signed 'body
+              (slat-assoc (slat-key signed 'body) 'ts 9999)))
+
+(slat-verify tampered
+             :public-key (load-public-key \"motoi.pub\"))
+```
+
+`#f`. The tampered body doesn't match the CID, so the signature check
+fails.
+
+## The signing rule
+
+**Sign the canonical bytes. Verify by canonicalizing again and
+checking the signature.**
+
+The canonicalization is what makes signing possible. Without stable
+bytes, no stable signature. That's why we spent Chapter 8 on the
+eleven rules.
+
+## Where next
+
+Chapter 11 walks auto-assembly. When the runtime reads a slat with a
+known head symbol, it rehydrates to a native object. When it reads
+one with an unknown head, it returns a generic record. Both paths are
+safe. Both are extensible.
+
+## Cross-links
+
+- [[appendix-g]] — signing recipes for common scenarios.
+- [[book-of-systems]] Chapter 3 — Service catalog, which uses
+  capability tokens.
+- [[book-of-self]] Chapter 8 — Limits and escalation, which uses
+  signed capability tokens for L2 access.
+
+---
+
+Turn the page.
+")

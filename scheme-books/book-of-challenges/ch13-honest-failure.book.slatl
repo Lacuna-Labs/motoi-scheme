@@ -1,0 +1,1508 @@
+;; ch13-honest-failure.slat
+;; Book of Challenges — Chapter 13 — Honest Failure at Scale
+
+(chapter
+  :book             "Book of Challenges"
+  :chapter-number   null
+  :title            "Chapter 13 — Honest Failure at Scale"
+  :size             53428
+  :sha256           "4e334b14ac55a864"
+  :prose
+"# Chapter 13 — Honest Failure at Scale
+
+Mastery isn't just writing programs that work when everything goes right. It's writing programs that degrade gracefully when the world pushes back — when a network call times out, when data arrives malformed, when a service returns `'nan` because it honestly can't answer. This chapter drills the hardest, most satisfying skill: orchestrating long routes where *any* stage might fail, and handling each failure cleanly without pretending, without crashing, without gold-plating a fake success.
+
+We'll start with guarding a single fallible call, then build up to multi-stage pipelines that check every result, degrade intelligently, and surface honest outcomes. By the end, you'll write routes that compose five, seven, ten stages — each one a wired verb that might return `'nan` or `(escalate ...)` — and your program will flow through them like water finding its level, never assuming, always checking, always honest.
+
+This is what lets the runtime operate in the real world. Services time out. APIs change. Data arrives incomplete. A program that can't handle failure is a program that can't be trusted. A program that *can* — that checks, routes, and degrades with clarity — is a program you can lean on when it matters.
+
+---
+
+## Guarding One Call
+
+Start simple: one wired verb, one honest check. The verb might succeed, or it might return `'nan`. We call the verb, bind the result, check it, and branch.
+
+The core idea: never assume. Bind the result to a name, then ask: did this work? If it's `'nan`, we have a choice — return a default, escalate cleanly, or try another route. If it worked, we use it. This is the atomic unit of honest failure handling.
+
+```scheme
+;; Call a verb, check for 'nan, return a default if it failed
+(let ((today (system/date-today)))
+  (if (eq? today 'nan)
+      \"unknown-date\"
+      today))
+```
+
+That's the pattern: bind, check, branch. Let's make it do real work.
+
+```scheme
+;; Fetch current Unix timestamp; if it fails, return a sentinel
+(let ((ts (time/unix-now)))
+  (if (eq? ts 'nan)
+      0  ;; sentinel: we don't know when \"now\" is
+      ts))
+```
+
+Now layer in a second check: what if the result isn't `'nan`, but it's an escalation? An escalation is a two-element list starting with the symbol `escalate`. We check for that, too.
+
+```scheme
+;; Check for both 'nan and escalate, return a safe default
+(let ((ts (time/unix-now)))
+  (cond
+    ((eq? ts 'nan) 0)
+    ((and (pair? ts) (eq? (car ts) 'escalate))
+     0)  ;; also a failure, also return sentinel
+    (else ts)))
+```
+
+That's the honest guard: `'nan` means value failure, `escalate` means structural failure, and anything else is success. Let's wrap it in a helper so we can reuse the pattern.
+
+```scheme
+;; Helper: return #t if x is a failure ('nan or escalate), #f otherwise
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+;; Use it to guard a call
+(let ((ts (time/unix-now)))
+  (if (failed? ts)
+      0
+      ts))
+```
+
+Now we have a reusable predicate. Let's build on it.
+
+---
+
+## Fallback Chains
+
+One verb fails — try another. This is a fallback chain: attempt the first option, check it, and if it failed, attempt the second. Keep the first success you find.
+
+```scheme
+;; Try to get current timestamp; if that fails, try parsing a known ISO string
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(let ((ts (time/unix-now)))
+  (if (failed? ts)
+      (let ((fallback (time/parse-iso8601 \"2025-01-01T00:00:00Z\")))
+        (if (failed? fallback)
+            0  ;; both failed; sentinel
+            fallback))
+      ts))
+```
+
+Nested `let` and `if` — it works, but it's a ladder. Let's make it cleaner with `cond`.
+
+```scheme
+;; Fallback chain with cond
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(let* ((primary (time/unix-now))
+       (secondary (time/parse-iso8601 \"2025-01-01T00:00:00Z\")))
+  (cond
+    ((not (failed? primary)) primary)
+    ((not (failed? secondary)) secondary)
+    (else 0)))  ;; all failed
+```
+
+Better. Now extend it: three fallbacks.
+
+```scheme
+;; Three-level fallback: current time, parsed ISO, hardcoded sentinel
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(let* ((opt1 (time/unix-now))
+       (opt2 (time/parse-iso8601 \"2025-06-15T12:00:00Z\"))
+       (opt3 1609459200))  ;; known Unix timestamp as final fallback
+  (cond
+    ((not (failed? opt1)) opt1)
+    ((not (failed? opt2)) opt2)
+    (else opt3)))
+```
+
+The pattern: bind all options with `let*`, then test them in order with `cond`. The first one that isn't a failure wins. If they all fail, you return a known-good default or escalate cleanly yourself.
+
+---
+
+## Escalating Honestly
+
+Sometimes there's no good default. When every option fails, the honest move is to escalate — return `(escalate <reason> <detail>)` so the caller knows what happened and can decide.
+
+```scheme
+;; Try to get a timestamp; if all fail, escalate with a reason
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(let* ((opt1 (time/unix-now))
+       (opt2 (time/parse-iso8601 \"2025-12-25T00:00:00Z\")))
+  (cond
+    ((not (failed? opt1)) opt1)
+    ((not (failed? opt2)) opt2)
+    (else (list 'escalate 'time-unavailable 'all-sources-failed))))
+```
+
+Now the caller can check: is the result a number, or is it an escalation? If it's an escalation, they know *why* and can choose their next move.
+
+Let's use this in a real scenario: computing a relative timestamp. We need \"now\" to compute \"days since X.\" If we can't get \"now,\" we can't compute the delta — so we escalate.
+
+```scheme
+;; Compute days since a known date; escalate if \"now\" is unavailable
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (days-since-epoch)
+  (let ((now (time/unix-now))
+        (epoch 0))  ;; Unix epoch: Jan 1, 1970
+    (if (failed? now)
+        (list 'escalate 'time-unavailable 'cannot-compute-delta)
+        (let ((seconds-delta (- now epoch)))
+          (quotient seconds-delta 86400)))))  ;; seconds in a day
+
+(days-since-epoch)
+```
+
+Honest escalation: if we can't get `now`, we don't fake it. We return a structured failure the caller can inspect.
+
+---
+
+## Two-Stage Pipelines
+
+Now compose two verbs: the output of the first becomes the input to the second. Either stage might fail. We check both.
+
+```scheme
+;; Get current Unix time, then parse a known ISO string and compute a delta
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(let* ((now (time/unix-now))
+       (target (time/parse-iso8601 \"2026-01-01T00:00:00Z\")))
+  (cond
+    ((failed? now)
+     (list 'escalate 'time-unavailable 'now-failed))
+    ((failed? target)
+     (list 'escalate 'parse-failed 'target-date-invalid))
+    (else
+     (let ((delta (- target now)))
+       (if (< delta 0)
+           (list 'escalate 'invalid-delta 'target-in-past)
+           (quotient delta 86400))))))  ;; days until target
+```
+
+Three checks: did `now` fail? Did `target` fail? Is the delta nonsensical? Each one escalates with a distinct reason. If all three pass, we return the answer.
+
+This is FORWARD and ESCAPE in tandem: we advance the computation (FORWARD) only when the prior stage succeeded, and we escalate cleanly (ESCAPE) the moment something breaks.
+
+Let's add a third stage: format the result as a human-readable string.
+
+```scheme
+;; Three-stage pipeline: get now, parse target, compute delta, format
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(let* ((now (time/unix-now))
+       (target (time/parse-iso8601 \"2026-07-04T00:00:00Z\")))
+  (cond
+    ((failed? now)
+     (list 'escalate 'time-unavailable 'now-failed))
+    ((failed? target)
+     (list 'escalate 'parse-failed 'target-invalid))
+    (else
+     (let ((delta (- target now)))
+       (cond
+         ((< delta 0)
+          (list 'escalate 'invalid-delta 'target-in-past))
+         (else
+          (let* ((days (quotient delta 86400))
+                 (slug (system/slugify (string-append (number->string days) \" days until target\"))))
+            (if (failed? slug)
+                (list 'escalate 'slugify-failed 'formatting-error)
+                slug))))))))
+```
+
+Four checks now: `now`, `target`, delta sanity, and `slugify`. The pipeline grows, but the pattern stays the same: check each stage, escalate if it fails, advance if it succeeds.
+
+---
+
+## Recovering from Partial Failure
+
+Sometimes you don't need *all* the data to succeed — you just need *enough*. A list of items arrives; some are malformed. Do you throw out the whole batch, or do you keep the good ones and log the bad?
+
+Mastery means choosing the right recovery strategy. Here's one: filter the list, keep only the items that pass a check, and if the result is empty, *then* escalate.
+
+```scheme
+;; Parse a list of ISO timestamps; keep only the valid ones
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (parse-timestamp ts-string)
+  (time/parse-iso8601 ts-string))
+
+(define (valid-timestamp? ts-string)
+  (let ((parsed (parse-timestamp ts-string)))
+    (not (failed? parsed))))
+
+(let* ((raw-timestamps '(\"2025-01-15T10:00:00Z\"
+                         \"invalid-date\"
+                         \"2025-06-20T14:30:00Z\"
+                         \"2025-12-31T23:59:59Z\"
+                         \"also-bad\"))
+       (valid-only (filter valid-timestamp? raw-timestamps)))
+  (if (null? valid-only)
+      (list 'escalate 'no-valid-timestamps 'all-failed)
+      (map parse-timestamp valid-only)))
+```
+
+We filter first, keeping only strings that parse successfully. If the filtered list is empty, we escalate. Otherwise, we map `parse-timestamp` over the survivors. This is graceful degradation: we accept partial success.
+
+Now extend it: compute the average of the parsed timestamps (as Unix seconds), but only if we have at least two valid ones.
+
+```scheme
+;; Parse timestamps, compute average, escalate if fewer than 2 valid
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (parse-timestamp ts-string)
+  (time/parse-iso8601 ts-string))
+
+(define (valid-timestamp? ts-string)
+  (let ((parsed (parse-timestamp ts-string)))
+    (not (failed? parsed))))
+
+(let* ((raw-timestamps '(\"2025-03-10T08:00:00Z\"
+                         \"bad-entry\"
+                         \"2025-03-12T08:00:00Z\"
+                         \"2025-03-14T08:00:00Z\"))
+       (valid-only (filter valid-timestamp? raw-timestamps))
+       (parsed-list (map parse-timestamp valid-only)))
+  (if (< (length parsed-list) 2)
+      (list 'escalate 'insufficient-data 'need-at-least-two)
+      (let* ((sum (apply + parsed-list))
+             (count (length parsed-list))
+             (avg (quotient sum count)))
+        avg)))
+```
+
+Two checks: do we have enough valid data? If yes, compute the average. If no, escalate. This is BACK in action: we don't gold-plate a result when the data is too sparse to be meaningful.
+
+---
+
+## Multi-Stage Orchestration with Wired Verbs
+
+Now the real work begins. We'll compose several wired verbs into one route, where each stage depends on the prior stage's success. This is what \"honest failure at scale\" means: a pipeline that could break at any joint, but handles every break cleanly.
+
+Let's build a route that:
+1. Generates a UUID
+2. Hashes it with SHA-256
+3. Slugifies the hash
+4. Computes the current timestamp
+5. Combines them into a structured result
+
+Each stage can fail. We check every one.
+
+```scheme
+;; Five-stage pipeline: UUID -> hash -> slugify -> timestamp -> combine
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(let* ((uuid (system/uuid-v4))
+       (hashed (if (failed? uuid)
+                   (list 'escalate 'uuid-failed 'stage-1)
+                   (system/sha256 uuid)))
+       (slugged (if (failed? hashed)
+                    hashed  ;; propagate prior failure
+                    (let ((slug (system/slugify hashed)))
+                      (if (failed? slug)
+                          (list 'escalate 'slugify-failed 'stage-3)
+                          slug))))
+       (ts (if (failed? slugged)
+               slugged  ;; propagate prior failure
+               (let ((now (time/unix-now)))
+                 (if (failed? now)
+                     (list 'escalate 'time-failed 'stage-4)
+                     now)))))
+  (if (failed? ts)
+      ts  ;; propagate failure
+      (list 'result slugged ts)))
+```
+
+This is the ladder pattern: each stage checks the prior stage. If the prior stage failed, we propagate the failure forward. If it succeeded, we attempt the next stage. At the end, we either have a valid result or a clean escalation.
+
+It works, but it's verbose. Let's refactor with a helper that short-circuits on failure.
+
+```scheme
+;; Helper: apply f to x if x is not a failure; else return x
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (then f x)
+  (if (failed? x)
+      x
+      (f x)))
+
+;; Five-stage pipeline with short-circuit helper
+(let* ((uuid (system/uuid-v4))
+       (hashed (then (lambda (u) (system/sha256 u)) uuid))
+       (slugged (then (lambda (h) (system/slugify h)) hashed))
+       (ts (then (lambda (s) (time/unix-now)) slugged))
+       (result (then (lambda (t) (list 'result slugged t)) ts)))
+  result)
+```
+
+Much cleaner. The `then` helper checks for failure and short-circuits if needed. Otherwise, it applies the function. This is close-data-close-paren orchestration: each stage wraps the next, and failures propagate automatically.
+
+Now a harder variant: fetch data from a wired verb, transform it, and store the result in cortex memory.
+
+```scheme
+;; Multi-stage: generate UUID, hash it, store in cortex with timestamp
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (then f x)
+  (if (failed? x) x (f x)))
+
+(let* ((uuid (system/uuid-v4))
+       (hashed (then (lambda (u) (system/sha256 u)) uuid))
+       (ts (then (lambda (h) (time/unix-now)) hashed))
+       (stored (then (lambda (t)
+                       (cortex/remember \"pipeline-result\"
+                                        (list 'hash hashed 'timestamp t)))
+                     ts)))
+  stored)
+```
+
+Four stages: generate, hash, get timestamp, store in cortex. If any stage fails, the failure propagates and we don't attempt to store bad data.
+
+---
+
+## Handling Lists of Fallible Operations
+
+Often you need to process a list where each item requires a fallible operation. You have choices:
+- Stop at the first failure (fail-fast)
+- Collect all successes and escalate only if *all* failed (best-effort)
+- Collect successes and failures separately (audit trail)
+
+Let's drill each one.
+
+### Fail-Fast
+
+Process items one by one. The moment one fails, stop and return the failure.
+
+```scheme
+;; Process a list of numbers: divide 100 by each; stop at first division error
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (safe-divide n)
+  (if (= n 0)
+      (list 'escalate 'division-by-zero n)
+      (/ 100 n)))
+
+(define (process-list lst)
+  (if (null? lst)
+      '()
+      (let ((result (safe-divide (car lst))))
+        (if (failed? result)
+            result  ;; stop here, return the failure
+            (let ((rest (process-list (cdr lst))))
+              (if (failed? rest)
+                  rest  ;; propagate failure from rest
+                  (cons result rest)))))))
+
+(process-list '(10 5 2 0 1))  ;; stops at 0, returns escalate
+```
+
+Recursive fail-fast: process the first item. If it fails, return the failure. Otherwise, recurse on the rest. If the rest fails, propagate that failure. Otherwise, cons the result onto the rest.
+
+### Best-Effort
+
+Keep all successes; escalate only if the success list is empty.
+
+```scheme
+;; Process a list, keep successes, escalate if all failed
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (safe-divide n)
+  (if (= n 0)
+      (list 'escalate 'division-by-zero n)
+      (/ 100 n)))
+
+(define (filter-successes lst)
+  (filter (lambda (item)
+            (not (failed? (safe-divide item))))
+          lst))
+
+(let* ((inputs '(10 5 0 2 0 1))
+       (valid-inputs (filter-successes inputs))
+       (results (map safe-divide valid-inputs)))
+  (if (null? results)
+      (list 'escalate 'all-failed 'no-valid-inputs)
+      results))
+```
+
+Filter first to keep only items that would succeed, then map over them. If the result list is empty, escalate.
+
+### Audit Trail
+
+Separate successes and failures into two lists.
+
+```scheme
+;; Process a list, partition into successes and failures
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (safe-divide n)
+  (if (= n 0)
+      (list 'escalate 'division-by-zero n)
+      (/ 100 n)))
+
+(define (partition-results lst)
+  (let loop ((remaining lst)
+             (successes '())
+             (failures '()))
+    (if (null? remaining)
+        (list 'successes (reverse successes)
+              'failures (reverse failures))
+        (let* ((item (car remaining))
+               (result (safe-divide item)))
+          (if (failed? result)
+              (loop (cdr remaining)
+                    successes
+                    (cons (list 'input item 'error result) failures))
+              (loop (cdr remaining)
+                    (cons (list 'input item 'output result) successes)
+                    failures))))))
+
+(partition-results '(10 5 0 2 0 1))
+```
+
+A named `let` loop: process each item, check if it failed, append it to the appropriate list. At the end, return both lists. This is an audit trail: you can see exactly what succeeded and what failed.
+
+---
+
+## Nested Pipelines
+
+Sometimes a stage itself is a multi-step pipeline. You have an outer route and an inner route, each with its own failure handling. The key: keep them separate, check both.
+
+```scheme
+;; Outer pipeline calls an inner pipeline; both can fail
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (then f x)
+  (if (failed? x) x (f x)))
+
+;; Inner pipeline: hash a string, then slugify the hash
+(define (hash-and-slug s)
+  (let* ((hashed (system/sha256 s))
+         (slugged (then (lambda (h) (system/slugify h)) hashed)))
+    slugged))
+
+;; Outer pipeline: generate UUID, pass it to inner pipeline, get timestamp
+(let* ((uuid (system/uuid-v4))
+       (processed (then hash-and-slug uuid))
+       (ts (then (lambda (p) (time/unix-now)) processed))
+       (result (then (lambda (t) (list 'final processed t)) ts)))
+  result)
+```
+
+The inner pipeline (`hash-and-slug`) is a self-contained function that returns either a success or a failure. The outer pipeline calls it with `then`, which short-circuits if the UUID generation failed. Each pipeline handles its own failures; the outer pipeline treats the inner pipeline as a single fallible stage.
+
+Now nest deeper: three levels.
+
+```scheme
+;; Three-level nesting: outer -> middle -> inner
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (then f x)
+  (if (failed? x) x (f x)))
+
+;; Inner: slugify a string
+(define (slugify-safe s)
+  (system/slugify s))
+
+;; Middle: hash then slugify
+(define (hash-and-slug s)
+  (let ((hashed (system/sha256 s)))
+    (then slugify-safe hashed)))
+
+;; Outer: UUID -> hash-and-slug -> timestamp
+(let* ((uuid (system/uuid-v4))
+       (processed (then hash-and-slug uuid))
+       (ts (then (lambda (p) (time/unix-now)) processed))
+       (result (then (lambda (t) (list 'final processed t)) ts)))
+  result)
+```
+
+Three functions, three levels of nesting, all using `then` to propagate failures. The structure is clean: each function does one thing, checks its result, and returns. The outer function composes them.
+
+---
+
+## Real-World Route: Event Pipeline
+
+Let's build something real. An event arrives (simulated here as a data structure). We:
+1. Extract a timestamp from the event
+2. Hash the event ID
+3. Compute the time delta between the event and now
+4. Store the result in cortex
+5. Return a summary
+
+Each stage can fail. We handle all of them.
+
+```scheme
+;; Event processing pipeline with full failure handling
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (then f x)
+  (if (failed? x) x (f x)))
+
+;; Simulated event (in real code, this would come from a webhook or queue)
+(define event
+  '((id . \"evt-12345\")
+    (timestamp . \"2025-01-15T10:30:00Z\")
+    (type . \"order.created\")))
+
+;; Extract a field from an alist
+(define (get-field alist key)
+  (let ((pair (assoc key alist)))
+    (if pair
+        (cdr pair)
+        (list 'escalate 'missing-field key))))
+
+;; Parse ISO timestamp
+(define (parse-ts ts-string)
+  (if (string? ts-string)
+      (time/parse-iso8601 ts-string)
+      (list 'escalate 'invalid-input 'not-a-string)))
+
+;; Compute time delta
+(define (delta-from-now event-ts)
+  (let ((now (time/unix-now)))
+    (if (failed? now)
+        now
+        (- now event-ts))))
+
+;; The pipeline
+(let* ((event-id (get-field event 'id))
+       (hashed-id (then (lambda (id) (system/sha256 id)) event-id))
+       (ts-string (get-field event 'timestamp))
+       (event-ts (then parse-ts ts-string))
+       (delta (then delta-from-now event-ts))
+       (stored (then (lambda (d)
+                       (cortex/remember \"event-processed\"
+                                        (list 'event-id hashed-id
+                                              'delta d)))
+                     delta)))
+  (if (failed? stored)
+      stored
+      (list 'summary
+            'event-id hashed-id
+            'age-seconds delta)))
+```
+
+Six stages, five opportunities for failure. Each one is checked. If any fails, we propagate the failure and stop. If all succeed, we store the result in cortex and return a summary.
+
+This is mastery: a real route, honest handling, clear escalation, no faked results.
+
+---
+
+## Parallel Failure: Multiple Independent Calls
+
+Sometimes you need data from several independent sources. None depends on the others, but you need *all* of them to succeed. If any fails, you escalate with the reason.
+
+```scheme
+;; Fetch data from three independent sources; escalate if any fails
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(let* ((uuid (system/uuid-v4))
+       (ts (time/unix-now))
+       (date (system/date-today)))
+  (cond
+    ((failed? uuid)
+     (list 'escalate 'uuid-failed 'source-1))
+    ((failed? ts)
+     (list 'escalate 'timestamp-failed 'source-2))
+    ((failed? date)
+     (list 'escalate 'date-failed 'source-3))
+    (else
+     (list 'combined uuid ts date))))
+```
+
+Three independent calls, checked in sequence. If any fails, we escalate with a clear reason. If all succeed, we combine them.
+
+Now extend it: some calls are optional. We want them if they succeed, but we don't fail the whole route if they don't.
+
+```scheme
+;; Fetch required and optional data; escalate only if required fails
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(let* ((required-uuid (system/uuid-v4))
+       (required-ts (time/unix-now))
+       (optional-date (system/date-today)))
+  (cond
+    ((failed? required-uuid)
+     (list 'escalate 'uuid-failed 'required))
+    ((failed? required-ts)
+     (list 'escalate 'timestamp-failed 'required))
+    (else
+     (list 'result
+           'uuid required-uuid
+           'timestamp required-ts
+           'date (if (failed? optional-date) 'unavailable optional-date)))))
+```
+
+Two required, one optional. If a required call fails, we escalate. If the optional call fails, we note it but continue.
+
+---
+
+## Retry Logic
+
+Sometimes a verb fails transiently — a network timeout, a rate limit. The honest move: try again, a fixed number of times, with a clear limit.
+
+Here's a retry helper. It attempts a thunk (a zero-argument function). If it fails, it retries up to N times. If all attempts fail, it returns the last failure.
+
+```scheme
+;; Retry a thunk up to N times; return first success or last failure
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (retry thunk attempts)
+  (let loop ((remaining attempts)
+             (last-result 'nan))
+    (if (<= remaining 0)
+        last-result  ;; out of attempts, return last failure
+        (let ((result (thunk)))
+          (if (failed? result)
+              (loop (- remaining 1) result)  ;; try again
+              result)))))  ;; success, return it
+
+;; Example: retry getting current timestamp up to 3 times
+(retry (lambda () (time/unix-now)) 3)
+```
+
+The loop tracks remaining attempts and the last result. Each iteration calls the thunk. If it succeeds, we return immediately. If it fails, we decrement the counter and try again. When we run out of attempts, we return the last failure.
+
+Use this for a real route: fetch a UUID, hash it, retry if hashing fails.
+
+```scheme
+;; Retry hashing a UUID; give up after 3 attempts
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (retry thunk attempts)
+  (let loop ((remaining attempts)
+             (last-result 'nan))
+    (if (<= remaining 0)
+        last-result
+        (let ((result (thunk)))
+          (if (failed? result)
+              (loop (- remaining 1) result)
+              result)))))
+
+(let ((uuid (system/uuid-v4)))
+  (if (failed? uuid)
+      uuid
+      (retry (lambda () (system/sha256 uuid)) 3)))
+```
+
+Generate a UUID (no retry on that; it either works or it doesn't). Then retry hashing up to 3 times. If all retries fail, we propagate the failure.
+
+---
+
+## Degraded Mode
+
+Sometimes you can't get the ideal data, but you can compute a reasonable fallback. This is degraded mode: you note the degradation, but you keep running.
+
+```scheme
+;; Compute days until a target date; degrade to estimated value if \"now\" fails
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (days-until target-unix)
+  (let ((now (time/unix-now)))
+    (if (failed? now)
+        (let ((approx-now 1704067200))  ;; fallback: known recent timestamp
+          (list 'degraded
+                'delta (quotient (- target-unix approx-now) 86400)
+                'reason 'now-unavailable))
+        (list 'exact
+              'delta (quotient (- target-unix now) 86400)))))
+
+(days-until 1735689600)  ;; Unix timestamp for Jan 1, 2025
+```
+
+We try to get `now`. If it fails, we use a known-good fallback timestamp and mark the result as `degraded`. The caller can see that the result is approximate, not exact.
+
+This is the BACK move: we don't over-promise. We surface the degradation honestly.
+
+---
+
+## Batch Operations with Partial Success
+
+You have a batch of items. You want to process all of them, but some might fail. Collect successes and failures, return both, let the caller decide what to do.
+
+```scheme
+;; Process a batch of strings: hash each, collect successes and failures
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (hash-string s)
+  (system/sha256 s))
+
+(define (process-batch items)
+  (let loop ((remaining items)
+             (successes '())
+             (failures '()))
+    (if (null? remaining)
+        (list 'successes (reverse successes)
+              'failures (reverse failures))
+        (let* ((item (car remaining))
+               (result (hash-string item)))
+          (if (failed? result)
+              (loop (cdr remaining)
+                    successes
+                    (cons (list 'item item 'error result) failures))
+              (loop (cdr remaining)
+                    (cons (list 'item item 'hash result) successes)
+                    failures))))))
+
+(process-batch '(\"alpha\" \"beta\" \"gamma\" \"delta\"))
+```
+
+Process each item, check the result, append to the appropriate list. At the end, return both. The caller can inspect how many succeeded, how many failed, and why.
+
+Now extend it: after processing, decide whether to escalate based on the success rate.
+
+```scheme
+;; Process batch, escalate if success rate < 50%
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (hash-string s)
+  (system/sha256 s))
+
+(define (process-batch items)
+  (let loop ((remaining items)
+             (successes '())
+             (failures '()))
+    (if (null? remaining)
+        (list 'successes (reverse successes)
+              'failures (reverse failures))
+        (let* ((item (car remaining))
+               (result (hash-string item)))
+          (if (failed? result)
+              (loop (cdr remaining)
+                    successes
+                    (cons (list 'item item 'error result) failures))
+              (loop (cdr remaining)
+                    (cons (list 'item item 'hash result) successes)
+                    failures))))))
+
+(let* ((items '(\"alpha\" \"beta\" \"gamma\" \"delta\"))
+       (batch-result (process-batch items))
+       (successes (cadr (assoc 'successes batch-result)))
+       (failures (cadr (assoc 'failures batch-result)))
+       (total (+ (length successes) (length failures)))
+       (success-rate (if (= total 0)
+                         0
+                         (/ (length successes) total))))
+  (if (< success-rate 0.5)
+      (list 'escalate 'low-success-rate
+            (list 'rate success-rate
+                  'successes (length successes)
+                  'failures (length failures)))
+      (list 'batch-ok
+            'successes successes
+            'failures failures)))
+```
+
+Process the batch, compute the success rate, escalate if it's below 50%. Otherwise, return the full result. This is policy-driven failure handling: the threshold is a business rule, not a technical one.
+
+---
+
+## Timeouts and Resource Limits
+
+Some operations are expensive. You want to try them, but you don't want to wait forever. Scheme doesn't have built-in timeouts, but you can simulate the *check*: attempt the operation, and if the result indicates a timeout (e.g., the verb returns a specific escalation), handle it.
+
+```scheme
+;; Simulate a call that might time out; handle the timeout escalation
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+;; Simulated expensive operation (in real code, a wired verb might return this)
+(define (expensive-call)
+  (list 'escalate 'timeout 'operation-exceeded-limit))
+
+(let ((result (expensive-call)))
+  (cond
+    ((and (failed? result)
+          (pair? result)
+          (eq? (cadr result) 'timeout))
+     (list 'degraded 'timeout-fallback 'used-cached-value))
+    ((failed? result)
+     result)  ;; other failure, propagate
+    (else
+     (list 'success result))))
+```
+
+Check not just *if* it failed, but *why*. If it's a timeout, degrade gracefully. If it's another kind of failure, propagate it. If it succeeded, use it.
+
+This is ESCAPE with nuance: different failures get different routes.
+
+---
+
+## Composing Higher-Order Failure Handlers
+
+We've built several helpers: `failed?`, `then`, `retry`. Now compose them into a toolkit.
+
+```scheme
+;; A small toolkit for failure handling
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (then f x)
+  (if (failed? x) x (f x)))
+
+(define (retry thunk attempts)
+  (let loop ((remaining attempts)
+             (last-result 'nan))
+    (if (<= remaining 0)
+        last-result
+        (let ((result (thunk)))
+          (if (failed? result)
+              (loop (- remaining 1) result)
+              result)))))
+
+(define (or-else x fallback)
+  (if (failed? x) fallback x))
+
+;; Use the toolkit: UUID -> hash with retry -> fallback if all retries fail
+(let* ((uuid (system/uuid-v4))
+       (hashed (then (lambda (u)
+                       (retry (lambda () (system/sha256 u)) 3))
+                     uuid))
+       (final (or-else hashed \"fallback-hash\")))
+  final)
+```
+
+Three helpers: `then` short-circuits on failure, `retry` retries a thunk, `or-else` provides a fallback. Compose them: generate UUID, retry hashing it, fall back to a constant if all retries fail.
+
+Now build a longer route with the toolkit.
+
+```scheme
+;; Multi-stage route using the failure toolkit
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (then f x)
+  (if (failed? x) x (f x)))
+
+(define (retry thunk attempts)
+  (let loop ((remaining attempts)
+             (last-result 'nan))
+    (if (<= remaining 0)
+        last-result
+        (let ((result (thunk)))
+          (if (failed? result)
+              (loop (- remaining 1) result)
+              result)))))
+
+(define (or-else x fallback)
+  (if (failed? x) fallback x))
+
+(let* ((uuid (system/uuid-v4))
+       (hashed (then (lambda (u)
+                       (retry (lambda () (system/sha256 u)) 3))
+                     uuid))
+       (slugged (then (lambda (h)
+                        (system/slugify h))
+                      hashed))
+       (ts (time/unix-now))
+       (final-ts (or-else ts 0))
+       (result (if (failed? slugged)
+                   (list 'escalate 'pipeline-failed 'slug-stage)
+                   (list 'result slugged final-ts))))
+  result)
+```
+
+Five stages, using all the helpers: `then`, `retry`, `or-else`. Each stage handles failure its own way. The final result is either a clean success or a clean escalation.
+
+---
+
+## Deep Recursion with Failure
+
+Recursion is powerful, but every recursive call is an opportunity for failure. Let's write a recursive function that processes a nested structure, checking for failure at each level.
+
+```scheme
+;; Recursively hash all strings in a nested list structure
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (hash-all structure)
+  (cond
+    ((null? structure) '())
+    ((string? structure)
+     (let ((hashed (system/sha256 structure)))
+       (if (failed? hashed)
+           hashed  ;; propagate failure
+           hashed)))
+    ((pair? structure)
+     (let ((first (hash-all (car structure))))
+       (if (failed? first)
+           first  ;; stop recursion, propagate failure
+           (let ((rest (hash-all (cdr structure))))
+             (if (failed? rest)
+                 rest
+                 (cons first rest))))))
+    (else structure)))  ;; numbers, symbols, etc. pass through
+
+(hash-all '(\"alpha\" (\"beta\" \"gamma\") \"delta\"))
+```
+
+Recursive descent: if it's a string, hash it and check for failure. If it's a pair, recurse on both halves and check both. If either half fails, propagate the failure. If both succeed, cons them together.
+
+Now a harder variant: process a tree where each node has a label and children. Hash the label, recurse on the children, combine the results.
+
+```scheme
+;; Process a tree: (label . children)
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (process-tree tree)
+  (cond
+    ((null? tree) '())
+    ((string? tree)
+     (system/sha256 tree))  ;; leaf node: hash it
+    ((pair? tree)
+     (let* ((label (car tree))
+            (children (cdr tree))
+            (hashed-label (if (string? label)
+                              (system/sha256 label)
+                              label)))
+       (if (failed? hashed-label)
+           hashed-label
+           (let ((processed-children (process-tree children)))
+             (if (failed? processed-children)
+                 processed-children
+                 (cons hashed-label processed-children))))))
+    (else tree)))
+
+(process-tree '(\"root\" (\"child1\" \"leaf1\") (\"child2\" \"leaf2\")))
+```
+
+Recurse through a tree structure, hashing string labels, propagating failures, combining successes. This is deep recursion with honest failure handling at every level.
+
+---
+
+## Accumulator with Failure Handling
+
+Sometimes you recurse with an accumulator — building up a result as you go. If a step fails, you need to decide: do you return the accumulator so far (partial success), or do you escalate (all-or-nothing)?
+
+Let's do both.
+
+### All-or-Nothing
+
+```scheme
+;; Sum a list of numbers, but hash each first; escalate if any hash fails
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (sum-hashed-numbers nums)
+  (let loop ((remaining nums)
+             (acc 0))
+    (if (null? remaining)
+        acc
+        (let* ((num (car remaining))
+               (str (number->string num))
+               (hashed (system/sha256 str)))
+          (if (failed? hashed)
+              (list 'escalate 'hash-failed num)  ;; stop, return failure
+              (loop (cdr remaining)
+                    (+ acc (string-length hashed))))))))  ;; accumulate hash length
+
+(sum-hashed-numbers '(1 2 3 4 5))
+```
+
+Accumulator pattern: loop through the list, hash each number (converted to string), add the hash length to the accumulator. If any hash fails, stop and escalate. Otherwise, return the total.
+
+### Partial Success
+
+```scheme
+;; Sum hashed numbers, keep accumulator even if some fail
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (sum-hashed-numbers-partial nums)
+  (let loop ((remaining nums)
+             (acc 0)
+             (failed-count 0))
+    (if (null? remaining)
+        (list 'result acc 'failed failed-count)
+        (let* ((num (car remaining))
+               (str (number->string num))
+               (hashed (system/sha256 str)))
+          (if (failed? hashed)
+              (loop (cdr remaining)
+                    acc
+                    (+ failed-count 1))  ;; note the failure, keep going
+              (loop (cdr remaining)
+                    (+ acc (string-length hashed))
+                    failed-count))))))
+
+(sum-hashed-numbers-partial '(1 2 3 4 5))
+```
+
+Same loop, but now we track failures separately. If a hash fails, we increment the failure counter and keep going. At the end, we return both the accumulator and the failure count.
+
+---
+
+## Fold with Failure
+
+Fold (also called reduce) is a classic higher-order pattern. You have a binary function, an initial accumulator, and a list. You thread the accumulator through the list, applying the function at each step.
+
+What happens when the function can fail?
+
+```scheme
+;; Fold with a fallible function; escalate on first failure
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (safe-fold f init lst)
+  (let loop ((remaining lst)
+             (acc init))
+    (if (null? remaining)
+        acc
+        (let ((result (f acc (car remaining))))
+          (if (failed? result)
+              result  ;; stop, return the failure
+              (loop (cdr remaining) result))))))
+
+;; Example: fold over a list, hashing and concatenating strings
+(define (hash-and-concat acc s)
+  (let ((hashed (system/sha256 s)))
+    (if (failed? hashed)
+        hashed
+        (string-append acc hashed))))
+
+(safe-fold hash-and-concat \"\" '(\"a\" \"b\" \"c\"))
+```
+
+Fold with failure: at each step, apply the function and check the result. If it fails, stop and return the failure. Otherwise, continue.
+
+Now a variant: fold that collects failures but keeps going.
+
+```scheme
+;; Fold that collects failures separately
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (fold-with-errors f init lst)
+  (let loop ((remaining lst)
+             (acc init)
+             (errors '()))
+    (if (null? remaining)
+        (list 'result acc 'errors (reverse errors))
+        (let ((result (f acc (car remaining))))
+          (if (failed? result)
+              (loop (cdr remaining)
+                    acc
+                    (cons (list 'item (car remaining) 'error result) errors))
+              (loop (cdr remaining)
+                    result
+                    errors))))))
+
+(define (hash-and-concat acc s)
+  (let ((hashed (system/sha256 s)))
+    (if (failed? hashed)
+        hashed
+        (string-append acc hashed))))
+
+(fold-with-errors hash-and-concat \"\" '(\"a\" \"b\" \"c\"))
+```
+
+Same fold, but now failures are collected in a separate list. At the end, you get both the accumulator and the error list.
+
+---
+
+## Seven-Stage Real-World Pipeline
+
+Time to put it all together. A genuinely hard route:
+1. Generate a UUID
+2. Hash the UUID
+3. Slugify the hash
+4. Get the current timestamp
+5. Parse a target ISO date
+6. Compute the delta between now and target
+7. Store the result in cortex memory
+
+Each stage can fail. We check every one, propagate failures cleanly, and return a structured result.
+
+```scheme
+;; Seven-stage pipeline with full failure handling
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (then f x)
+  (if (failed? x) x (f x)))
+
+(let* (;; Stage 1: generate UUID
+       (uuid (system/uuid-v4))
+       ;; Stage 2: hash it
+       (hashed (then (lambda (u) (system/sha256 u)) uuid))
+       ;; Stage 3: slugify the hash
+       (slugged (then (lambda (h) (system/slugify h)) hashed))
+       ;; Stage 4: get current timestamp
+       (now (then (lambda (s) (time/unix-now)) slugged))
+       ;; Stage 5: parse target date
+       (target (then (lambda (n) (time/parse-iso8601 \"2026-01-01T00:00:00Z\")) now))
+       ;; Stage 6: compute delta
+       (delta (then (lambda (t) (- t now)) target))
+       ;; Stage 7: store in cortex
+       (stored (then (lambda (d)
+                       (cortex/remember \"pipeline-result\"
+                                        (list 'uuid uuid
+                                              'slugged slugged
+                                              'delta d)))
+                     delta)))
+  ;; Return final result or escalation
+  (if (failed? stored)
+      stored
+      (list 'summary
+            'uuid uuid
+            'slug slugged
+            'delta-seconds delta)))
+```
+
+Seven stages, each checked with `then`. If any stage fails, the failure propagates and we stop. If all succeed, we store the result and return a summary.
+
+This is mastery at scale: a long route, honest handling, no faked results, clear escalation.
+
+---
+
+## Map-Reduce with Failure
+
+Combine map and fold: map a fallible function over a list, then fold the results. Handle failure at both stages.
+
+```scheme
+;; Map-reduce: hash strings, sum the lengths, handle failures
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (safe-map f lst)
+  (let loop ((remaining lst)
+             (results '()))
+    (if (null? remaining)
+        (reverse results)
+        (let ((result (f (car remaining))))
+          (if (failed? result)
+              result  ;; stop on first failure
+              (loop (cdr remaining) (cons result results)))))))
+
+(define (safe-fold f init lst)
+  (let loop ((remaining lst)
+             (acc init))
+    (if (null? remaining)
+        acc
+        (let ((result (f acc (car remaining))))
+          (if (failed? result)
+              result
+              (loop (cdr remaining) result))))))
+
+;; Hash each string, then sum the hash lengths
+(let* ((strings '(\"alpha\" \"beta\" \"gamma\"))
+       (hashes (safe-map (lambda (s) (system/sha256 s)) strings)))
+  (if (failed? hashes)
+      hashes
+      (safe-fold (lambda (acc h) (+ acc (string-length h))) 0 hashes)))
+```
+
+Map with failure checking, then fold with failure checking. If either stage fails, propagate the failure. Otherwise, return the final accumulator.
+
+---
+
+## Mutual Recursion with Failure
+
+Two functions call each other. Each can fail. Propagate failures through both.
+
+```scheme
+;; Mutually recursive: process-even and process-odd
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (process-even n)
+  (if (<= n 0)
+      0
+      (let ((hashed (system/sha256 (number->string n))))
+        (if (failed? hashed)
+            hashed
+            (let ((next (process-odd (- n 1))))
+              (if (failed? next)
+                  next
+                  (+ (string-length hashed) next)))))))
+
+(define (process-odd n)
+  (if (<= n 0)
+      0
+      (let ((slugged (system/slugify (number->string n))))
+        (if (failed? slugged)
+            slugged
+            (let ((next (process-even (- n 1))))
+              (if (failed? next)
+                  next
+                  (+ (string-length slugged) next)))))))
+
+(process-even 10)
+```
+
+Mutual recursion: `process-even` hashes the number and calls `process-odd`, which slugifies and calls `process-even`. Each checks for failure at each step. If any fails, the failure propagates up through the mutual calls.
+
+---
+
+## Conditional Escalation Based on Data
+
+Sometimes failure isn't about verbs — it's about the *data*. A value is technically valid, but semantically wrong. You check it and escalate if it doesn't meet your criteria.
+
+```scheme
+;; Compute days until target; escalate if target is in the past
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (days-until-target target-iso)
+  (let* ((now (time/unix-now))
+         (target (time/parse-iso8601 target-iso)))
+    (cond
+      ((failed? now)
+       (list 'escalate 'time-unavailable 'now))
+      ((failed? target)
+       (list 'escalate 'parse-failed 'target))
+      (else
+       (let ((delta (- target now)))
+         (cond
+           ((< delta 0)
+            (list 'escalate 'invalid-target 'date-in-past))
+           ((< delta 86400)
+            (list 'escalate 'invalid-target 'too-soon))  ;; less than 1 day
+           (else
+            (quotient delta 86400))))))))
+
+(days-until-target \"2026-06-15T00:00:00Z\")
+```
+
+Data validation as escalation: the values are valid, but the *relationship* between them isn't. We check, and escalate with a clear reason.
+
+---
+
+## Complex Data Transformation with Failure
+
+Process a nested JSON-like structure (represented as alists). Extract fields, hash them, compute derived values, handle missing fields and failed verbs.
+
+```scheme
+;; Process a nested event structure
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (get-field alist key)
+  (let ((pair (assoc key alist)))
+    (if pair
+        (cdr pair)
+        (list 'escalate 'missing-field key))))
+
+(define event
+  '((id . \"evt-99\")
+    (user . ((name . \"alice\")
+             (email . \"alice@example.com\")))
+    (timestamp . \"2025-02-10T14:00:00Z\")))
+
+(let* ((event-id (get-field event 'id))
+       (hashed-id (if (failed? event-id)
+                      event-id
+                      (system/sha256 event-id)))
+       (user (get-field event 'user))
+       (email (if (failed? user)
+                  user
+                  (get-field user 'email)))
+       (hashed-email (if (failed? email)
+                         email
+                         (system/sha256 email)))
+       (ts-string (get-field event 'timestamp))
+       (ts (if (failed? ts-string)
+               ts-string
+               (time/parse-iso8601 ts-string))))
+  (cond
+    ((failed? hashed-id) hashed-id)
+    ((failed? hashed-email) hashed-email)
+    ((failed? ts) ts)
+    (else
+     (list 'processed
+           'event-id hashed-id
+           'email hashed-email
+           'timestamp ts))))
+```
+
+Nested structure: extract fields at multiple levels, hash extracted values, parse a timestamp. Check each step. If any fails, propagate the failure. Otherwise, return a processed structure.
+
+---
+
+## Composing All the Techniques
+
+Let's build the hardest program in this chapter. It combines:
+- Retry logic
+- Nested pipelines
+- Batch processing with partial success
+- Recursive data transformation
+- Multi-stage orchestration
+- Honest escalation at every joint
+
+The task: process a batch of events. For each event, extract the ID, hash it with retry, parse the timestamp, compute the age, and store it in cortex. Collect successes and failures. Escalate if the success rate is below a threshold.
+
+```scheme
+;; The hardest route: batch event processing with all techniques
+(define (failed? x)
+  (or (eq? x 'nan)
+      (and (pair? x) (eq? (car x) 'escalate))))
+
+(define (retry thunk attempts)
+  (let loop ((remaining attempts)
+             (last-result 'nan))
+    (if (<= remaining 0)
+        last-result
+        (let ((result (thunk)))
+          (if (failed? result)
+              (loop (- remaining 1) result)
+              result)))))
+
+(define (get-field alist key)
+  (let ((pair (assoc key alist)))
+    (if pair
+        (cdr pair)
+        (list 'escalate 'missing-field key))))
+
+(define (process-event event)
+  (let* ((event-id (get-field event 'id))
+         (hashed-id (if (failed? event-id)
+                        event-id
+                        (retry (lambda () (system/sha256 event-id)) 3)))
+         (ts-string (get-field event 'timestamp))
+         (ts (if (failed? ts-string)
+                 ts-string
+                 (time/parse-iso8601 ts-string)))
+         (now (time/unix-now))
+         (age (if (or (failed? ts) (failed? now))
+                  (list 'escalate 'age-unavailable 'missing-time-data)
+                  (- now ts)))
+         (stored (if (or (failed? hashed-id) (failed? age))
+                     (list 'escalate 'storage-skipped 'partial-failure)
+                     (cortex/remember \"event-age\"
+                                      (list 'id hashed-id 'age age)))))
+    (cond
+      ((failed? hashed-id) (list 'failed event 'reason hashed-id))
+      ((failed? age) (list 'failed event 'reason age))
+      ((failed? stored) (list 'failed event 'reason stored))
+      (else (list 'success 'id hashed-id 'age age)))))
+
+(define (process-batch events)
+  (let loop ((remaining events)
+             (successes '())
+             (failures '()))
+    (if (null? remaining)
+        (list 'successes (reverse successes)
+              'failures (reverse failures))
+        (let ((result (process-event (car remaining))))
+          (if (and (pair? result) (eq? (car result) 'success))
+              (loop (cdr remaining)
+                    (cons result successes)
+                    failures)
+              (loop (cdr remaining)
+                    successes
+                    (cons result failures)))))))
+
+(define events
+  (list
+   '((id . \"evt-100\") (timestamp . \"2025-01-10T10:00:00Z\"))
+   '((id . \"evt-101\") (timestamp . \"2025-01-11T11:00:00Z\"))
+   '((id . \"evt-102\") (timestamp . \"invalid-date\"))
+   '((id . \"evt-103\") (timestamp . \"2025-01-13T13:00:00Z\"))))
+
+(let* ((batch-result (process-batch events))
+       (successes (cadr (assoc 'successes batch-result)))
+       (failures (cadr (assoc 'failures batch-result)))
+       (total (+ (length successes) (length failures)))
+       (success-rate (if (= total 0) 0 (/ (length successes) total))))
+  (if (< success-rate 0.5)
+      (list 'escalate 'low-success-rate
+            (list 'rate success-rate
+                  'successes (length successes)
+                  'failures (length failures)))
+      (list 'batch-complete
+            'success-rate success-rate
+            'successes successes
+            'failures failures)))
+```
+
+This is the summit. Retry logic on hashing. Field extraction from nested structures. Timestamp parsing. Age computation. Cortex storage. Batch processing with success/failure separation. Final threshold check. Honest escalation at every stage.
+
+It's 60+ lines of Scheme, but every line is necessary. No gold-plating. Just mastery.
+
+---
+
+## Challenges
+
+You've seen the patterns. Now drill them yourself.
+
+1. **Parallel fetch with timeout handling**: Write a program that fetches a UUID, a timestamp, and today's date in parallel (three independent calls). If any call returns an escalation with reason `'timeout`, use a fallback value for that call only. If any other escalation occurs, propagate it. Return a combined result if at least two of the three succeed; escalate otherwise.
+
+2. **Deep recursive tree processor**: Write a function that processes a tree where each node is `(label . children)`, and children is a list of subtrees. For each label (a string), hash it with retry (up to 3 attempts). If the hash fails, replace that node's label with `'hash-failed` but continue processing children. Return the transformed tree. Count how many nodes had hash failures and include that in the final result.
+
+3. **Fold with degraded mode**: Write a fold that sums the lengths of hashed strings. If a hash fails, use the original string length as a fallback (degraded mode) and mark the result as `'degraded`. At the end, return both the total and a flag indicating whether any degradation occurred.
+
+4. **Multi-source data merge**: You have three data sources (simulated as alists). Extract a field `'value` from each. Hash each extracted value. If all three hashes succeed, return their concatenation. If exactly two succeed, return those two concatenated and mark the result as `'partial`. If fewer than two succeed, escalate.
+
+5. **Batch with retry and backoff simulation**: Process a batch of strings. For each, hash it with retry (up to 3 attempts). Track how many retries were needed per item. After processing, compute the average retry count. If the average is above 1.5, escalate with reason `'high-retry-rate`; otherwise, return the batch of hashes.
+
+6. **Recursive mutual functions with failure logging**: Write two mutually recursive functions, `process-a` and `process-b`. `process-a` hashes a number (as string), then calls `process-b` with `n-1`. `process-b` slugifies a number (as string), then calls `process-a` with `n-1`. Base case: `n <= 0` returns
+")

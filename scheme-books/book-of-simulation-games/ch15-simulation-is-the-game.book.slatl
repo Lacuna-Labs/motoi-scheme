@@ -1,0 +1,347 @@
+;; ch15-simulation-is-the-game.book.slatl
+;; Book of Simulation Games — Chapter 15: The Simulation IS the Game
+;; Authored 2026-07-16 by simulation-games-engineer-lane.
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Simulation Games"
+  :chapter-number      15
+  :title               "The Simulation IS the Game"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "simulation-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + physics-simulation-emergent"
+  :book-version        "1.0.0"
+  :provenance          ((:authored-by "Engineer") (:date "2026-07-16"))
+  :prose
+"There are games you win. There are games you finish. And there are
+games that just KEEP GOING, whose delight is not the ending but the
+watching. A city sim. A garden sim. An ecosystem where sheep and
+wolves and grass find each other in a slow dance of populations. A
+sandbox where the rules exist but no goal does.
+
+Some of the most beloved games ever made are of this kind. They give
+you tools and a world and let you play in it. The score is your
+attention. The victory is a beautiful arrangement.
+
+This chapter builds an ecosystem. Grass grows via cellular-automaton-
+like rules. Sheep eat grass and reproduce. Wolves eat sheep and
+reproduce. Populations rise and fall — a classic Lotka-Volterra
+oscillation, emerging without any predator-prey math written down.
+We let the user intervene — seed grass, remove a wolf, watch what
+ripples. The user is not scoring points; they are learning cause and
+effect at scale. The chapter closes with Cortex holding the
+ecosystem's history so long-running sessions can be resumed.
+
+---
+
+## 15.1 The world
+
+A grid. Each cell is grass-empty, grass-growing, or grass-full.
+Grass-empty becomes grass-growing after a while; grass-growing
+becomes grass-full after more time; grass-full stays until eaten.
+
+```scheme
+(define ECO-COLS 60)
+(define ECO-ROWS 40)
+
+(define (init-ecosystem)
+  (grid-init ECO-COLS ECO-ROWS)
+  ;; Fill 30% with grass-full, rest empty
+  (let loop-c ((c 0))
+    (when (< c ECO-COLS)
+      (let loop-r ((r 0))
+        (when (< r ECO-ROWS)
+          (when (< (random) 0.3)
+            (grid-set! c r 'grass-full))
+          (loop-r (+ r 1))))
+      (loop-c (+ c 1)))))
+```
+
+Grass rule: each frame, some fraction of empty cells regrow. Each
+grass-growing cell has a chance to mature.
+
+```scheme
+(define GRASS-REGROW-PROB 0.005)
+(define GRASS-MATURE-PROB 0.05)
+
+(define (step-grass)
+  (let loop-c ((c 0))
+    (when (< c ECO-COLS)
+      (let loop-r ((r 0))
+        (when (< r ECO-ROWS)
+          (case (grid-ref c r)
+            ((grass-empty)
+             (when (< (random) GRASS-REGROW-PROB)
+               (grid-set! c r 'grass-growing)))
+            ((grass-growing)
+             (when (< (random) GRASS-MATURE-PROB)
+               (grid-set! c r 'grass-full))))
+          (loop-r (+ r 1))))
+      (loop-c (+ c 1)))))
+```
+
+## 15.2 Sheep
+
+```scheme
+(define (spawn-sheep x y)
+  (let ((s (world/spawn 'sheep x y)))
+    (entity/mass!      s 1.0)
+    (entity/max-speed! s 1.2)
+    (ai/wander         s 1.0)
+    (ai/bb-set!        s 'energy 20)
+    (ai/bb-set!        s 'age 0)
+    s))
+
+(define SHEEP-EAT-ENERGY 5)
+(define SHEEP-REPRODUCE-THRESHOLD 40)
+(define SHEEP-MOVE-ENERGY-COST 0.02)
+
+(define (step-sheep sheep)
+  ;; Consume energy as it moves
+  (ai/bb-set! sheep 'energy
+    (- (ai/bb-get sheep 'energy) SHEEP-MOVE-ENERGY-COST))
+  ;; If standing on grass-full, eat it
+  (let* ((pos (entity/pos sheep))
+         (c   (quotient (car pos) 8))
+         (r   (quotient (cdr pos) 8)))
+    (when (and (>= c 0) (< c ECO-COLS)
+               (>= r 0) (< r ECO-ROWS)
+               (eq? (grid-ref c r) 'grass-full))
+      (grid-set! c r 'grass-empty)
+      (ai/bb-set! sheep 'energy
+        (+ (ai/bb-get sheep 'energy) SHEEP-EAT-ENERGY))))
+  ;; Reproduce if enough energy
+  (when (> (ai/bb-get sheep 'energy) SHEEP-REPRODUCE-THRESHOLD)
+    (ai/bb-set! sheep 'energy (/ (ai/bb-get sheep 'energy) 2))
+    (spawn-sheep (entity/x sheep) (entity/y sheep)))
+  ;; Die if out of energy
+  (when (<= (ai/bb-get sheep 'energy) 0)
+    (entity/despawn! sheep)))
+```
+
+The sheep wanders. If it's on grass, it eats. If it has enough
+energy, it reproduces (halving its own energy, spawning a child with
+the other half). If out of energy, it dies. Simple rules.
+
+## 15.3 Wolves
+
+```scheme
+(define (spawn-wolf x y)
+  (let ((w (world/spawn 'wolf x y)))
+    (entity/mass!      w 1.5)
+    (entity/max-speed! w 1.5)
+    (ai/wander         w 0.7)
+    (ai/bb-set!        w 'energy 40)
+    (ai/pursue         w (world/nearest 'sheep x y))
+    w))
+
+(define WOLF-EAT-ENERGY 20)
+(define WOLF-REPRODUCE-THRESHOLD 80)
+(define WOLF-MOVE-ENERGY-COST 0.05)
+
+(define (step-wolf wolf)
+  (ai/bb-set! wolf 'energy
+    (- (ai/bb-get wolf 'energy) WOLF-MOVE-ENERGY-COST))
+  ;; Update pursuit to always chase nearest sheep
+  (let ((prey (world/nearest 'sheep (entity/x wolf) (entity/y wolf))))
+    (when prey
+      (ai/pursue wolf prey)
+      ;; If close enough, eat
+      (when (< (geom/distance (entity/pos wolf) (entity/pos prey)) 6)
+        (entity/despawn! prey)
+        (ai/bb-set! wolf 'energy
+          (+ (ai/bb-get wolf 'energy) WOLF-EAT-ENERGY)))))
+  (when (> (ai/bb-get wolf 'energy) WOLF-REPRODUCE-THRESHOLD)
+    (ai/bb-set! wolf 'energy (/ (ai/bb-get wolf 'energy) 2))
+    (spawn-wolf (entity/x wolf) (entity/y wolf)))
+  (when (<= (ai/bb-get wolf 'energy) 0)
+    (entity/despawn! wolf)))
+```
+
+Wolves chase the nearest sheep, eat when close, reproduce with
+excess energy, die when out.
+
+## 15.4 The frame loop
+
+```scheme
+(define pop-history '())
+
+(init-ecosystem)
+(repeat 40 (lambda () (spawn-sheep (* (random) 480) (* (random) 320))))
+(repeat 10 (lambda () (spawn-wolf  (* (random) 480) (* (random) 320))))
+
+(on-frame
+  (lambda (t)
+    (world/step)
+    (step-grass)
+    (world/each 'sheep step-sheep)
+    (world/each 'wolf  step-wolf)
+    (when (= 0 (modulo t 30))
+      (set! pop-history
+        (cons (list t (world/count 'sheep) (world/count 'wolf))
+              pop-history)))
+    ;; Paint
+    (paint-grass)
+    (world/each 'sheep (lambda (s)
+      (paint-circle (entity/x s) (entity/y s) 3 white)))
+    (world/each 'wolf (lambda (w)
+      (paint-circle (entity/x w) (entity/y w) 4 red)))
+    (when (= 0 (modulo t 60))
+      (plot-populations pop-history))))
+```
+
+`paint-grass` renders grass cells in shades of green. Sheep are
+white dots, wolves red. Population history plots over time.
+
+## 15.5 Lotka-Volterra emerges
+
+Watch what happens. Grass grows plentiful. Sheep multiply, eating
+grass. Wolves multiply, eating sheep. Sheep decline. Wolves,
+running out of prey, decline. Grass regrows. Sheep rebound. Wolves
+rebound. Repeat.
+
+The two populations trace an oscillation in phase space (plot sheep
+count on x-axis, wolves on y-axis, watch a closed loop form). This
+is the Lotka-Volterra predator-prey model, emerging from micro-rules
+that never mention 'oscillation.' The oscillation is a macroscopic
+consequence of the local dynamics.
+
+Sometimes the oscillation is stable — a limit cycle. Sometimes one
+species goes extinct — the other soon follows if it was prey-
+dependent. The outcome depends on initial numbers, on grass regrow
+rate, on reproduction thresholds.
+
+## 15.6 The user intervenes
+
+```scheme
+;; Click a cell: seed grass there.
+(on-input 'mouse-click
+  (lambda (x y)
+    (grid-set! (quotient x 8) (quotient y 8) 'grass-full)))
+
+;; Press 's' to add sheep.
+(on-input 'key-s
+  (lambda ()
+    (let ((m (input/mouse-pos)))
+      (spawn-sheep (car m) (cdr m)))))
+
+;; Press 'w' to add wolf.
+(on-input 'key-w
+  (lambda ()
+    (let ((m (input/mouse-pos)))
+      (spawn-wolf (car m) (cdr m)))))
+
+;; Press 'r' to remove nearest wolf.
+(on-input 'key-r
+  (lambda ()
+    (let ((m (input/mouse-pos)))
+      (let ((w (world/nearest 'wolf (car m) (cdr m))))
+        (when w (entity/despawn! w))))))
+```
+
+Now the user can perturb. Add a wolf; watch the sheep population
+crash. Remove all wolves; watch sheep explode until grass runs out.
+Seed grass in a corner; watch a stable sub-population form there.
+The user is not scoring; they are learning ecology by touch.
+
+## 15.7 Cortex holds the ecosystem across sessions
+
+```scheme
+;; Save state on exit.
+(on-exit
+  (lambda ()
+    (cortex/write 'ecosystem-state
+      (list :grass  (grid-snapshot)
+            :sheep  (world/snapshot 'sheep)
+            :wolf   (world/snapshot 'wolf)
+            :time   (frame)))))
+
+;; Load on startup.
+(on-startup
+  (lambda ()
+    (let ((saved (cortex/read 'ecosystem-state)))
+      (if saved
+          (begin
+            (grid-restore! (cdr (assoc :grass saved)))
+            (world/restore! (cdr (assoc :sheep saved)))
+            (world/restore! (cdr (assoc :wolf  saved))))
+          (init-ecosystem)))))
+```
+
+Now the ecosystem persists. The user can leave for a week, come
+back, and pick up their world. The sheep they left in the north-east
+corner are still there, maybe with more of their kind. The wolves
+they removed are still absent.
+
+This is what turns a simulation into a garden. It is yours; it
+persists; you tend it.
+
+---
+
+## 15.8 The four routing patterns
+
+**Composition.** The ecosystem is composed of grass rules + sheep
+rules + wolf rules + intervention handlers. Each is independent.
+Add fire, add drought, add hunters — each composes cleanly.
+
+**Orchestration.** The frame loop orchestrates: step physics, step
+grass, step sheep, step wolves, sample populations, paint. Longer
+orchestration: 'run for 10000 frames, take snapshots every 100 frames,
+save all snapshots to Cortex, allow later playback.'
+
+**In-routing.** Mouse click routes to grass-seeder. Key press routes
+to species-adder or -remover. Sheep-eats-grass event (proximity
+check) routes to grid-set + energy update. Wolf-eats-sheep event
+routes to sheep-despawn + wolf energy update.
+
+**Routing.** Sheep and wolf positions route to framebuffer. Grass
+grid routes to green-shade fill. Population history routes to a plot
+plus to Cortex ('sheep peak was 187 at frame 2400'). User
+interventions route to a log so we can replay the session and
+attribute changes to actions.
+
+---
+
+## 15.9 Common desktop tasks
+
+An operator running a hydroponic-farm consulting shop asked the runtime:
+'if I add nitrogen at rate R and remove plants at rate P, will the
+tank stabilize?' The predator-prey math is close enough as a first
+approximation. Model nitrogen as grass, algae as sheep, plant-
+harvesting as a wolf pulse. The oscillations and stable points give
+the operator a first-pass answer they can refine.
+
+## 15.10 Try this
+
+1. Remove all wolves. What happens to sheep? What happens after
+   sheep boom?
+2. Halve grass regrowth. Does the ecosystem still cycle?
+3. Give sheep more energy per grass. Does population plateau higher?
+4. Add a second predator (bear) that eats wolves. Watch three-species
+   dynamics.
+5. Track the phase-space trajectory (sheep count vs wolf count over
+   time). Is it a closed loop?
+
+## 15.11 Pitfalls
+
+**Extinction.** Too few of one species and the ecosystem collapses
+irreversibly. This is realistic — real ecosystems have similar
+tipping points — but for a play sim you may want to seed a rescue.
+
+**Cost.** N sheep * M wolves nearest-neighbor queries is O(N*M).
+Use `world/spatial-index` for larger populations.
+
+**Cell size.** If cells are too small, sheep don't reliably eat
+grass they walk over. If too large, grass looks blocky. 8-pixel
+cells with 3-pixel sheep is a decent compromise.
+
+---
+
+Next: publish the simulation. Wrap what you built as a shareable
+card. Give it sliders. Save the tape. Send the URL to a friend.")

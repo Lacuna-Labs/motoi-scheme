@@ -1,0 +1,203 @@
+;; appendix-e-sprite-cell-palette.book.slatl
+
+(dialect :applies ("motoi" "sakura"))
+
+(appendix
+  :book "Book of Arcade Games"
+  :letter "E"
+  :title "Sprite Cell Palette"
+  :dialect "motoi"
+  :audience :kid
+  :also-for :adult
+  :content-rating :G
+  :author-lane "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible #t
+  :confidentiality "public"
+  :book-version "1.0.0"
+  :prose
+"Sprites and cells are how you paint characters, enemies, coins, and
+everything else that isn't a raw geometric shape. The Motoi runtime
+exposes a small sprite library. This appendix covers what you can do
+with what's there and how to work around what isn't.
+
+## Verbs
+
+- `paint-cell 'kind x y w h` — paint a named cell at world (x,y)
+  with size (w,h). The runtime knows which sprite corresponds to
+  'kind based on the game's sprite palette.
+- `sprite/rasterize sprite` — convert a sprite to a bitmap. Used
+  for pixel-precise hit detection.
+- `sprite/address sprite label` — get the (x,y) offset of a named
+  point on the sprite (a landmark).
+- `sprite/landmarks sprite` — list all named landmarks on a sprite.
+
+## The cell-name convention
+
+Every `paint-cell` call takes a symbol as its first arg. That symbol
+names the sprite in the runtime's palette. Conventions:
+
+- `'player` — the main character
+- `'enemy` — generic enemy
+- `'boss` — boss sprite
+- `'bullet` — player bullet
+- `'enemy-bullet`, `'boss-bullet` — enemy fire
+- `'ground`, `'wall`, `'sky`, `'grass`, `'water` — level tiles
+- `'coin`, `'heart`, `'key`, `'star` — pickups
+- `'ball`, `'ship`, `'paddle`, `'cannon` — arcade primitives
+- `'dot`, `'spark`, `'particle` — small effects
+
+Any symbol works; the runtime maps unknowns to a default filled
+rectangle. Kids can invent names.
+
+## Animated sprites via cell rotation
+
+Motoi's sprite lib is small — no `sprite/anim` verb yet (see gap-3
+in the architect design). To animate, cycle cell names based on
+frame count.
+
+```scheme
+;; A walking character: 4 walk-cycle frames.
+(define walk-cells '#('walk-0 'walk-1 'walk-2 'walk-3))
+(define (paint-walker x y)
+  (let ((frame (modulo (world/frame) 24)))
+    (paint-cell (vector-ref walk-cells (quotient frame 6)) x y 16 24)))
+```
+
+`(quotient frame 6)` gives 0/1/2/3, changing every 6 frames.
+`(modulo frame 24)` restarts the cycle every 24 frames. Six frames
+per cell at 60 FPS = 100 ms per animation frame — reasonable walk
+cycle speed.
+
+For animation while stationary (idle animation), use `tick/sine`:
+
+```scheme
+;; A breathing character: subtle 2-frame idle.
+(define (paint-breather x y)
+  (paint-cell (if (> (tick/sine (* 0.02 (world/frame))) 0)
+                  'idle-a
+                  'idle-b)
+              x y 16 24))
+```
+
+## Sprite landmarks — hit points
+
+`sprite/landmarks` returns named points on a sprite. Useful for:
+
+- Muzzle position (where a gun sprite's bullet exits)
+- Head-hit-box vs body-hit-box (headshot damage bonus)
+- Wheel positions (for a car sprite whose wheels rotate independently)
+
+```scheme
+;; Fire bullet from muzzle.
+(let* ((muzzle (sprite/address 'ship 'muzzle))
+       (mx (car muzzle))
+       (my (cadr muzzle)))
+  (world/spawn 'bullet (+ (entity/x ship) mx)
+                       (+ (entity/y ship) my)))
+```
+
+If your sprite doesn't have named landmarks, use an offset by hand:
+`(world/spawn 'bullet (entity/x ship) (- (entity/y ship) 8))`.
+
+## Cell size vs entity shape
+
+`entity/shape! e 'rect 16 16` sets the COLLIDER shape (for physics
+math). `paint-cell 'kind x y 16 16` sets the VISUAL size. Usually
+these match. But you can decouple:
+
+- Visual bigger than collider: a large sprite with a small hit-box.
+  Enemy that looks scary but is easy to hit.
+- Collider bigger than visual: a small sprite with a large invisible
+  hit-box. Enemy that seems small but you get damaged from further
+  away.
+
+Play with the ratio to shape difficulty.
+
+## Palette design
+
+For a coherent game, restrict yourself:
+
+- One player color family (blue tones).
+- One enemy color family (red tones).
+- One pickup color family (yellow/gold tones).
+- One environment color family (green/brown tones).
+
+Kids can tell instantly what's what without labels. Chromatic
+consistency is 90% of visual game clarity.
+
+## Common desktop tasks
+
+**Shop-product cells.** A shop can register each product category as
+a `paint-cell 'product-name` — kids browsing see mini-sprites for
+each product. Cortex holds the sprite-per-product palette.
+
+**Custom brand sprite.** A shop's mascot appears throughout its
+minigames as a `paint-cell 'shop-mascot`. Same sprite is used as
+enemy, hero, or NPC depending on context.
+
+## Pitfalls
+
+**Sprite paints wrong.** Cell name typo. `'plyaer` vs `'player`.
+Grep.
+
+**Sprite too big / too small.** `paint-cell` sizing args (w, h)
+don't match sprite artwork's native size. Try matching to native
+sprite dimensions.
+
+**Sprite doesn't rotate.** `paint-cell` doesn't currently rotate
+sprites. Use `entity/pose! e 'angle rad` and hope the runtime honors
+it. Otherwise render pre-rotated sprite variants (8 or 16 rotations
+in the palette).
+
+**Animation stutters.** Frame-cycle divisor too small. If you
+change cells every frame at 60 FPS, animation is too fast to see.
+Use `quotient frame 4` or higher.
+
+## Sample paint routines
+
+**Coin flip:**
+```scheme
+(define (paint-coin-flip x y frame)
+  (paint-cell (case (modulo (quotient frame 3) 4)
+                ((0) 'coin-face) ((1) 'coin-edge)
+                ((2) 'coin-back) ((3) 'coin-edge))
+              x y 8 8))
+```
+
+**Heart pulse:**
+```scheme
+(define (paint-pulsing-heart x y frame)
+  (let ((size (+ 10 (round (* 2 (tick/sine (* 0.1 frame)))))))
+    (paint-cell 'heart x y size size)))
+```
+
+**Enemy flash on hit:**
+```scheme
+(define (paint-enemy e hit-frame)
+  (paint-cell (if (< (- (world/frame) hit-frame) 6)
+                  'enemy-flash 'enemy)
+              (entity/x e) (entity/y e) 12 12))
+```
+
+Save the frame of the hit; if within 6 frames, paint the flash
+variant.
+
+## The sprite-check tool
+
+At game startup, verify every sprite you use is present in the
+palette:
+
+```scheme
+(define (verify-sprites needed-names)
+  (for-each
+   (lambda (name)
+     (unless (member name (sprite/landmarks name))
+       (display \"WARNING: sprite \")
+       (display name)
+       (display \" missing\") (newline)))
+   needed-names))
+
+(verify-sprites '(player enemy coin ground wall boss))
+```
+
+Catches missing-asset bugs before the kid sees a blank rectangle.")

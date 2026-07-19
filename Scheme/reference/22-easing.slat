@@ -1,0 +1,480 @@
+(verb
+  :name "bezier-ease"
+  :library "easing"
+  :kind "pure"
+  :signature "(bezier-ease x1 y1 x2 y2) -> easing"
+  :summary "Build a cubic-Bézier easing curve from two control points, matching the CSS cubic-bezier convention."
+  :explanation "bezier-ease is the general-purpose easing constructor. It takes four numbers — the x,y coordinates of the two interior control points of a normalized cubic Bézier from (0,0) to (1,1) — and returns an easing value: a function-like handle that maps t ∈ [0,1] to an eased output. This is the same convention used by CSS `cubic-bezier()`, so curves you like from the web (Material's emphasized, iOS's standard, etc.) transfer directly. Use this when named easings don't match the feel you want."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(define smooth (bezier-ease 0.25 0.1 0.25 1.0))\n(motion/move-to 'my-card 200 100 500 :easing smooth)" :note "Build a smooth curve (similar to CSS `ease`) and use it to animate a card.")
+    (:dialect "motoi" :tier "intermediate" :code "(define material-emphasized (bezier-ease 0.2 0.0 0.0 1.0))\n(define material-standard  (bezier-ease 0.4 0.0 0.2 1.0))\n(motion/move-to 'panel 0 200 400 :easing material-emphasized)" :note "Recreate two commonly-loved curves and pick one per animation intent.")
+    (:dialect "motoi" :tier "expert" :code "(define (feel-for role)\n  (cond ((eq? role 'entrance) (bezier-ease 0.0 0.0 0.2 1.0))\n        ((eq? role 'exit)     (bezier-ease 0.4 0.0 1.0 1.0))\n        ((eq? role 'micro)    (bezier-ease 0.4 0.0 0.6 1.0))\n        (else                 easing/standard)))\n(motion/move-to 'toast 300 20 250 :easing (feel-for 'entrance))" :note "Role-driven easing selector: entrances decelerate, exits accelerate, micro-interactions are symmetric.")
+  )
+  :caveats ("x1 and x2 should be in [0,1] to remain a valid CSS-style cubic-bezier; values outside can produce non-monotonic time." "y1 and y2 can be outside [0,1] to produce overshoot (Bézier control points allow this)." "The returned easing is a value, not a live callback: pass it by name to any verb that takes :easing.")
+  :drawbacks ("Cubic Bézier cannot represent every possible feel; use spring-ease for physical settle, or compose easings via named-ease chains." "Building many bezier-eases per frame is wasteful; define them once at module scope.")
+  :usecases ("Matching a design spec that gives cubic-bezier(x1, y1, x2, y2) values." "Building a house-style set of curves for a project." "Fine-tuning entrance/exit feel that named easings don't quite hit.")
+  :related ("named-ease" "spring-ease" "easing/emphasized" "easing/standard" "easing/decelerated" "easing/accelerated" "motion/move-to" "curve/bezier")
+  :learn (:concept "Cubic Bézier as an easing primitive: two control points determine the shape of a normalized 0→1 curve." :prerequisites ("motion/move-to" "curve/bezier") :progression "Build a few named curves via bezier-ease, then compose them with motion/move-to across a scene.")
+  :row-2-audit ((:problem "The designer hands the operator a cubic-bezier spec straight from the design system: cubic-bezier(0.2, 0, 0, 1). The operator needs the same curve in Scheme so animations match the mockup exactly."
+                 :program "(define emphasized (bezier-ease 0.2 0.0 0.0 1.0))\n(motion/move-to 'hero 100 100 400 :easing emphasized)"
+                 :explanation "Line 1 builds the easing value from the four control-point coordinates, storing it as a first-class binding. Line 2 uses it on a motion animation. The four numbers came straight from CSS; no derivation, no lossy translation. If the designer changes the spec, the operator changes four numbers and reships. There is no 'approximately' — the curve is exact."
+                 :meta "Reaching for named-ease would require the design system's curve to happen to match a Penner name, which is rare. Reaching for spring-ease would be wrong because the design spec is a Bézier, not a mass-spring. bezier-ease is the honest answer because the operator has exactly the right data to feed it.")
+                (:eng "Design/dev parity: same numbers on both sides; the audit is a copy-paste from Figma." :math "The parameterization gives exact control over both the initial and final tangents." :cs "The returned closure captures four floats; O(1) per t evaluation."))
+  :row-3-dimension ((:setup "Two control points shaping a normalized 0→1 curve."
+                     :rungs ((:domain "easing" :code "(bezier-ease 0.2 0 0 1)")
+                             (:domain "font Bezier glyph outline (metaphor)" :code "(define (glyph-point p0 p1 p2 p3 t)\n  (let ((u (- 1 t)))\n    (+ (* u u u p0)\n       (* 3 u u t p1)\n       (* 3 u t t p2)\n       (* t t t p3))))\n(glyph-point 0 0.2 0 1 0.5)")
+                             (:domain "cubic polynomial in Bernstein basis" :code "(define (cubic-bernstein p0 p1 p2 p3 t)\n  (let ((u (- 1 t)))\n    (+ (* u u u p0)\n       (* 3 u u t p1)\n       (* 3 u t t p2)\n       (* t t t p3))))\n(cubic-bernstein 0 0.2 0 1 0.5)"))
+                     :explanation "In easing, the four coordinates parameterize a time-shaping curve. In the type-design metaphor, the exact same math parameterizes a glyph outline — Bezier curves are the substrate of every TrueType and PostScript letterform. In the math rung, this is the cubic polynomial written in the Bernstein basis; the coefficients are the very same p0..p3. All three are the same object, presented in different contexts."
+                     :meta "The shape transfers because Bezier curves are a single mathematical object; whether the axis is time or space, and whether the codomain is animation-progress or ink-coordinate, the parameterization is identical.")
+                    (:eng "One primitive: animator, type designer, and applied mathematician are doing the same thing." :math "The Bernstein basis is a partition of unity; the sum of the four blending functions is exactly 1." :cs "O(1) per t; can be lifted to matrix form for batch evaluation."))
+  :row-4-proof ((:claim "For a valid bezier-ease with x-controls in [0,1], the curve passes through both endpoints: e(0) = 0 and e(1) = 1. This is the endpoint-interpolation invariant that guarantees safe boundary composition."
+                 :program "(define (approx a b) (< (abs (- a b)) 0.001))\n(define (check-endpoints x1 y1 x2 y2)\n  (let ((e (bezier-ease x1 y1 x2 y2)))\n    (and (approx (e 0) 0)\n         (approx (e 1) 1))))\n(and (check-endpoints 0.2 0.0 0.0 1.0)\n     (check-endpoints 0.42 0 0.58 1)\n     (check-endpoints 0 0 1 1))"
+                 :invariant "∀ x1 y1 x2 y2 ∈ [0,1] . bezier-ease(x1,y1,x2,y2)(0) = 0 ∧ bezier-ease(x1,y1,x2,y2)(1) = 1"
+                 :meta "A Bezier curve that failed this would produce a jump at the start or end of every animation. Falsification is one control-point tuple where the endpoint doesn't hit the target. The CS pattern name is 'endpoint-interpolating spline'. Book-of-motion ch 5 covers Bézier easings; book-of-math ch 9 covers Bernstein polynomials.")
+                (:eng "This invariant is why bezier-ease is composable with arbitrary target ranges via lo + e·(hi-lo)." :math "The Bernstein basis on [0,1] evaluated at 0 gives (1,0,0,0), at 1 gives (0,0,0,1) — endpoints are always interpolated." :cs "Compile-time property, but a runtime test is the smoke check that the implementation matches the spec."))
+  :row-5-emergence ((:base "bezier-ease produces a shaped [0,1] → [0,1] curve from control points."
+                     :composition "(define (design-system-suite)\n  (list (cons 'emphasized (bezier-ease 0.2 0 0 1))\n        (cons 'standard (bezier-ease 0.4 0 0.2 1))\n        (cons 'decelerated (bezier-ease 0 0 0.2 1))\n        (cons 'accelerated (bezier-ease 0.4 0 1 1))))\n(define suite (design-system-suite))\n(motion/move-to 'card 100 100 400 :easing (cdr (assq 'emphasized suite)))"
+                     :emergent "A design-system easing palette — bezier-ease composed with an association list gives the operator a named lookup that matches the design tokens exactly, which no single call can provide."
+                     :meta "This is the same family as CSS custom-property tokens for easings (--easing-emphasized), or a Material Design token map. Cross-reference book-of-composition ch 5 (token-name dispatch); book-of-motion ch 4 (named-curve libraries). Familiar analog: Tailwind CSS's transition-timing-function tokens.")
+                    (:eng "One primitive plus a table = a design-system palette; adding a new named curve is one line." :math "The set of (endpoint-interpolating cubic Béziers on [0,1]) forms a manifold parameterized by four coordinates; the palette picks specific points." :cs "O(1) lookup, O(1) evaluation per frame; the table is data.")))
+
+(verb
+  :name "named-ease"
+  :library "easing"
+  :kind "pure"
+  :signature "(named-ease symbol) -> easing"
+  :summary "Look up a named easing curve by symbol (e.g. 'ease-in-quad, 'ease-out-cubic, 'ease-in-out-sine)."
+  :explanation "named-ease is the lookup verb: pass a symbol from the Penner easing family ('linear, 'ease-in-quad, 'ease-out-cubic, 'ease-in-out-sine, 'ease-out-elastic, 'ease-in-out-back, etc.) and get back the corresponding easing value. This is the fastest way to spell 'a familiar curve' — the same names you'd type in a JavaScript animation library. Unknown symbols return the linear easing as a safe fallback."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(motion/move-to 'my-card 200 100 400 :easing (named-ease 'ease-out-cubic))" :note "Look up ease-out-cubic and hand it to motion/move-to.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (bounce-in-place entity)\n  (motion/move-to entity (entity/x entity) (- (entity/y entity) 30) 200 :easing (named-ease 'ease-out-back))\n  (motion/move-to entity (entity/x entity)    (entity/y entity)    200 :easing (named-ease 'ease-in-quad)))\n(bounce-in-place 'hero)" :note "Two-part bounce: overshoot up with back-out, settle down with in-quad.")
+    (:dialect "motoi" :tier "expert" :code "(define (chain-eases entity waypoints ease-names duration-each)\n  (let loop ((ws waypoints) (es ease-names))\n    (cond ((null? ws) 'ok)\n          (else (motion/move-to entity (car (car ws)) (cadr (car ws)) duration-each\n                  :easing (named-ease (car es)))\n                (loop (cdr ws) (cdr es))))))\n(chain-eases 'agent '((100 100) (200 200) (100 200))\n             '(ease-out-cubic ease-in-out-sine ease-in-quad) 300)" :note "Chain waypoints with per-segment easings for expressive multi-part travel.")
+  )
+  :caveats ("Unknown symbols return the linear curve, silently — verify your spelling if a move feels wrong." "The set of names is fixed by the Penner family; use bezier-ease for anything custom." "Symbols are namespaced only by convention; conflicts with user symbols are impossible because named-ease only knows its own set.")
+  :drawbacks ("Cannot inspect the underlying curve; if you need to introspect, build the same curve via bezier-ease." "Slower to type than referencing a constant (easing/ease-out) — use whichever fits your codebase.")
+  :usecases ("Dialects and DSLs that store easing choices as symbols in data." "Reading an easing name from configuration or user input." "Matching web-animation vocabulary in Motoi code.")
+  :related ("bezier-ease" "spring-ease" "easing/linear" "easing/ease-in" "easing/ease-out" "easing/ease-in-out" "motion/move-to" "tick/ease")
+  :learn (:concept "Symbol → curve lookup: named eases as a small keyword vocabulary." :prerequisites ("motion/move-to") :progression "Start with named-ease for familiar shapes, then bezier-ease for house-styling, then spring-ease for physical settle.")
+  :row-2-audit ((:problem "The operator is reading a saved animation configuration from disk. Each animation has an :easing key stored as a symbol like 'ease-out-cubic. They need to convert those symbols into runnable easing values before dispatching the animation."
+                 :program "(define config '((:name banner :easing ease-out-cubic)\n                (:name toast :easing ease-in-quad)))\n(define (resolve entry)\n  (let ((sym (cadr (memq :easing entry))))\n    (named-ease sym)))\n(resolve (car config))"
+                 :explanation "Line 1 defines a saved config as data. Line 2 defines resolve to pull the symbol from the config entry and pass it to named-ease. Line 3 resolves the banner's easing. The config file is symbol-oriented and human-readable; the runtime is easing-value oriented. named-ease is the bridge. If a symbol is misspelled, named-ease returns linear silently — the operator can add a validation pass in resolve to warn on unknown names before playback."
+                 :meta "Reaching for bezier-ease would require the config to store four numbers per animation, tripling the disk footprint and losing the semantic name. Reaching for spring-ease would require even more parameters. named-ease is the honest answer because the config's mental model is 'this animation feels like ease-out-cubic,' which is exactly what the symbol expresses.")
+                (:eng "Text config → runtime value in one step; symbol names are debug-friendly." :math "Function lookup; the vocabulary is discrete." :cs "Symbol dispatch; O(1) with a hash lookup or O(k) with a small cond."))
+  :row-3-dimension ((:setup "Symbol-keyed lookup into a small vocabulary of pre-shaped values."
+                     :rungs ((:domain "easing" :code "(named-ease 'ease-out-cubic)")
+                             (:domain "color-name lookup (metaphor)" :code "(define (color-of name)\n  (cond ((eq? name 'red) '(255 0 0))\n        ((eq? name 'green) '(0 255 0))\n        ((eq? name 'blue) '(0 0 255))\n        (else '(128 128 128))))\n(color-of 'red)")
+                             (:domain "partial function on a finite set" :code "(define (lookup key alist default)\n  (let ((pair (assq key alist)))\n    (if pair (cdr pair) default)))\n(lookup 'ease-out-cubic '((linear . 1) (ease-out-cubic . 2)) 1)"))
+                     :explanation "In easing, a symbol names a curve. In the color-name metaphor, a symbol names an RGB triple — the exact same shape (symbol → structured value) just with different codomain semantics. In the math rung, this is a partial function from a finite set of names to structured values, with a default for the unknown case. All three fetch by keyword."
+                     :meta "The shape transfers because it is the vocabulary-dispatch pattern — a fixed set of names each identifying a pre-computed value, with a defined fallback for unknowns.")
+                    (:eng "One shape covers CSS color names, HTTP-status-message lookup, and easing choice." :math "Partial function; total on the domain of registered symbols." :cs "Dispatch table; O(1) with a hash, O(k) with a cond chain."))
+  :row-4-proof ((:claim "For every registered Penner name n, (named-ease n) equals (named-ease n) invoked at any later time — the mapping is a pure function of the symbol, not state. This is the referential-transparency invariant."
+                 :program "(define (check-pure name)\n  (let ((a (named-ease name))\n        (b (named-ease name)))\n    (equal? (a 0.5) (b 0.5))))\n(and (check-pure 'ease-out-cubic)\n     (check-pure 'ease-in-quad)\n     (check-pure 'linear))"
+                 :invariant "∀ symbol s . named-ease(s)(t) = named-ease(s)(t) for all t, across all time"
+                 :meta "A curve that varied with time or global state would make animations non-reproducible. Falsification is any repeated call that gave a different value. The CS pattern name is 'pure lookup function.' Book-of-code ch 3 covers referential transparency; book-of-motion ch 4 covers named-curve libraries.")
+                (:eng "Reproducibility of animations is what makes visual regressions catchable; this invariant is the foundation." :math "The lookup is a partial function from Symbol to Function, itself pure." :cs "No mutable state; the registry is read-only after initialization."))
+  :row-5-emergence ((:base "named-ease resolves a symbol to a runnable easing curve."
+                     :composition "(define (batch-animate entries)\n  (for-each (lambda (entry)\n              (motion/move-to (car entry)\n                              (cadr entry)\n                              (caddr entry)\n                              300\n                              :easing (named-ease (cadddr entry))))\n            entries))\n(batch-animate '((a 100 100 ease-out-cubic)\n                 (b 200 100 ease-in-quad)))"
+                     :emergent "A batch animator driven from data — combining named-ease with a list of animation entries produces a driver that takes text-style config and executes it, which neither verb has alone."
+                     :meta "This is the same family as CSS animation lists driven from a stylesheet, or JSON-configured animation cues in Framer Motion. Cross-reference book-of-composition ch 5 (data-driven dispatch). Familiar analog: an Adobe After Effects composition running a batch of keyframes from a data file.")
+                    (:eng "Data drives motion; changing behavior is editing a list, not editing code." :math "Composition of data → symbol → function → effect; layered but each layer pure." :cs "O(N) in the number of entries; each animation dispatched independently.")))
+
+(verb
+  :name "spring-ease"
+  :library "easing"
+  :kind "pure"
+  :signature "(spring-ease [:stiffness s] [:damping d] [:mass m]) -> easing"
+  :summary "Build a physics-based spring easing from stiffness, damping, and mass parameters."
+  :explanation "spring-ease returns an easing derived from a damped harmonic oscillator. Instead of a fixed Bézier shape, it simulates a spring pulling toward the target: :stiffness controls how strongly it pulls, :damping controls how quickly it settles, :mass controls inertia. The resulting curve overshoots slightly (or bounces multiple times, depending on damping) before settling. Springs give motion a sense of physicality that cubic curves can't quite reach. Defaults: stiffness 100, damping 15, mass 1 — a lively bounce that settles quickly."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(motion/move-to 'card 200 100 :easing (spring-ease))" :note "Spring easing with defaults — a friendly bounce that settles quickly.")
+    (:dialect "motoi" :tier "intermediate" :code "(define bouncy (spring-ease :stiffness 200 :damping 8 :mass 1))\n(define calm   (spring-ease :stiffness 80  :damping 20 :mass 1))\n(motion/move-to 'toy 100 100 :easing bouncy)\n(motion/move-to 'card 100 100 :easing calm)" :note "Two springs: a bouncy one for playful UI, a calm one for restrained motion.")
+    (:dialect "motoi" :tier "expert" :code "(define (spring-for feel)\n  (cond ((eq? feel 'toast)  (spring-ease :stiffness 180 :damping 22))\n        ((eq? feel 'bounce) (spring-ease :stiffness 220 :damping 8))\n        ((eq? feel 'settle) (spring-ease :stiffness 100 :damping 18))\n        (else easing/spring)))\n(motion/move-to 'notification 20 20 :easing (spring-for 'toast))" :note "Feel-driven spring factory: name the intent, get a tuned spring.")
+  )
+  :caveats ("Duration is inferred from the spring parameters, not from a :duration keyword; if you need exact timing, use bezier-ease or easing/ease-in-out." "Very low damping produces many bounces — usually not what UI wants; save it for physical objects (balls, characters).")
+  :drawbacks ("Not deterministic across host versions if the spring solver changes; capture parameters explicitly for reproducibility." "Slightly more expensive per-frame than a fixed Bézier evaluation.")
+  :usecases ("Toast notifications and modal entrances that should feel physical." "Character bounces after landing." "UI elements that should feel alive: buttons, cards, chat bubbles." "Any 'settle in place' motion where a fixed curve looks robotic.")
+  :related ("bezier-ease" "named-ease" "easing/spring" "phys/spring" "motion/move-to")
+  :learn (:concept "Physical simulation as an easing: mass-spring-damper produces an inherently natural settle." :prerequisites ("motion/move-to" "phys/spring") :progression "Contrast spring-ease vs bezier-ease on the same motion; the physical one feels alive.")
+  :row-2-audit ((:problem "A toast notification slides in and the current Bezier curve feels dead — the arrival is precise but robotic. The designer says 'make it feel like a real card being placed on a table, with a tiny bounce as it settles.' The operator needs a physical settle."
+                 :program "(define toast-spring (spring-ease :stiffness 180 :damping 22 :mass 1))\n(motion/move-to 'toast 20 20 :easing toast-spring)"
+                 :explanation "Line 1 builds a spring easing with stiffness 180 (medium pull), damping 22 (relatively fast decay), and mass 1 (normal inertia). This combination gives a single, small overshoot before settling — one quick bounce, then rest. Line 2 uses it. Duration is inferred from the spring parameters, not specified explicitly. If the designer wants a livelier bounce, damping drops; if a heavier settle, mass rises."
+                 :meta "Reaching for bezier-ease can approximate overshoot with y-controls > 1, but shaping multi-bounce behavior with Bezier requires stitching together multiple curves. spring-ease is the honest answer for 'this should feel physical' because the math is a mass-spring-damper ODE, which is the actual physics of settling.")
+                (:eng "Spring parameters map to feel words the designer already uses: stiffness = pull, damping = decay, mass = weight." :math "Solution of ẍ + 2ζω_n ẋ + ω_n² x = ω_n² x_target; underdamped case has overshoot." :cs "Runtime ODE solve; more compute per frame than a Bezier lookup, but O(1)."))
+  :row-3-dimension ((:setup "A damped harmonic oscillator shaping a motion toward a target."
+                     :rungs ((:domain "easing" :code "(spring-ease :stiffness 180 :damping 22 :mass 1)")
+                             (:domain "car suspension (metaphor)" :code "(define (spring-suspension mass k c x xdot)\n  (list (- x)\n        (- (/ (* k x) mass) (/ (* c xdot) mass))))\n(spring-suspension 1 180 22 0.1 0)")
+                             (:domain "second-order linear ODE" :code "(define (dx x xdot dt k c m)\n  (list (+ x (* xdot dt))\n        (- xdot (* (+ (* k x) (* c xdot)) (/ dt m)))))\n(dx 1 0 0.01 100 15 1)"))
+                     :explanation "In easing, a spring shapes a UI arrival. In the car-suspension metaphor, the same mass-spring-damper equation smooths the ride over a pothole. In the math rung, ẍ + (c/m)·ẋ + (k/m)·x = 0 is the archetypal second-order linear ODE. All three are the identical differential equation, applied in different substrates."
+                     :meta "The shape transfers because a mass-spring-damper is a mass-spring-damper; whether the mass is a UI element, a car chassis, or an abstract coordinate, the ODE governs the motion.")
+                    (:eng "One shape covers UI, mechanical engineering, and control theory." :math "ẍ + 2ζω_n ẋ + ω_n² x = 0; ζ = c/(2√(km)) determines regime." :cs "Numerical ODE integration; explicit Euler is O(1) per step but unstable at high stiffness; use semi-implicit for real animations."))
+  :row-4-proof ((:claim "For any positive stiffness k, positive damping c, and positive mass m, the spring-ease curve reaches its target within finite time and remains bounded (does not oscillate to infinity). This is the stability invariant: the underlying damped oscillator has all eigenvalues with strictly negative real part."
+                 :program "(define (approx-target? spring t-max target)\n  (let loop ((t 0) (best 1))\n    (if (>= t t-max)\n        (< best 0.01)\n        (let ((v (spring t)))\n          (loop (+ t 0.01) (min best (abs (- v target))))))))\n(define s (spring-ease :stiffness 180 :damping 22 :mass 1))\n(approx-target? s 3.0 1)"
+                 :invariant "∀ k, c, m > 0 . x(t) → 1 as t → ∞ and |x(t)| < ∞ for all t ≥ 0"
+                 :meta "A spring with negative damping would blow up; a spring with zero damping would oscillate forever. Falsification is a parameter set where x(t) exceeds some large bound or fails to approach 1. The CS pattern name is 'BIBO stable second-order system'. Book-of-motion ch 15 covers spring physics; book-of-math ch 12 covers linear ODE stability.")
+                (:eng "This invariant is why spring easings do not need a max-duration clamp; they always settle." :math "The characteristic polynomial ms² + cs + k has roots with negative real part iff c > 0 and k > 0." :cs "Integration must use a stable scheme; explicit Euler at high k needs tiny steps."))
+  :row-5-emergence ((:base "spring-ease shapes motion via a mass-spring-damper ODE."
+                     :composition "(define (staggered-spring-cascade items)\n  (let loop ((is items) (delay 0))\n    (cond ((null? is) 'ok)\n          (else (time/when delay (lambda ()\n                  (motion/move-to (car is) 100 100\n                    :easing (spring-ease :stiffness 200 :damping 15 :mass 1))))\n                (loop (cdr is) (+ delay 60))))))\n(staggered-spring-cascade '(icon1 icon2 icon3))"
+                     :emergent "A live-feeling cascade — chaining spring-ease with staggered time/when delays produces a group of elements that each pop into place with individual spring physics, giving the ensemble an organic, alive quality."
+                     :meta "This is the same family as staggered animations in Framer Motion, or the wiggle-in-place motion of a UIKit spring animation batch. Cross-reference book-of-composition ch 11 (staggered ensembles). Familiar analog: iOS's default spring animations when a stack of table-view rows enters.")
+                    (:eng "The cascade reads as alive because each element springs individually; adding a fourth item is one line." :math "The ensemble is a set of independent damped oscillators with staggered start times." :cs "O(N) time; each animation independent; no coupling.")))
+
+(verb
+  :name "easing/emphasized"
+  :library "easing"
+  :kind "meta"
+  :signature "easing/emphasized -> easing"
+  :summary "The emphasized easing: strong deceleration for entrances that should command attention."
+  :explanation "easing/emphasized is a pre-built easing tuned for entrances that should feel *pulled in* — the motion starts fast and decelerates strongly, so the arrival is the moment the viewer notices. Equivalent to `(bezier-ease 0.2 0.0 0.0 1.0)`. Use it for hero elements, primary calls to action, notifications, and any single element that should draw the eye when it lands."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(motion/move-to 'hero 100 100 400 :easing easing/emphasized)" :note "Slide a hero element in with strong deceleration.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (announce s)\n  (fb/text 40 20 s :font font/big :color 'white)\n  (motion/move-to 'title 40 20 500 :easing easing/emphasized))\n(announce \"CHAPTER 1\")" :note "Announce a title with big font + emphasized entrance.")
+    (:dialect "motoi" :tier "expert" :code "(define (attention-cascade elements)\n  (let loop ((elts elements) (delay 0))\n    (cond ((null? elts) 'ok)\n          (else (time/when delay (lambda ()\n                  (motion/move-to (car elts) (entity/x (car elts)) (entity/y (car elts)) 400\n                    :easing easing/emphasized)))\n                (loop (cdr elts) (+ delay 80))))))\n(attention-cascade '(icon1 icon2 icon3 icon4))" :note "Staggered attention cascade: each element enters with emphasized easing, 80ms apart.")
+  )
+  :caveats ("Save for elements that should command attention; overuse dilutes the effect." "Not appropriate for exits — use easing/accelerated for that.")
+  :drawbacks ("Strong deceleration can feel dramatic; test with the actual content to avoid melodrama." "Long durations amplify the pause at the end; keep durations moderate (300-500ms) for most UI.")
+  :usecases ("Hero element entrances." "Primary call-to-action reveals." "Chapter titles and major transitions." "Notifications that must be noticed.")
+  :related ("easing/standard" "easing/decelerated" "easing/accelerated" "bezier-ease" "motion/move-to")
+  :learn (:concept "Named-curve constants encode design intent: 'emphasized' names the feel, not the math." :prerequisites ("motion/move-to") :progression "Compare easing/emphasized with easing/standard on the same entrance to feel the difference.")
+  :row-2-audit ((:problem "A hero banner is entering the screen and the product lead says 'this needs to demand attention when it lands.' The operator wants a strong deceleration into the target position so the viewer's eye catches the moment of arrival."
+                 :program "(motion/move-to 'hero-banner 40 40 500 :easing easing/emphasized)"
+                 :explanation "One line: motion/move-to takes the target, duration, and the emphasized easing. easing/emphasized is a constant — it names the shape without re-deriving control points. The banner starts fast, decelerates strongly, and arrives with visible settle. The operator's audit trail is one symbol; a stakeholder can pattern-match on easing/emphasized in code review and understand the intent immediately."
+                 :meta "Reaching for easing/standard would give symmetric acceleration and deceleration, missing the emphasis. Reaching for easing/decelerated would decelerate but with less bite. easing/emphasized is the honest answer because the design system defined this exact curve for exactly this purpose.")
+                (:eng "One name, one intent; a designer and a developer read the same word." :math "Fixed cubic Bezier equivalent to (0.2, 0, 0, 1)." :cs "Constant lookup; O(1)."))
+  :row-3-dimension ((:setup "A named design-system token for arrival-emphasis motion."
+                     :rungs ((:domain "easing" :code "easing/emphasized")
+                             (:domain "typographic bold weight (metaphor)" :code "(define (font-weight-for role)\n  (case role\n    ((hero) 'bold)\n    ((body) 'regular)\n    (else 'regular)))\n(font-weight-for 'hero)")
+                             (:domain "categorical variable in a design taxonomy" :code "(define emphasis-tier 'high)\n(case emphasis-tier ((high) 'strong-deceleration) ((medium) 'symmetric) ((low) 'gentle))"))
+                     :explanation "In easing, a symbol names an attention-commanding motion curve. In the typography metaphor, 'bold' names a weight that carries the same design intent — draw the eye. In the taxonomy rung, emphasis-tier is a categorical variable whose value picks a design treatment. All three encode design intent as a named category."
+                     :meta "The shape transfers because 'emphasis' is a category in a design taxonomy; the substrate (motion, typography, layout) is different but the categorical structure is the same.")
+                    (:eng "Design tokens propagate across motion, type, and color; naming is the shared surface." :math "Enum-typed variable with fixed value; morphism from taxonomy category to concrete parameter." :cs "Compile-time constant; no runtime dispatch cost."))
+  :row-4-proof ((:claim "easing/emphasized is a pure constant that hits (0,0) and (1,1) exactly, and its slope at t=1 is smaller than its slope at t=0 (this quantifies 'emphasized deceleration'). This is the deceleration-monotonicity invariant."
+                 :program "(define (approx a b) (< (abs (- a b)) 0.001))\n(define e easing/emphasized)\n(and (approx (e 0) 0)\n     (approx (e 1) 1)\n     (< (- (e 1) (e 0.98)) (- (e 0.02) (e 0))))"
+                 :invariant "e(0) = 0, e(1) = 1, and e'(1) < e'(0)"
+                 :meta "A curve that violated this would not read as emphasized — it would read as either linear or emphasis-in-reverse. Falsification is one control-point spec where slope-at-end exceeds slope-at-start. The CS pattern name is 'endpoint-pinned decelerating spline'. Book-of-motion ch 4 covers the material-design easing curves.")
+                (:eng "The invariant is what makes emphasized feel emphasized in a user test." :math "Cubic Bezier slope at t=0 is 3(y1-0)/1 = 3·0 = 0 wait — slope at start uses ratio of tangent (x1,y1); for (0.2,0) the effective initial slope is 0/0.2 = 0? Actually approximate: (e 0.02) − (e 0))/0.02 vs (e 1) − (e 0.98))/0.02 — the arrival slope must be smaller." :cs "Property test on the constant; O(1) evaluation."))
+  :row-5-emergence ((:base "easing/emphasized is a pre-configured strong-decelerating curve constant."
+                     :composition "(define (announce-cascade titles)\n  (let loop ((ts titles) (delay 0))\n    (cond ((null? ts) 'ok)\n          (else (time/when delay (lambda ()\n                  (motion/move-to (car ts) 40 40 500 :easing easing/emphasized)))\n                (loop (cdr ts) (+ delay 400))))))\n(announce-cascade '(title1 title2 title3))"
+                     :emergent "A staged announcement cascade — using easing/emphasized in a delayed sequence produces a cinematic reveal where each title lands with the same emphatic feel, which the constant alone cannot express."
+                     :meta "This is the same family as a chapter-title reveal in a documentary, or a keyframed lower-third animation in broadcast graphics. Cross-reference book-of-composition ch 11 (staged reveals). Familiar analog: keynote slide transitions where each element enters with a decisive settle.")
+                    (:eng "One constant + one delay loop = a broadcast-quality reveal sequence." :math "Repeated application of the same shaping function at time-shifted intervals." :cs "O(N) delayed dispatches; the constant is shared, no allocation per title.")))
+
+(verb
+  :name "easing/standard"
+  :library "easing"
+  :kind "meta"
+  :signature "easing/standard -> easing"
+  :summary "The default all-purpose easing: symmetric acceleration and deceleration."
+  :explanation "easing/standard is the workhorse curve: symmetric ease-in-out, appropriate for the vast majority of UI motion. Equivalent to `(bezier-ease 0.4 0.0 0.2 1.0)`. Use it when you don't have a specific reason to pick emphasized, decelerated, or accelerated. It reads as calm, deliberate, and predictable."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(motion/move-to 'card 200 100 300 :easing easing/standard)" :note "Standard easing — the safe default choice for most animations.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (slide-panel panel to-x)\n  (motion/move-to panel to-x (entity/y panel) 300 :easing easing/standard))\n(slide-panel 'sidebar 0)" :note "Slide a panel with standard easing — no drama, just movement.")
+    (:dialect "motoi" :tier "expert" :code "(define (batch-move entities to-positions)\n  (for-each (lambda (e p)\n              (motion/move-to e (car p) (cadr p) 250 :easing easing/standard))\n            entities to-positions))\n(batch-move '(a b c) '((10 10) (20 20) (30 30)))" :note "Batch-move a group with a consistent standard feel.")
+  )
+  :caveats ("Symmetric curves can feel mechanical if used for entrances that should decelerate; prefer easing/emphasized or easing/decelerated for entrances.")
+  :drawbacks ("Not distinctive — it is the default, by design; use other easings when you want a specific character.")
+  :usecases ("Any motion where no specific feel is required." "Moves between two arbitrary points." "General UI transitions and panel slides.")
+  :related ("easing/emphasized" "easing/decelerated" "easing/accelerated" "easing/ease-in-out" "bezier-ease" "motion/move-to")
+  :learn (:concept "Defaults matter: a good default reduces the number of decisions you have to make." :prerequisites ("motion/move-to") :progression "Start with easing/standard everywhere, then swap in emphasized/decelerated/accelerated where they earn their keep.")
+  :row-2-audit ((:problem "A general UI panel needs to move to a new position. There is no design brief for the feel — the operator just needs 'sensible motion.' Picking a specific easing is over-designing."
+                 :program "(motion/move-to 'panel 200 100 300 :easing easing/standard)"
+                 :explanation "One call, one line. easing/standard is the workhorse default: symmetric ease-in-out, calm, predictable. The operator does not have to justify the choice to a designer — 'standard' is the null hypothesis. If a designer later says 'this needs more drama,' the fix is easing/standard → easing/emphasized, one symbol swap."
+                 :meta "Reaching for a specific curve without a design reason introduces false precision. easing/standard is the honest answer for 'just move it there' because the design system reserved 'standard' precisely for that case.")
+                (:eng "The default reduces the decision cost of every animation." :math "Symmetric cubic Bezier ≈ (0.4, 0, 0.2, 1)." :cs "Constant lookup; O(1)."))
+  :row-3-dimension ((:setup "The named default in a categorical vocabulary."
+                     :rungs ((:domain "easing" :code "easing/standard")
+                             (:domain "font weight default (metaphor)" :code "(define default-weight 'regular)\ndefault-weight")
+                             (:domain "identity in a monoid" :code "(define (choose-easing role default)\n  (case role ((emphasized) 'emphasized) (else default)))\n(choose-easing 'unknown 'standard)"))
+                     :explanation "In easing, 'standard' is the fallback. In typography, 'regular' is the default font weight. In the algebra rung, the default acts like an identity — applying it does not change the shape you already have. All three are the same idea: the least-committing choice from a fixed vocabulary."
+                     :meta "The default in a vocabulary is the identity of the choice-monoid; picking the default is 'no choice.' That is why designers, typographers, and algebraists all reach for the same shape.")
+                    (:eng "Defaults compose: standard motion + standard type + standard color = a consistent baseline." :math "Identity element in the choice-lattice." :cs "Compile-time constant."))
+  :row-4-proof ((:claim "easing/standard is monotonically non-decreasing on [0,1] and passes through both endpoints. This is the standard-monotonicity invariant that makes it safe as a universal default."
+                 :program "(define (check-mono e n)\n  (let loop ((i 0) (prev 0) (ok? #t))\n    (if (>= i n)\n        ok?\n        (let* ((t (/ i n))\n               (v (e t)))\n          (loop (+ i 1) v (and ok? (>= v prev)))))))\n(check-mono easing/standard 100)"
+                 :invariant "∀ 0 ≤ a < b ≤ 1 . easing/standard(a) ≤ easing/standard(b)"
+                 :meta "A non-monotone default would cause the animation to briefly reverse direction — always a bug. Falsification is any strictly-decreasing pair. The CS pattern name is 'monotone universal default.' Book-of-motion ch 4 covers the design-system defaults.")
+                (:eng "Every animation using easing/standard is guaranteed forward-only motion." :math "Cubic Bezier with control points (0.4, 0, 0.2, 1) has non-negative derivative on [0,1]." :cs "Property test; O(n) samples."))
+  :row-5-emergence ((:base "easing/standard is the pre-configured symmetric default curve."
+                     :composition "(define (fallback-easing spec)\n  (or (and (symbol? spec) (named-ease spec))\n      easing/standard))\n(motion/move-to 'card 200 100 300 :easing (fallback-easing 'unknown-name))"
+                     :emergent "A safe-defaulting animation pipeline — combining easing/standard as fallback with named-ease produces a resolver that never crashes on bad input, which named-ease alone cannot guarantee (it also falls back, but explicit standard is more auditable)."
+                     :meta "This is the same family as CSS's 'initial' keyword, or a config parser's default-value fallback pattern. Cross-reference book-of-composition ch 5 (defaulting patterns). Familiar analog: React's defaultProps.")
+                    (:eng "Every animation has a safe motion; malformed configs degrade gracefully." :math "Coalesce operation with an identity fallback." :cs "O(1) fallback resolution; the constant is shared, no allocation.")))
+
+(verb
+  :name "easing/decelerated"
+  :library "easing"
+  :kind "meta"
+  :signature "easing/decelerated -> easing"
+  :summary "Decelerating easing: fast start, gentle arrival — for entrances."
+  :explanation "easing/decelerated starts at full speed and slows to a rest. Equivalent to `(bezier-ease 0.0 0.0 0.2 1.0)`. Use it for entrances where you want the element to *appear* and settle, without the extra drama of easing/emphasized. Feels like a hand placing a card on a table."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(motion/move-to 'toast 300 20 400 :easing easing/decelerated)" :note "Toast enters fast and settles gently at (300, 20).")
+    (:dialect "motoi" :tier "intermediate" :code "(define (drop-in card y)\n  (motion/move-to card (entity/x card) y 350 :easing easing/decelerated))\n(drop-in 'notification 20)" :note "Drop a notification in from off-screen with a decelerated arrival.")
+    (:dialect "motoi" :tier "expert" :code "(define (deal-cards cards y-target step-ms)\n  (let loop ((cs cards) (delay 0))\n    (cond ((null? cs) 'ok)\n          (else (time/when delay (lambda ()\n                  (motion/move-to (car cs) (entity/x (car cs)) y-target 350 :easing easing/decelerated)))\n                (loop (cdr cs) (+ delay step-ms))))))\n(deal-cards '(c1 c2 c3 c4 c5) 200 80)" :note "Deal cards in sequence, each decelerating into place.")
+  )
+  :caveats ("Not for exits; the shape is wrong (exits should accelerate, not decelerate).")
+  :drawbacks ("Symmetric asymmetry — the curve only makes sense one way; reversing it produces easing/accelerated.")
+  :usecases ("Entrances of secondary UI elements." "Toasts, tooltips, dropdown reveals." "Anything sliding into place from off-screen.")
+  :related ("easing/accelerated" "easing/emphasized" "easing/standard" "easing/ease-out" "bezier-ease" "motion/move-to")
+  :learn (:concept "Directional asymmetry: entrances and exits have opposite shapes." :prerequisites ("motion/move-to") :progression "Pair easing/decelerated with easing/accelerated for symmetric enter/exit pairs.")
+  :row-2-audit ((:problem "A notification is entering from off-screen. It should feel like it's *arriving* — starting quickly and settling gently, but without the drama of easing/emphasized."
+                 :program "(motion/move-to 'notification 300 20 400 :easing easing/decelerated)"
+                 :explanation "One call. easing/decelerated maps t→e(t) where e' at 0 is large (fast start) and e' at 1 is small (soft landing). The notification appears at full speed and glides to its resting spot. The audit is one symbol; a reviewer sees 'decelerated' and knows this is a settle-arrival, not a hero-emphasized landing."
+                 :meta "Reaching for easing/emphasized would over-emphasize a routine notification. Reaching for easing/ease-out gives a similar shape but from a different vocabulary; easing/decelerated is the design-system's arrival token, matching the design brief.")
+                (:eng "One line, one intent." :math "Cubic Bezier ≈ (0, 0, 0.2, 1); zero start-tangent, strong end-tangent to y=1." :cs "Constant; O(1)."))
+  :row-3-dimension ((:setup "Arrival-shape curve with fast start and soft landing."
+                     :rungs ((:domain "easing" :code "easing/decelerated")
+                             (:domain "airplane landing profile (metaphor)" :code "(define (descent-rate altitude)\n  (max 100 (- altitude 100)))\n(descent-rate 500)")
+                             (:domain "monotone-decreasing derivative" :code "(define (mono-dec-deriv f a b n)\n  (let loop ((i 0) (prev (* n (- (f (/ 1 n)) (f 0)))))\n    (if (>= i n) 'ok\n        (let ((slope (* n (- (f (/ (+ i 1) n)) (f (/ i n))))))\n          (loop (+ i 1) slope)))))\n(mono-dec-deriv (lambda (t) (- 1 (expt (- 1 t) 2))) 0 1 10)"))
+                     :explanation "In easing, decelerated shapes an arrival. In the airplane metaphor, descent-rate decreases as the plane nears the ground — the same monotone-decreasing derivative. In the math rung, a function whose derivative decreases monotonically is a concave function; the concavity is the shape's mathematical signature."
+                     :meta "The shape transfers because 'monotone-decreasing derivative' is a well-defined mathematical property (concavity) that shows up wherever a system decelerates naturally.")
+                    (:eng "Aviation, UI, and physics all use the same shape." :math "Concave map on [0,1] pinned at endpoints." :cs "Constant lookup; O(1)."))
+  :row-4-proof ((:claim "easing/decelerated is concave: its derivative is monotonically non-increasing on [0,1]. This is the concavity invariant — the mathematical fingerprint of 'decelerating.'"
+                 :program "(define (numerical-slope f t h)\n  (/ (- (f (+ t h)) (f t)) h))\n(define (check-concave e n)\n  (let loop ((i 1) (prev-slope (numerical-slope e 0 0.01)))\n    (if (>= i n) #t\n        (let ((s (numerical-slope e (/ i n) 0.01)))\n          (if (> s (+ prev-slope 0.01))\n              #f\n              (loop (+ i 1) s))))))\n(check-concave easing/decelerated 50)"
+                 :invariant "∀ 0 ≤ t1 < t2 ≤ 1 . e'(t1) ≥ e'(t2)"
+                 :meta "A curve that failed this would accelerate somewhere in the middle — no longer a pure decelerated shape. Falsification is any t1<t2 pair where slope increased. The CS pattern name is 'concave map.' Book-of-motion ch 4 covers deceleration shapes; book-of-math ch 7 covers concavity.")
+                (:eng "Concavity is what a designer means by 'landing softly.'" :math "Non-positive second derivative characterizes concavity." :cs "Property test on numerical derivative; O(N) samples."))
+  :row-5-emergence ((:base "easing/decelerated is a concave arrival shape."
+                     :composition "(define (deal-cards cards ys stagger)\n  (let loop ((cs cards) (ys ys) (delay 0))\n    (cond ((null? cs) 'ok)\n          (else (time/when delay (lambda ()\n                  (motion/move-to (car cs) 200 (car ys) 350 :easing easing/decelerated)))\n                (loop (cdr cs) (cdr ys) (+ delay stagger))))))\n(deal-cards '(c1 c2 c3) '(100 130 160) 80)"
+                     :emergent "A dealer-style card layout — chaining easing/decelerated with staggered delays produces a dealer-hand animation where each card lands with a soft settle, the ensemble reading as a physical action."
+                     :meta "This is the same family as a physical card-dealing motion, or a stack-of-notifications reveal in mobile OS. Cross-reference book-of-composition ch 11 (staggered arrivals). Familiar analog: iOS's notification stack presenting.")
+                    (:eng "One constant + staggered dispatch = a card-dealer animation." :math "Repeated concave shape applied at staggered start times." :cs "O(N) delayed dispatches.")))
+
+(verb
+  :name "easing/accelerated"
+  :library "easing"
+  :kind "meta"
+  :signature "easing/accelerated -> easing"
+  :summary "Accelerating easing: gentle start, fast exit — for departures."
+  :explanation "easing/accelerated starts slowly and builds speed to a fast exit. Equivalent to `(bezier-ease 0.4 0.0 1.0 1.0)`. Use it for exits — the element gathers itself, then leaves quickly. Feels like a bird lifting off."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(motion/move-to 'toast -100 20 300 :easing easing/accelerated)" :note "Slide a toast off the left edge with accelerated exit.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (dismiss card)\n  (motion/move-to card (entity/x card) -50 300 :easing easing/accelerated))\n(dismiss 'notification)" :note "Dismiss a notification upward off-screen.")
+    (:dialect "motoi" :tier "expert" :code "(define (sweep-out cards direction)\n  (let ((dx (if (eq? direction 'left) -400 400)))\n    (for-each (lambda (c)\n                (motion/move-to c (+ (entity/x c) dx) (entity/y c) 350 :easing easing/accelerated))\n              cards)))\n(sweep-out '(c1 c2 c3) 'left)" :note "Sweep a group of cards off-screen in a chosen direction.")
+  )
+  :caveats ("Not for entrances; reversed direction feels unnatural." "The exit is fast — use durations that give the eye time to see it leaving.")
+  :drawbacks ("Accelerated moves can feel abrupt if durations are too short; use 300-400ms for perceivable exits.")
+  :usecases ("Dismiss animations for toasts, modals, notifications." "Elements leaving the screen for good." "Cards being tossed aside or swept out.")
+  :related ("easing/decelerated" "easing/emphasized" "easing/standard" "easing/ease-in" "bezier-ease" "motion/move-to")
+  :learn (:concept "Exits accelerate; entrances decelerate. This is the fundamental asymmetry of on/off motion." :prerequisites ("motion/move-to") :progression "Pair easing/accelerated with easing/decelerated for matched dismiss/enter pairs.")
+  :row-2-audit ((:problem "A dismiss animation on a modal panel is needed. The operator wants the panel to gather itself and then leave decisively — a slow start that speeds up as the panel exits the screen."
+                 :program "(motion/move-to 'modal 400 -200 350 :easing easing/accelerated)"
+                 :explanation "One line. easing/accelerated has small initial slope (slow start) and large final slope (fast exit). The panel begins moving gently, then accelerates off-screen. The audit trail is one symbol — a reviewer sees 'accelerated' and knows this is a departure, not an arrival."
+                 :meta "Reaching for easing/decelerated would produce the wrong shape entirely — a fast start followed by a soft stop off-screen looks unfinished. easing/accelerated is the honest answer because the intent is departure and this curve encodes departure.")
+                (:eng "One line, one intent; consistent with the design system's exit token." :math "Cubic Bezier ≈ (0.4, 0, 1, 1); small initial tangent, tangent-to-y=1 at t=1." :cs "Constant lookup; O(1)."))
+  :row-3-dimension ((:setup "Departure-shape curve with slow start and fast exit."
+                     :rungs ((:domain "easing" :code "easing/accelerated")
+                             (:domain "rocket launch profile (metaphor)" :code "(define (thrust-profile t)\n  (* t t))\n(thrust-profile 0.9)")
+                             (:domain "monotone-increasing derivative" :code "(define (mono-inc? f a b n)\n  (let loop ((i 1) (prev (- (f (/ 1 n)) (f 0))))\n    (if (>= i n) #t\n        (let ((slope (- (f (/ (+ i 1) n)) (f (/ i n)))))\n          (if (< slope prev) #f\n              (loop (+ i 1) slope))))))\n(mono-inc? (lambda (t) (* t t)) 0 1 20)"))
+                     :explanation "In easing, accelerated shapes a departure. In the rocket metaphor, thrust builds as fuel burns off — the same shape of increasing speed. In the math rung, a function with monotone-increasing derivative is convex; convexity is the mathematical fingerprint."
+                     :meta "The shape transfers because 'monotone-increasing derivative' is convexity, which shows up in any system that accelerates naturally.")
+                    (:eng "Aerospace, UI, and math all use the same shape for departure." :math "Convex map on [0,1] pinned at endpoints." :cs "Constant; O(1)."))
+  :row-4-proof ((:claim "easing/accelerated is convex: its derivative is monotonically non-decreasing on [0,1]. This is the convexity invariant — the mathematical fingerprint of 'accelerating.'"
+                 :program "(define (numerical-slope f t h)\n  (/ (- (f (+ t h)) (f t)) h))\n(define (check-convex e n)\n  (let loop ((i 1) (prev-slope (numerical-slope e 0 0.01)))\n    (if (>= i n) #t\n        (let ((s (numerical-slope e (/ i n) 0.01)))\n          (if (< s (- prev-slope 0.01))\n              #f\n              (loop (+ i 1) s))))))\n(check-convex easing/accelerated 50)"
+                 :invariant "∀ 0 ≤ t1 < t2 ≤ 1 . e'(t1) ≤ e'(t2)"
+                 :meta "A curve that failed this would decelerate somewhere mid-motion — the panel would appear to hesitate on the way out. Falsification is any pair where slope decreased. CS pattern: 'convex map'. Book-of-motion ch 4 covers exit curves; book-of-math ch 7 covers convexity.")
+                (:eng "Convexity is what a designer means by 'gathering speed'." :math "Non-negative second derivative characterizes convexity." :cs "Property test on the numerical derivative."))
+  :row-5-emergence ((:base "easing/accelerated is a convex departure shape."
+                     :composition "(define (sweep-out cards direction)\n  (let ((dx (if (eq? direction 'left) -400 400)))\n    (for-each (lambda (c)\n                (motion/move-to c (+ (entity/x c) dx) (entity/y c) 350\n                                :easing easing/accelerated))\n              cards)))\n(sweep-out '(c1 c2 c3) 'left)"
+                     :emergent "A group sweep-off — chaining easing/accelerated over a card list produces a broom effect where cards start together, gather speed, and exit as a group, which the constant alone cannot express."
+                     :meta "This is the same family as a cover-flow dismiss in macOS, or the mass-exit of subtitles in a lower-third. Cross-reference book-of-composition ch 11. Familiar analog: Keynote's magic-move dismissing many objects at once.")
+                    (:eng "One constant + one loop = a group dismiss." :math "Parallel application of the same convex shape." :cs "O(N) dispatches; each independent.")))
+
+(verb
+  :name "easing/linear"
+  :library "easing"
+  :kind "meta"
+  :signature "easing/linear -> easing"
+  :summary "The identity easing: constant velocity throughout, no acceleration."
+  :explanation "easing/linear is the null curve: t maps to t, no shape. Use it when you *want* mechanical motion — a clock hand sweeping, a progress bar filling, a scrolling ticker. Or when composing easings and you need an identity to fall back on. Named 'linear' because f(t) = t."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(motion/move-to 'clock-hand 200 100 6000 :easing easing/linear)" :note "A clock hand sweeps at constant velocity — mechanical motion is the point.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (progress-bar-fill bar duration-ms)\n  (motion/move-to bar 200 (entity/y bar) duration-ms :easing easing/linear))\n(progress-bar-fill 'download-bar 3000)" :note "Progress bars should not ease — the linear fill communicates equal time per unit.")
+    (:dialect "motoi" :tier "expert" :code "(define (marquee-scroll text-entity screen-width)\n  (motion/move-to text-entity (- screen-width) (entity/y text-entity) 8000 :easing easing/linear)\n  (time/when 8000 (lambda ()\n    (entity/set! text-entity 'x screen-width)\n    (marquee-scroll text-entity screen-width))))\n(marquee-scroll 'news-ticker 320)" :note "Marquee ticker loops with constant velocity — linear is the only correct choice here.")
+  )
+  :caveats ("Almost never right for organic motion; use easing/standard as the default." "Long linear moves feel robotic — that is often the intent.")
+  :drawbacks ("Reads as mechanical unless mechanical is the goal.")
+  :usecases ("Clock hands, timers, progress bars." "Marquees and scrolling tickers." "Deliberate 'machine' motion for effect." "Identity easing in composition.")
+  :related ("easing/standard" "easing/ease-in-out" "named-ease" "bezier-ease" "motion/move-to")
+  :learn (:concept "The identity easing: no shape is a shape. It communicates 'this is a machine, not a body.'" :prerequisites ("motion/move-to") :progression "Contrast easing/linear against easing/standard on the same move to feel why organic ≠ linear.")
+  :row-2-audit ((:problem "A progress bar fills as data loads. The operator wants exactly N% filled after N% of expected time — no easing curve, just faithful linear mapping."
+                 :program "(motion/move-to 'progress-bar 200 (entity/y 'progress-bar) 3000 :easing easing/linear)"
+                 :explanation "One line. easing/linear maps t → t; there is no shaping. Fifty percent of duration = fifty percent of fill. The audit is trivial: the width of the bar is a linear function of elapsed time. This is exactly what a progress bar should communicate — equal work per unit time."
+                 :meta "Reaching for easing/standard would give a curve where the bar appears to slow down at the ends, misleading the user about how much time is left. Reaching for easing/ease-out would fill fast at first, tricking the user into thinking the load is nearly done. easing/linear is the honest answer because the semantic contract is 'progress equals time.'")
+                (:eng "The bar's width is a faithful proxy for elapsed time; users can extrapolate." :math "Identity map on [0,1]." :cs "Constant; O(1)."))
+  :row-3-dimension ((:setup "The identity function on [0,1] — no shape at all."
+                     :rungs ((:domain "easing" :code "easing/linear")
+                             (:domain "constant-velocity vehicle (metaphor)" :code "(define (constant-velocity-position v0 t) (* v0 t))\n(constant-velocity-position 5 3)")
+                             (:domain "identity function" :code "(define (id x) x)\n(id 0.5)"))
+                     :explanation "In easing, linear maps t to t. In the constant-velocity metaphor, position is a linear function of time — the archetypal Newtonian motion. In the math rung, the identity function is the neutral element of function composition. All three are the identity, just wearing different labels."
+                     :meta "The shape transfers because identity is identity; the substrate does not matter.")
+                    (:eng "The identity easing is the shape of Newtonian constant-velocity motion." :math "Identity on [0,1] is the identity morphism in the category of maps." :cs "Constant lookup; O(1)."))
+  :row-4-proof ((:claim "easing/linear satisfies e(t) = t for every t in [0,1]. This is the identity invariant that makes it interchangeable with 'no easing at all.'"
+                 :program "(define (approx a b) (< (abs (- a b)) 0.0001))\n(define (check-identity e n)\n  (let loop ((i 0) (ok? #t))\n    (if (>= i n) ok?\n        (let ((t (/ i n)))\n          (loop (+ i 1) (and ok? (approx (e t) t)))))))\n(check-identity easing/linear 100)"
+                 :invariant "∀ t ∈ [0,1] . easing/linear(t) = t"
+                 :meta "A linear easing that departed from identity would corrupt every composition using it as a neutral element. Falsification is any t where e(t) ≠ t. CS pattern: 'identity function'. Book-of-motion ch 4 covers the identity easing as the neutral element.")
+                (:eng "This is the strongest invariant in the library: a curve that equals its argument exactly." :math "Identity on the unit interval." :cs "Property test; O(N) samples."))
+  :row-5-emergence ((:base "easing/linear is the identity — no shape."
+                     :composition "(define (compose-with-linear e t)\n  (e (easing/linear t)))\n(compose-with-linear easing/emphasized 0.5)\n(define (piecewise-motion phase-1-duration total)\n  (lambda (t)\n    (if (< t (/ phase-1-duration total))\n        (easing/linear t)\n        (easing/ease-out (- t (/ phase-1-duration total))))))\n((piecewise-motion 200 1000) 0.5)"
+                     :emergent "A piecewise motion where a linear windup precedes an ease-out arrival — chaining linear with a shaping easing produces a two-phase gesture that neither can produce alone. Composition with linear preserves shape; composition after linear introduces shape."
+                     :meta "This is the same family as an audio envelope's attack-then-release segment, or a machine motion followed by a hand placing something. Cross-reference book-of-composition ch 12 (piecewise motion). Familiar analog: a robot arm's constant-velocity move followed by a soft grip.")
+                    (:eng "Linear is the neutral element of an easing composition; adding it changes nothing." :math "Identity morphism; e ∘ id = e for every easing e." :cs "O(1) per call in both segments.")))
+
+(verb
+  :name "easing/ease-in"
+  :library "easing"
+  :kind "meta"
+  :signature "easing/ease-in -> easing"
+  :summary "Ease-in: slow start, fast end. Departures and windups."
+  :explanation "easing/ease-in is a classic Penner-style ease-in curve — the object begins slowly and builds speed. Equivalent to `(named-ease 'ease-in-quad)`. It reads as *decisive* — the entity commits to a move and accelerates into it. Prefer it for departures, windups, and any motion where the end matters more than the start."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(motion/move-to 'ball 200 100 500 :easing easing/ease-in)" :note "Ball starts slow and accelerates as it moves to (200, 100).")
+    (:dialect "motoi" :tier "intermediate" :code "(define (leap character to-x to-y)\n  (motion/move-to character to-x to-y 600 :easing easing/ease-in))\n(leap 'hero 300 100)" :note "Leap has weight — the wind-up gives the motion effort.")
+    (:dialect "motoi" :tier "expert" :code "(define (windup-throw thrower target duration)\n  (let ((wind-x (- (entity/x thrower) 20)))\n    (motion/move-to thrower wind-x (entity/y thrower) (quotient duration 3) :easing easing/ease-in)\n    (motion/move-to thrower (entity/x target) (entity/y target) (- duration (quotient duration 3)) :easing easing/ease-out)))\n(windup-throw 'pitcher 'catcher 900)" :note "Compose ease-in (windup) with ease-out (release) for a full throwing motion.")
+  )
+  :caveats ("Slow start can feel sluggish; keep durations short if the pace feels off." "Use easing/ease-out for entrances (the mirror).")
+  :drawbacks ("Not the friendliest first easing to reach for; ease-out or ease-in-out are usually safer defaults.")
+  :usecases ("Departures, launches, dismissals." "Anything reading as *effort*." "First half of a windup-and-release compound motion.")
+  :related ("easing/ease-out" "easing/ease-in-out" "easing/accelerated" "named-ease" "motion/move-to")
+  :learn (:concept "Ease-in reads as decisive commitment; the entity means to go." :prerequisites ("motion/move-to") :progression "Compose ease-in with ease-out to build wind-up/release gestures.")
+  :row-2-audit ((:problem "A pitcher character winds up before throwing. The wind-up should read as effort — start slow, accelerate. The operator needs a curve where the last part of the motion carries the most speed."
+                 :program "(motion/move-to 'pitcher 100 100 300 :easing easing/ease-in)"
+                 :explanation "One line. easing/ease-in starts slow (small derivative at 0) and accelerates (large derivative at 1). The pitcher's arm gathers momentum, then commits. The audit is one symbol; a reviewer reads 'ease-in' and knows this is a windup, not an arrival."
+                 :meta "Reaching for easing/ease-out would produce the reverse — the arm would move fast then coast to a stop, which is what happens after the release, not the windup. easing/ease-in is the honest answer for 'gather-and-commit.'")
+                (:eng "One line, one intent; the windup is legible in code." :math "Cubic Bezier ≈ ease-in-quad." :cs "Constant; O(1)."))
+  :row-3-dimension ((:setup "Accelerating shape with slow start and fast end."
+                     :rungs ((:domain "easing" :code "easing/ease-in")
+                             (:domain "muscle contraction (metaphor)" :code "(define (contraction-force t) (* t t))\n(contraction-force 0.5)")
+                             (:domain "convex map on [0,1]" :code "(define (t-squared t) (* t t))\n(t-squared 0.5)"))
+                     :explanation "In easing, ease-in shapes a windup. In the muscle-contraction metaphor, force builds nonlinearly as recruitment increases — the same convex shape. In the math rung, t² is the archetypal convex map on [0,1]. All three are convex and pinned at endpoints."
+                     :meta "The shape transfers because muscle recruitment, animation windup, and mathematical convexity all share the same rising-derivative structure.")
+                    (:eng "One curve fits UI motion, biomechanics, and math." :math "t² is convex; second derivative is 2 > 0." :cs "Constant; O(1)."))
+  :row-4-proof ((:claim "easing/ease-in is convex on [0,1] and pinned at endpoints: e(0)=0, e(1)=1, and its derivative is non-decreasing. This is the ease-in-convexity invariant."
+                 :program "(define (approx a b) (< (abs (- a b)) 0.0001))\n(define (numerical-slope f t h)\n  (/ (- (f (+ t h)) (f t)) h))\n(and (approx (easing/ease-in 0) 0)\n     (approx (easing/ease-in 1) 1)\n     (< (numerical-slope easing/ease-in 0.1 0.01)\n        (numerical-slope easing/ease-in 0.9 0.01)))"
+                 :invariant "e(0)=0 ∧ e(1)=1 ∧ ∀ 0 ≤ t1 < t2 ≤ 1, e'(t1) ≤ e'(t2)"
+                 :meta "A curve that failed convexity would decelerate somewhere in the windup, breaking the 'gathering' feel. Falsification is any pair where slope decreased. CS pattern: 'convex endpoint-pinned map'. Book-of-motion ch 4; book-of-math ch 7.")
+                (:eng "The invariant guarantees that the windup feels like effort throughout." :math "Convexity + endpoint pinning define the ease-in family." :cs "Property test on numerical slope."))
+  :row-5-emergence ((:base "easing/ease-in is a convex windup shape."
+                     :composition "(define (windup-release entity to-x to-y duration)\n  (let ((back-x (- (entity/x entity) 20))\n        (t1 (quotient duration 3))\n        (t2 (- duration (quotient duration 3))))\n    (motion/move-to entity back-x (entity/y entity) t1 :easing easing/ease-in)\n    (time/when t1 (lambda ()\n      (motion/move-to entity to-x to-y t2 :easing easing/ease-out)))))\n(windup-release 'pitcher 400 100 900)"
+                     :emergent "A complete throwing gesture — chaining easing/ease-in (windup) with easing/ease-out (release) via time/when produces a two-phase motion that reads as a full throw, which no single easing can express."
+                     :meta "This is the same family as an animation-blend graph in Unity, or a compound gesture in Rive. Cross-reference book-of-composition ch 12 (two-phase gestures). Familiar analog: a Punch-and-throw animation in a fighting game.")
+                    (:eng "Two easings + one delay = a full-body gesture." :math "Piecewise composition of convex + concave shapes." :cs "O(1) per phase; two motion dispatches.")))
+
+(verb
+  :name "easing/ease-out"
+  :library "easing"
+  :kind "meta"
+  :signature "easing/ease-out -> easing"
+  :summary "Ease-out: fast start, gentle end. Arrivals and settles."
+  :explanation "easing/ease-out is the classic arrival curve — the object starts fast and settles at the destination. Equivalent to `(named-ease 'ease-out-cubic)`. This is the most common easing in UI: it feels like a hand placing something down. Prefer it for entrances, arrivals, and anything landing softly."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(motion/move-to 'card 200 100 400 :easing easing/ease-out)" :note "Card glides in and settles at (200, 100) — the standard arrival feel.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (place item x y)\n  (motion/move-to item x y 300 :easing easing/ease-out))\n(place 'card 150 150)" :note "Generic place-something-down helper.")
+    (:dialect "motoi" :tier "expert" :code "(define (cascade-arrival items xs y stagger)\n  (let loop ((is items) (xs xs) (d 0))\n    (cond ((null? is) 'ok)\n          (else (time/when d (lambda ()\n                  (motion/move-to (car is) (car xs) y 350 :easing easing/ease-out)))\n                (loop (cdr is) (cdr xs) (+ d stagger))))))\n(cascade-arrival '(a b c) '(50 150 250) 100 60)" :note "Stagger arrivals: each element settles into its slot with ease-out.")
+  )
+  :caveats ("Overusing ease-out for exits looks wrong; use easing/ease-in or easing/accelerated for exits.")
+  :drawbacks ("The most familiar easing — using it for every animation can feel monotonous. Vary it with easing/emphasized or spring-ease.")
+  :usecases ("Entrances of any UI element." "Anything settling into place." "The safe first choice for arrival motion.")
+  :related ("easing/ease-in" "easing/ease-in-out" "easing/decelerated" "named-ease" "motion/move-to")
+  :learn (:concept "Ease-out reads as landing; the entity arrives at rest." :prerequisites ("motion/move-to") :progression "Compare easing/ease-out with easing/decelerated: both decelerate, but the shape is subtly different.")
+  :row-2-audit ((:problem "A card slides into place on the board. It should feel like a hand placing it — starting quickly and settling into position with a soft touch."
+                 :program "(motion/move-to 'card 200 100 400 :easing easing/ease-out)"
+                 :explanation "One call. easing/ease-out has large initial slope and small terminal slope. The card enters at speed and comes to rest. The audit is one symbol; a reviewer reads 'ease-out' and recognizes the arrival shape."
+                 :meta "Reaching for easing/ease-in would produce the wrong shape — the card would accelerate INTO the target, feeling like an impact. easing/ease-out is the honest answer for 'landing softly.'")
+                (:eng "One line; the arrival is legible." :math "Cubic Bezier ≈ ease-out-cubic." :cs "Constant; O(1)."))
+  :row-3-dimension ((:setup "Decelerating shape with fast start and soft end."
+                     :rungs ((:domain "easing" :code "easing/ease-out")
+                             (:domain "brake profile (metaphor)" :code "(define (deceleration-at-time v0 a t)\n  (max 0 (- v0 (* a t))))\n(deceleration-at-time 10 5 1.5)")
+                             (:domain "concave map on [0,1]" :code "(define (one-minus-square t) (- 1 (expt (- 1 t) 2)))\n(one-minus-square 0.5)"))
+                     :explanation "In easing, ease-out shapes an arrival. In the brake metaphor, deceleration slows a car to rest — the same concave shape. In the math rung, 1 − (1−t)² is the archetypal concave map on [0,1]. All three are concave and pinned at endpoints."
+                     :meta "The shape transfers because braking, animation arrival, and concavity all share the same falling-derivative structure.")
+                    (:eng "One curve fits UI motion, automotive engineering, and math." :math "1 − (1−t)² is concave; second derivative is −2 < 0." :cs "Constant; O(1)."))
+  :row-4-proof ((:claim "easing/ease-out is concave on [0,1] and pinned at endpoints: e(0)=0, e(1)=1, derivative non-increasing. This is the ease-out concavity invariant."
+                 :program "(define (approx a b) (< (abs (- a b)) 0.0001))\n(define (numerical-slope f t h)\n  (/ (- (f (+ t h)) (f t)) h))\n(and (approx (easing/ease-out 0) 0)\n     (approx (easing/ease-out 1) 1)\n     (> (numerical-slope easing/ease-out 0.1 0.01)\n        (numerical-slope easing/ease-out 0.9 0.01)))"
+                 :invariant "e(0)=0 ∧ e(1)=1 ∧ ∀ 0 ≤ t1 < t2 ≤ 1, e'(t1) ≥ e'(t2)"
+                 :meta "A curve failing concavity would accelerate somewhere in the arrival, breaking the 'landing' feel. Falsification is any pair where slope increased. CS pattern: 'concave endpoint-pinned map'. Book-of-motion ch 4; book-of-math ch 7. Concavity + endpoint pinning; monotone-decreasing derivative.")
+                (:eng "The invariant is what makes ease-out feel like landing." :math "Concavity + pinning; the standard shape for arrival." :cs "Property test; O(N)."))
+  :row-5-emergence ((:base "easing/ease-out is a concave arrival shape."
+                     :composition "(define (cascade-arrival items xs y step)\n  (let loop ((is items) (xs xs) (delay 0))\n    (cond ((null? is) 'ok)\n          (else (time/when delay (lambda ()\n                  (motion/move-to (car is) (car xs) y 300 :easing easing/ease-out)))\n                (loop (cdr is) (cdr xs) (+ delay step))))))\n(cascade-arrival '(a b c) '(50 150 250) 100 60)"
+                     :emergent "A staged arrival cascade — combining ease-out with time-staggered dispatch produces a group settling into a row, each element landing with the arrival shape."
+                     :meta "This is the same family as staggered CSS transitions, or a UITableView cell-appear animation. Cross-reference book-of-composition ch 11. Familiar analog: iOS row-by-row cell fade-in.")
+                    (:eng "One easing + staggered dispatch = a row-arrival choreography." :math "Parallel application of the same concave shape." :cs "O(N) delayed dispatches.")))
+
+(verb
+  :name "easing/ease-in-out"
+  :library "easing"
+  :kind "meta"
+  :signature "easing/ease-in-out -> easing"
+  :summary "Ease-in-out: symmetric — slow start, fast middle, gentle end. The organic default."
+  :explanation "easing/ease-in-out combines ease-in and ease-out into a symmetric curve. Equivalent to `(named-ease 'ease-in-out-cubic)`. It reads as breathing: in-and-out. The most natural feel for motion that isn't specifically an entrance or exit — a card sliding to a new position, a camera panning, an entity crossing the screen."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(motion/move-to 'sprite 300 200 500 :easing easing/ease-in-out)" :note "Symmetric ease — start slow, speed up, slow down.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (traverse entity waypoints)\n  (let loop ((ws waypoints))\n    (cond ((null? ws) 'ok)\n          (else (motion/move-to entity (car (car ws)) (cadr (car ws)) 400 :easing easing/ease-in-out)\n                (loop (cdr ws))))))\n(traverse 'ghost '((100 100) (200 200) (100 200)))" :note "Walk waypoints with a natural ease-in-out feel each hop.")
+    (:dialect "motoi" :tier "expert" :code "(define (camera-tour cam scenes seconds-each)\n  (let loop ((ss scenes))\n    (cond ((null? ss) 'ok)\n          (else (motion/move-to cam (car (car ss)) (cadr (car ss)) (* seconds-each 1000) :easing easing/ease-in-out)\n                (time/when (* seconds-each 1000) (lambda () (loop (cdr ss))))))))\n(camera-tour 'camera '((0 0) (200 100) (400 200)) 2)" :note "Camera tour: pan between scenes with ease-in-out for a documentary feel.")
+  )
+  :caveats ("Symmetric curves feel calm; if you want drama, use easing/emphasized instead." "Not the fastest-feeling easing; too slow for micro-interactions.")
+  :drawbacks ("Symmetric — reversing the direction produces the same shape; not useful for creating asymmetry.")
+  :usecases ("Traversals between two arbitrary points." "Camera pans and zooms." "Card shuffles and repositions." "The natural default for 'just move it there'.")
+  :related ("easing/ease-in" "easing/ease-out" "easing/standard" "named-ease" "motion/move-to")
+  :learn (:concept "Symmetric easing reads as breathing — in, then out, then rest." :prerequisites ("motion/move-to") :progression "Compare with easing/standard: standard is asymmetric and starts a hair faster; ease-in-out is perfectly symmetric.")
+  :row-2-audit ((:problem "A camera should pan smoothly between two scenes with no drama — start slow, accelerate through the middle, decelerate to a rest. The operator wants the calm, symmetric feel of a documentary."
+                 :program "(motion/move-to 'camera 400 200 1500 :easing easing/ease-in-out)"
+                 :explanation "One line. easing/ease-in-out has small slopes at both endpoints and a peak in the middle — a symmetric S-curve. The camera starts gently, speeds up mid-transit, and settles at the destination. The audit is one symbol; a reviewer sees 'ease-in-out' and knows this is a calm traverse."
+                 :meta "Reaching for easing/ease-in would accelerate the camera into the target (feels like collision). easing/ease-out would start fast and glide (feels like emerging from off-camera). easing/ease-in-out is the honest answer for 'symmetric traversal.'")
+                (:eng "One line for a doc-style camera move." :math "Cubic Bezier ≈ ease-in-out-cubic; symmetric under t → 1-t." :cs "Constant; O(1)."))
+  :row-3-dimension ((:setup "Symmetric S-curve with slow endpoints and fast middle."
+                     :rungs ((:domain "easing" :code "easing/ease-in-out")
+                             (:domain "logistic breathing (metaphor)" :code "(define (logistic k t)\n  (/ 1 (+ 1 (exp (- 0 (* k (- t 0.5)))))))\n(logistic 6 0.5)")
+                             (:domain "sigmoid function" :code "(define (sigmoid x)\n  (/ 1 (+ 1 (exp (- 0 x)))))\n(sigmoid 0)"))
+                     :explanation "In easing, ease-in-out shapes calm traversal. In the logistic-breathing metaphor, the shape resembles a sigmoid centered at t=0.5. In the math rung, the sigmoid is the archetypal S-curve; all three share the same symmetric-around-midpoint structure."
+                     :meta "The shape transfers because it is the sigmoid archetype; wherever a bounded quantity has both a slow start and a slow finish with a fast middle, this shape appears.")
+                    (:eng "Camera pans, population growth curves, and machine learning activations share the same shape." :math "S-curve; symmetric under t ↔ 1-t reflection." :cs "Constant; O(1)."))
+  :row-4-proof ((:claim "easing/ease-in-out is symmetric about t=0.5: e(t) + e(1-t) = 1 for every t. This is the point-symmetry invariant that makes it feel calm and reversible."
+                 :program "(define (approx a b) (< (abs (- a b)) 0.001))\n(define (check-symmetry n)\n  (let loop ((i 0) (ok? #t))\n    (if (> i n) ok?\n        (let ((t (/ i n)))\n          (loop (+ i 1)\n                (and ok? (approx (+ (easing/ease-in-out t)\n                                    (easing/ease-in-out (- 1 t))) 1)))))))\n(check-symmetry 50)"
+                 :invariant "∀ t ∈ [0,1] . e(t) + e(1-t) = 1"
+                 :meta "An asymmetric curve would make forward and reverse traversals feel different. Falsification is any t where the sum ≠ 1. CS pattern: 'point-symmetric S-curve.' Book-of-motion ch 4. Symmetry under t → 1-t.")
+                (:eng "The invariant means reverse-playback of the animation looks identical." :math "Point-reflection about (0.5, 0.5)." :cs "Property test; O(N)."))
+  :row-5-emergence ((:base "easing/ease-in-out is a symmetric S-curve."
+                     :composition "(define (patrol-loop entity waypoints)\n  (let loop ((ws waypoints))\n    (cond ((null? ws) (patrol-loop entity waypoints))\n          (else (motion/move-to entity (car (car ws)) (cadr (car ws)) 500 :easing easing/ease-in-out)\n                (time/when 500 (lambda () (loop (cdr ws))))))))\n(patrol-loop 'guard '((100 100) (300 100) (300 300) (100 300)))"
+                     :emergent "A perpetual patrol — chaining ease-in-out with a waypoint loop produces a guard-like patrol that reads as calm, deliberate motion between four points. No single call has this behavior."
+                     :meta "This is the same family as an NPC patrol AI, or a security-camera pan pattern. Cross-reference book-of-composition ch 12. Familiar analog: metal-gear-solid guard patrol.")
+                    (:eng "One easing + a waypoint list = a full patrol behavior." :math "Composition of symmetric shapes indexed by a cyclic sequence." :cs "O(1) per segment; the outer loop is tail-recursive.")))
+
+(verb
+  :name "easing/spring"
+  :library "easing"
+  :kind "meta"
+  :signature "easing/spring -> easing"
+  :summary "The default spring easing: lively bounce that settles quickly. Physical-feeling motion."
+  :explanation "easing/spring is a pre-built spring-based easing tuned for lively but composed motion — a small overshoot, quick settle. Equivalent to `(spring-ease :stiffness 100 :damping 15 :mass 1)`. Reach for it when a curve-based easing feels dead — springs feel alive. Perfect for toasts, buttons, and any UI element that should react physically."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(motion/move-to 'button 200 100 :easing easing/spring)" :note "Button springs into place with a small overshoot.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (toast-in text)\n  (fb/text 20 -30 text :font font/default)\n  (motion/move-to 'toast 20 20 :easing easing/spring))\n(toast-in \"saved!\")" :note "Toast drops in with springy settle.")
+    (:dialect "motoi" :tier "expert" :code "(define (react-to-click entity)\n  (let ((original (entity/pos entity)))\n    (motion/move-to entity (car original) (- (cadr original) 6) 100 :easing easing/ease-out)\n    (time/when 100 (lambda ()\n      (motion/move-to entity (car original) (cadr original) :easing easing/spring)))))\n(react-to-click 'card)" :note "Click reaction: quick lift with ease-out, spring settle back.")
+  )
+  :caveats ("Spring duration is not exact — the settle time depends on the spring parameters; if you need precise timing, use a Bézier curve instead." "Overshoot is small but visible; if you don't want it, use easing/ease-out.")
+  :drawbacks ("Not appropriate for exits — springs are inherently arriving motion." "Slightly more compute per frame than fixed-curve eases.")
+  :usecases ("Toast and notification entrances." "Button press feedback." "Any UI element that should feel alive on interaction." "Cards settling into a spread.")
+  :related ("spring-ease" "easing/emphasized" "easing/ease-out" "phys/spring" "motion/move-to")
+  :learn (:concept "Spring easing is physically-based motion; overshoot and settle read as *life*." :prerequisites ("motion/move-to" "easing/ease-out") :progression "Contrast easing/spring with easing/ease-out on the same motion — the spring feels alive.")
+  :row-2-audit ((:problem "A save button lit up when pressed and the designer says 'make it feel alive when it comes back to rest.' A curve-based easing won't give the small overshoot that reads as physical."
+                 :program "(motion/move-to 'save-button 40 40 :easing easing/spring)"
+                 :explanation "One call. easing/spring encodes a small mass-spring-damper trajectory: pull, overshoot, settle. The button lifts and returns with a hint of bounce that fixed-curve eases cannot fake. The audit is one symbol; a reviewer sees 'spring' and knows this is physical, not shaped."
+                 :meta "Reaching for easing/ease-out gives a soft landing but no overshoot; reaching for spring-ease works but requires parameter choices. easing/spring is the honest answer for 'default physical settle' because the parameters were already tuned by the design system.")
+                (:eng "One line; the physicality is preserved." :math "Damped oscillator with k=100, c=15, m=1." :cs "Constant; the ODE solve is per-frame."))
+  :row-3-dimension ((:setup "A pre-configured damped oscillator with small overshoot."
+                     :rungs ((:domain "easing" :code "easing/spring")
+                             (:domain "underdamped RLC circuit (metaphor)" :code "(define (underdamped-response t k c m)\n  (let* ((omega-n (sqrt (/ k m)))\n         (zeta (/ c (* 2 (sqrt (* k m)))))\n         (omega-d (* omega-n (sqrt (- 1 (* zeta zeta))))))\n    (- 1 (* (exp (- 0 (* zeta omega-n t)))\n            (cos (* omega-d t))))))\n(underdamped-response 0.1 100 15 1)")
+                             (:domain "second-order linear ODE with underdamped roots" :code "(define (settle-value ode-integrate steps)\n  (car (ode-integrate 0 (* steps 0.01))))\n(settle-value (lambda (a b) (list (+ a 1) 0)) 100)"))
+                     :explanation "In easing, spring shapes a settle. In the RLC-circuit metaphor, an underdamped circuit's voltage response has the same overshoot-then-settle shape. In the math rung, an underdamped second-order ODE is the archetype. All three are ζ<1 damped oscillators."
+                     :meta "The shape transfers because it IS a damped oscillator; whether the mass is a UI element, an electron cloud, or an abstract coordinate, the ODE is the same.")
+                    (:eng "One curve fits UI, analog electronics, and control theory." :math "x(t) = 1 − e^{-ζω_n t} cos(ω_d t + φ)." :cs "Constant lookup; runtime ODE solve."))
+  :row-4-proof ((:claim "easing/spring reaches its target value 1 within a bounded settling time and thereafter stays within ε of 1. This is the finite-settle invariant."
+                 :program "(define (settle-time-of e epsilon max-t)\n  (let loop ((t 0))\n    (cond ((> t max-t) 'no-settle)\n          ((and (< (abs (- (e t) 1)) epsilon)\n                (< (abs (- (e (+ t 0.5)) 1)) epsilon))\n           t)\n          (else (loop (+ t 0.01))))))\n(settle-time-of easing/spring 0.02 5)"
+                 :invariant "∃ t_s ∈ R⁺ . ∀ t ≥ t_s . |e(t) − 1| ≤ ε"
+                 :meta "A spring that never settled would run animations forever. Falsification is a parameter set with settle-time > max acceptable. CS pattern: 'BIBO stable settle.' Book-of-motion ch 15; book-of-math ch 12.")
+                (:eng "The finite-settle invariant is what allows motion/on-settle to fire." :math "Damped-oscillator eigenvalues have negative real part; settle-time ≈ 4/(ζω_n)." :cs "Numerical integration until steady state; O(t_s / dt)."))
+  :row-5-emergence ((:base "easing/spring is a pre-tuned damped-oscillator settle."
+                     :composition "(define (react-to-click entity)\n  (let* ((orig-y (entity/y entity)))\n    (motion/move-to entity (entity/x entity) (- orig-y 6) 100 :easing easing/ease-out)\n    (time/when 100 (lambda ()\n      (motion/move-to entity (entity/x entity) orig-y :easing easing/spring)))))\n(react-to-click 'save-button)"
+                     :emergent "A tactile-feedback click — chaining ease-out (lift) with easing/spring (return) produces a two-phase press-and-release gesture that reads as a physical button, which neither easing alone can express."
+                     :meta "This is the same family as haptic-feedback UI patterns in iOS, or a mechanical-keyboard key-return. Cross-reference book-of-composition ch 12. Familiar analog: iOS's UIButton spring-back after touch-up.")
+                    (:eng "Two easings + one delay = a physical button." :math "Piecewise composition of a concave dip and an underdamped return." :cs "O(1) per segment; two motion dispatches.")))
+

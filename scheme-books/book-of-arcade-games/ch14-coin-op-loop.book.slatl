@@ -1,0 +1,403 @@
+;; ch14-coin-op-loop.book.slatl
+;; Book of Arcade Games — Chapter 14: The Coin-Op Loop
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Arcade Games"
+  :chapter-number      14
+  :title               "The Coin-Op Loop"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + game-design"
+  :book-version        "1.0.0"
+  :prose
+"A real arcade cabinet doesn't sit idle. It cycles: attract mode →
+title screen → press start → play → game over → high score entry →
+back to attract mode. The whole life of the machine is a state
+machine. When no one is playing, the attract mode plays a demo of the
+game to LURE someone to insert a quarter. When someone plays, the
+game runs. When they lose, high-score entry captures their initials,
+then the machine slips back to attract.
+
+This chapter builds that whole cabinet in about 150 lines. The state
+machine is a `game/state` value with transitions driven by
+`input/pressed? 'a`. Each state has its own paint and its own logic.
+Between states, one moment of blank + reset.
+
+By the end you have a shippable arcade session — everything from title
+to leaderboard.
+
+---
+
+## 14.1 States
+
+The cabinet has five states:
+
+- `'attract` — demo playing, waits for start button
+- `'title` — title screen with menu
+- `'play` — the actual game
+- `'game-over` — end screen, brief pause
+- `'high-score` — high-score entry
+
+Each has an entry action, a per-frame action, and transitions.
+
+```scheme
+(define cabinet-state 'attract)
+(define state-timer 0)
+```
+
+---
+
+## 14.2 Title screen
+
+Slow breathing animation on 'PRESS START'.
+
+```scheme
+(define (paint-title-screen)
+  (paint-clear)
+  (paint-text \"BALLPIT\" 120 60)
+  (paint-text \"the arcade\" 130 80)
+  ;; Breathing 'PRESS START' via tick/sine.
+  (let* ((phase (* 0.05 (world/frame)))
+         (breath (+ 1.0 (* 0.15 (tick/sine phase))))
+         (x-offset (round (* breath 130))))
+    (paint-text \"PRESS START\" x-offset 140))
+  (paint-text \"HIGH: \"
+              80 190)
+  (paint-text (number->string (or (cortex/read 'arcade-high) 0))
+              140 190))
+```
+
+`tick/sine phase` returns a sine wave value oscillating between -1
+and 1. Multiplied by 0.15 and added to 1.0, gives a factor from 0.85
+to 1.15. Times a base position, the text subtly breathes.
+
+Kids read this animation as 'the game is alive, waiting for me.'
+Static text feels dead.
+
+---
+
+## 14.3 Play
+
+The actual game — we'll use the small ball-bounce game from chapter 1
+for simplicity, but this slot holds whichever chapter's shape you like.
+
+```scheme
+(define (init-play)
+  (world/reset!)
+  (world/gravity! 0 0.4)
+  (world/floor! 220)
+  (let ((p (world/spawn 'player 160 200)))
+    (entity/shape! p 'triangle 8)
+    (entity/solid! p #t))
+  (set! current-score 0)
+  (set! player-hp 3))
+
+(define current-score 0)
+(define player-hp 3)
+
+(define (paint-play)
+  (world/step)
+  (paint-clear)
+  (world/each 'player
+              (lambda (p) (paint-cell 'player (entity/x p) (entity/y p) 8 8)))
+  (paint-text (string-append \"Score: \" (number->string current-score)) 10 10)
+  (paint-text (string-append \"HP: \" (number->string player-hp)) 10 20))
+```
+
+Real play code goes here. For a shippable demo, replace with the boss
+fight from chapter 12 or the shmup from chapter 5.
+
+---
+
+## 14.4 Game over
+
+Brief pause with the final score.
+
+```scheme
+(define (paint-game-over)
+  (paint-clear)
+  (paint-text \"GAME OVER\" 120 100)
+  (paint-text (string-append \"Final: \" (number->string current-score))
+              110 130)
+  (paint-text (string-append \"Time to attract mode: \"
+                             (number->string (max 0 (- 180 state-timer))))
+              60 200))
+```
+
+180 frames = 3 seconds. Long enough to absorb. Short enough that a
+disengaged player doesn't stall.
+
+---
+
+## 14.5 High score entry
+
+If final score beats the top-5 board, capture the player's initials.
+
+```scheme
+(define high-score-initials \"AAA\")
+(define initial-cursor 0)     ;; which letter (0, 1, 2)
+
+(define (paint-high-score-entry)
+  (paint-clear)
+  (paint-text \"NEW HIGH SCORE!\" 100 60)
+  (paint-text (string-append \"Score: \" (number->string current-score))
+              120 90)
+  (paint-text \"Enter your initials\" 90 130)
+  ;; Draw each of 3 initial letters. Highlight the cursor position.
+  (let loop ((i 0))
+    (when (< i 3)
+      (let ((letter (string (string-ref high-score-initials i)))
+            (x (+ 140 (* i 16))))
+        (paint-text letter x 160)
+        (when (= i initial-cursor)
+          (paint-text \"_\" x 165)))     ;; underscore for cursor
+      (loop (+ i 1)))))
+
+(define (advance-initial delta)
+  (let* ((cur (char->integer (string-ref high-score-initials initial-cursor)))
+         (next (+ cur delta))
+         (wrapped (cond ((< next 65) 90) ((> next 90) 65) (else next)))
+         (str (make-string 3)))
+    (string-set! str 0 (string-ref high-score-initials 0))
+    (string-set! str 1 (string-ref high-score-initials 1))
+    (string-set! str 2 (string-ref high-score-initials 2))
+    (string-set! str initial-cursor (integer->char wrapped))
+    (set! high-score-initials str)))
+```
+
+Up/down cycles through letters A-Z. Left/right moves cursor. 'a' saves
+to Cortex leaderboard.
+
+---
+
+## 14.6 The state machine
+
+Wire it all together.
+
+```scheme
+(define cabinet-state 'attract)
+(define state-timer 0)
+
+(define (transition new-state)
+  (set! cabinet-state new-state)
+  (set! state-timer 0)
+  (when (eq? new-state 'play)
+    (init-play)))
+
+(define (arcade-cabinet)
+  (transition 'attract)
+  (on-frame
+   (lambda ()
+     (set! state-timer (+ state-timer 1))
+     (cond
+       ((eq? cabinet-state 'attract)
+        ;; Attract mode: play the game silently in background, wait
+        ;; for start button. For simplicity we just show the title.
+        (paint-title-screen)
+        (when (input/pressed? 'a) (transition 'play))
+        ;; After 20 seconds of attract, show a demo (chapter 14, App K).
+        )
+       ((eq? cabinet-state 'title)
+        (paint-title-screen)
+        (when (input/pressed? 'a) (transition 'play)))
+       ((eq? cabinet-state 'play)
+        (when (input/down? 'left)
+          (world/each 'player (lambda (p) (entity/move! p -4 0))))
+        (when (input/down? 'right)
+          (world/each 'player (lambda (p) (entity/move! p 4 0))))
+        (when (input/pressed? 'a)
+          (set! current-score (+ current-score 100)))
+        (paint-play)
+        ;; Simulated game-over: 30 sec of play, or press 'b'.
+        (when (or (> state-timer (* 60 30)) (input/pressed? 'b))
+          (transition 'game-over)))
+       ((eq? cabinet-state 'game-over)
+        (paint-game-over)
+        (when (> state-timer 180)
+          (if (> current-score (or (cortex/read 'arcade-high) 0))
+              (transition 'high-score)
+              (transition 'attract))))
+       ((eq? cabinet-state 'high-score)
+        (paint-high-score-entry)
+        (when (input/pressed? 'left)
+          (set! initial-cursor (max 0 (- initial-cursor 1))))
+        (when (input/pressed? 'right)
+          (set! initial-cursor (min 2 (+ initial-cursor 1))))
+        (when (input/pressed? 'up)   (advance-initial 1))
+        (when (input/pressed? 'down) (advance-initial -1))
+        (when (input/pressed? 'a)
+          (cortex/write 'arcade-high current-score)
+          (cortex/write 'arcade-initials high-score-initials)
+          (transition 'attract)))))))
+
+(big-bang arcade-cabinet)
+```
+
+Read the `cond` slowly. Each branch handles ONE state. Each branch
+paints, polls input, and possibly transitions. Between states, one
+frame of setup via `transition`.
+
+`init-play` resets the world. That is the key discipline of a state
+machine: each state entry cleans up cleanly. No leftover entities from
+the previous game. No leftover state.
+
+---
+
+## 14.7 Attract mode with a demo
+
+The real attract mode plays a demo of the game — recorded input replayed
+back at attract time. `world/tape-record!` records inputs; `world/tape-
+replay` plays them back. See Appendix K (Tape Replay for Attract Mode)
+for the full pattern.
+
+Sketch:
+
+```scheme
+;; During play, record.
+(world/tape-record! 'demo-play)
+;; ... game runs ...
+(world/tape-save 'demo-play 'saved-demo)
+
+;; During attract, replay.
+(world/tape-replay 'saved-demo)
+```
+
+The kid does not immediately see the game. They see A game playing
+itself. Muscle memory activates before they realize they're not
+playing yet. Then they press start and they ARE playing.
+
+---
+
+## 14.8 The four patterns in a cabinet loop
+
+**Composition.** Each state composes: paint routine + per-frame logic
++ transition condition. Add a new state (e.g. 'options-menu) by
+composing a new triple.
+
+**Orchestration.** The frame loop dispatches to the current state
+each frame. Each state handles its own per-frame update, poll, paint.
+
+**In-routing.** Input routes to state-specific handlers. 'a' in
+attract = start; 'a' in play = fire; 'a' in high-score = save. Same
+button, different route per state.
+
+**Routing.** State transitions route via `transition` function. It's
+the routing hub. Every transition IS a route from state to state.
+Cortex writes route to persistence.
+
+---
+
+## 14.9 Common desktop tasks
+
+**Shop cycle.** A shop's front page could operate as an attract loop:
+demo tour → featured items → 'CLICK TO BROWSE' → item detail →
+add-to-cart → checkout → thanks → back to demo. Each phase = a state.
+Same pattern.
+
+**Support-chat auto-cycle.** For an operator's chat window: idle
+attract (rotating tips) → active chat → transcript summary → back to
+idle. Chapter 14's shape scales.
+
+---
+
+## 14.10 Pitfalls
+
+**State leaks entities.** `init-play` didn't `world/reset!`. Old boss
+still on screen during title.
+
+**Two states fire same frame.** You transitioned mid-cond and the
+new state's branch also fires. Use `unless (state-changed)` guard,
+or transition-only-on-last-line-of-branch.
+
+**High-score entry saves initials without saving score.** Two Cortex
+writes; if either fails, half-state. Wrap in `cortex/transaction!` if
+available, or accept the risk for a small game.
+
+**Attract mode too long.** Kids get bored. Cap at 30 seconds; loop
+title-then-attract-then-title.
+
+**Game timer runs during pause.** If your state timer counts frames,
+it counts during pause menu. Freeze via `game/stop` or gate with
+`(unless paused? (set! timer ...))`.
+
+---
+
+## 14.11 Try this yourself
+
+1. Add an options menu — sound on/off, difficulty. State: 'options.
+2. Add a credits screen — state: 'credits.
+3. Multi-slot save: 3 named save slots. Kid picks which slot at
+   title.
+4. Difficulty scaling based on high-score history: if the player
+   consistently beats top-3, increase enemy count 20%.
+5. Achievements: on certain milestones (first boss kill, 10k score),
+   flash achievement banner over 60 frames.
+6. Cabinet 'coin' — require 3 button presses (as the arcade 'insert
+   coin') before play starts. Just for atmosphere.
+
+---
+
+## 14.12 What we built
+
+Five-state cabinet loop. Breathing title. Play. Game over with delay.
+High-score entry. Cortex persistence of high score. Transition
+discipline that resets cleanly. Full shape of an arcade session.
+
+Next chapter: two players, one screen. Split the input space, split
+the camera, share the physics. Local multiplayer.")
+
+(code-block :chapter 14 :lang "scheme" :source
+"(define cabinet-state 'attract)
+(define state-timer 0)
+(define current-score 0)
+(define (init-play)
+  (world/reset!)
+  (world/gravity! 0 0.4)
+  (world/floor! 220)
+  (let ((p (world/spawn 'player 160 200)))
+    (entity/shape! p 'triangle 8)
+    (entity/solid! p #t))
+  (set! current-score 0))
+(define (transition new-state)
+  (set! cabinet-state new-state)
+  (set! state-timer 0)
+  (when (eq? new-state 'play) (init-play)))
+(define (coin-op-anchor)
+  (transition 'attract)
+  (on-frame
+   (lambda ()
+     (set! state-timer (+ state-timer 1))
+     (cond
+       ((eq? cabinet-state 'attract)
+        (paint-clear)
+        (paint-text \"BALLPIT\" 120 60)
+        (paint-text \"PRESS START\"
+                    (+ 100 (round (* 20 (tick/sine (* 0.05 (world/frame))))))
+                    140)
+        (when (input/pressed? 'a) (transition 'play)))
+       ((eq? cabinet-state 'play)
+        (world/each 'player
+                    (lambda (p)
+                      (when (input/down? 'left)  (entity/move! p -4 0))
+                      (when (input/down? 'right) (entity/move! p 4 0))))
+        (when (input/pressed? 'a) (set! current-score (+ current-score 100)))
+        (world/step)
+        (paint-clear)
+        (world/each 'player
+                    (lambda (p) (paint-cell 'player (entity/x p) (entity/y p) 8 8)))
+        (paint-text (string-append \"Score: \" (number->string current-score)) 10 10)
+        (when (> state-timer 1800) (transition 'game-over)))
+       ((eq? cabinet-state 'game-over)
+        (paint-clear)
+        (paint-text \"GAME OVER\" 120 100)
+        (paint-text (string-append \"Final: \" (number->string current-score))
+                    110 130)
+        (when (> state-timer 180) (transition 'attract)))))))
+(big-bang coin-op-anchor)")

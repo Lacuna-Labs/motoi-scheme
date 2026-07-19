@@ -1,0 +1,201 @@
+(dialect :applies ("motoi" "sakura") :note "Default: applies to both dialects. When a split exists between Motoi and Sakura, add sibling records in the same doc, each tagged with a per-record :dialect override.")
+(chapter
+  :book "Book of Jesse"
+  :chapter-number 14
+  :title "Chapter 12 — Common Headaches and Solutions"
+  :provenance
+    (:source-path "/Users/alfred/code/scheme-lang/docs/BOOK-OF-JESSE.md"
+     :source-sha "a4fe105b21fbbb37e6b52bd1b3884eed3a65127db421fa7e044480d4d024873e"
+     :recovered-at "2026-07-14"
+     :recovery-item "recovery-008")
+  :prose
+"## Chapter 12 — Common Headaches and Solutions
+
+Every language has papercuts. Here are the ones that catch Fennel / TIC-80 / Clojure / Lua programmers on their first week.
+
+### `nil` and `#f`
+
+Lua has `nil`. Fennel has `nil`. Clojure has `nil`. Motoi Scheme does not have `nil` — it has `#f` (false), `'()` (empty list), and undefined behavior for reading an unbound variable (an error, not silent failure).
+
+The subtle case: in Lua, `nil` is falsy. In Clojure, `nil` is falsy. In Scheme, *only `#f` is falsy*. Every other value — including `0`, `\"\"`, `'()`, `(void)` — is truthy.
+
+**Bug you will hit:**
+
+```scheme
+(if (hash-ref maybe-empty-dict 'x)
+    'found
+    'missing)
+```
+
+If `x` isn't in the dict, `hash-ref` returns... what? In Motoi Scheme's base, it returns `#f`, which is falsy, so the code works as you'd expect. But *some* hash implementations return `'()` (empty list) for missing keys, which is truthy under Scheme rules. Read the `:signature` in the reference. When in doubt, use `hash-has-key?`:
+
+```scheme
+(if (hash-has-key? maybe-empty-dict 'x)
+    (hash-ref maybe-empty-dict 'x)
+    'missing)
+```
+
+### The `t = t + 1` frame counter
+
+TIC-80 gives you a global `t` you can increment each frame. Motoi Scheme's `on-frame` doesn't. You have two paths:
+
+**Global mutable, if that's your shape:**
+
+```scheme
+(define t 0)
+
+(define (frame)
+  (set! t (+ t 1))
+  (clear 0)
+  (text 10 10 (number->string t) 15))
+
+(on-frame frame)
+```
+
+**State-threaded, if you want the discipline:**
+
+```scheme
+(define (step state)  (+ state 1))
+(define (draw state)  (clear 0)
+                      (text 10 10 (number->string state) 15))
+
+(big-bang 0
+  (on-tick step)
+  (to-draw draw))
+```
+
+The second one composes better. The first one reads faster. Pick your battle.
+
+### Closures capturing loop variables
+
+Same trap Fennel has, same solution:
+
+```scheme
+;; wrong — every closure captures the same n
+(define closures
+  (map (lambda (n) (lambda () n))
+       '(1 2 3)))
+
+;; wait, this actually works in Scheme because each map iteration
+;; creates a fresh binding of n. Compare Lua:
+```
+
+```lua
+-- wrong in Lua
+local fs = {}
+for i = 1, 3 do fs[i] = function() return i end end
+-- all three return 3 in Lua 5.1's for loop (i is one shared binding)
+```
+
+Motoi Scheme's `map` gives you a fresh `n` per iteration by construction, so the closures capture what you'd expect. If you build your own loop with `set!` and a shared variable, you'll get the Lua-shape bug:
+
+```scheme
+;; wrong — all closures share the same n
+(define closures '())
+(let loop ((i 3) (n 0))
+  (when (> i 0)
+    (set! n (+ n 1))
+    (set! closures (cons (lambda () n) closures))
+    (loop (- i 1) n)))
+
+;; all three closures return 3
+```
+
+Fix: put the binding inside the lambda's enclosing scope:
+
+```scheme
+(define closures '())
+(let loop ((i 1))
+  (when (<= i 3)
+    (let ((snapshot i))
+      (set! closures (cons (lambda () snapshot) closures)))
+    (loop (+ i 1))))
+
+;; each closure returns its own snapshot
+```
+
+Same fix as Fennel's `local i = i` inside the loop.
+
+### Module imports
+
+Motoi Scheme uses R7RS-style `import`:
+
+```scheme
+(import (sakura threading))       ;; -> and ->> macros
+(import (sakura animation))       ;; helpers
+```
+
+You will *not* usually need to import layer-0 or layer-1 verbs — they're in the base environment. Import is for opt-in libraries and for community modules.
+
+If you're used to Lua's `require` or Clojure's `require`, `import` fills the role. Aliasing (`(import (rename (sakura threading) (-> pipe)))`) works the way you'd expect from R7RS.
+
+### Tail-call quirks
+
+Scheme guarantees tail-call optimization *only in tail position*. This is not:
+
+```scheme
+;; NOT tail — cons wraps the recursive call
+(define (bad-map f xs)
+  (if (null? xs) '()
+      (cons (f (car xs)) (bad-map f (cdr xs)))))
+```
+
+The `cons` is not in tail position — the recursive call has to return before `cons` can run. Very long lists will exhaust memory (though not the JS stack, because the trampoline handles it).
+
+Rewrite as accumulator:
+
+```scheme
+(define (good-map f xs)
+  (let loop ((in xs) (out '()))
+    (if (null? in)
+        (reverse out)
+        (loop (cdr in) (cons (f (car in)) out)))))
+```
+
+Now the recursive call is in tail position. Deep lists work.
+
+Or just use the built-in `map`, which handles all of this for you.
+
+### `define` inside `let`
+
+R7RS lets you `define` inside a `let` body, and Motoi Scheme respects this. The defines become local to the `let`, in the shape of an implicit `letrec`:
+
+```scheme
+(let ((x 10))
+  (define (helper y) (+ x y))
+  (helper 5))                             ;; ⇒ 15
+```
+
+But be aware: this is a subtle interaction with `set!` on the outer `x`. Read carefully if you nest deeply.
+
+### The reader auto-quotes shape heads
+
+At the REPL, `(circle 40 40 15)` isn't a call — the reader sees an unbound head and auto-quotes it. So the value is the tagged list `(circle 40 40 15)`. Then the display layer notices the shape and renders it.
+
+This is *only* for shape heads: `circle`, `disc`, `line`, `rect`, `shapes`, `plot`. Everything else is a normal call. If you accidentally shadow one of those names, the auto-quote goes away for that name. If you want an unambiguous read, quote explicitly: `'(circle 40 40 15)`.
+
+The rule is in `src/repl/repl.js` — `AUTO_QUOTE_HEADS`.
+
+### Zero-indexing everywhere
+
+Lua indexes from 1. Fennel too (it's a Lua transpiler). Motoi Scheme indexes from 0. `(list-ref xs 0)` is the first element.
+
+### Numbers
+
+Motoi Scheme distinguishes exact and inexact numbers, R7RS-style. `1/3` is exact; `0.3333` is inexact. Most arithmetic between exacts stays exact — `(+ 1/3 1/6)` is `1/2`. As soon as an inexact enters, everything becomes inexact — `(+ 1/3 0.5)` is `0.8333...`. If you're used to Lua's one-number-type simplicity, you can force inexact with `exact->inexact`.
+
+### Error handling
+
+Errors are values:
+
+```scheme
+{:kind        :not-found
+ :message     \"hash key missing: 'x\"
+ :source-pos  (line 42 col 12 file \"scratch.scm\")
+ :did-you-mean (\"y\")}
+```
+
+You can `guard`/`raise` (R7RS) around them, or let them bubble to the REPL, which pretty-prints the shape. The `:did-you-mean` field is populated automatically for many verbs — a Levenshtein pass over the known names.
+
+---
+")

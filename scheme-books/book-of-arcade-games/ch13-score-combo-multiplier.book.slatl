@@ -1,0 +1,341 @@
+;; ch13-score-combo-multiplier.book.slatl
+;; Book of Arcade Games — Chapter 13: Score, Combo, Multiplier
+
+(dialect :applies ("motoi" "sakura"))
+
+(chapter
+  :book                "Book of Arcade Games"
+  :chapter-number      13
+  :title               "Score, Combo, Multiplier"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "sakura-teaching + game-design"
+  :book-version        "1.0.0"
+  :prose
+"Arcade DNA is the scoreboard. The number in the top-right corner is why
+you keep playing. Every hit is +100. Two hits in the same 60-frame
+window: ×2 multiplier — that hit was worth +200. Three in a row: ×3.
+Miss, get hit, wait too long — the multiplier resets and the number
+stops growing.
+
+The whole feedback loop is: do a thing, see the number grow, WANT to
+do the next thing to keep the number growing. Every arcade cabinet
+ever built is a machine for growing that number. The number itself is
+free — it's a variable. The magic is in the multiplier, the combo
+timer, and how the number is DISPLAYED.
+
+This chapter builds the scoreboard right. Base score. Combo counter
+with a decay window. Multiplier that scales visibly with combo.
+Number-that-grows visualization with `tick/ease`. Screen-flash on
+combo-up. Persistent high score via Cortex.
+
+---
+
+## 13.1 Base score
+
+Every hit is +100.
+
+```scheme
+(define score 0)
+
+(define (basic-score)
+  (world/reset!)
+  (let ((p (world/spawn 'player 160 210)))
+    (entity/shape! p 'triangle 8)
+    (entity/hp! p 5)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -4 0))
+       (when (input/down? 'right) (entity/move! p 4 0))
+       (when (input/pressed? 'a)
+         (set! score (+ score 100))
+         (world/camera-shake! 1 0.9))
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       (paint-text (string-append \"Score: \" (number->string score))
+                   10 10)))))
+
+(big-bang basic-score)
+```
+
+You press 'a', score grows. That is enough to see the pattern. Now
+add combo.
+
+---
+
+## 13.2 The combo counter
+
+Successive hits within a window grow the combo.
+
+```scheme
+(define score 0)
+(define combo 0)
+(define combo-decay-at 0)     ;; frame at which combo resets
+
+(define (combo-score)
+  (world/reset!)
+  (let ((p (world/spawn 'player 160 210)))
+    (entity/shape! p 'triangle 8)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -4 0))
+       (when (input/down? 'right) (entity/move! p 4 0))
+       (when (input/pressed? 'a)
+         (set! combo (+ combo 1))
+         (set! combo-decay-at (+ (world/frame) 60))  ;; 1 sec window
+         (set! score (+ score (* 100 combo)))
+         (world/camera-shake! (min 5 combo) 0.9))
+       ;; Combo decay.
+       (when (>= (world/frame) combo-decay-at)
+         (set! combo 0))
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       (paint-text (string-append \"Score: \" (number->string score)) 10 10)
+       (paint-text (string-append \"x\" (number->string combo)) 10 20)))))
+
+(big-bang combo-score)
+```
+
+Read the combo logic. Every 'a' press: bump combo, extend the decay
+window to 60 frames from now, add `100 * combo` to score. If you
+haven't pressed 'a' in a second, combo resets to 0 and the next hit
+is worth just 100.
+
+Kid presses 'a' rapidly: 100, 300, 600, 1000, 1500, 2100. Presses
+'a' once, waits 2 seconds, presses again: 100, then 100. Same
+five inputs, hugely different scores. That's the whole hook.
+
+---
+
+## 13.3 Growing number
+
+The number should GROW when it changes. Not just update — visibly
+scale up, then settle.
+
+```scheme
+(define score 0)
+(define displayed-score 0)     ;; interpolates toward score
+(define score-flash 0)          ;; frames of flash
+
+(define (growing-score)
+  (world/reset!)
+  (let ((p (world/spawn 'player 160 210)))
+    (entity/shape! p 'triangle 8)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -4 0))
+       (when (input/down? 'right) (entity/move! p 4 0))
+       (when (input/pressed? 'a)
+         (set! score (+ score 100))
+         (set! score-flash 10))
+       ;; Displayed-score chases actual score.
+       (set! displayed-score
+             (+ displayed-score
+                (* 0.1 (- score displayed-score))))
+       (when (> score-flash 0) (set! score-flash (- score-flash 1)))
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       ;; Score painted big when flashing; normal otherwise.
+       (paint-text (string-append \"Score: \"
+                                  (number->string (round displayed-score)))
+                   10
+                   (if (> score-flash 0) 30 10))))))
+
+(big-bang growing-score)
+```
+
+Two variables: `score` is the actual, `displayed-score` is the smooth
+interpolation. Every frame, `displayed-score` gets 10% closer to
+`score`. Hit 'a', score jumps 100, displayed-score smoothly climbs
+from 0 to 100 over about 40 frames. That climb IS the dopamine.
+
+The score-flash sets a position offset. When you hit, the text shifts
+up 20 pixels for 10 frames, then returns. Subtle, effective. Real
+arcade games do this AT SCALE — every hit, the number wobbles, glows,
+bounces. Feel is code.
+
+---
+
+## 13.4 The multiplier
+
+Combo doesn't just multiply the score — it multiplies the DISPLAY.
+Bigger combo = bigger number on screen.
+
+```scheme
+(define score 0)
+(define combo 0)
+(define combo-decay-at 0)
+
+(define (multiplier-display)
+  (world/reset!)
+  (let ((p (world/spawn 'player 160 210)))
+    (entity/shape! p 'triangle 8)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -4 0))
+       (when (input/down? 'right) (entity/move! p 4 0))
+       (when (input/pressed? 'a)
+         (set! combo (+ combo 1))
+         (set! combo-decay-at (+ (world/frame) 60))
+         (set! score (+ score (* 100 combo))))
+       (when (>= (world/frame) combo-decay-at)
+         (set! combo 0))
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       (paint-text (string-append \"Score: \" (number->string score)) 10 10)
+       ;; Combo painted increasingly large, right-aligned.
+       (when (> combo 0)
+         (let ((y-off (- 30 (min combo 20))))
+           (paint-text (string-append \"x\" (number->string combo))
+                       (- 300 (* 8 (min combo 15))) y-off)))))))
+(big-bang multiplier-display)
+```
+
+The combo number is painted in a size that grows with combo. At combo
+5, subtly bigger. At combo 15, huge. At combo 20+, capped so it
+doesn't take over the screen.
+
+Every arcade game does something like this. The number is the reward
+AND the punishment — when combo breaks, it disappears from the screen
+entirely.
+
+---
+
+## 13.5 High-score persistence
+
+Score should survive the game session.
+
+```scheme
+(define score 0)
+
+(define (high-score-tracked)
+  (world/reset!)
+  (let ((high-score (or (cortex/read 'arcade-high) 0))
+        (p (world/spawn 'player 160 210)))
+    (entity/shape! p 'triangle 8)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -4 0))
+       (when (input/down? 'right) (entity/move! p 4 0))
+       (when (input/pressed? 'a)
+         (set! score (+ score 100))
+         (when (> score high-score)
+           (set! high-score score)
+           (cortex/write 'arcade-high score)))
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       (paint-text (string-append \"Score: \" (number->string score)) 10 10)
+       (paint-text (string-append \"High:  \" (number->string high-score))
+                   10 20)))))
+
+(big-bang high-score-tracked)
+```
+
+When score passes the high-score, we update the display AND persist.
+Kid quits, comes back tomorrow: high score persists. The number the
+kid is trying to beat is their own past self.
+
+Even better: keep the top 5, not just top 1. Store as a Cortex list.
+Show the leaderboard on the title screen (chapter 14).
+
+---
+
+## 13.6 The four patterns
+
+**Composition.** Score display = base score + combo + multiplier +
+flash + interpolation. Add or subtract any layer.
+
+**Orchestration.** Frame order: input, score/combo update, decay check,
+interpolate displayed-score, paint. Interpolation MUST come after
+score update so the interpolation targets the current value.
+
+**In-routing.** Hits route to score-bump handlers. Combo timer routes
+frame-tick to decay checker. All routing is state-mutation via `set!`.
+
+**Routing.** Score routes to display (as text). Score also routes to
+Cortex (as persistent state). Two routes for one variable.
+
+---
+
+## 13.7 Common desktop tasks
+
+**Shop-progress badge.** Customer completes an action (browse 5 items,
+add to wishlist, share). Small score bumps for each; combo bonus if
+done in one session. Score routes to a badge on the customer's
+profile.
+
+**Support-response streak.** Operator answering customer messages. Each
+reply within 60 seconds of receipt = combo. Weekly streak leaderboard
+among the operator's team. Score routes to team dashboard.
+
+---
+
+## 13.8 Pitfalls
+
+**Score wraps at max integer.** Motoi Scheme uses bignums; you won't
+hit this. But if you display formatted, large numbers get unreadable.
+Format as `1.2M` beyond a million.
+
+**Displayed-score never catches up.** Interpolation factor too small.
+Try 0.15 or 0.2 for snappier.
+
+**Combo breaks silently.** Kid doesn't know why. Add a visual: on
+combo-break, brief red flash of the combo counter, then it vanishes.
+
+**Multiplier resets on death.** By design, mostly. But some players
+appreciate keeping their multiplier through respawn. Design choice.
+
+---
+
+## 13.9 Try this yourself
+
+1. Cap max combo at 30 with a visual 'MAX!' banner when reached.
+2. Add per-enemy score: small enemy 100, medium 300, large 800.
+3. Streak bonus: after 10-combo, every point scores +50 as flat bonus.
+4. Rank grade: at end of session, compute grade S/A/B/C/D from score.
+5. Combo pause: 'b' button freezes decay for 2 seconds. Once per game.
+6. Score sharing: on new high score, `paint-text` a share URL that
+   encodes the score in a Cortex key.
+
+---
+
+## 13.10 What we built
+
+Base score. Combo with decay window. Multiplier scaling. Interpolated
+display. Screen flash on hit. Cortex persistence. All in about 40
+lines of scoring logic.
+
+Next chapter: wrap the game in the cabinet. Title screen. Play. Game
+over. High score entry. Attract mode. The state machine of a full
+arcade session.")
+
+(code-block :chapter 13 :lang "scheme" :source
+"(define score 0)
+(define combo 0)
+(define combo-decay-at 0)
+(define (score-combo-anchor)
+  (world/reset!)
+  (let ((p (world/spawn 'player 160 210)))
+    (entity/shape! p 'triangle 8)
+    (on-frame
+     (lambda ()
+       (when (input/down? 'left)  (entity/move! p -4 0))
+       (when (input/down? 'right) (entity/move! p 4 0))
+       (when (input/pressed? 'a)
+         (set! combo (+ combo 1))
+         (set! combo-decay-at (+ (world/frame) 60))
+         (set! score (+ score (* 100 combo)))
+         (world/camera-shake! (min 5 combo) 0.9))
+       (when (>= (world/frame) combo-decay-at)
+         (set! combo 0))
+       (paint-clear)
+       (paint-cell 'player (entity/x p) (entity/y p) 8 8)
+       (paint-text (string-append \"Score: \" (number->string score)) 10 10)
+       (when (> combo 0)
+         (paint-text (string-append \"x\" (number->string combo)) 260 20))))))
+(big-bang score-combo-anchor)")

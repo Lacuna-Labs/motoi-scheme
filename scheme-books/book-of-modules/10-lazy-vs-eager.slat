@@ -1,0 +1,130 @@
+(chapter
+  :book "Book of Modules"
+  :chapter-number 10
+  :title "Lazy vs eager loading"
+  :audience "programmer-fluent-in-other-languages"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-completion-orchestrator")
+  :prose
+"# Chapter 10 — Lazy vs eager loading
+
+When you write `(import manners)` at the top of your file, when does Motoi actually load `manners`? At parse time? At program start? The first time you call `greet`?
+
+The answer is: **it depends on the import form**, and understanding the difference matters when a module has an expensive initialization or when startup latency is precious.
+
+## 10.1 The default — eager
+
+By default, `import` is eager. When Motoi parses your program, it loads every imported module immediately. The module's body runs; every top-level side effect fires; every `define` gets its binding.
+
+This means: by the time your program's first line executes, every module has already been loaded and initialized. Verbs are ready to call. Nothing surprises you at first use.
+
+Eager loading is the right default because it makes programs predictable. If a module is going to fail to load — bad hash, missing dependency, network error — it fails *before* your program starts doing real work. You do not get halfway through a computation and then discover a module was broken.
+
+## 10.2 The lazy form
+
+Sometimes you have a module that is expensive to load — it precomputes a large table, opens a file, connects to a network service. If your program *might* use it but does not always, paying for the load on every run is wasteful.
+
+The lazy form solves this:
+
+```scheme
+(import expensive-thing :lazy #t)
+```
+
+With `:lazy #t`, the import registers the module's name and metadata but does *not* run its body. The body runs the first time any of its exported verbs is called.
+
+From the outside, this is invisible. `(expensive-thing/compute ...)` works whether the module has been loaded yet or not. If not, the call triggers the load first, then proceeds.
+
+## 10.3 When lazy is right
+
+Lazy loading is right when:
+
+- **The module is expensive** and startup latency matters.
+- **The module is optional** — your program might not need it depending on user input.
+- **The module has heavy dependencies** you would rather not resolve unless needed.
+
+Lazy loading is *wrong* when:
+
+- **The module might fail to load** and you would rather know at startup.
+- **The load-time side effects matter** — say, the module registers itself with a coordinator that has to run before the program does anything.
+- **You care about deterministic profile numbers** — lazy loads make timing analysis harder.
+
+The rule of thumb: eager unless proven expensive.
+
+## 10.4 What Cortex sees
+
+Cortex records both the registration event and the actual load. For an eager import:
+
+```scheme
+(cortex/query :predicate 'module-loaded)
+;; ⇒ ((manners module-loaded (:eager #t) 1720000000))
+```
+
+For a lazy import:
+
+```scheme
+(cortex/query :predicate 'module-loaded)
+;; ⇒ ((expensive-thing module-registered (:lazy #t) 1720000000)
+;;    (expensive-thing module-loaded (:on-first-call #t) 1720000010))
+```
+
+The registration and the load are separate events. If a lazy module never loads, you can tell — the load event is missing.
+
+## 10.5 The startup profile
+
+If your program feels slow to start, you can profile the loads:
+
+```scheme
+(load/trace-on!)
+;; run program
+;; ⇒ manners loaded in 3ms
+;;   graphics loaded in 45ms
+;;   sound loaded in 800ms  ← the culprit
+;;   input loaded in 2ms
+```
+
+`sound` is 800ms. If sound is not always needed, mark it lazy. Startup drops by 800ms. The trade-off: the first call to a sound verb is now 800ms slower than before. Depending on your program, that might be fine (the first sound call happens after user input, so an 800ms pause is invisible) or not fine (the first sound call happens on a rendered frame, and the pause is a stutter).
+
+## 10.6 Precomputation vs on-demand
+
+A related technique — precomputation — sometimes makes lazy loading unnecessary.
+
+If the reason `expensive-thing` is slow is that it precomputes a big table every time it loads, and the table would be the same on every run, the module can *cache the table on disk* and reload it fast on subsequent runs.
+
+```scheme
+(module expensive-thing
+  (export lookup)
+
+  (define big-table
+    (if (cache-hit? 'big-table)
+        (cache-read 'big-table)
+        (let ((table (compute-big-table)))
+          (cache-write 'big-table table)
+          table))))
+```
+
+First run: 800ms. Every subsequent run: 5ms. This is often a better answer than lazy loading, because it fixes the underlying slowness rather than deferring it.
+
+## 10.7 A module that is always lazy
+
+Some modules are essentially always lazy — they represent operations that are rarely called and expensive when they are. The module author can mark this in the module header:
+
+```scheme
+(module expensive-thing
+  :default-lazy #t
+  ...)
+```
+
+With `:default-lazy #t`, `import expensive-thing` behaves as if the caller had written `:lazy #t`. The caller can still force eager with `:lazy #f`, but the default is lazy.
+
+This is a hint from the author to consumers: *this is expensive; only load it when you need it.*
+
+## 10.8 Try it
+
+Write a module whose body prints a message when it loads. Import it eagerly; verify the message prints at parse time. Import it lazily; verify the message prints at first call, not before.
+
+Chapter 11 covers circular imports — what happens when A imports B and B imports A. Turn the page.")

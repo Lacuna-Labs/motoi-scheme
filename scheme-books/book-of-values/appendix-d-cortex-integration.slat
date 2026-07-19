@@ -1,0 +1,163 @@
+;; appendix-d-cortex-integration.slat
+;; Book of Values — Appendix D
+
+(chapter
+  :book              "Book of Values"
+  :chapter-number    "D"
+  :title             "Appendix D — Cortex Integration for Values with Provenance"
+  :audience          :engineer
+  :dialect           "motoi"
+  :book-version      "1.0"
+  :provenance        "book-of-values-author-2026-07-16"
+  :training-eligible #t
+  :content-rating    :G
+  :prose
+"# Appendix D — Cortex Integration for Values with Provenance
+
+Motoi has a persistent memory called **Cortex**. Values written to
+Cortex survive across process runs. Chapter 5 introduced Cortex
+briefly; this appendix goes deeper on the *value + provenance*
+integration.
+
+## The Cortex verbs (base env)
+
+Cortex ships with:
+
+- `cortex/remember key value` — write. Returns `#t`.
+- `cortex/recall key` — read. Returns the value or an
+  implementation-dependent absence marker.
+- `cortex/read key` — alternative read; returns `#f` when absent.
+- `cortex/write key value` — alternative write; returns `#t`.
+- `cortex/forget key` — remove.
+- `cortex/keys` — list of all keys currently in memory.
+- `cortex/size` — count of keys.
+- `cortex/query pattern` — search for matching values.
+
+The exact semantics of `query` and the read-vs-recall distinction
+are still stabilising as of 2026-07-16.
+
+<!-- NEEDS-ALFRED: Confirm the canonical semantics of cortex/recall
+     vs cortex/read (both appear in the base env), and the exact
+     query language for cortex/query. -->
+
+## Storing a value with provenance
+
+The simplest pattern:
+
+```
+(define reading (list 'val 42 'sensor
+                      (list ':id 'thermo-3
+                            ':at \"2026-07-16T14:00Z\")))
+
+(cortex/remember \"thermo-3/latest\" reading)
+;; -> #t
+
+(cortex/recall \"thermo-3/latest\")
+;; -> (val 42 sensor (:id thermo-3 :at \"2026-07-16T14:00Z\"))
+```
+
+The provenance-attached shape from Chapter 5 round-trips through
+Cortex unchanged. That's the point: Cortex is Motoi-native so it
+speaks list-and-symbol natively.
+
+## Rolling history
+
+If you need not just the latest reading but the last *N*, keep a
+list.
+
+```
+(define (history-key sensor-id) (string-append \"history/\" sensor-id))
+
+(define (push-reading sensor-id reading N)
+  (let* ((key (history-key sensor-id))
+         (existing (cortex/recall key))
+         (list-so-far (if (pair? existing) existing '()))
+         (updated (cons reading list-so-far))
+         (trimmed (if (> (length updated) N)
+                      (take-first updated N)
+                      updated)))
+    (cortex/remember key trimmed)))
+
+(define (take-first lst n)
+  (cond
+    ((or (null? lst) (= n 0)) '())
+    (else (cons (car lst) (take-first (cdr lst) (- n 1))))))
+```
+
+Now `push-reading` maintains a rolling window of readings per
+sensor. Query the window later to detect drift, trend, or
+missing readings.
+
+## Provenance chains across runs
+
+Because Cortex persists, a value written by one run can be *used*
+by another. That downstream use is itself a computed value with
+provenance that points *back to Cortex*.
+
+```
+(define stored-reading
+  (or (cortex/recall \"thermo-3/latest\")
+      (list 'val 0 'unknown '((:reason . no-prior-reading)))))
+
+(define computed-alarm-level
+  (list 'val
+        (cond ((> (cadr stored-reading) 100) 'high)
+              ((> (cadr stored-reading) 80)  'warn)
+              (else                          'ok))
+        'computed
+        (list ':from-cortex-key \"thermo-3/latest\"
+              ':from-value stored-reading)))
+```
+
+The alarm level carries a pointer back to the Cortex key it read
+from. If the alarm level is questioned later, the trail leads to
+the cortex key, the cortex key holds the reading, the reading
+holds the sensor id and time. Full chain.
+
+## Avoiding Cortex misuse
+
+Cortex is a memory. It's not a database. Rules of thumb:
+
+- **Yes:** rolling per-sensor history bounded in size, latest
+  known state per identifier, config that must survive a restart.
+
+- **No:** a million-row transaction log. A general search index.
+  Anything with strong consistency requirements across concurrent
+  writers.
+
+If you find yourself building a query language on top of Cortex,
+Cortex is the wrong tool. Use a real database at the boundary and
+let Cortex remember *summaries* or *pointers*.
+
+## The forget cadence
+
+Cortex data lives until you `cortex/forget` it. It doesn't expire
+on its own. For rolling data, `forget` old keys on a schedule. For
+long-lived data, `remember` it and let it stay.
+
+```
+(cortex/forget \"thermo-3/latest\")
+;; -> #t (or implementation-dependent)
+```
+
+## Testing with Cortex
+
+Cortex state persists across REPL commands but not usually across
+`bin/motoi eval` invocations (each `eval` is its own process). For
+unit-test-style checks in a single process, remember-then-recall
+patterns work fine.
+
+For integration tests that must run across processes, save a
+snapshot of the Cortex state (Motoi's `system/registry` and
+related verbs give you inspection surface) and restore between
+tests.")
+
+(example :ref "appD-remember-recall"
+         :code "(begin (cortex/remember \"testkey\" (list 'val 42 'sensor)) (cortex/recall \"testkey\"))"
+         :expected "(val 42 sensor)")
+(example :ref "appD-size-after-write"
+         :code "(begin (cortex/remember \"x\" 1) (cortex/remember \"y\" 2) (>= (cortex/size) 2))"
+         :expected #t)
+(example :ref "appD-keys-nonempty"
+         :code "(begin (cortex/remember \"kk\" 1) (pair? (cortex/keys)))"
+         :expected #t)

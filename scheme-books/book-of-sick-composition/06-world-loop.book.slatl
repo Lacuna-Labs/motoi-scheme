@@ -1,0 +1,249 @@
+(chapter
+  :book "Book of Sick Composition"
+  :chapter-number 6
+  :title "The World Loop — big-bang, on-tick, to-draw"
+  :audience "kid-and-adult operators"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-18"
+     :sources ((:reference "MOTOI-SCHEME-REFERENCE.slat" :verbs (big-bang on-tick to-draw on-key stop-when game/state game/stop game/running? game/frame))
+               (:book "book-of-composition" :chapter 16 :section "composing-games")
+               (:book "book-of-motion" :chapter 5 :section "timing")))
+  :prose
+"# Chapter 6 — The World Loop
+
+Painting one picture is a still. Painting sixty pictures per second is a movie. This chapter teaches you the shape Motoi uses to run a movie: `big-bang`. It is the verb every real-time program in Motoi passes through, from a bouncing ball to a full game.
+
+The pattern comes from How to Design Programs — a Racket teaching book — and it survives untouched in Motoi because it is honest about what a game loop actually is: a state, a way to advance the state, a way to draw the state, and a way to stop.
+
+## Why big-bang exists
+
+A game loop is boring plumbing. Every game has the same shape at the outermost layer: on each tick, compute the new state; then draw the current state; then check whether the game is over. The interesting logic sits inside those three slots. The plumbing is the same every time.
+
+`big-bang` writes the plumbing for you. You hand it four clauses: an initial state, a `on-tick` handler that advances state, a `to-draw` handler that renders state, and (optionally) a `stop-when` predicate. It spins the loop; you write the pieces.
+
+There is a second reason this shape is worth reaching for. Because each clause is a pure function of state — and only the state carries information from tick to tick — you can time-travel debug. Save the state at any frame. Reload it. Replay from there. The composition doctrine you saw in Book of Composition Chapter 1 (round-trip: file and tool are the same) applies here too: state and game are the same thing.
+
+## Problem 1 — A counter that ticks up
+
+The smallest useful big-bang: a number that goes up one per frame, and a display that shows it.
+
+```
+(big-bang 0
+  (on-tick (lambda (state) (+ state 1)))
+  (to-draw (lambda (state)
+             (begin-frame 'main)
+             (text/draw (number->string state)
+                        at:    (list 160 120)
+                        color: 'petal-pink
+                        font:  'big
+                        align: 'center)
+             (end-frame 'main)))
+  (stop-when (lambda (state) (= state 300))))
+```
+
+Read the four pieces. Initial state: `0`. `on-tick` receives the current state and returns the next — here just `state + 1`. `to-draw` receives the current state and paints it — one big pink number in the middle. `stop-when` receives the state and returns true when it is time to quit — after 300 frames (about five seconds at 60fps).
+
+That is a whole real-time program. Run it and you watch a number count up from 0 to 300 in five seconds. Change the increment to `2` and it counts twice as fast. Change the `stop-when` bound to `1000000` and it counts forever.
+
+## Problem 2 — A bouncing ball
+
+Now the state is a record, not a number. We track the ball's position and velocity.
+
+```
+(define (make-ball x y vx vy)
+  (list x y vx vy))
+
+(define (ball-x  b) (list-ref b 0))
+(define (ball-y  b) (list-ref b 1))
+(define (ball-vx b) (list-ref b 2))
+(define (ball-vy b) (list-ref b 3))
+
+(define (advance ball)
+  (let* ((x  (+ (ball-x ball)  (ball-vx ball)))
+         (y  (+ (ball-y ball)  (ball-vy ball)))
+         (vx (if (or (< x 0) (> x 320)) (- (ball-vx ball)) (ball-vx ball)))
+         (vy (if (or (< y 0) (> y 240)) (- (ball-vy ball)) (ball-vy ball))))
+    (make-ball x y vx vy)))
+
+(define (render ball)
+  (begin-frame 'main)
+  (paint-rect (list 0 0) (list 320 240) 'shadow-veil)
+  (paint-circle (list (ball-x ball) (ball-y ball)) 8 'petal-pink)
+  (end-frame 'main))
+
+(big-bang (make-ball 100 100 3 2)
+  (on-tick advance)
+  (to-draw render))
+```
+
+The state is the ball. `advance` computes the new state — position plus velocity, and velocities flip when the ball hits an edge. `render` paints a filled background rectangle (so we do not leave trails) then a pink circle at the ball's position.
+
+Two design choices worth noticing.
+
+First: we made accessors (`ball-x`, `ball-y`, etc.) so the rest of the code never asks `(list-ref ball 0)`. If tomorrow the ball gains a color, only the constructor and one new accessor change. Everywhere else keeps working.
+
+Second: `on-tick` and `to-draw` each receive a bare state and produce a value. Neither mutates. The state is threaded through the loop like a river; each frame you scoop up the old state, produce a new state, and hand it back to `big-bang`. This is why time-travel debugging is possible: the state is the whole story.
+
+## Problem 3 — A paddle controlled by the keyboard
+
+Now add `on-key`. The state is a paddle position; the tick advances nothing; the key handler adjusts position based on arrow presses.
+
+```
+(define (make-paddle x) x)
+
+(define (advance-paddle p) p)  ;; paddle only moves when a key fires
+
+(define (handle-key p event)
+  (let ((k (list-ref event 1)))
+    (cond ((eq? k 'left)   (max 0    (- p 5)))
+          ((eq? k 'right)  (min 300  (+ p 5)))
+          (else p))))
+
+(define (render-paddle p)
+  (begin-frame 'main)
+  (paint-rect (list 0 0) (list 320 240) 'shadow-veil)
+  (paint-rect (list p 220) (list 20 6) 'petal-pink)
+  (end-frame 'main))
+
+(big-bang (make-paddle 150)
+  (on-tick advance-paddle)
+  (on-key  handle-key)
+  (to-draw render-paddle))
+```
+
+The paddle is just an x coordinate. `handle-key` takes the current state and a key event; it returns the new state. If the key is `'left`, subtract 5; if `'right`, add 5; otherwise, leave it alone. `max` and `min` clamp the paddle inside the screen.
+
+Notice `on-tick` here is a no-op — it just returns the state unchanged. That is fine. Not every game has ticking logic that runs regardless of input; some games are entirely input-driven.
+
+## Problem 4 (pro) — A tiny complete game: catch a falling star
+
+Combine everything: a paddle that catches, a star that falls, a score, and a game-over condition.
+
+```
+(define (make-state paddle-x star-x star-y score lives)
+  (list paddle-x star-x star-y score lives))
+
+(define (state-paddle-x s) (list-ref s 0))
+(define (state-star-x   s) (list-ref s 1))
+(define (state-star-y   s) (list-ref s 2))
+(define (state-score    s) (list-ref s 3))
+(define (state-lives    s) (list-ref s 4))
+
+(define (respawn-star)
+  (random-int 0 300))
+
+(define (advance s)
+  (let* ((px  (state-paddle-x s))
+         (sx  (state-star-x s))
+         (sy  (+ (state-star-y s) 4))
+         (score (state-score s))
+         (lives (state-lives s)))
+    (cond
+      ;; star caught
+      ((and (>= sy 220)
+            (>= sx px)
+            (<= sx (+ px 20)))
+       (make-state px (respawn-star) 0 (+ score 10) lives))
+      ;; star missed
+      ((> sy 240)
+       (make-state px (respawn-star) 0 score (- lives 1)))
+      ;; still falling
+      (else (make-state px sx sy score lives)))))
+
+(define (handle-key s event)
+  (let ((k  (list-ref event 1))
+        (px (state-paddle-x s)))
+    (cond ((eq? k 'left)   (make-state (max 0    (- px 8))
+                                        (state-star-x s)
+                                        (state-star-y s)
+                                        (state-score s)
+                                        (state-lives s)))
+          ((eq? k 'right)  (make-state (min 300 (+ px 8))
+                                        (state-star-x s)
+                                        (state-star-y s)
+                                        (state-score s)
+                                        (state-lives s)))
+          (else s))))
+
+(define (render s)
+  (begin-frame 'main)
+  (paint-rect (list 0 0) (list 320 240) 'shadow-veil)
+  ;; paddle
+  (paint-rect (list (state-paddle-x s) 220) (list 20 6) 'petal-pink)
+  ;; star
+  (paint-emoji '⭐ (list (state-star-x s) (state-star-y s)) size: 16)
+  ;; score
+  (text/draw (string-append \"score: \" (number->string (state-score s)))
+             at:    (list 8 8)
+             color: 'petal-pink
+             font:  'default
+             align: 'left)
+  ;; lives
+  (text/draw (string-append \"lives: \" (number->string (state-lives s)))
+             at:    (list 312 8)
+             color: 'moss-green
+             font:  'default
+             align: 'right)
+  (end-frame 'main))
+
+(define (game-over? s)
+  (<= (state-lives s) 0))
+
+(big-bang (make-state 150 (respawn-star) 0 0 3)
+  (on-tick advance)
+  (on-key  handle-key)
+  (to-draw render)
+  (stop-when game-over?))
+```
+
+Read the whole thing. State is five numbers. Advance drops the star by 4 pixels per tick, checks for catch (score goes up, star respawns), checks for miss (life lost, star respawns), or leaves the star falling. `handle-key` moves the paddle. `render` paints everything. `game-over?` fires when lives hit zero.
+
+This is a complete game in maybe 60 lines. Every line is a real Motoi verb. Every design decision is visible — the paddle width, the fall speed, the score per catch, the initial lives. Change any number and the game changes.
+
+Notice the pattern for updating a record field: reconstruct the whole thing with the new value in that slot. That is verbose. In Chapter 12 (of the eventual larger book) you might reach for records with named-field accessors; here, in the base book, we spell it out so nothing is hidden.
+
+## Capstone — A pause button that suspends `advance` without suspending `on-key`
+
+```
+(define (make-state paddle-x star-x star-y score lives paused?)
+  (list paddle-x star-x star-y score lives paused?))
+
+(define (state-paused? s) (list-ref s 5))
+
+(define (advance-maybe s)
+  (if (state-paused? s)
+      s
+      (advance s)))          ;; from problem 4, minus the paused? field
+
+(define (toggle-pause s)
+  (make-state (state-paddle-x s)
+              (state-star-x s)
+              (state-star-y s)
+              (state-score s)
+              (state-lives s)
+              (not (state-paused? s))))
+
+(define (handle-key s event)
+  (let ((k (list-ref event 1)))
+    (cond ((eq? k 'p)      (toggle-pause s))
+          ;; other keys same as problem 4, but only advance paddle when unpaused
+          (else s))))
+
+(big-bang (make-state 150 (respawn-star) 0 0 3 #f)
+  (on-tick advance-maybe)
+  (on-key  handle-key)
+  (to-draw render))
+```
+
+We extended the state with a `paused?` flag. `advance-maybe` short-circuits the physics when paused. `toggle-pause` flips the flag. `handle-key` reserves the `p` key for pause. The rest of the game is exactly as before.
+
+Adding a feature by extending the state and short-circuiting a handler — no hidden globals, no side channels — is the shape you want. It scales from a paddle game to a large simulation without ever asking `where does the state live` because the state lives exactly where the loop passes it.
+
+## What's next
+
+Chapter 7 introduces the entity system — a way to run many game objects with real physics without writing your own collision or integration code. `world/spawn`, `entity/pos`, `entity/move!`, `world/step`. That is where a paddle catching one falling star becomes a hundred sprites in a proper world.
+")

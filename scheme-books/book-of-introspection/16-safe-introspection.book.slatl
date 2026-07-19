@@ -1,0 +1,432 @@
+(chapter
+  :book "Book of Introspection"
+  :chapter-number 16
+  :title "Safe introspection — perm, sandbox, and what shouldn't leak"
+  :audience "programmer-learning-motoi"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :wave-status "seeded — full authoring in Wave 4"
+  :provenance
+    ((:authored-at "2026-07-17"
+      :authored-by "book-of-introspection-author-agent"
+      :sources ("src/dispatch.js" "src/verbRegistry.js"))
+     (:edit-source "MOTOI-3.0-GAP-CLOSURE-PLAN-2026-07-18" :gap "subsystem-limits-eng-mirror-16.12" :date "2026-07-18"))
+  :prose
+"# Chapter 16 — Safe introspection: perm, sandbox, and what shouldn't leak
+
+Every chapter so far has been about what you can see. This chapter is about what you cannot — deliberately, honestly, by design.
+
+Not all introspection is safe. Reading a verb's perm tier is safe. Reading a runtime secret environment variable is not. Reading a Cortex record you wrote is safe. Reading a stranger's cart's private state is not. Motoi's introspection surface draws the line and this chapter shows where.
+
+## 16.1 The perm boundary
+
+Every verb has a perm tier (Chapter 2). The dispatcher checks the caller's perm against the verb's requirement before allowing the call.
+
+Introspection verbs are all `read` tier. That is deliberate — they only observe. But *what they observe* is bounded by what the runtime chooses to expose.
+
+The registry snapshot returns metadata, not implementation. The metadata does not include the verb's actual function body, just its name, doc, contract, and pointer to source. If you want the body, you go read source; the runtime does not hand you the function.
+
+Similarly, `snapshot-registry` returns a copy, not the live registry. Mutating the returned object does not affect the runtime's registry. This is a read-only projection.
+
+## 16.2 Runtime redaction
+
+A runtime can redact fields before returning them from introspection. Sensitive fields — source pointers pointing at proprietary code, doc strings referencing internal systems, examples exposing credentials — can be stripped.
+
+```scheme
+(source-of 'some-private-verb)
+;; => nil    ;; runtime redacted the source pointer
+```
+
+The introspection layer is honest about the redaction — you get nil, not a fake pointer. If a field is nil where you expected a value, either the field was never populated or the runtime is redacting.
+
+## 16.3 The never-introspectable mark
+
+A cart author can mark specific values as never-introspectable. The runtime respects the mark — introspection verbs return an opaque placeholder.
+
+```scheme
+(define secret (make-opaque-value my-actual-secret))
+(type-of secret)
+;; => opaque
+
+(shape-of secret)
+;; => (:mechanical (:type opaque) :prose \"This value has been marked as never-introspectable by its creator.\")
+```
+
+The type is `opaque`. The mechanical fields are minimal. The LLM's prose is honest — the value cannot be introspected because someone said so.
+
+## Sections 16.4 through 16.11 — pending Wave 4 authoring
+
+- 16.4 The eight perm tiers in detail
+- 16.5 Sandbox mechanics
+- 16.6 Redaction policies
+- 16.7 Opaque values and how to make them
+- 16.8 Cortex privacy — record source and confidentiality tags
+- 16.9 Auditing your own cart for what you leak
+- 16.10 The LLM and sensitive data
+- 16.11 Cross-cart isolation
+
+## 16.12 Networked runtime concerns (subsystem-limit awareness for the engineering audience)
+
+Every earlier section in this chapter is about what the runtime EXPOSES safely — the perm tiers, redaction, opaque values, the sandbox. This section is about what the runtime does NOT expose because the underlying subsystem is not present at all.
+
+The distinction matters for auditors. A missing subsystem is not a bug in the introspection layer; it is a feature of the runtime. Introspecting for a subsystem that isn't there should return a specific, honest signal — not silence, not a fake stub, not a fabricated value.
+
+### 16.12.1 The subsystem-presence protocol
+
+For each of the fourteen subsystems Motoi does not natively include, the runtime exposes a small introspection surface:
+
+```scheme
+(system/has? 'networking)      ; => #f    (Motoi cannot fetch)
+(system/has? 'shell)           ; => #f    (no exec/system escape)
+(system/has? 'gps)             ; => #f    (no geolocation sensor)
+(system/has? 'llm-remote)      ; => #f    (no cloud LLM API)
+(system/has? 'http-serve)      ; => #t    (LOCAL server IS present)
+(system/has? 'llm-local)       ; => #t/#f (depends on runtime host)
+```
+
+`system/has?` returns a boolean. `#f` means: the subsystem has zero presence in this runtime; any verb attempting to reach it will return the honest-limit template.
+
+`(system/limit-info 'networking)` returns the full metadata record:
+
+```scheme
+(system/limit-info 'networking)
+;; => (:subsystem \"networking\"
+;;     :present #f
+;;     :adjacent-capability \"http/serve — Motoi as LOCAL server\"
+;;     :canonical-refusal-template \"honest-capability + honest-limit +
+;;       meta-honesty + fish-in-car-metaphor + redirect-to-curl-or-Claude\"
+;;     :redirect-targets (\"curl\" \"user-terminal\" \"claude\" \"sakura\")
+;;     :book-crossref \"book-of-computing/08 §8.9\"
+;;     :systems-crossref \"book-of-systems/02 networking section\")
+```
+
+The introspection layer does not lie about what's present. If `system/has?` returns `#f`, no clever Scheme can talk the runtime into calling that subsystem.
+
+### 16.12.2 The fourteen subsystems
+
+Enumerate what's tracked, for audit completeness:
+
+- `networking` — client-side HTTP (fetch, POST, socket to remote).
+- `filesystem-external` — read/write outside the sandbox.
+- `shell` — `system(cmd)`, exec, subprocess.
+- `external-api` — Etsy, Shopify, Stripe, third-party services.
+- `llm-remote` — GPT-4/Claude/Gemini via cloud API.
+- `hardware` — GPIO, serial, USB, robotics, reactor control.
+- `database-sql` — Postgres, MySQL, SQLite, Mongo.
+- `cloud-deploy` — AWS/GCP/Fly/Vercel deploys.
+- `gps` — geolocation sensor read.
+- `camera-mic-capture` — device media capture initiation.
+- `email-sms-notify` — SMTP, Twilio, push notifications.
+- `date-time-external` — timezone DB lookup, NTP sync.
+- `file-download-upload` — wire file transfer.
+- `install-package` — npm, pip, apt-get, brew execution.
+
+For each, `system/has?` returns `#f` and `system/limit-info` returns the full metadata record. This is the engineering-audience-friendly enumeration of what the sandbox mechanics in §16.5 (Wave 4) will formalize.
+
+### 16.12.3 Auditing a cart for subsystem-presumption
+
+When you review a cart, run:
+
+```scheme
+(define cart-verbs (extract-verb-calls my-cart))
+(define assumed-subsystems
+  (map (lambda (v) (assoc 'requires-subsystem (help v)))
+       cart-verbs))
+(define missing
+  (filter (lambda (s)
+            (and s (not (system/has? (cdr s)))))
+          assumed-subsystems))
+
+missing
+;; => list of (verb requires-subsystem) pairs where the subsystem is
+;;    absent from this runtime
+```
+
+If `missing` is non-empty, the cart assumes a subsystem this runtime does not have. Either:
+(a) the cart cannot run here — reject or warn the user, or
+(b) the cart has a graceful fallback and will surface the honest-limit template at that verb call.
+
+This audit runs at cart-load time in most host configurations.
+
+### 16.12.4 The honest-limit response as introspectable behavior
+
+When user code (or an LLM authoring code) attempts to call a verb from a missing subsystem, the runtime does NOT throw an unrecoverable error. It emits a structured error record you can inspect:
+
+```scheme
+(define result (try (http/get \"https://example.com\")))
+
+result
+;; => (:kind subsystem-unavailable
+;;     :subsystem networking
+;;     :verb-attempted http/get
+;;     :honest-limit-template \"Motoi does not have client-side networking.
+;;       He can serve HTTP locally. He cannot fetch.\"
+;;     :adjacent-capability \"http/serve\"
+;;     :redirect \"curl in user's terminal, or Claude, or Sakura for
+;;       business-side wire\")
+```
+
+The error record's `:kind` is `subsystem-unavailable` — not `unbound-symbol`, not `perm-denied`, not `runtime-error`. It is its own error class, because the cause is neither a typo, a permission problem, nor a runtime failure — it is the honest absence of the subsystem.
+
+This lets code and LLMs handle the case cleanly:
+
+```scheme
+(cond
+  ((eq? (:kind result) 'subsystem-unavailable)
+   (display (:honest-limit-template result))
+   (display \"\\nTry: \")
+   (display (:redirect result)))
+  ((eq? (:kind result) 'perm-denied)
+   ;; a different case — perm rejected, not subsystem missing
+   ...)
+  (else
+   (process-result result)))
+```
+
+### 16.12.5 Why this is not the same as a perm-denied refusal
+
+Perm-denied is: 'You do not have permission to call this verb.'
+Subsystem-unavailable is: 'This verb has no implementation in this runtime.'
+
+They are distinct concerns:
+
+- Perm-denied is a SANDBOX or POLICY refusal. The verb exists; you're not allowed to call it. Might work in a different runtime with a different perm set.
+- Subsystem-unavailable is a WORLD-BOUND refusal. The verb has no implementation to call. Even with maximum perms, calling it does nothing.
+
+Introspection must report them separately or an auditor cannot reason about what the cart actually needs. `system/has?` reports subsystem presence; the perm system reports permission. Both are queryable, both are auditable, neither substitutes for the other.
+
+### 16.12.6 Why the honest-limit template is uniform
+
+The honest-limit template that fires for every missing subsystem has a uniform five-element shape:
+
+1. Honest capability (what Motoi CAN do adjacent to this)
+2. Honest limit (what he CAN'T)
+3. Meta-honesty (even if he could, he might not know the right move)
+4. Playful physical metaphor
+5. Redirect (who or what has the capability)
+
+The uniformity IS a safety feature. When users and LLMs see the same shape every time they hit a subsystem wall, they learn the shape and stop pushing on the wall. They start using the redirect. Inconsistency in the refusal shape would train the user to prompt harder.
+
+This is analogous to Wave 6's crisis-refusal-template consistency: the template stays constant so people learn to recognize it. Same doctrine, different leaf.
+
+### 16.12.7 Cross-references
+
+- Book of Computing Chapter 8, §8.9 — networking-specific version.
+- Book of Systems Chapter 2 — the systematic subsystem walk for the operator audience.
+- Book of Motoi Scheme Appendix G — the kid-facing version.
+- Motoi safety refusals (see Book of Reason if it exists in your tree, or the motoi-safety-refusals doctrine) — a distinct system; subsystem-limits are ADDITIVE to safety refusals, not replacements.
+
+## Sections 16.13 through 16.16 — pending Wave 4 authoring
+
+- 16.13 The confidentiality flag on chapter metadata
+- 16.14 Testing your privacy posture
+- 16.15 Reporting introspection leaks
+- 16.16 Closing — honesty about limits
+
+## 16.17 The three principles
+
+Motoi's safety-of-introspection story rests on three principles:
+
+**Principle one: no covert exposure.** If introspection cannot show you a field, the runtime returns nil or an opaque placeholder — never a fabricated value. The reader can always tell what is present versus absent.
+
+**Principle two: opt-in transparency.** By default, every verb's metadata is fully introspectable. To make something private, the author marks it. There is no accidental exposure of things that were marked private; there is no accidental hiding of things that were meant to be public.
+
+**Principle three: the sandbox is authoritative.** If the runtime is sandboxed, the sandbox has the final say on what can be introspected. Cart authors cannot override the sandbox's redactions.
+
+## 16.18 A worked example
+
+You are running a stranger's cart in a sandboxed runtime.
+
+```scheme
+(help 'their/private-verb)
+;; => (:name \"their/private-verb\" :doc \"[redacted]\" :contract \"[redacted]\" :source nil ...)
+```
+
+The sandbox has redacted the interesting fields. You know the verb exists (name is present). You do not know what it does (doc is redacted). You cannot go read source (source is nil).
+
+This is honest. The sandbox told you what it hid. You can decide to run the cart or not, given that private verbs are opaque.
+
+## 16.19 The last preview
+
+There is no next chapter. Chapter 16 is the last. The eight appendices follow.
+
+The book ends here. Introspection is a superpower. Motoi trusts you to use it without leaking through it.
+
+## 16.20 Wave 4 preview
+
+The full chapter (~8000 words) will cover:
+
+- All eight perm tiers with worked audit patterns
+- Sandbox mechanics in detail
+- Redaction policies (defaults, overrides, edge cases)
+- Opaque value construction
+- Cortex privacy and per-record confidentiality
+- Auditing your own cart for information leaks
+- LLM interaction with sensitive data (grounding vs speculation)
+- Cross-cart isolation guarantees
+- Networked runtime concerns
+- The `:confidentiality` flag on chapter metadata
+- Testing your privacy posture
+- Reporting introspection leaks
+- The final closing rhythm
+
+## 16.21 The honesty principle, one more time
+
+Every field the introspection layer returns is honest. If it says a verb exists, it exists. If it says a field is nil, the field is nil. If it says a value is opaque, the value is opaque. There are no false negatives, no false positives, no misleading returns.
+
+This is what makes introspection trustworthy. If you cannot trust the returns, the whole surface collapses. Motoi trades some flexibility for that trust — the runtime cannot silently expose secrets and cannot silently hide things — and the trade is worth it for a language that wants to be introspected freely.
+
+## 16.22 A closing observation
+
+Introspection and safety compose the same way every other pair in this book composes. Small primitives. Uniform metadata. Explicit fields. The safety story is not a separate system; it is the same introspection layer, with a few extra fields (`:redacted`, `:opaque`, `:confidentiality`) that mean something specific.
+
+Learn to read those fields the same way you learned to read the doc field. When you see nil where a value was expected, ask why. Sometimes the field was never populated. Sometimes the runtime redacted. Sometimes the value is opaque by design. All three are honest returns; you just have to know which is which.
+
+## 16.23 The book closes
+
+Sixteen chapters. Every question you can ask about a Motoi program has a verb that will answer it — unless the answer would leak something the runtime chose to protect, in which case the runtime tells you honestly that the answer is unavailable.
+
+That is the whole introspection surface.
+
+Turn to the appendices for reference material, cheat sheets, and worked examples of the patterns from throughout the book.
+
+## 16.24 Deep-seed — the sandbox model
+
+Motoi's dispatcher (`src/dispatch.js`) checks every verb call against the caller's perm tier. If the caller does not have the required perm, the call errors with `perm-denied`.
+
+The sandbox is stricter — it can also add allow-lists (only these specific verbs) and deny-lists (never these), regardless of perm.
+
+Introspection verbs are all `read` tier. In most sandboxes they are allowed. But a paranoid sandbox can deny even introspection — for example, refusing `snapshot-registry` if it does not want the cart to enumerate the whole verb space.
+
+If introspection is denied, the introspection verbs error like any other perm-denied verb. The error record's `:kind` is `perm-denied`. You can catch it and adjust behavior.
+
+## 16.25 Deep-seed — Cortex confidentiality
+
+Cortex records can carry a `:confidentiality` field:
+
+```scheme
+(cortex/record
+  :subject 'user
+  :predicate 'ssn
+  :object \"123-45-6789\"
+  :at (current-second)
+  :source 'user-input
+  :confidentiality 'personal-data)
+```
+
+When another verb queries Cortex, the runtime checks the querier's perm against the record's confidentiality. If the querier does not have `personal-data` perm, the record is filtered out.
+
+This means introspection over Cortex is also perm-gated. `cortex/query` respects confidentiality. You do not accidentally expose personal data by listing every record about a user.
+
+## 16.26 Deep-seed — the audit pattern
+
+If you are running a cart and want to know what it introspected during a session, you can trace the introspection verbs themselves:
+
+```scheme
+(,trace help)
+(,trace snapshot-registry)
+(,trace cortex/query)
+
+(run-the-cart)
+
+(,trace-log help)
+;; every help call the cart made
+```
+
+Now you know exactly what the cart looked at. If it snooped your Cortex records unnecessarily, or introspected verbs it should not have needed, the log tells you.
+
+This is defense-in-depth. Perm-gating stops the cart from calling verbs it should not; tracing tells you what it did call. Together they give you visibility into introspection-as-surveillance.
+
+Turn to the appendices.
+
+## 16.27 The closing rhythm
+
+The book is done. Sixteen chapters. Eight appendices to follow.
+
+Every verb from the book is one call away. Every reflex from the book gets stronger with practice. Every question you have about your own Motoi programs has an introspection verb that will answer it.
+
+Introspection is a superpower. Now you have it. Use it well.
+
+Turn to Appendix A.
+
+## 16.28 A last note for the reader
+
+You have finished reading Book of Introspection. Or at least the parts that were written in Wave 1. Wave 2 through 4 will fill in the seeded chapters and appendices.
+
+Regardless of which wave you are reading in, the shape of the book is the same. Chapters 1-4 are the foundations. Chapters 5-7 are the runtime layers. Chapters 8-12 are the value-side surfaces. Chapters 13-16 are the extended and safety layers.
+
+Whichever chapter you close on, you have more introspection reflex than you started with. Every reflex serves you every time you write a Motoi program from now on.
+
+Turn to the appendices for reference.
+
+## 16.29 The final closing
+
+Book of Introspection ends here. The appendices are reference material and worked examples. Read them for the specific patterns you need; skim them for orientation.
+
+Onward to Appendix A — the SLAT schema of a verb record, field by field.
+
+## 16.30 One more time
+
+Every question you can ask about a Motoi program has a verb that will answer it — subject to the safety limits this chapter drew — and every verb is one call away, and every call composes with the next, and every composition is data you can further introspect. That is the shape of the language and the shape of this book.
+
+Onward to the appendices.
+
+## 16.31 Deep-seed — the eight perm tiers, one more time
+
+For the closing, the perm vocabulary in one place:
+
+- `read` — pure observation. Every introspection verb, every query, every projection is here. Safe by default.
+- `paint` — visual side effects only. Draw a dot, place a glyph. No state mutation.
+- `animate` — motion or RAF tween. Runs at full or half substrate power; skipped at quarter or paused.
+- `state-change` — moves cards, focuses UI, opens/closes something. First tier that persists across the current frame.
+- `destructive` — deletes data, transfers ownership. Irreversible operations.
+- `financial` — money moves. Requires cart-manifest declaration.
+- `network` — outbound network call. Requires cart-manifest declaration and possibly per-endpoint approval.
+- `personal-data` — reads or writes user PII. Requires user consent flow.
+
+Eight tiers. Every verb has one. Every caller has a set. Dispatch is a match: caller's set must contain the verb's requirement.
+
+## 16.32 Deep-seed — auditing your own cart
+
+Before you publish a cart, audit its perm usage:
+
+```scheme
+(define my-cart (read-slat-file \"my-cart.slat\"))
+(define calls (extract-verb-calls my-cart))
+(define perms
+  (unique (map (lambda (n) (cdr (assoc 'perm (help n)))) calls)))
+
+perms
+;; => (\"read\" \"paint\" \"animate\" \"state-change\")
+```
+
+Your cart requires these four perms. Declare them in the cart's manifest. Do not declare more than you need — the sandbox will grant only what you declare, and asking for `financial` when you do not use it makes users suspicious.
+
+## 16.33 Closing exercise
+
+Try this on a cart file (any cart):
+
+```scheme
+(define cart (read-slat-file \"path/to/cart.slat\"))
+(define verbs (extract-verb-calls cart))
+(define sensitive
+  (filter
+    (lambda (n)
+      (member (cdr (assoc 'perm (help n)))
+              '(\"financial\" \"personal-data\" \"destructive\" \"network\"))))
+    verbs))
+
+sensitive
+;; => any verb the cart uses with a sensitive perm
+```
+
+If sensitive is empty, the cart is low-risk. If it is not, review each entry and decide whether the cart's use of that verb is legitimate.
+
+That is auditing at introspection speed. One filter, one review. No security scanner needed.
+
+## 16.34 Turn to Appendix A
+
+Book of Introspection ends. The appendices are next. Turn the page.
+")

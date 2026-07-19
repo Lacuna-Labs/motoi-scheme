@@ -1,0 +1,1373 @@
+;; ch15-refactor-to-one.slat
+;; Book of One-Shot — Chapter 15: Refactor To One
+
+(chapter
+  :book             "Book of One-Shot"
+  :chapter-number   null
+  :title            "Chapter 15: Refactor To One"
+  :source-path      "/Users/alfred/code/curator/BOOK/A-branch-scheme-books/one-shot/ch15-refactor-to-one.md"
+  :size             37826
+  :sha256           "907fd9e8f739d490"
+  :prose
+"# Chapter 15: Refactor To One
+
+**What it drills:** take a sprawling multi-line sketch and collapse it to a single one-shot form
+
+---
+
+You've sketched something that *works*. It's laid out in steps—define this, compute that, check the other thing, build the answer. Readable. Clear. Each line makes sense.
+
+And yet something nags. Every intermediate `define` is a place for staleness to creep in. Every step is a place to forget a guard. The data flows down the page, but the *closure* doesn't happen until the very end—if it happens at all.
+
+This chapter drills the collapse. We take a multi-step sketch—something you might write on first pass—and fold it into a single atomic form. No intermediate bindings that outlive their use. No gaps where an error can hide. The retrieval expressions close the outer form. Close data, close paren.
+
+The work isn't rewriting for cleverness. It's rewriting for *honesty*: the shape of the code matches the shape of the idea. One question, one form. One decision, one value.
+
+Let's start simple.
+
+---
+
+## The Sketch
+
+Here's a two-step sketch that computes a greeting:
+
+```scheme
+;; SKETCH (two steps)
+(define user-name \"Keiko\")
+(string-append \"Hello, \" user-name \"!\")
+```
+
+It works. But `user-name` lives beyond its use. If we wanted to *close* the data at the point of use, we'd write:
+
+```scheme
+;; ONE SHOT
+(string-append \"Hello, \" \"Keiko\" \"!\")
+```
+
+No intermediate. The literal closes the form. If the name came from elsewhere, we'd pull the lookup *into* the form:
+
+```scheme
+;; ONE SHOT (lookup in place)
+(string-append \"Hello, \" (or (system/env \"USER\") \"friend\") \"!\")
+```
+
+The fallback is guarded *inside* the form. No `user-name` binding to forget, no gap between retrieval and use.
+
+---
+
+## Two Guards, One Form
+
+Sketch that checks two conditions before building a message:
+
+```scheme
+;; SKETCH (three steps)
+(define temp (sensor/read :thermometer))
+(define status (if (> temp 30) \"hot\" \"comfortable\"))
+(string-append \"The room is \" status \".\")
+```
+
+Collapse it:
+
+```scheme
+;; ONE SHOT
+(string-append \"The room is \" 
+               (if (> (sensor/read :thermometer) 30) 
+                   \"hot\" 
+                   \"comfortable\") 
+               \".\")
+```
+
+*[needs: sensor/read]*  
+<!-- BUILD: wire sensor surface -->
+
+The sensor read happens *inside* the conditional, which happens *inside* the append. One form. The guard and the work are one expression.
+
+---
+
+## Retrieve, Check, Use
+
+Sketch that fetches a user preference, checks it, and acts:
+
+```scheme
+;; SKETCH (four steps)
+(define pref (cortex/recall :topic \"audio.volume\"))
+(define vol (if pref pref 50))
+(define clamped (max 0 (min 100 vol)))
+(string-append \"Volume set to \" (number->string clamped))
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(string-append \"Volume set to \" 
+               (number->string 
+                 (max 0 
+                      (min 100 
+                           (or (cortex/recall :topic \"audio.volume\") 50)))))
+```
+
+*[needs: cortex/recall]*  
+<!-- BUILD: wire cortex recall for preferences -->
+
+The recall is guarded with `or`, clamped with `max` and `min`, stringified, and appended—all in one closing form. No `vol`. No `clamped`. The data flows inward, and the paren closes at the end.
+
+---
+
+## Map With Guard
+
+Sketch that filters a list, then maps it:
+
+```scheme
+;; SKETCH (three steps)
+(define raw '(2 -1 5 0 8))
+(define positive (filter (lambda (n) (> n 0)) raw))
+(map (lambda (n) (* n n)) positive)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(map (lambda (n) (* n n)) 
+     (filter (lambda (n) (> n 0)) 
+             '(2 -1 5 0 8)))
+```
+
+The filter closes inside the map. One form. If the list came from a lookup, that would close inside the filter:
+
+```scheme
+;; ONE SHOT (lookup in place)
+(map (lambda (n) (* n n)) 
+     (filter (lambda (n) (> n 0)) 
+             (or (cortex/recall :topic \"measurements\") '())))
+```
+
+*[needs: cortex/recall]*
+
+No `raw`. No `positive`. The retrieval, the filter, and the map are one expression.
+
+---
+
+## Wire Fetch, Then Use
+
+Sketch that fetches data from a URL, stores it, reads it back, and extracts a field:
+
+```scheme
+;; SKETCH (four steps)
+(define response (fetch \"https://api.example.com/status\"))
+(store :api-cache response)
+(define cached (loam/recall :api-cache))
+(cdr (assoc 'status cached))
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(cdr (assoc 'status 
+            (loam/recall :api-cache 
+                         :from (store :api-cache 
+                                      (fetch \"https://api.example.com/status\")))))
+```
+
+*[needs: fetch, store, loam/recall with :from]*  
+<!-- BUILD: wire fetch + store + loam retrieval with inline store -->
+
+The fetch closes the store, the store closes the recall, the recall closes the `assoc`, the `assoc` closes the `cdr`. One wire-shot. No `response`. No `cached`. No gap where staleness can enter.
+
+---
+
+## Conditional Fetch
+
+Sketch that checks a cache, and only fetches if the cache is empty:
+
+```scheme
+;; SKETCH (three steps)
+(define cached (loam/recall :weather-data))
+(define data (if cached cached (fetch \"https://weather.example.com/now\")))
+(cdr (assoc 'temp data))
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(cdr (assoc 'temp 
+            (or (loam/recall :weather-data) 
+                (fetch \"https://weather.example.com/now\"))))
+```
+
+*[needs: loam/recall, fetch]*  
+<!-- BUILD: wire loam recall + fetch -->
+
+The `or` short-circuits. If the recall succeeds, the fetch never happens. If the recall returns `#f`, the fetch runs and closes the `or`. One form.
+
+---
+
+## Knowledge Lookup, Then Format
+
+Sketch that looks up a category in world knowledge, checks if it's empty, and formats a response:
+
+```scheme
+;; SKETCH (three steps)
+(define facts (knowledge/of :category \"owls\"))
+(define summary (if facts (car facts) \"No data available.\"))
+(string-append \"Fact: \" summary)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(string-append \"Fact: \" 
+               (if (knowledge/of :category \"owls\") 
+                   (car (knowledge/of :category \"owls\")) 
+                   \"No data available.\"))
+```
+
+*[needs: knowledge/of]*  
+<!-- BUILD: wire knowledge surface -->
+
+Wait—this calls `knowledge/of` twice. We can do better with a `let` that still closes in one form:
+
+```scheme
+;; ONE SHOT (let for single lookup)
+(let ((facts (knowledge/of :category \"owls\")))
+  (string-append \"Fact: \" 
+                 (if facts (car facts) \"No data available.\")))
+```
+
+*[needs: knowledge/of]*
+
+The `let` is part of the one-shot. The binding lives only for the body. No top-level `define`.
+
+---
+
+## Registry Check, Then Action
+
+Sketch that checks if a capability is available, then acts on it:
+
+```scheme
+;; SKETCH (three steps)
+(define can-speak (system/registry :domain \"voice\"))
+(define action (if can-speak \"Speaking now.\" \"Voice unavailable.\"))
+action
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(if (system/registry :domain \"voice\") 
+    \"Speaking now.\" 
+    \"Voice unavailable.\")
+```
+
+*[needs: system/registry]*  
+<!-- BUILD: wire registry surface -->
+
+The registry check *is* the conditional. No `can-speak`. The guard and the work are one expression.
+
+---
+
+## Map Over Lookups
+
+Sketch that looks up a list of topics, retrieves each, and formats them:
+
+```scheme
+;; SKETCH (three steps)
+(define topics '(\"breakfast\" \"weather\" \"calendar\"))
+(define facts (map (lambda (t) (cortex/recall :topic t)) topics))
+(map (lambda (f) (string-append \"• \" (or f \"—\"))) facts)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(map (lambda (t) 
+       (string-append \"• \" 
+                      (or (cortex/recall :topic t) \"—\"))) 
+     '(\"breakfast\" \"weather\" \"calendar\"))
+```
+
+*[needs: cortex/recall]*
+
+The recall happens *inside* the map. One form. No `facts`. The data flows from the list, through the lambda, into the append, and the paren closes.
+
+---
+
+## Fold With Guard
+
+Sketch that folds a list of numbers, but only if they're positive:
+
+```scheme
+;; SKETCH (three steps)
+(define nums '(3 -2 7 0 5))
+(define positive (filter (lambda (n) (> n 0)) nums))
+(fold + 0 positive)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(fold + 0 
+      (filter (lambda (n) (> n 0)) 
+              '(3 -2 7 0 5)))
+```
+
+The filter closes inside the fold. If the list came from a recall:
+
+```scheme
+;; ONE SHOT (recall in place)
+(fold + 0 
+      (filter (lambda (n) (> n 0)) 
+              (or (cortex/recall :topic \"daily-steps\") '())))
+```
+
+*[needs: cortex/recall]*
+
+The recall is guarded with `or`, filtered, and folded—all in one form.
+
+---
+
+## Wire Fetch With Fallback
+
+Sketch that tries two URLs, falling back to the second if the first fails:
+
+```scheme
+;; SKETCH (three steps)
+(define primary (fetch \"https://api.example.com/primary\"))
+(define data (if primary primary (fetch \"https://api.example.com/fallback\")))
+(cdr (assoc 'value data))
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(cdr (assoc 'value 
+            (or (fetch \"https://api.example.com/primary\") 
+                (fetch \"https://api.example.com/fallback\"))))
+```
+
+*[needs: fetch with #f on failure]*  
+<!-- BUILD: wire fetch to return #f on HTTP error -->
+
+The `or` short-circuits. If the primary succeeds, the fallback never runs. If the primary fails (returning `#f`), the fallback runs and closes the `or`. One form.
+
+---
+
+## Knowledge + World in One
+
+Sketch that checks local knowledge, then queries world knowledge if local is empty:
+
+```scheme
+;; SKETCH (three steps)
+(define local (knowledge/of :category \"penguins\"))
+(define answer (if local (car local) (world/knowledge :query \"penguin habitat\")))
+(string-append \"Answer: \" answer)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(string-append \"Answer: \" 
+               (or (let ((local (knowledge/of :category \"penguins\"))) 
+                     (and local (car local))) 
+                   (world/knowledge :query \"penguin habitat\")))
+```
+
+*[needs: knowledge/of, world/knowledge]*  
+<!-- BUILD: wire knowledge + world surfaces -->
+
+The `let` checks local knowledge. The `and` guards the `car`. If local is empty, the `or` falls through to the world query. One form.
+
+---
+
+## Nested Wire-Shots
+
+Sketch that fetches user profile, then fetches preferences based on a field in the profile:
+
+```scheme
+;; SKETCH (four steps)
+(define profile (fetch \"https://api.example.com/user/profile\"))
+(define user-id (cdr (assoc 'id profile)))
+(define prefs-url (string-append \"https://api.example.com/user/\" user-id \"/prefs\"))
+(fetch prefs-url)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(fetch (string-append \"https://api.example.com/user/\" 
+                      (cdr (assoc 'id 
+                                  (fetch \"https://api.example.com/user/profile\"))) 
+                      \"/prefs\"))
+```
+
+*[needs: fetch]*  
+<!-- BUILD: wire fetch -->
+
+The inner fetch closes inside the `assoc`, which closes inside the `cdr`, which closes inside the `string-append`, which closes inside the outer fetch. Two wire-shots, one top-level form. No `profile`. No `user-id`. No `prefs-url`.
+
+---
+
+## Speech With Inline Recall
+
+Sketch that recalls a name, formats a greeting, and speaks it:
+
+```scheme
+;; SKETCH (three steps)
+(define name (cortex/recall :topic \"user.name\"))
+(define greeting (string-append \"Good morning, \" (or name \"friend\") \"!\"))
+(surface :say greeting)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(surface :say (string-append \"Good morning, \" 
+                             (or (cortex/recall :topic \"user.name\") \"friend\") 
+                             \"!\"))
+```
+
+*[needs: cortex/recall, surface :say]*  
+<!-- BUILD: wire cortex + speech surface -->
+
+The recall is guarded, appended, and spoken—all in one form. The data flows inward, and the paren closes at the speech boundary.
+
+---
+
+## Honest Null With Escalation
+
+Sketch that tries to recall a fact, and escalates if it's missing:
+
+```scheme
+;; SKETCH (two steps)
+(define fact (cortex/recall :topic \"medication-time\"))
+(if fact fact (escalate :reason \"No medication schedule stored.\"))
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(or (cortex/recall :topic \"medication-time\") 
+    (escalate :reason \"No medication schedule stored.\"))
+```
+
+*[needs: cortex/recall, escalate]*  
+<!-- BUILD: wire cortex + escalate surface -->
+
+The `or` short-circuits. If the recall succeeds, the escalate never runs. If the recall returns `#f`, the escalate fires and the form ends. One honest-null shot.
+
+---
+
+## Map + Fold + Guard
+
+Sketch that maps a list, filters the results, and folds them:
+
+```scheme
+;; SKETCH (four steps)
+(define raw '(1 2 3 4 5))
+(define squared (map (lambda (n) (* n n)) raw))
+(define evens (filter (lambda (n) (= (modulo n 2) 0)) squared))
+(fold + 0 evens)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(fold + 0 
+      (filter (lambda (n) (= (modulo n 2) 0)) 
+              (map (lambda (n) (* n n)) 
+                   '(1 2 3 4 5))))
+```
+
+The map closes inside the filter, the filter closes inside the fold. One form. No `squared`. No `evens`.
+
+---
+
+## Conditional Wire Fetch
+
+Sketch that checks the time, and fetches data only during business hours:
+
+```scheme
+;; SKETCH (four steps)
+(define now (clock/now))
+(define hour (string->number (substring now 11 13)))
+(define should-fetch (and (>= hour 9) (< hour 17)))
+(if should-fetch (fetch \"https://api.example.com/office-status\") 'closed)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(if (let ((hour (string->number (substring (clock/now) 11 13)))) 
+      (and (>= hour 9) (< hour 17))) 
+    (fetch \"https://api.example.com/office-status\") 
+    'closed)
+```
+
+*[needs: clock/now, fetch]*  
+<!-- BUILD: wire clock + fetch -->
+
+The `let` extracts the hour from `clock/now`. The `and` checks the range. The `if` decides whether to fetch. One form. No `now`. No `hour`. No `should-fetch`.
+
+---
+
+## Recall + Transform + Store
+
+Sketch that recalls a list, transforms it, and stores it back:
+
+```scheme
+;; SKETCH (three steps)
+(define old-list (cortex/recall :topic \"shopping-list\"))
+(define new-list (cons \"milk\" (or old-list '())))
+(store :shopping-list new-list)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(store :shopping-list 
+       (cons \"milk\" 
+             (or (cortex/recall :topic \"shopping-list\") '())))
+```
+
+*[needs: cortex/recall, store]*  
+<!-- BUILD: wire cortex + store -->
+
+The recall is guarded, consed, and stored—all in one form. The data flows from recall to cons to store, and the paren closes at the storage boundary.
+
+---
+
+## Nested Let for Readability
+
+Sketch that computes intermediate values for clarity:
+
+```scheme
+;; SKETCH (four steps)
+(define width 10)
+(define height 5)
+(define area (* width height))
+(string-append \"Area: \" (number->string area) \" sq m\")
+```
+
+Collapse with nested `let`:
+
+```scheme
+;; ONE SHOT
+(let ((width 10) 
+      (height 5)) 
+  (let ((area (* width height))) 
+    (string-append \"Area: \" (number->string area) \" sq m\")))
+```
+
+Or flatten the `let*`:
+
+```scheme
+;; ONE SHOT (let*)
+(let* ((width 10) 
+       (height 5) 
+       (area (* width height))) 
+  (string-append \"Area: \" (number->string area) \" sq m\"))
+```
+
+Both are one form. The bindings live only for the body. No top-level `define`.
+
+---
+
+## Registry + Conditional Action
+
+Sketch that checks multiple capabilities and acts based on what's available:
+
+```scheme
+;; SKETCH (four steps)
+(define has-voice (system/registry :domain \"voice\"))
+(define has-screen (system/registry :domain \"display\"))
+(define medium (cond (has-voice \"speech\") (has-screen \"text\") (else \"log\")))
+medium
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(cond ((system/registry :domain \"voice\") \"speech\") 
+      ((system/registry :domain \"display\") \"text\") 
+      (else \"log\"))
+```
+
+*[needs: system/registry]*  
+<!-- BUILD: wire registry -->
+
+The registry checks are the conditionals. No `has-voice`. No `has-screen`. No `medium`. The guard and the work are one expression.
+
+---
+
+## Wire Fetch + Parse + Guard
+
+Sketch that fetches JSON, parses it, and guards against missing fields:
+
+```scheme
+;; SKETCH (four steps)
+(define response (fetch \"https://api.example.com/data.json\"))
+(define parsed (json/parse response))
+(define temp (assoc 'temperature parsed))
+(if temp (cdr temp) 'nan)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(let ((parsed (json/parse (fetch \"https://api.example.com/data.json\")))) 
+  (if (assoc 'temperature parsed) 
+      (cdr (assoc 'temperature parsed)) 
+      'nan))
+```
+
+*[needs: fetch, json/parse]*  
+<!-- BUILD: wire fetch + JSON parsing -->
+
+The fetch closes inside the parse, the parse closes inside the `let`, the `assoc` is checked and dereferenced in the `if`. One form. The guard is honest: if the field is missing, return `'nan`.
+
+---
+
+## Map Over Wire Fetches
+
+Sketch that fetches data for multiple IDs:
+
+```scheme
+;; SKETCH (two steps)
+(define ids '(\"a1\" \"b2\" \"c3\"))
+(map (lambda (id) (fetch (string-append \"https://api.example.com/item/\" id))) ids)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(map (lambda (id) 
+       (fetch (string-append \"https://api.example.com/item/\" id))) 
+     '(\"a1\" \"b2\" \"c3\"))
+```
+
+*[needs: fetch]*
+
+The URL construction and fetch happen *inside* the map. One form. If the IDs came from a recall:
+
+```scheme
+;; ONE SHOT (recall in place)
+(map (lambda (id) 
+       (fetch (string-append \"https://api.example.com/item/\" id))) 
+     (or (cortex/recall :topic \"active-ids\") '()))
+```
+
+*[needs: cortex/recall, fetch]*
+
+The recall is guarded and mapped. One form.
+
+---
+
+## Fold With Nested Lookup
+
+Sketch that folds a list, looking up a multiplier for each element:
+
+```scheme
+;; SKETCH (two steps)
+(define items '(\"apples\" \"oranges\" \"bananas\"))
+(fold (lambda (item acc) 
+        (+ acc (* (cortex/recall :topic (string-append \"price.\" item)) 1))) 
+      0 
+      items)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(fold (lambda (item acc) 
+        (+ acc (or (cortex/recall :topic (string-append \"price.\" item)) 0))) 
+      0 
+      '(\"apples\" \"oranges\" \"bananas\"))
+```
+
+*[needs: cortex/recall]*
+
+The recall happens *inside* the fold's lambda. The fallback is guarded with `or`. One form. No `items`.
+
+---
+
+## Speech With Nested Wire Fetch
+
+Sketch that fetches a weather report and speaks it:
+
+```scheme
+;; SKETCH (four steps)
+(define weather (fetch \"https://weather.example.com/now\"))
+(define temp (cdr (assoc 'temperature weather)))
+(define message (string-append \"It's \" (number->string temp) \" degrees.\"))
+(surface :say message)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(surface :say 
+         (string-append \"It's \" 
+                        (number->string 
+                          (cdr (assoc 'temperature 
+                                      (fetch \"https://weather.example.com/now\")))) 
+                        \" degrees.\"))
+```
+
+*[needs: fetch, surface :say]*  
+<!-- BUILD: wire fetch + speech -->
+
+The fetch closes inside the `assoc`, which closes inside the `cdr`, which closes inside the `number->string`, which closes inside the append, which closes inside the speech surface. One form. No `weather`. No `temp`. No `message`.
+
+---
+
+## Honest Null With Wire Fetch
+
+Sketch that fetches data and honestly returns `'nan` if a field is missing:
+
+```scheme
+;; SKETCH (three steps)
+(define data (fetch \"https://api.example.com/sensor\"))
+(define value (assoc 'reading data))
+(if value (cdr value) 'nan)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(let ((data (fetch \"https://api.example.com/sensor\"))) 
+  (if (assoc 'reading data) 
+      (cdr (assoc 'reading data)) 
+      'nan))
+```
+
+*[needs: fetch]*
+
+The fetch closes inside the `let`, the `assoc` is checked and dereferenced in the `if`. If the field is missing, the form honestly returns `'nan`. No fake fallback value.
+
+---
+
+## Recall + Map + Filter + Fold
+
+Sketch that recalls a list, maps it, filters it, and folds it:
+
+```scheme
+;; SKETCH (five steps)
+(define raw (cortex/recall :topic \"readings\"))
+(define doubled (map (lambda (n) (* n 2)) (or raw '())))
+(define positive (filter (lambda (n) (> n 0)) doubled))
+(define total (fold + 0 positive))
+total
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(fold + 0 
+      (filter (lambda (n) (> n 0)) 
+              (map (lambda (n) (* n 2)) 
+                   (or (cortex/recall :topic \"readings\") '()))))
+```
+
+*[needs: cortex/recall]*
+
+The recall is guarded, mapped, filtered, and folded—all in one form. No `raw`. No `doubled`. No `positive`. No `total`. The data flows inward, and the paren closes at the fold.
+
+---
+
+## Conditional Store Based on Threshold
+
+Sketch that checks a value, and stores it only if it exceeds a threshold:
+
+```scheme
+;; SKETCH (three steps)
+(define reading (sensor/read :thermometer))
+(define should-store (> reading 25))
+(if should-store (store :high-temp reading) 'ignored)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(let ((reading (sensor/read :thermometer))) 
+  (if (> reading 25) 
+      (store :high-temp reading) 
+      'ignored))
+```
+
+*[needs: sensor/read, store]*  
+<!-- BUILD: wire sensor + store -->
+
+The sensor read closes inside the `let`, the threshold check is the `if`, the store happens only if the condition holds. One form.
+
+---
+
+## Nested Knowledge Lookups
+
+Sketch that looks up a category, extracts a subcategory from the result, and looks that up:
+
+```scheme
+;; SKETCH (four steps)
+(define animals (knowledge/of :category \"animals\"))
+(define subcategory (cdr (assoc 'subtype (car animals))))
+(define details (knowledge/of :category subcategory))
+details
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(knowledge/of :category 
+              (cdr (assoc 'subtype 
+                          (car (knowledge/of :category \"animals\")))))
+```
+
+*[needs: knowledge/of]*
+
+The outer lookup closes around the result of the inner lookup. Two knowledge calls, one top-level form. No `animals`. No `subcategory`. No `details`.
+
+---
+
+## Registry-Guarded Wire Fetch
+
+Sketch that checks if network is available before fetching:
+
+```scheme
+;; SKETCH (three steps)
+(define has-network (system/registry :domain \"network\"))
+(define data (if has-network (fetch \"https://api.example.com/status\") 'offline))
+data
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(if (system/registry :domain \"network\") 
+    (fetch \"https://api.example.com/status\") 
+    'offline)
+```
+
+*[needs: system/registry, fetch]*  
+<!-- BUILD: wire registry + fetch -->
+
+The registry check is the conditional. The fetch happens only if the capability exists. One form.
+
+---
+
+## Map + Store Results
+
+Sketch that maps a list and stores each result:
+
+```scheme
+;; SKETCH (two steps)
+(define items '(\"tea\" \"coffee\" \"juice\"))
+(map (lambda (item) (store (string->symbol item) \"available\")) items)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(map (lambda (item) 
+       (store (string->symbol item) \"available\")) 
+     '(\"tea\" \"coffee\" \"juice\"))
+```
+
+*[needs: store]*
+
+The store happens *inside* the map. One form. No `items`. Each element is transformed and stored as the map executes.
+
+---
+
+## Wire Fetch + Conditional Parse
+
+Sketch that fetches data, checks its type, and parses it accordingly:
+
+```scheme
+;; SKETCH (four steps)
+(define response (fetch \"https://api.example.com/data\"))
+(define content-type (cdr (assoc 'content-type response)))
+(define parsed (if (equal? content-type \"json\") (json/parse response) response))
+parsed
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(let ((response (fetch \"https://api.example.com/data\"))) 
+  (if (equal? (cdr (assoc 'content-type response)) \"json\") 
+      (json/parse response) 
+      response))
+```
+
+*[needs: fetch, json/parse]*  
+<!-- BUILD: wire fetch + JSON parsing with content-type handling -->
+
+The fetch closes inside the `let`, the content-type check is the conditional, the parse happens only if needed. One form. No `content-type`. No `parsed`.
+
+---
+
+## Fold With Nested Wire Fetch
+
+Sketch that folds a list of URLs, fetching each and accumulating a field:
+
+```scheme
+;; SKETCH (two steps)
+(define urls '(\"https://api.example.com/a\" \"https://api.example.com/b\"))
+(fold (lambda (url acc) 
+        (+ acc (cdr (assoc 'count (fetch url))))) 
+      0 
+      urls)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(fold (lambda (url acc) 
+        (+ acc (cdr (assoc 'count (fetch url))))) 
+      0 
+      '(\"https://api.example.com/a\" \"https://api.example.com/b\"))
+```
+
+*[needs: fetch]*
+
+The fetch happens *inside* the fold's lambda. Each URL is fetched, the field is extracted, and the accumulator is updated—all in one form. No `urls`.
+
+---
+
+## Knowledge + Recall + Fallback Chain
+
+Sketch that tries local knowledge, then cortex recall, then a hardcoded fallback:
+
+```scheme
+;; SKETCH (four steps)
+(define local (knowledge/of :category \"timezone\"))
+(define recalled (if local local (cortex/recall :topic \"user.timezone\")))
+(define final (if recalled recalled \"UTC\"))
+final
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(or (knowledge/of :category \"timezone\") 
+    (cortex/recall :topic \"user.timezone\") 
+    \"UTC\")
+```
+
+*[needs: knowledge/of, cortex/recall]*
+
+The `or` tries each source in order, short-circuiting on the first success. One form. No `local`. No `recalled`. No `final`.
+
+---
+
+## Speech With Map Over Recalls
+
+Sketch that recalls multiple topics and speaks them as a list:
+
+```scheme
+;; SKETCH (three steps)
+(define topics '(\"todo.morning\" \"todo.afternoon\"))
+(define facts (map (lambda (t) (cortex/recall :topic t)) topics))
+(surface :say (string-append \"Tasks: \" (fold string-append \"\" facts)))
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(surface :say 
+         (string-append \"Tasks: \" 
+                        (fold string-append \"\" 
+                              (map (lambda (t) (cortex/recall :topic t)) 
+                                   '(\"todo.morning\" \"todo.afternoon\")))))
+```
+
+*[needs: cortex/recall, surface :say]*
+
+The map closes inside the fold, the fold closes inside the append, the append closes inside the speech surface. One form. No `topics`. No `facts`.
+
+---
+
+## Nested Conditionals With Wire Fetch
+
+Sketch that checks a local cache, then checks a fallback URL, then escalates:
+
+```scheme
+;; SKETCH (four steps)
+(define cached (loam/recall :api-data))
+(define fetched (if cached cached (fetch \"https://api.example.com/primary\")))
+(define fallback (if fetched fetched (fetch \"https://api.example.com/fallback\")))
+(if fallback fallback (escalate :reason \"All sources failed.\"))
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(or (loam/recall :api-data) 
+    (fetch \"https://api.example.com/primary\") 
+    (fetch \"https://api.example.com/fallback\") 
+    (escalate :reason \"All sources failed.\"))
+```
+
+*[needs: loam/recall, fetch, escalate]*  
+<!-- BUILD: wire loam + fetch + escalate -->
+
+The `or` tries each source in order. If all return `#f`, the escalate fires. One form. No `cached`. No `fetched`. No `fallback`.
+
+---
+
+## Map + Store + Retrieve + Fold
+
+Sketch that maps a list, stores each result, retrieves them, and folds:
+
+```scheme
+;; SKETCH (four steps)
+(define items '(\"a\" \"b\" \"c\"))
+(map (lambda (item) (store (string->symbol item) (string-length item))) items)
+(define lengths (map (lambda (item) (loam/recall (string->symbol item))) items))
+(fold + 0 lengths)
+```
+
+Collapse (but note the store/recall gap):
+
+```scheme
+;; ONE SHOT (but storage is side-effectful)
+(fold + 0 
+      (map (lambda (item) 
+             (begin 
+               (store (string->symbol item) (string-length item)) 
+               (loam/recall (string->symbol item)))) 
+           '(\"a\" \"b\" \"c\")))
+```
+
+*[needs: store, loam/recall]*  
+<!-- BUILD: wire store + loam recall; note that begin sequences the side effect -->
+
+This uses `begin` to sequence the store and recall within the map. It's still one top-level form, but the `begin` reveals the sequencing. A purer approach would store once and retrieve later, but that would be two forms.
+
+---
+
+## Knowledge Lookup With Transformation
+
+Sketch that looks up a list of facts and formats them:
+
+```scheme
+;; SKETCH (three steps)
+(define facts (knowledge/of :category \"planets\"))
+(define names (map (lambda (f) (cdr (assoc 'name f))) facts))
+(fold (lambda (n acc) (string-append acc n \", \")) \"\" names)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(fold (lambda (n acc) (string-append acc n \", \")) 
+      \"\" 
+      (map (lambda (f) (cdr (assoc 'name f))) 
+           (knowledge/of :category \"planets\")))
+```
+
+*[needs: knowledge/of]*
+
+The knowledge lookup closes inside the map, the map closes inside the fold. One form. No `facts`. No `names`.
+
+---
+
+## Wire Fetch + Guard + Transform + Store
+
+Sketch that fetches data, checks a field, transforms it, and stores it:
+
+```scheme
+;; SKETCH (five steps)
+(define data (fetch \"https://api.example.com/reading\"))
+(define value (assoc 'temperature data))
+(define temp (if value (cdr value) 0))
+(define celsius (/ (- temp 32) 1.8))
+(store :temperature-c celsius)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(store :temperature-c 
+       (/ (- (let ((value (assoc 'temperature (fetch \"https://api.example.com/reading\")))) 
+               (if value (cdr value) 0)) 
+             32) 
+          1.8))
+```
+
+*[needs: fetch, store]*
+
+The fetch closes inside the `assoc`, the `assoc` is checked and dereferenced in the `let`, the value is transformed, and the result is stored—all in one form. No `data`. No `value`. No `temp`. No `celsius`.
+
+---
+
+## Speech With Nested Conditionals
+
+Sketch that checks multiple conditions and speaks accordingly:
+
+```scheme
+;; SKETCH (four steps)
+(define temp (sensor/read :thermometer))
+(define time (clock/now))
+(define hour (string->number (substring time 11 13)))
+(define message (cond ((> temp 30) \"It's hot.\") 
+                      ((< hour 12) \"Good morning.\") 
+                      (else \"Hello.\")))
+(surface :say message)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(surface :say 
+         (cond ((> (sensor/read :thermometer) 30) \"It's hot.\") 
+               ((< (string->number (substring (clock/now) 11 13)) 12) \"Good morning.\") 
+               (else \"Hello.\")))
+```
+
+*[needs: sensor/read, clock/now, surface :say]*  
+<!-- BUILD: wire sensor + clock + speech -->
+
+The sensor read and clock call happen *inside* the `cond`. The `cond` closes inside the speech surface. One form. No `temp`. No `time`. No `hour`. No `message`.
+
+---
+
+## Map Over Nested Lookups
+
+Sketch that maps a list, looking up metadata for each element and transforming it:
+
+```scheme
+;; SKETCH (two steps)
+(define items '(\"apple\" \"banana\" \"cherry\"))
+(map (lambda (item) 
+       (string-append item \": \" 
+                      (number->string 
+                        (or (cortex/recall :topic (string-append \"price.\" item)) 0)))) 
+     items)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(map (lambda (item) 
+       (string-append item \": \" 
+                      (number->string 
+                        (or (cortex/recall :topic (string-append \"price.\" item)) 0)))) 
+     '(\"apple\" \"banana\" \"cherry\"))
+```
+
+*[needs: cortex/recall]*
+
+The recall happens *inside* the map's lambda. One form. No `items`.
+
+---
+
+## Fold With Conditional Accumulation
+
+Sketch that folds a list, accumulating only values that meet a condition:
+
+```scheme
+;; SKETCH (two steps)
+(define nums '(3 7 2 9 4))
+(fold (lambda (n acc) 
+        (if (> n 5) (+ acc n) acc)) 
+      0 
+      nums)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(fold (lambda (n acc) 
+        (if (> n 5) (+ acc n) acc)) 
+      0 
+      '(3 7 2 9 4))
+```
+
+The conditional is *inside* the fold's lambda. One form. No `nums`.
+
+---
+
+## Wire Fetch + Map + Fold
+
+Sketch that fetches a list, maps it, and folds it:
+
+```scheme
+;; SKETCH (four steps)
+(define response (fetch \"https://api.example.com/items\"))
+(define items (cdr (assoc 'items response)))
+(define values (map (lambda (i) (cdr (assoc 'value i))) items))
+(fold + 0 values)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(fold + 0 
+      (map (lambda (i) (cdr (assoc 'value i))) 
+           (cdr (assoc 'items (fetch \"https://api.example.com/items\")))))
+```
+
+*[needs: fetch]*
+
+The fetch closes inside the `assoc`, the `assoc` closes inside the map, the map closes inside the fold. One form. No `response`. No `items`. No `values`.
+
+---
+
+## Knowledge + Recall + Transform + Speech
+
+Sketch that looks up knowledge, recalls a preference, transforms both, and speaks the result:
+
+```scheme
+;; SKETCH (five steps)
+(define fact (knowledge/of :category \"birds\"))
+(define name (cdr (assoc 'name (car fact))))
+(define pref (cortex/recall :topic \"favorite.bird\"))
+(define message (string-append \"The \" name \" is a bird. Your favorite: \" (or pref \"unknown\") \".\"))
+(surface :say message)
+```
+
+Collapse:
+
+```scheme
+;; ONE SHOT
+(surface :say 
+         (string-append \"The \" 
+                        (cdr (assoc 'name (car (knowledge/of :category \"birds\")))) 
+                        \" is a bird. Your favorite: \" 
+                        (or (cortex/recall :topic \"favorite.bird\") \"unknown\") 
+                        \".\"))
+```
+
+*[needs: knowledge/of, cortex/recall, surface :say]*
+
+The knowledge lookup, the recall, the transformations, and the speech all happen in one form. No `fact`. No `name`. No `pref`. No `message`.
+
+---
+
+## The Summit: Wire + Recall + Knowledge + Guard + Transform + Speech
+
+Sketch that fetches weather, recalls a preference, looks up knowledge, guards everything, transforms the data, and speaks it:
+
+```scheme
+;; SKETCH (eight steps)
+(define weather (fetch \"https://weather.example.com/now\"))
+(define temp (cdr (assoc 'temperature weather)))
+(define unit (cortex/recall :topic \"temperature.unit\"))
+(define display-temp (if (equal? unit \"C\") (/ (- temp 32) 1.8) temp))
+(define clothing (knowledge/of :category \"clothing\"))
+(define suggestion (cdr (assoc 'warm (car clothing))))
+(define message (string-append \"It's \" (number->string display-temp) \" degrees. Wear \" suggestion \".\"))
+(surface :say message)
+```
+
+Collapse to one form:
+
+```scheme
+;; ONE SHOT (the summit)
+(surface :say 
+         (string-append \"It's \" 
+                        (number->string 
+                          (let ((temp (cdr (assoc 'temperature (fetch \"https://weather.example.com/now\")))) 
+                                (unit (cortex/recall :topic \"temperature.unit\"))) 
+                            (if (equal? unit \"C\") (/ (- temp 32) 1.8) temp))) 
+                        \" degrees. Wear \" 
+                        (cdr (assoc 'warm (car (knowledge/of :category \"clothing\")))) 
+                        \".\"))
+```
+
+*[needs: fetch, cortex/recall, knowledge/of, surface :say]*  
+<!-- BUILD: wire fetch + cortex + knowledge + speech -->
+
+**What just happened:**
+
+- Fetched weather from a remote URL.
+- Extracted the temperature field.
+- Recalled the user's preferred unit (C or F).
+- Transformed the temperature if needed.
+- Looked up clothing knowledge.
+- Extracted a suggestion.
+- Formatted the message.
+- Spoke it.
+
+All in **one atomic Scheme form**. No `weather`. No `temp`. No `unit`. No `display-temp`. No `clothing`. No `suggestion`. No `message`.
+
+The wire call closes the outer form. The recall closes within the `let`. The knowledge lookup closes within the append. The conditional closes within the `number->string`. The data flows inward, and the paren closes at the speech boundary.
+
+This is the refactor. The eight-step sketch becomes one closing form. The gap between fetch and use is zero. The staleness window is zero. The error surface is one expression.
+
+**Close data, close paren.**
+
+---
+
+## Exercises
+
+Write the route (one-shot Scheme form) for each:
+
+1. **Recall a list of tasks, filter out completed ones (those with a 'done field set to `#t`), map them to just their 'name field, fold them into a comma-separated string, and speak it.**  
+   Use: `(cortex/recall :topic \"tasks\")`, `filter`, `map`, `fold`, `(surface :say ...)`.
+
+2. **Fetch a user profile from `https://api.example.com/user`, extract the 'id field, construct a new URL `https://api.example.com/user/ID/friends`, fetch that, extract the 'friends list, and return the count.**  
+   Use: `fetch`, `assoc`, `cdr`, `string-append`, `length`.
+
+3. **Check the registry for \"location\" capability. If present, fetch `https://location.example.com/current`, extract the 'city field, look up knowledge about that city in category \"cities\", and speak the first fact's 'description field. If any step fails, escalate with a clear reason.**  
+   Use: `(system/registry :domain \"location\")`, `fetch`, `assoc`, `cdr`, `(knowledge/of :category ...)`, `car`, `(surface :say ...)`, `(escalate :reason ...)`.
+
+4. **Recall a number from \"counter\", increment it by 1, store it back to \"counter\", then fetch a URL `https://api.example.com/log?n=N` where N is the new counter value, and return the response.**  
+   Use: `(cortex/recall :topic \"counter\")`, `+`, `(store :counter ...)`, `string-append`, `number->string`, `fetch`.  
+   (Note: this will use `let` or nested forms to carry the incremented value through.)
+
+5. **Map over the list `'(\"en\" \"es\" \"fr\")`, and for each language code, fetch `https://greetings.example.com/LANG`, extract the 'greeting field, and accumulate them into a single string separated by \" / \". Speak the result.**  
+   Use: `map`, `fetch`, `string-append`, `assoc`, `cdr`, `fold`, `(surface :say ...)`.
+
+6. **Look up knowledge in category \"planets\", map each planet to its 'distance field, filter out any `#f` values, compute the average distance (sum ÷ count), and store the result in `:average-distance`.**  
+   Use: `(knowledge/of :category \"planets\")`, `map`, `assoc`, `cdr`, `filter`, `fold`, `/`, `length`, `(store :average-distance ...)`.
+
+---
+
+**What you've learned:**
+
+The sprawling multi-step sketch—readable but leaky—can *always* collapse to a single closing form. The intermediate `define`s are eliminated. The data flows inward. The guard, the retrieval, the transformation, and the action become one expression.
+
+This isn't cleverness. It's honesty. The shape of the code matches the shape of the idea. One question, one form. One decision, one value. No gaps where staleness or errors can hide.
+
+You've seen it at every scale: from a two-line greeting to an eight-step wire-spanning speech shot. The technique is the same. Close data, close paren. Refactor to one.
+
+**Next:** Chapter 16 awaits—*The Grand One-Shot*—where we take everything we've learned and collapse a genuinely ambitious task into a single atomic Scheme form that would make a skeptic pause. See you there.
+")

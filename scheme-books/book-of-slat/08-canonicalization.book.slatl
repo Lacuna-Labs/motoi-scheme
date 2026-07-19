@@ -1,0 +1,353 @@
+;; 08-canonicalization.slat
+;; Book of SLAT — Chapter 8 — Canonicalization
+
+(chapter
+  :book             "Book of SLAT"
+  :chapter-number   8
+  :title            "Chapter 8 — Canonicalization"
+  :size             9018
+  :sha256           "3a8d6149d76164bc"
+  :prose
+"---
+slug: book-of-slat-ch08
+title: Canonicalization
+book: slat
+chapter: 8
+of: 16
+part: III
+app: scheme-repl
+palette: book-standard
+canonical: true
+owner: docs-team (Jess)
+status: draft
+last-reviewed: 2026-07-12
+---
+
+# Chapter 8 — Canonicalization
+
+Big word. Small idea.
+
+**Canonicalization means: one value, one byte string.**
+
+You read a slat, write it out canonically, and every writer produces
+the same bytes. Two writers on two machines producing the same value
+produce the same bytes. Two records with the same fields in different
+orders produce the same bytes.
+
+Once you have that property, you can content-address (Chapter 9), you
+can sign (Chapter 10), you can Merkle-attest a corpus (Chapter 10),
+you can trust the substrate.
+
+Without it, you have JSON's fifteen-year-old problem: `{\"a\":1,\"b\":2}`
+and `{\"b\":2,\"a\":1}` are the same value but different bytes, so
+signatures don't match, hashes don't match, caches don't hit, and
+signing standards had to invent JCS (RFC 8785) to try to fix it.
+
+SLAT bakes canonicalization into the writer. No extra step. No
+opt-in.
+
+## The eleven rules
+
+Every canonical slat obeys eleven rules. I'll walk each one with a
+tiny example.
+
+## Rule 1 — head first
+
+The `_form` symbol goes immediately after `(`.
+
+```motoi-scheme
+(slat-dumps '(event :ts 1 :kind \"card.opened\"))
+```
+
+Produces `(event :kind \"card.opened\" :ts 1)`. Head `event` at position
+0.
+
+## Rule 2 — positional next
+
+Positional values come after the head, before the keyword pairs.
+
+```motoi-scheme
+(slat-dumps '(log :level :warn \"message here\" iter-350))
+```
+
+The reader parsed `\"message here\"` and `iter-350` as positional. The
+writer emits them right after the head. In your text, that would look
+like:
+
+```
+(log \"message here\" iter-350 :level :warn)
+```
+
+Except — actually, canonical form has keys sorted lexicographically
+(rule 3). So positional and keys mix based on the rule, not the
+reader order. In practice the canonical form is:
+
+```
+(log \"message here\" iter-350 :level :warn)
+```
+
+## Rule 3 — keywords sorted
+
+`:keyword value` pairs are sorted by keyword name in lexicographic byte
+order (UTF-8).
+
+```motoi-scheme
+(slat-dumps '(event :ts 1 :by 'motoi :kind \"card.opened\"))
+```
+
+Produces:
+
+```
+(event :by 'motoi :kind \"card.opened\" :ts 1)
+```
+
+`:by` before `:kind` before `:ts`. Alphabetical.
+
+Every writer everywhere sorts the same way. That's what makes signing
+work.
+
+## Rule 4 — comments dropped from canonical
+
+`_comment` fields are not signed material. The canonical form is the
+signed form. If you want to sign a comment, promote it to a keyword.
+
+```motoi-scheme
+(slat-dumps '(event :ts 1 :kind \"card.opened\"))
+```
+
+...regardless of what comments were attached to the source, produces
+just the record. No comment.
+
+If you want the comment to be part of the record forever:
+
+```motoi-scheme
+(slat-dumps '(event :ts 1 :kind \"card.opened\" :note \"the first card\"))
+```
+
+Now `:note` is a keyword, part of the record, part of the canonical
+form, part of what gets signed.
+
+## Rule 5 — strings normalized
+
+UTF-8, NFC (Normalized Form C — canonical composition). The five
+escapes are `\\n \\t \\r \\\\ \\\"`. No other characters are escaped. Any
+code point ≥ 0x20 outside those five is emitted literally.
+
+```motoi-scheme
+(slat-dumps \"hi\\nthere\")
+```
+
+Produces `\"hi\\nthere\"` — the newline is escaped.
+
+```motoi-scheme
+(slat-dumps \"🌸\")
+```
+
+Produces `\"🌸\"` — the cherry blossom is emitted literally, not as
+`ἳ8`.
+
+## Rule 6 — numbers
+
+- Integers: decimal, no leading zeros.
+- Rationals: reduced to lowest terms.
+- Bigdecimals: canonical decimal string with trailing `M`.
+- Floats: shortest round-trip representation.
+
+```motoi-scheme
+(slat-dumps 3.14)
+```
+
+Produces `3.14`. Not `3.140000000000000124344978758017532527446746826171875`.
+The shortest string that round-trips through IEEE-754 to the same
+float.
+
+```motoi-scheme
+(slat-dumps 2/6)
+```
+
+Produces `1/3`. Reduced. Always.
+
+```motoi-scheme
+(slat-dumps (fraction 10 30))
+```
+
+Also `1/3`.
+
+## Rule 7 — booleans and nil
+
+`#t`, `#f`, `nil`. No aliases. No `true`/`false`. No `null`.
+
+## Rule 8 — instants
+
+ISO-8601 with UTC (`Z` suffix). No fractional seconds unless present
+in source.
+
+```motoi-scheme
+(slat-dumps (slat-loads \"#inst \\\"2026-07-11T18:22:00-05:00\\\"\"))
+```
+
+Produces `#inst \"2026-07-11T23:22:00Z\"`. Normalized to UTC.
+
+Fractional seconds preserve as-is. If the source has milliseconds, the
+canonical form has milliseconds. If it doesn't, it doesn't.
+
+## Rule 9 — bytes
+
+Base64 without padding.
+
+```motoi-scheme
+(slat-dumps (slat-loads \"#b64 \\\"SGVsbG8=\\\"\"))
+```
+
+Produces `#b64 \"SGVsbG8\"`. Trailing `=` dropped.
+
+## Rule 10 — whitespace
+
+Single space between tokens. No leading or trailing whitespace inside
+parens. Single trailing newline at the end of `.slatl` lines. No
+trailing newline inside `.slat` documents.
+
+```motoi-scheme
+(slat-dumps '(event   :ts   1))
+```
+
+Produces `(event :ts 1)`. Extra whitespace collapsed.
+
+## Rule 11 — no structural sharing
+
+If a slat has `#0=` labels and `#0#` references, the canonical writer
+expands them before emitting.
+
+```
+(pair #0=(a b c) #0#)
+```
+
+...becomes:
+
+```
+(pair (a b c) (a b c))
+```
+
+The signed form is always fully expanded. This prevents an attacker
+from crafting a small labeled payload that expands to a huge tree at
+read time, then signing the small form and shipping the expansion.
+
+The reader still accepts `#0=` and `#0#` — the guard is on canonical
+output, not input.
+
+## The one-value one-byte-string property
+
+Once you have all eleven rules, this holds:
+
+```motoi-scheme
+(define v '(event :ts 1 :kind \"card.opened\" :by 'motoi))
+(define bytes-a (slat-dumps v))
+(define bytes-b (slat-dumps (slat-loads (slat-dumps v))))
+(equal? bytes-a bytes-b)
+```
+
+`#t`. Always.
+
+The property holds across bindings too:
+
+```
+JavaScript:  slat.dumps(v)  → \"(event :by 'motoi :kind \\\"card.opened\\\" :ts 1)\"
+Python:      slat.dumps(v)  → b\"(event :by 'motoi :kind \\\"card.opened\\\" :ts 1)\"
+```
+
+Byte-for-byte identical. That's the CI gate.
+
+## Why we care
+
+Three reasons.
+
+**One: content addressing.** A value has one canonical byte string.
+The sha256 of that byte string is the value's content ID. Two writers
+producing the same value produce the same content ID. That's how
+deduplication works. That's how the atom store recognizes when two
+authors write the same atom.
+
+**Two: signing.** You sign the canonical bytes. Any receiver
+canonicalizes their copy, hashes, compares to the signature. If the
+canonicalization is stable across writers, the signature verifies.
+
+**Three: caching.** A cache keyed on content ID hits whenever any
+writer produced the same value. Two authors writing the same fact
+share one cache line.
+
+## Non-canonical output
+
+Bindings may emit non-canonical output when the caller doesn't request
+canonical form. `slat-dumps` returns canonical form. `slat-dumps-pretty`
+returns pretty-printed non-canonical.
+
+Non-canonical output is fine for humans. For signing, hashing, or any
+byte-level operation, use canonical.
+
+## Try this
+
+Write the same record with keys in different orders. Compare the
+canonical bytes.
+
+```motoi-scheme
+(define a (slat-loads \"(event :ts 1 :kind \\\"card.opened\\\" :by 'motoi)\"))
+(define b (slat-loads \"(event :by 'motoi :ts 1 :kind \\\"card.opened\\\")\"))
+(define c (slat-loads \"(event :kind \\\"card.opened\\\" :by 'motoi :ts 1)\"))
+
+(equal? (slat-dumps a) (slat-dumps b) (slat-dumps c))
+```
+
+`#t`. Three records. One canonical form.
+
+Round-trip a value ten times.
+
+```motoi-scheme
+(define original '(atom :id \"atm-001\" :type 'code :weight 1.0 :body '(lambda (x) x)))
+(define (roundtrip v n)
+  (if (= n 0) v (roundtrip (slat-loads (slat-dumps v)) (- n 1))))
+
+(equal? (slat-dumps original) (slat-dumps (roundtrip original 10)))
+```
+
+`#t`. Ten round-trips. Same bytes.
+
+## The canonicalization rules in one page
+
+For quick reference, here's the whole list:
+
+1. Head first.
+2. Positional after the head.
+3. Keywords sorted lexicographically by name.
+4. Comments dropped.
+5. Strings UTF-8 NFC with only the five standard escapes.
+6. Numbers in normalized form (integers decimal, rationals reduced,
+   bigdecimals with `M`, floats shortest round-trip).
+7. Booleans `#t`/`#f`, nil is `nil`.
+8. Instants ISO-8601 UTC.
+9. Bytes base64 no padding.
+10. Whitespace single-spaced, no trailing.
+11. No structural sharing.
+
+Appendix D has each rule with more examples. Chapter 9 uses the
+canonical form to build content addresses. Chapter 10 uses content
+addresses to build signatures. Every rule in this chapter enables the
+next two.
+
+## Where next
+
+Chapter 9 — content addressing. Now that we have canonical bytes,
+we can sha256 them to get a stable fingerprint. Any value, one
+fingerprint, forever. The Cortex uses these for deduplication. The
+training corpus uses them for provenance.
+
+## Cross-links
+
+- [[appendix-d]] — the full canonicalization ruleset with expanded
+  examples.
+- [[book-of-money]] — why bigdecimal canonicalization is not
+  optional.
+
+---
+
+Turn the page.
+")

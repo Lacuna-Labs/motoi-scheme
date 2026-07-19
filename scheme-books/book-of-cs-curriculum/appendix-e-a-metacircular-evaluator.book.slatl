@@ -1,0 +1,187 @@
+;; appendix-e-a-metacircular-evaluator.book.slatl
+;; Book of CS Curriculum — Appendix E — A metacircular evaluator, walked
+
+(appendix
+  :book             "Book of CS Curriculum"
+  :chapter-number   null
+  :title            "Appendix E — A metacircular evaluator, walked"
+  :prose
+"# Appendix E — A metacircular evaluator, walked
+
+Write Scheme in Scheme. Not the whole compiler — just enough that you understand what the interpreter you're already using does when you type `(+ 1 2)`. This is SICP §4.1 in Motoi Scheme, one small snippet at a time.
+
+## What we're going for
+
+At the end of this appendix, this will run:
+
+```scheme
+(mc-eval '(+ 1 2) initial-env)
+;=> 3
+
+(mc-eval '((lambda (x) (* x x)) 5) initial-env)
+;=> 25
+```
+
+We'll have written an evaluator, in Scheme, that evaluates Scheme. The 'meta' is not because it's fancy — it's because the interpreter and its host language are the same shape.
+
+## The main dispatch
+
+An evaluator is a `cond` that asks 'what kind of expression is this?' and dispatches to a handler. Here's the skeleton:
+
+```scheme
+(define (mc-eval exp env)
+  (cond ((self-evaluating? exp) exp)
+        ((symbol? exp) (lookup exp env))
+        ((quoted? exp) (cadr exp))
+        ((if? exp) (mc-eval-if exp env))
+        ((lambda? exp) (make-proc exp env))
+        ((application? exp) (mc-apply
+                              (mc-eval (car exp) env)
+                              (map (lambda (e) (mc-eval e env))
+                                   (cdr exp))))
+        (else (error 'unknown-exp exp))))
+```
+
+Read that top to bottom. Numbers and strings evaluate to themselves. Symbols look up in the environment. `(quote x)` returns `x`. `(if p a b)` needs its own logic. A lambda closes over its environment. Anything else is an application — the head is a function, the rest are arguments.
+
+## Self-evaluating things
+
+```scheme
+(define (self-evaluating? e)
+  (or (number? e) (string? e) (boolean? e)))
+```
+
+Numbers, strings, booleans evaluate to themselves. `42` is `42`. `\"hi\"` is `\"hi\"`. `#t` is `#t`. No lookup needed.
+
+## Symbol lookup
+
+An environment is a list of frames; each frame is a list of `(name . value)` pairs.
+
+```scheme
+(define (lookup sym env)
+  (cond ((null? env) (error 'unbound sym))
+        (else
+         (let ((pair (assoc sym (car env))))
+           (if pair (cdr pair) (lookup sym (cdr env)))))))
+```
+
+Walk the frames from innermost to outermost. In each frame, look for the symbol. First hit wins. If we run off the end, unbound.
+
+## The `if` form
+
+```scheme
+(define (mc-eval-if exp env)
+  (if (mc-eval (cadr exp) env)
+      (mc-eval (caddr exp) env)
+      (mc-eval (cadddr exp) env)))
+```
+
+Evaluate the predicate. If it's truthy, evaluate and return the consequent. Otherwise, evaluate and return the alternative. Note we're using the host's `if` to implement the interpreted `if`. That's fine — that's what makes this 'metacircular.'
+
+## Lambda and closures
+
+A closure is 'the code plus the environment it was defined in':
+
+```scheme
+(define (make-proc exp env)
+  (list 'closure (cadr exp) (cddr exp) env))
+```
+
+Encoding: `('closure params body env)`. The tag lets us recognize a closure at apply time.
+
+## Apply
+
+The heart of the interpreter:
+
+```scheme
+(define (mc-apply proc args)
+  (cond ((primitive? proc) (apply-primitive proc args))
+        ((closure? proc)
+         (let ((params (cadr proc))
+               (body (caddr proc))
+               (env (cadddr proc)))
+           (mc-eval-sequence body
+                             (extend-env params args env))))))
+```
+
+Primitives call the host directly. Closures extend the environment with the arguments bound to the parameters, then evaluate the body in that new environment.
+
+## Extending the environment
+
+```scheme
+(define (extend-env params args env)
+  (cons (map cons params args) env))
+```
+
+Zip params with args into pairs, prepend that frame to the environment. Now `(lookup x new-env)` will hit the parameter binding before it walks up to the caller's scope.
+
+## Primitives
+
+We need at least a handful:
+
+```scheme
+(define initial-env
+  (list (list (cons '+ (list 'primitive +))
+              (cons '- (list 'primitive -))
+              (cons '* (list 'primitive *))
+              (cons '= (list 'primitive =))
+              (cons 'car (list 'primitive car))
+              (cons 'cdr (list 'primitive cdr))
+              (cons 'cons (list 'primitive cons))
+              (cons 'null? (list 'primitive null?)))))
+
+(define (primitive? p) (and (pair? p) (eq? (car p) 'primitive)))
+(define (apply-primitive p args) (apply (cadr p) args))
+```
+
+Notice: we're just wrapping the host's `+`, `-`, and so on. The interpreter's `+` IS the host's `+`, dressed in a small tag.
+
+## Try it
+
+```scheme
+(mc-eval '(+ 1 2) initial-env)
+;=> 3
+
+(mc-eval '(if (= 3 3) 'yes 'no) initial-env)
+;=> yes
+
+(mc-eval '((lambda (x y) (+ x y)) 10 20) initial-env)
+;=> 30
+```
+
+Three lines. First evaluates `(+ 1 2)` — dispatch to application, evaluate operator (`+` → primitive), evaluate operands (`1` `2` — self-evaluating), apply. Result: `3`.
+
+Second evaluates the `if`, which requires evaluating the predicate `(= 3 3)`, seeing it's `#t`, evaluating the consequent — the quoted symbol `yes`.
+
+Third is the interesting one. The lambda evaluates to a closure over `initial-env`. That closure gets applied to `10` and `20`. The apply logic extends the environment with `x=10, y=20`, then evaluates the body `(+ x y)` in the extended env. `x` looks up to `10`; `y` looks up to `20`; the primitive `+` runs on them; we get `30`.
+
+## Recursion works — try it
+
+```scheme
+(mc-eval
+  '(define fact
+     (lambda (n)
+       (if (= n 0) 1
+           (* n (fact (- n 1))))))
+  initial-env)
+
+(mc-eval '(fact 5) initial-env)
+;=> 120
+```
+
+For that to work you need to add `define` handling to `mc-eval` — extend the current frame with the new binding. About four more lines.
+
+## What the metacircular evaluator teaches
+
+Once you've written this, you understand every 'weird' thing a Scheme interpreter does. Closures? Just a tag + code + environment. Tail calls? Trampoline the recursive `mc-eval` calls into a loop. Continuations? Reify the pending computation as a data structure. Macros? Add a rewrite pass before `mc-eval`.
+
+The interpreter isn't magic. It's about 200 lines of Scheme.
+
+## Where this appendix lives in Motoi Scheme's containment doctrine
+
+Alfred's containment rule: metacircular evaluators, functional-versus-imperative comparison, and language-implementation topics live in the Book of CS Curriculum only. They don't scatter into the domain books. That's why this appendix is here — the reader who wants it finds it in one place, and the reader who came for the domain book (Motion, Music, Money) isn't asked to detour through language theory.
+
+## For further reading
+
+SICP §4.1, from which the whole shape of this appendix is borrowed. Guy Steele's *Definitional Interpreters for Higher-Order Programming Languages* if you want to go further. See also Appendix F (implementing a small imperative language in Scheme) for the counterpoint.
+")

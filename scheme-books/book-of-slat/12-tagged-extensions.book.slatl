@@ -1,0 +1,261 @@
+;; 12-tagged-extensions.slat
+;; Book of SLAT — Chapter 12 — Tagged extensions
+
+(chapter
+  :book             "Book of SLAT"
+  :chapter-number   12
+  :title            "Chapter 12 — Tagged extensions"
+  :size             7127
+  :sha256           "206f1f5df4d09cc7"
+  :prose
+"---
+slug: book-of-slat-ch12
+title: Tagged extensions
+book: slat
+chapter: 12
+of: 16
+part: III
+app: scheme-repl
+palette: book-standard
+canonical: true
+owner: docs-team (Jess)
+status: draft
+last-reviewed: 2026-07-12
+---
+
+# Chapter 12 — Tagged extensions
+
+The escape hatch.
+
+Auto-assembly (Chapter 11) lets you add new RECORD types. Tagged
+extensions let you add new SCALAR types — a UUID, an instant, a byte
+string, a color, a coordinate, whatever you want.
+
+Six baseline tags ship in 1.0: `#inst`, `#dur`, `#uuid`, `#uri`,
+`#b64`, and `#tag`. Everything else is community-registered.
+
+## The pattern
+
+```
+#tag-name value
+```
+
+`#tag-name` is a symbol. `value` is anything the reader can parse — a
+string, a number, a record, a list, another tagged value.
+
+When the reader sees `#weather-observation \"72.4\"`, it produces a
+tagged value:
+
+```
+SlatTagged(\"weather-observation\", \"72.4\")
+```
+
+The tag travels with the value. Consumers can:
+
+- **Ignore it.** Treat the tagged value as opaque. Forward it. Store
+  it. Round-trip it.
+- **Register a rehydrator.** Turn the tagged value into a native
+  object at read time.
+- **Use it as-is.** Access the tag and the raw value separately.
+
+## Registering a rehydrator
+
+```motoi-scheme
+(slat-register-tag 'color
+  (lambda (raw)
+    (make-color raw)))
+
+(slat-loads \"#color \\\"#ff0088\\\"\")
+```
+
+The reader sees `#color \"#ff0088\"`, calls the registered rehydrator
+with the string `\"#ff0088\"`, and returns a native `Color` object.
+
+Unregistered tags come back as `SlatTagged`. Still readable. Still
+round-trippable. Just not native.
+
+## The six baseline tags
+
+All six of them are just tagged extensions with reader rehydrators
+baked in. Same mechanism as any other tag.
+
+- `#inst \"...\"` → a `Date` or `datetime`.
+- `#dur \"...\"` → a `Duration` or `timedelta`.
+- `#uuid \"...\"` → a `UUID`.
+- `#uri \"...\"` → a `URL`.
+- `#b64 \"...\"` → a byte string.
+- `#tag value` → a metatag; used for signing envelopes.
+
+These ship with the reader. Every binding rehydrates them the same
+way. Cross-binding equality is guaranteed.
+
+## Reserved tags
+
+Any tag starting with `#_` is reserved by Lacuna. Currently used:
+
+- `#_error` — a reader error inside a tolerant-mode value.
+- `#_bad-line` — a whole-line reader error.
+- `#_pending` — a value that's still being computed.
+
+Consumers cannot emit `#_` tags. Trying to write one triggers a
+canonicalization error. This is a safety property.
+
+## Extending the tag namespace
+
+Anyone can invent a new tag. No coordination required.
+
+Someone in the community writes:
+
+```
+#weather-observation (temp 72.4 humidity 0.63)
+```
+
+...into a mailbox. Consumers that don't know about weather observations
+see `SlatTagged(\"weather-observation\", …)` and forward the value.
+Nothing breaks.
+
+Later, someone lands a PR:
+
+```motoi-scheme
+(slat-register-tag 'weather-observation
+  (lambda (raw)
+    (parse-weather-observation raw)))
+```
+
+...into the runtime. From that commit forward, weather observations
+rehydrate to native objects. Old records still parse. New consumers
+get typing. Zero coordination.
+
+That's the community protocol. It's how EDN's tagged extensions work
+in Clojure. It's how we do it too.
+
+## Preserving unknown tags on round-trip
+
+Consumers must preserve unknown tags on round-trip. If you read a
+`#weather-observation` and don't know what it is, you write it out as
+`#weather-observation` — same tag, same underlying value.
+
+That's why the tag travels. You don't lose the information just
+because you don't understand it.
+
+## Tag naming conventions
+
+- Kebab-case: `#weather-observation`, not `#weatherObservation` or
+  `#weather_observation`.
+- Namespaced when the tag is domain-specific: `#physics/vec3`,
+  `#music/note`, `#game/coord`.
+- Short and readable when the tag is universal: `#uuid`, `#inst`.
+
+Reserved prefixes:
+
+- `#_` — Lacuna internal.
+- `#lacuna/…` — Lacuna namespace.
+
+Community tags should namespace themselves to avoid collision.
+
+## Combos
+
+### Tagged extension + canonicalization
+
+The tagged value canonicalizes based on its inner value. `#inst
+\"2026-07-11T18:22:00Z\"` canonicalizes to the same bytes as `#inst
+\"2026-07-11T18:22:00.000Z\"` if fractional seconds are absent.
+
+Same value, same bytes, same CID, same signature. The extension
+mechanism doesn't break canonicalization.
+
+### Tagged extension + auto-assembly + line-delimited
+
+New subsystem publishes `#weather-observation` records. Loam ingests.
+Downstream consumers treat them as opaque tagged values.
+
+Later, a small PR lands: `(slat-register-tag 'weather-observation …)`.
+Now the same downstream consumers get native rehydration on next read.
+
+Zero coordination. Old records still work. New records get typed.
+Every consumer is safe to upgrade at its own pace.
+
+### Tagged extension + reader sandbox
+
+Because the reader is inert, tagged values are safe on untrusted
+input. The reader parses the shape. It calls the registered rehydrator
+IF one exists. The rehydrator can validate before returning.
+
+If no rehydrator, the tag comes back opaque. Consumers pattern-match
+before acting on it.
+
+## What tagged extensions do NOT do
+
+- **Don't run code.** The rehydrator runs, but it's YOUR code — you
+  registered it. Untrusted input never triggers arbitrary execution.
+- **Don't add new grammar.** The tag itself is a symbol, and the value
+  is any legal slat. Nothing new to parse.
+- **Don't require versioning.** Tags travel forever. If a tag falls
+  out of use, its old records still parse. If a tag changes meaning,
+  the community negotiates.
+
+## Try this
+
+Register a small tag, use it, unregister it, use it again.
+
+```motoi-scheme
+(slat-register-tag 'greeting-code
+  (lambda (raw)
+    (case raw
+      ((100) \"hello\")
+      ((200) \"goodbye\")
+      (else \"unknown\"))))
+
+(slat-loads \"#greeting-code 100\")
+```
+
+You get `\"hello\"`.
+
+```motoi-scheme
+(slat-unregister-tag 'greeting-code)
+
+(slat-loads \"#greeting-code 100\")
+```
+
+You get `SlatTagged(\"greeting-code\", 100)`. Opaque. Still legible.
+
+Read a slat with several tagged values.
+
+```motoi-scheme
+(slat-loads \"
+(user
+  :id     #uuid \\\"550e8400-e29b-41d4-a716-446655440000\\\"
+  :joined #inst \\\"2026-01-01T00:00:00Z\\\"
+  :bio    \\\"loves slats\\\"
+  :avatar #uri \\\"https://lacuna.dev/avatar.png\\\"
+  :pubkey #b64 \\\"AAAAC3NzaC1lZDI1NTE5AAAA...\\\")\")
+```
+
+Four tagged values in one record. Each rehydrates to its native type.
+
+## The tagged extension rule
+
+**A tag names the type. The value carries the data. Unknown tags
+survive round-trip.**
+
+That's how new types travel through the system without a language
+change.
+
+## Where next
+
+Chapter 13 walks the mailbox. Now that you've seen the substrate, the
+framing, the reader, canonical form, content addressing, signing, and
+the two extension mechanisms — it's time to see them all work together
+in a running system. Mailboxes are the daily use case. Every process
+sends and receives messages by writing and reading slats.
+
+## Cross-links
+
+- [[appendix-b]] — every baseline tag, one page each.
+- [[book-of-systems]] Chapter 6 — Graceful reconnect, which handles
+  mailbox continuity across restarts.
+
+---
+
+Turn the page.
+")

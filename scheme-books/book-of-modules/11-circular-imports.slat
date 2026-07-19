@@ -1,0 +1,155 @@
+(chapter
+  :book "Book of Modules"
+  :chapter-number 11
+  :title "Circular imports"
+  :audience "programmer-fluent-in-other-languages"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-completion-orchestrator")
+  :prose
+"# Chapter 11 — Circular imports
+
+What happens when module A imports module B and module B imports module A? This shape — the circular import — is one of the recurring quiet bugs in module systems everywhere. Motoi has a specific answer, and this chapter explains it.
+
+## 11.1 The shape of the problem
+
+Consider:
+
+```scheme
+;; a.scm
+(module a
+  (import b)
+  (export foo)
+  (define (foo) (bar)))
+
+;; b.scm
+(module b
+  (import a)
+  (export bar)
+  (define (bar) (foo)))
+```
+
+`a` imports `b`; `b` imports `a`. When Motoi tries to load either one, it hits the other, which hits the first again, and so on.
+
+Naively, this is a loading loop with no exit. Motoi detects the loop and does not spin forever. What it does instead is more interesting.
+
+## 11.2 Motoi's answer — a warning, not a crash
+
+When Motoi sees the circular structure, it emits a warning and proceeds with a partial load. The rule: each module gets its bindings registered *before* its body fully evaluates. When A's body evaluates and calls `import b`, B's body starts evaluating. When B's body says `import a`, A's bindings are already registered (from A's original load) even though A's body has not finished. B sees the *shape* of A but not necessarily any values that A defines after the point where B was pulled in.
+
+This is enough to make many circular structures work. It is also enough to hide subtle bugs — an early call from B into A can see an undefined value where a defined one would have been if the loading order had been different.
+
+The warning is Motoi's way of saying: *this loaded, but you should refactor*.
+
+## 11.3 Why circular imports usually mean something is wrong
+
+A cycle in the module graph almost always means the boundaries between the modules are not quite right. If A needs `bar` and B needs `foo`, one of three things is probably true.
+
+- **`foo` and `bar` belong together** in a single module. The cycle is telling you the split was wrong.
+- **A third module** should hold the things both A and B need, and A and B should each import from it without importing each other.
+- **One of the calls should be a callback**, not a direct import. A registers a callback for what it needs from B; B invokes the callback instead of importing A.
+
+Any of the three refactorings breaks the cycle. Each is a different design choice, appropriate in different situations.
+
+## 11.4 The single-module refactor
+
+If A and B are tightly coupled — every verb in A calls verbs in B and vice versa — the honest answer is often to merge them.
+
+```scheme
+;; ab.scm
+(module ab
+  (export foo bar)
+  (define (foo) (bar))
+  (define (bar) (foo)))
+```
+
+The cycle disappears because there is nothing to cycle between. If you find yourself resisting this refactor with reasons like *but they are conceptually different*, that resistance is worth listening to — the two things really are different — but the module system is telling you they cannot both be modules on their own.
+
+## 11.5 The shared-third-module refactor
+
+If A and B share a small set of things they both need, extract those into a third module.
+
+```scheme
+;; shared.scm
+(module shared
+  (export common-helper)
+  (define (common-helper) ...))
+
+;; a.scm
+(module a
+  (import shared)
+  (export foo)
+  (define (foo) (common-helper) (something-a-specific)))
+
+;; b.scm
+(module b
+  (import shared)
+  (export bar)
+  (define (bar) (common-helper) (something-b-specific)))
+```
+
+`a` and `b` no longer import each other. Both import `shared`. The cycle is broken. `shared` has no imports of its own, so it can be loaded first without any complications.
+
+## 11.6 The callback refactor
+
+Sometimes A really does need to call something in B, and vice versa, but the coupling is one-directional in each direction — A calls into B's *interface*, B calls into A's *callback*.
+
+```scheme
+;; b.scm
+(module b
+  (export bar register-callback!)
+
+  (define callback (make-parameter #f))
+
+  (define (register-callback! cb)
+    (callback cb))
+
+  (define (bar)
+    (when (callback)
+      ((callback)))))
+
+;; a.scm
+(module a
+  (import b)
+  (export foo)
+
+  (define (my-callback) (do-something-a-specific))
+
+  (b/register-callback! my-callback)
+
+  (define (foo) (b/bar)))
+```
+
+Now A imports B, but B does not import A. B has a callback slot; A registers into it at startup. The cycle is broken because B does not know about A statically — it just knows about the callback shape.
+
+This refactor is heavier than the first two but more flexible. It is the right choice when the coupling is real but you want the modules to be swappable.
+
+## 11.7 The warning is a design signal
+
+I keep coming back to this: a circular-import warning is Motoi asking you to reconsider the boundary. It is not saying *your code is broken* — the code will run — it is saying *this shape will bite you eventually*.
+
+The most common bite: reordering the imports later fixes or breaks the program mysteriously. Or moving a define within a module changes whether the cycle works. Both symptoms trace back to the fact that in a cycle, load order matters in ways it does not for acyclic imports.
+
+Refactor when you see the warning. Do not silence it.
+
+## 11.8 Cortex records the cycles
+
+Every detected cycle is logged.
+
+```scheme
+(cortex/query :predicate 'module-cycle-detected)
+;; ⇒ ((cycle-detected :modules (a b) :at 1720000000)
+;;    (cycle-detected :modules (x y z x) :at 1720000010))
+```
+
+A tool can grep this log for cycles across a codebase and produce a list of the shapes to fix. This is a good tech-debt audit — cycles are usually easy to see once you have the list.
+
+## 11.9 Try it
+
+Build the two-module cycle from section 11.1. Observe the warning. Try each of the three refactors. Notice how each one changes the shape of the program in a different way.
+
+Chapter 12 covers module identity — the deep answer to *what makes two modules the same*. Turn the page.")

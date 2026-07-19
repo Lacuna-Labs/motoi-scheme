@@ -1,0 +1,345 @@
+;; BURN-DOWN-TRAINING-ARC-MAPPING-2026-07-17.ENG.slat
+;; Burn-down for RESEARCH-TRAINING-ARC-MAPPING-2026-07-17.ENG.slat
+;; Plus: portable methodology transfer table (Motoi → Sakura 4B → future models)
+;; Author: Lacuna Engineering — Claude Opus 4.7 (1M context)
+;; Date:   2026-07-17
+;; Adapter under test: /Users/alfred/.forge/runs/motoi/adapter/adapters.safetensors
+;; Prior: ppl-delta sweep → DataInf on 100k → drop bottom 60% → 1k LIMA polish → retrain r128 · 2ep
+
+(engineering-doc
+  :name "Burn-Down — Training Arc Mapping (Motoi 0.75 → 0.76) + Portable Methodology"
+  :doc-id "BURN-DOWN-TRAINING-ARC-MAPPING-2026-07-17"
+  :version "1.0"
+  :book "engineering"
+  :section "training-arc-execution"
+  :audience "Alfred (execution plan + cross-model blueprint)"
+  :dialect "motoi"
+  :date "2026-07-17"
+  :author "Lacuna Engineering — Claude Opus 4.7 (1M context)"
+  :status "SHIP — planning, terse, action-guiding"
+  :training-eligible #f
+  :confidentiality "internal"
+  :provenance "burn-down of RESEARCH-TRAINING-ARC-MAPPING-2026-07-17"
+
+  :executive-summary
+"# Executive summary
+
+Two deliverables in one doc.
+
+**A. Burn-down**: 6 waves gated by evidence. The plan is 5–7 days wall clock,
+but only ~14–20 hr of Alfred's attention if we run agents concurrently. Waves
+1–2 gate everything downstream; if perplexity-delta at Wave 1 is null, we
+pivot to hand-curated LIMA (Fallback A) and save 2 days.
+
+**B. Portable methodology**: DataInf-scored curation is a TECHNIQUE, not a
+Motoi-specific tactic. The corpus blueprint we pay for once on Motoi becomes
+the shaping guide for Sakura 4B, Sakura 4B Round 2 (post-Motoi-findings),
+Qwen2.5-Coder-7B, and any future character/coder fine-tune. Concrete
+transfer table below with expected LIMA size / rank / epochs per target.
+
+**One most-important cross-model finding**: LIMA polish size scales roughly
+with sqrt(base params). 1.5B → ~1k, 4B → ~2–3k, 7B → ~4–5k. Corpus VOLUME
+past ~10–25k appears to be diminishing returns at all three scales for
+persona + narrow-domain fine-tuning. Alfred's next three models can each save
+40–60% of authoring effort by using Motoi's DataInf-scored influence
+distribution as prior."
+
+  :deliverable-a-burn-down
+"# Deliverable A — Burn-down of the plan
+
+## Wave 1 — Perplexity-delta held-out sweep
+
+**Preconditions**
+- 100k SFT corpus checked in at `training-data/motoi-0.75/` (assume present).
+- AUDIT-9 probe suite frozen at `engineering/AUDIT-9-SCENARIO-COVERAGE-PROBES.ENG.slat`.
+- Corpus split by book directory (composition, introspection, ordinary-world,
+  reason, motion, self, music, safety, verbs) — 9 groups.
+
+**What is authored**
+- `training/scripts/ppl_holdout_sweep.py` — trains 9 mini-adapters, each
+  holding out one book, rank 32 (small — this is diagnostic, not production),
+  1 epoch, seed 31.
+- `training/scripts/ppl_delta_report.py` — for each held-out book, measures
+  ppl on the held-out subset vs the same-book text under the full-corpus
+  baseline adapter. Outputs `runs/ppl_delta/report.slat`.
+- Schema: `(book :name X :ppl-baseline F :ppl-holdout F :delta F :verdict {stuck | leaky | null})`.
+
+**Compute vs eng**
+- Wall clock: 9 mini-adapters × ~30 min each on M2 Max ≈ 5 hr training + 1 hr eval.
+- Eng attention (agent): ~4 hr authoring + 1 hr result interpretation.
+- Alfred attention: ~30 min gate review.
+
+**Gate**
+- If ≥5 of 9 books show clear stick (delta > 0.3 ppl), Wave 2 (DataInf) is
+  worth firing — books are legibly separable in the corpus.
+- If <3 books show clear stick, pivot to **Fallback A** (hand-curated LIMA
+  using AUDIT-9 WEAK/FAIL verdicts). Delta signal too noisy for DataInf to
+  produce trustworthy per-pair scores.
+
+## Wave 2 — DataInf attribution over 100k pairs
+
+**Preconditions**
+- Wave 1 gate passed.
+- `ykwon0407/DataInf` cloned into `vendor/DataInf/`, patched for MLX/Apple
+  Silicon (Kwon's repo assumes PyTorch CUDA — Alfred's runtime is MLX; expect
+  ~4 hr adapter shim).
+
+**Compute vs eng**
+- Wall clock: 4–8 hr for full 100k × 70 probes on M2 Max (Kwon's closed-form
+  method — no Hessian inversion, sub-quadratic in adapter param count).
+- Eng attention: ~6 hr (MLX adapter shim, probe-file conversion, run monitor,
+  score-file emit).
+- Alfred attention: ~30 min gate review of score distribution histogram.
+
+**Output**
+- `runs/datainf/data_influence_scores.jsonl` — one row per pair:
+  `{pair_id, book, subset, influence_agg, influence_per_probe: {probe_id: score}, verdict: {keep_top40 | drop_bottom60 | borderline}}`.
+
+**Gate**
+- Threshold for 'drop this pair': aggregate influence below 40th percentile
+  AND no per-probe score above 60th percentile.
+- If ≥50% of the corpus flags as drop, sanity-check: too aggressive means
+  DataInf mis-scored short-form-heavy books. Fall back to 30% drop.
+- If <20% flags as drop, DataInf is not discriminating — likely a scoring
+  bug. Rerun with fewer probes (top-20 highest-quality probes only).
+
+## Wave 3 — LIMA polish authoring (~1000 pairs)
+
+**Targets** (three zero-stick books from prior report + safety)
+- Book of Introspection: ~250 long-form pairs, VARIED, no thesaurus/prefix
+  algorithmic duplication (the pattern that broke Wave 0).
+- Book of Ordinary World: ~250 prose-diverse pairs — bodies, weather,
+  streets, dinners (per user memory: prosaic world breadth doctrine).
+- Flower Stories (long-form composition polish): ~250 pairs — Midsummer /
+  Tempest cadence, narrative flow, no repetition-collapse triggers.
+- Safety refusals: ~250 pairs across the 7 refusal categories from user
+  memory (self-harm, emergency, personal advice, look-things-up, self-modify,
+  redirect-to-code, alternative-sources). No 911, no regional specifics —
+  deflect-and-stop pattern.
+
+**Split**
+- Agent-authored bulk: ~800 pairs (4 agents × 200, one per target).
+- Alfred final-cut review: ~200 pairs (safety-critical + persona-load-bearing).
+
+**Compute vs eng**
+- Wall clock: ~2 days concurrent agent authoring + 1 day Alfred review.
+- Eng attention (agents): ~30 hr across 4 concurrent lanes.
+- Alfred attention: ~4–6 hr review + final-cut on 200 load-bearing pairs.
+
+## Wave 4 — Corpus refold + sign
+
+**What happens**
+- Merge (top 40% from DataInf) + (1k LIMA polish) → ~41k curated corpus.
+- Manifest v3 signed at `training-data/motoi-0.76/MANIFEST.slat` with
+  provenance chain per pair (survived-datainf | authored-lima-2026-07-17).
+- Held-out set (10% of original) preserved untouched — same seed, same split,
+  so 0.75 vs 0.76 comparison is on identical held-out data.
+
+**Compute vs eng**
+- Wall clock: ~4 hr.
+- Eng attention: ~4 hr (agents).
+- Alfred attention: ~30 min manifest sign-off.
+
+## Wave 5 — Retrain rank 128, 2 epochs, seed 31
+
+**Config** (per user memory 'Motoi training config LOCKED')
+- Base: Qwen2.5-Coder-1.5B-Instruct (unchanged).
+- LoRA rank 128 (NOT 256 — Q2 verdict from prior report).
+- Seq len 4096.
+- Seed 31 (odd prime, prevents Adam events).
+- Epochs: 2 (NOT 3 — reduces long-form overfit).
+- LR: 1e-4 → 1e-5 cosine (unchanged).
+- Start FROM BASE, not resume from 0.75 (Kwon's Qwen2.5-1.5B forgetting
+  study — resuming compounds distributional drift).
+
+**Compute vs eng**
+- Wall clock: ~41k × 2 epochs on M2 Max ≈ 18–24 hr training (proportional
+  scale from 65k × 3ep = ~45 hr in run-1).
+- Eng attention: ~2 hr setup + Adam-spike watch. Run-1 had one spike at
+  iter 8200 — same seed, but corpus reordering may shift or eliminate it.
+  Auto-checkpoint every 500 iters; if spike >2σ, snapshot pre-spike and
+  investigate.
+- Alfred attention: ~1 hr (kickoff + spot check).
+
+## Wave 6 — Re-eval + probe suite v2
+
+**Rerun**
+- AUDIT-9 70-probe scenario suite (unchanged — this is the effect definition).
+- Direct-probe verb-recall audit (correct for evaluation-judge undercount).
+- Persona 12-axis judge.
+- Safety refusal battery (7 categories × ~10 prompts).
+
+**Expected deltas** (from prior report)
+- PASS 8.6% → 18–25% (2–3x).
+- Safety 0–7% → 30–60%.
+- Long-form introspection: 0/7 → 2–4/7 stick.
+- Persona: 81% ± 3% (wash).
+- Verb-recall (probe-corrected): 60–70% → 60–70% (wash — verb coverage
+  preserved by DataInf keep-top40).
+
+**Gate**
+- Shape matches prediction (PASS climbs, safety climbs, persona holds):
+  method works, run 1.0 next.
+- PASS climbs but safety doesn't: LIMA safety pairs need review — likely
+  register mismatch (crisis-tone consistency IS the safety feature per user
+  memory).
+- Nothing moves: DataInf is scoring noise. Fall back to hand-curated LIMA
+  and rerun.
+- Persona regresses >5%: bottom-60% drop was too aggressive on persona
+  pairs. Rerun with drop-bottom-40% instead.
+
+## Honest totals — three scenarios
+
+| Scenario   | Wall clock | Eng attention (agent) | Alfred attention |
+|------------|-----------|----------------------|-------------------|
+| Aggressive | 4 days    | ~40 hr concurrent    | ~10 hr            |
+| Balanced   | 6 days    | ~60 hr               | ~15 hr            |
+| Careful    | 8 days    | ~80 hr               | ~20 hr            |
+
+Aggressive = single agent per wave, no re-review between waves, Alfred
+gate-reviews only. Balanced = 2 concurrent agents on authoring, one gate
+review between each wave. Careful = re-review after each wave, Alfred
+spot-checks intermediate artifacts, DataInf run twice with different
+probe subsets for confidence.
+
+Recommendation: **balanced**. Aggressive risks compounding a Wave 1 or
+Wave 2 error into Wave 5 wasted training compute. Careful is over-invested
+for a 0.75→0.76 arc — save it for 0.9→1.0."
+
+  :deliverable-b-portable-methodology
+"# Deliverable B — Portable methodology (cross-model blueprint)
+
+## The core insight
+
+DataInf-scored curation is a **technique for mapping data types to
+outcomes**. It transfers across models because the mapping is between the
+CORPUS SHAPE and the PROBE SHAPE, not between the corpus and a specific
+architecture. Alfred pays for the measurement once on Motoi; the shape-map
+we produce becomes prior information for every subsequent character or
+coder fine-tune.
+
+## What transfers, what doesn't
+
+**Transfers across models:**
+- Probe suite STRUCTURE (scenario coverage taxonomy — persona / verb-recall
+  / long-form / safety / doctrine).
+- Influence-scoring METHODOLOGY (author probes → train once → DataInf →
+  drop bottom fraction → author LIMA polish → retrain).
+- LIMA-shape polish discipline (diversity over volume, no thesaurus
+  duplication, hand-curated final-cut on safety-critical).
+- The finding that ~40% of a hand-authored corpus is dead weight against
+  a well-scoped probe suite (Nanney 2025 rank-utilisation numbers imply
+  this is architecture-general).
+
+**Does NOT transfer:**
+- Specific verb-influence scores (Motoi's `card/*` is Sakura-only; Motoi
+  itself has different verb set).
+- Exact drop-threshold (probe suite quality + corpus quality both vary).
+- Rank choice (persona at 1.5B ≠ persona at 7B).
+- Absolute LIMA count (scales with base capacity — sqrt-of-params rule
+  below).
+
+**What each new model teaches (accretes to blueprint):**
+- Motoi teaches: at 1.5B, long-form collapses in 3 epochs; introspection
+  needs diversity not scale; 40% corpus drop is safe.
+- Sakura 4B will teach: at 4B, does long-form still collapse? Does 4B
+  need proportionally more or fewer LIMA polish pairs?
+- Qwen2.5-Coder-7B would teach: does the coder-specific finding (verb
+  breadth needs ≥3 exemplars per verb) hold at 7B, or does 7B one-shot?
+- A 7B non-coder character model would teach: is character persona at 7B
+  fully saturated at rank 32 (as some studies suggest), or does it
+  benefit from higher rank the way narrow-domain does?
+
+## Methodology transfer table
+
+| Base model | Purpose | Expected corpus | Expected LIMA | Rank | Epochs | Notes |
+|------------|---------|-----------------|---------------|------|--------|-------|
+| Qwen2.5-Coder-1.5B-Instruct (Motoi 0.76) | Kid-facing Scheme tutor + persona | ~40k curated (post-DataInf) | ~1k | 128 | 2 | DONE per this burn-down. Long-form collapse risk. |
+| Qwen3-4B-Instruct-2507 (Sakura 4B round 1) | Shop-operator persona, business posture, Cortex-integrated | ~50–70k | ~2–3k | 64 | 2 | Existing plan per training manual. Rank 64 likely sufficient at 4B for persona (Wan 2024 evidence). |
+| Qwen3-4B-Instruct-2507 (Sakura 4B round 2, post-Motoi-findings) | Same as above, corpus shaped by Motoi's DataInf priors | ~25–35k | ~2–3k | 64 | 2 | Round 2 saves ~40% authoring effort by dropping types Motoi flagged as low-influence. |
+| Qwen2.5-Coder-7B-Instruct (hypothetical) | Advanced code fine-tune (Scheme + host language) | ~30–50k | ~4–5k | 32 or 64 | 2 | 7B coder may one-shot verb learning at lower epoch count. Rank likely lower than Motoi. |
+| Qwen3-7B-Instruct (hypothetical Sakura-like) | 7B character persona | ~30–50k | ~4–5k | 32 | 2 | Persona at 7B is well below saturation at low ranks. Bulk corpus size is where the win is. |
+
+## The LIMA size / base capacity rule (proposed, needs Sakura 4B to confirm)
+
+LIMA polish size scales roughly with sqrt(base_params_in_billions):
+- 1.5B → sqrt(1.5) ≈ 1.22 → ~1k polish pairs
+- 4B → sqrt(4) = 2.0 → ~2k polish pairs
+- 7B → sqrt(7) ≈ 2.65 → ~2.5–5k polish pairs (band widens due to
+  distribution effects)
+
+Rationale: LIMA size tracks the number of distinct behavioral MODES the
+polish must sharpen, and larger models have more modes latent in the base
+that need selecting rather than teaching. This is a HYPOTHESIS from Motoi
+data + LIMA/LIMO literature; Sakura 4B is the first confirmation datapoint.
+
+## Bulk corpus VOLUME (proposed rule)
+
+Bulk corpus can shrink after Round 1 gives DataInf priors. Ratio:
+- Round 1 (blind, no priors): ~5–7× LIMA size in bulk pairs.
+- Round 2+ (with DataInf-derived shape priors): ~2–3× LIMA size in bulk pairs.
+
+For Sakura 4B Round 2 specifically: Motoi's DataInf report will tell us
+what fraction of hand-authored persona pairs are dead weight. If Motoi's
+result is ~60% dead (as expected), Sakura Round 2 authors 40% fewer bulk
+pairs from the start — direct cash savings on eng-attention.
+
+## Value proposition to Alfred (blunt)
+
+Motoi 0.76 arc costs ~15 hr of Alfred's attention. It produces:
+1. A working Motoi 0.76.
+2. A DataInf-scored map of which data types stuck at 1.5B.
+3. A LIMA-size and bulk-ratio prior for future models.
+
+Sakura 4B Round 1 currently plans ~50–70k bulk + ~2–3k LIMA. With Motoi's
+findings, Sakura 4B Round 2 could plausibly hit the same target at
+~25–35k bulk + ~2–3k LIMA — saving Alfred ~30–40k pairs of authoring
+effort. At any reasonable rate (agent or human), that's the ROI.
+
+Same math applies to any subsequent 4B or 7B — the blueprint accretes."
+
+  :cross-cutting-caveats
+"# Cross-cutting caveats
+
+1. **Motoi is offline-hermetic** (user memory HARD CONSTRAINT). All Wave 1–6
+   work runs locally on M2 Max. DataInf's ykwon0407 repo is local-runnable;
+   the MLX shim is the only new dependency.
+
+2. **The AUDIT-9 probe suite defines 'effect'.** If Alfred wants a different
+   effect definition (e.g., add a new 'flower-story fluency' probe class),
+   the probe suite changes BEFORE Wave 2, not after. Retrofitting probes
+   after DataInf scores are computed invalidates the scores.
+
+3. **Safety consistency IS the safety feature** (user memory HARD SAFETY
+   LOCK). LIMA safety pairs in Wave 3 must use near-identical templates
+   for crisis + emergency categories. Wit dies in crisis. Non-negotiable.
+
+4. **STOP fake-completion cycle** (user memory): this burn-down describes
+   waves as PLANNED, not shipped. Each wave gate produces artifacts Alfred
+   can inspect. No 'wired!' declarations without Alfred confirming end-to-end.
+
+5. **Motoi persona is 'he' + Sakura is 'she'** (user memory). Any cross-
+   model authoring during Wave 3 or Sakura Round 2 keeps the split. Never
+   author Motoi pairs in Sakura's voice or vice versa.
+
+6. **Version output is 0.76, not 1.0** (user memory: OUTPUT VERSION = 0.75
+   for team review, iterate). This arc targets 0.76 or 0.8. 1.0 is downstream.
+
+7. **The methodology transfer table for Sakura 4B assumes the training
+   manual's plan.** If Sakura's plan has moved (Qwen version bump, rank
+   change, corpus grew), those rows need Sakura-side confirmation before
+   Round 2 fires."
+
+  :sources-index
+"# Sources index (lighter than prior report — planning not research)
+
+- Prior: RESEARCH-TRAINING-ARC-MAPPING-2026-07-17.ENG.slat (full citations)
+- DataInf: Kwon et al., ICLR 2024, arXiv 2310.00902 · https://github.com/ykwon0407/DataInf
+- LoRA rank utilisation: Nanney 2025, HuggingFace
+- LIMA: arXiv 2305.11206 · LIMO: arXiv 2502.03387
+- Persona rank: Wan et al. arXiv 2412.11250; Wang et al. arXiv 2607.04510
+- User memory: Motoi training config LOCKED; SAFETY REFUSALS
+- Sakura 4B plan: engineering/FOLD-TRAIN-PLAN-0.75.ENG.slat — Round 2
+  rows contingent on that plan's current shape"
+
+) ;; end engineering-doc

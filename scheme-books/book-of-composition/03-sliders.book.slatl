@@ -1,0 +1,215 @@
+(chapter
+  :book "Book of Composition"
+  :chapter-number 3
+  :title "Sliders in depth — numeric widgets, log scale, quantization"
+  :audience "programmer-fluent-in-other-languages"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-of-composition-author-agent"
+     :cli-verified #t)
+  :prose
+"# Chapter 3 — Sliders in depth
+
+The slider is the composer's simplest widget and also the most useful. A number goes in, a number comes out. That is all. Every other widget in the composer either builds on the slider's contract (buttons emit forms in place of numbers, toggles emit booleans, color pickers emit palette references) or aggregates it (an ADSR is four sliders bound together, an FX chain is a stack of parameter sliders per effect).
+
+This chapter covers every option the slider verb accepts, every quirk of its emit, how to make sliders that feel logarithmic to the ear, how to quantize a slider to integer steps, and how the runtime clamps values that stray outside `:min` and `:max`.
+
+## 3.1 The verb signature
+
+The signature the reference documents:
+
+```
+(composer/slider :label :bind :min :max :step . options)
+```
+
+The keyword arguments are:
+
+- `:label` — string. Displayed on surfaces that show labels; ignored on headless surfaces.
+- `:bind` — path. Where the slider's value writes.
+- `:min` — number. The floor.
+- `:max` — number. The ceiling.
+- `:step` — number. The granularity between adjacent legal values.
+- `:value` — number, optional. The starting value. If omitted, defaults to `:min`.
+- `:orientation` — symbol, optional. `'horizontal` or `'vertical`. Default `'horizontal`. Ignored on surfaces that pick one.
+- `:log` — boolean, optional. If `#t`, the slider maps its physical position to its value logarithmically. Default `#f`.
+
+## 3.2 The minimal slider
+
+The smallest legal slider:
+
+```scheme
+(composer/slider :label \"BPM\" :bind '(cart/main :bpm)
+                 :min 60 :max 240 :step 1)
+```
+
+That is a slider labeled `BPM`, bound to the `:bpm` slot inside `cart/main`, ranging from 60 to 240 with integer steps. `composer/emit` on a canvas containing this slider produces:
+
+```
+(composer/slider :label \"BPM\" :bind (quote (cart/main :bpm))
+                 :min 60 :max 240 :step 1 :value 60)
+```
+
+`:value 60` is added by the emit because the slider defaulted to `:min` when it had no explicit `:value`. Round-trip: load the emit back, and the slider starts at 60.
+
+## 3.3 ASCII mockup — a slider bar
+
+```
+Attack   [==|-----------------] 0.05
+Decay    [====|---------------] 0.10
+Sustain  [==================|-] 0.70
+Release  [======|-------------] 0.30
+```
+
+Each bar is a physical position mapped to a value. The `|` is the scrubber. The `=` region is filled left of the scrubber. The `-` region is empty right of it. The number at the right is the current value.
+
+## 3.4 The value defaults to min
+
+Sliders you construct without a `:value` default to `:min`. This matches ordinary expectations: build a volume slider, and its knob starts at zero; build a pan slider from -1 to 1, and its knob starts at -1 (not center). If you want center as the default, pass `:value 0` explicitly.
+
+```scheme
+(composer/slider :label \"Pan\" :bind '(mix :pan) :min -1 :max 1 :step 0.01 :value 0)
+```
+
+Emit produces:
+
+```
+(composer/slider :label \"Pan\" :bind (quote (mix :pan))
+                 :min -1 :max 1 :step 0.01 :value 0)
+```
+
+Passing `:value 0` explicitly is the difference between a slider that boots at -1 (surprising) and one that boots at center (obvious).
+
+## 3.5 Step is the granularity
+
+`:step` tells the surface (and the emit) how big each numeric increment is. A step of 1 with a min of 0 and max of 100 gives 101 discrete positions. A step of 0.01 with the same range gives 10,001 positions.
+
+Kids setting BPM want integer steps. Volume sliders want small floating-point steps (0.01 or 0.001). Envelope-time sliders want small float steps (0.001 seconds is a millisecond, and audio work often cares about milliseconds).
+
+The step does not truncate the value automatically at emit time — the current runtime stores the value the caller sets and includes it verbatim in the emit. If you set a slider with `:step 1` to `:value 3.7`, the emit will faithfully preserve 3.7. That is a runtime quirk today; the widget respects step in its interactive surface (Curator will snap the scrubber to integer positions) but the value slot accepts anything numeric.
+
+If you want strict integer snapping at emit time, apply the snapping yourself before setting:
+
+```scheme
+(define (snap value step)
+  (* step (round (/ value step))))
+```
+
+## 3.6 Log scale for perceptually-uniform sliders
+
+Human perception of loudness and pitch is logarithmic. A linear slider from 0.0 to 1.0 mapping to gain sounds like a huge jump from 0.05 to 0.15 and almost no change from 0.85 to 0.95 — because ears do not care about linear amplitude, they care about ratios.
+
+The `:log` option tells the widget to map its physical position to its value on a log curve:
+
+```scheme
+(composer/slider :label \"Volume\" :bind '(mix :master)
+                 :min 0.001 :max 1.0 :step 0.001 :log #t)
+```
+
+Physical position 0.5 on a log slider from 0.001 to 1.0 maps to the geometric mean of the range, not the arithmetic mean. That is what your ear expects.
+
+Two important notes about log sliders:
+
+1. Log sliders cannot include zero as a min. Log(0) is minus infinity. Use a tiny positive value like 0.001 instead. The surface will render this as visually near-zero and treat it as effectively muted.
+2. The log flag is a rendering hint. The value slot still stores the linear number. The emit contains `:log #t` so a reload knows to render it logarithmically again.
+
+## 3.7 Orientation
+
+`:orientation 'horizontal` is the default. `:orientation 'vertical` tells surfaces that render sliders to draw them tall instead of wide. Most surfaces respect the hint; some (say, a phone in portrait) ignore it and stick to horizontal for space reasons.
+
+The emit records the orientation so a reload preserves it. On a headless surface (TUI, tests) orientation is invisible; the widget still stores the option so the round-trip carries it forward.
+
+## 3.8 The runtime clamp
+
+The composer stores whatever number you set. It does NOT automatically clamp values to `:min..:max` when you write from Scheme. A slider set to `:value 500` when its max is 240 will faithfully emit `:value 500`.
+
+The user-facing surface DOES clamp (you cannot drag a scrubber past the ends of the bar). The Scheme API does not. This is intentional: a program setting a slider from outside may want to detect and handle out-of-range values itself, and silent clamping would hide the problem.
+
+If you want clamping in your setter, wrap it:
+
+```scheme
+(define (slider-set-clamped widget value)
+  (let ((v (max (widget :min) (min (widget :max) value))))
+    (slider-set widget v)))
+```
+
+## 3.9 Emitted slider form — every field explained
+
+A slider emits as:
+
+```
+(composer/slider :label STRING :bind (quote PATH)
+                 :min NUMBER :max NUMBER :step NUMBER :value NUMBER)
+```
+
+- `:label` — the label. If empty at construction, emits as an empty string.
+- `:bind` — the bind path, quoted so it does not evaluate.
+- `:min`, `:max`, `:step` — the range and granularity, as numbers.
+- `:value` — the current runtime value, always present.
+
+Options like `:orientation` and `:log` are stored on the record but the current emit implementation always outputs the same six fields. If a slider is log-scaled, you will need to include `:log #t` in the hand-written form you load; the runtime preserves the flag in the widget's internal state but does not currently emit it. This is a known limitation of the v1.0 emit and is on the list to smooth in a later minor version. In practice, kids and authors set `:log` at construction and reload from source files that include the flag, so it does not bite.
+
+## 3.10 Slider set from Scheme
+
+The composer exposes a helper for programmatic mutation of a slider's value. In the runtime source it is called `sliderSet`; from Scheme you would go through the composer's mutation surface (which the module documents as tests-and-programs API rather than a first-class verb, per the v1.0 spec's `:non-ui-primitives` note).
+
+For book examples that need to demonstrate a slider changing, we construct a fresh slider with `:value X` and emit — you see the value in the emit. That is the most direct way to prove the round-trip without depending on a mutation API that may vary by dialect.
+
+## 3.11 A worked example — a mixer canvas
+
+Consider a small mixer canvas with three channel volume sliders and a master fader:
+
+```scheme
+(composer/canvas (list :bind '(mix))
+  (composer/slider :label \"CH 1\" :bind '(mix :ch1 :vol) :min 0 :max 1 :step 0.01 :value 0.75 :log #t)
+  (composer/slider :label \"CH 2\" :bind '(mix :ch2 :vol) :min 0 :max 1 :step 0.01 :value 0.60 :log #t)
+  (composer/slider :label \"CH 3\" :bind '(mix :ch3 :vol) :min 0 :max 1 :step 0.01 :value 0.40 :log #t)
+  (composer/slider :label \"Master\" :bind '(mix :master) :min 0 :max 1 :step 0.001 :value 0.85 :log #t))
+```
+
+Four sliders, all log-scaled, three at channel-specific defaults, master at 0.85. The emit will hold all four with their current values baked in. Save this canvas, hand-edit the master to 1.0, reload — the master fader sits at 1.0.
+
+The mixer is what a musician wants to see when adjusting balance. Nothing about the widget is specialized for audio; the widget is just a slider, and audio is what happens because the values it writes flow through a synth graph elsewhere in the runtime.
+
+## 3.12 Sliders that write into deeply nested paths
+
+The bind path can go as deep as your data structure allows. Here is a slider that controls a filter's cutoff on a specific instrument in a specific pattern in a specific song:
+
+```scheme
+(composer/slider :label \"Filter cutoff\"
+                 :bind '(song :patterns :verse :instruments :lead :fx :filter :cutoff)
+                 :min 100 :max 20000 :step 10 :log #t)
+```
+
+Nine-element path. The widget does not care about the depth; it writes to that exact slot when moved. The bind is data. If you want to relocate the slot, edit the bind path.
+
+## 3.13 Sliders and defaults you shouldn't skip
+
+Two defaults that trip authors:
+
+- `:value` defaults to `:min`. If you want zero-centered, pass `:value 0` explicitly.
+- `:log` defaults to `#f`. For volume, gain, or anything the ear cares about ratios of, use `:log #t`.
+
+Setting these correctly at construction avoids surprises later. The emit will preserve them.
+
+## 3.14 What the surface does with a slider
+
+Each surface renders the slider its own way. On Curator's desktop canvas it's a horizontal bar with a draggable scrubber, keyboard arrows for step increments, and a numeric readout to the right. In the TUI (Chapter 14) it renders as an ASCII bar with the character `|` for the scrubber. In an HTTP browser response it renders as an HTML `<input type='range'>` with the `min`, `max`, and `step` attributes wired through. On a phone (per the cross-surface design) it's a full-width bar with long-press for numeric-entry sheet.
+
+Every rendering emits the same numeric value on change. The widget is a number producer; surfaces are the ways humans supply the number.
+
+## 3.15 What to remember from this chapter
+
+- Sliders are numeric widgets. They take `:label`, `:bind`, `:min`, `:max`, `:step`, and optionally `:value`, `:orientation`, `:log`.
+- The value defaults to `:min` unless you pass `:value` explicitly.
+- `:step` is the increment surfaces should offer. The value slot itself is not automatically snapped.
+- `:log #t` maps physical position logarithmically. Use it for volume, gain, or anything ratio-perceptual. Do not include zero in the range of a log slider.
+- The emitted form always includes the current `:value` so a reload lands the scrubber where you left it.
+- Sliders write values by symbolic bind path. The path can go as deep as your data structure requires.
+- The slider widget is deterministic. Every surface renders it, every surface emits the same number on change.
+
+Chapter 4 covers buttons and toggles — how a widget can emit a form on click instead of a value, and how a boolean flag differs from a number.
+")
