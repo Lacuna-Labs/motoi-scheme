@@ -59,6 +59,35 @@ const MOTOI_PINK_256  = 218   // ~#ffafd7
 const MOTOI_GREEN_256 = 28    // ~#008700
 const MOTOI_BROWN_256 = 94    // ~#875f00
 
+// ── theme awareness ──────────────────────────────────────────────
+// The default splash + prompt paint Motoi's canonical pink accent. When
+// a theme is passed through opts.theme, we resolve the primary /
+// splash-blossom role from the theme, so `motoi repl --theme hacker`
+// wears green phosphor instead of pink.
+function resolveThemeColors(theme) {
+  if (!theme || !theme.roles) return null
+  const nameFor = (role) => theme.roles[role] || null
+  const rgbFor = (role) => {
+    const n = nameFor(role)
+    if (!n) return null
+    if (theme.colors && theme.colors[n]) return theme.colors[n]
+    return null
+  }
+  return {
+    // The blossom-glyph replacement (splash tree top).
+    blossomRgb: rgbFor('splashBlossom') || rgbFor('primary') || MOTOI_PINK,
+    // Prompt marker color (❀ under Sakura; > under Hacker).
+    promptRgb:  rgbFor('prompt') || rgbFor('primaryDark') || MOTOI_PINK,
+    // Title text on splash.
+    titleRgb:   rgbFor('splashTitle') || rgbFor('primaryDark') || MOTOI_PINK,
+    // Body hint text.
+    hintRgb:    rgbFor('splashHint') || rgbFor('accent') || MOTOI_GREEN,
+    // Whether the blossom glyph should be rendered at all. Themes can
+    // set a boolean-ish flag via a role — hacker doesn't want a flower.
+    hasBlossom: theme.name !== 'hacker',
+  }
+}
+
 function fg24(rgb) { return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m` }
 function fg256(n)  { return `\x1b[38;5;${n}m` }
 
@@ -118,7 +147,7 @@ function loadLogoAscii() {
  *   plain   if true, return only the wordmark on one line — no stripes,
  *           no tree, no hint. Callers who want a one-line banner.
  */
-export function renderSplash({ color = 'auto', version = VERSION, width = 42, plain = false } = {}) {
+export function renderSplash({ color = 'auto', version = VERSION, width = 42, plain = false, theme = null } = {}) {
   if (plain) return `Motoi Scheme  v${version}`
 
   // Resolve color mode.
@@ -136,8 +165,15 @@ export function renderSplash({ color = 'auto', version = VERSION, width = 42, pl
   const dim = (s) => mode === 'none' ? s : `\x1b[2m${s}\x1b[22m`
   const bold = (s) => mode === 'none' ? s : `\x1b[1m${s}\x1b[22m`
 
-  // Color the ❀ blossoms pink — the tree carries Sakura-roundness by design.
-  const colorTree = (row) => row.replace(/❀/g, paint(MOTOI_PINK, MOTOI_PINK_256, '❀'))
+  // Theme integration: swap the blossom color for the theme's splash
+  // color when a theme is passed. Under Hacker, the ❀ becomes a green
+  // phosphor '*' — no blossom, no pink. Everything else stays the same
+  // so the layout doesn't shift between themes.
+  const tc = resolveThemeColors(theme)
+  const blossomRgb = tc ? tc.blossomRgb : MOTOI_PINK
+  const blossomCode256 = tc ? MOTOI_PINK_256 : MOTOI_PINK_256  // shared fallback
+  const blossomGlyph = tc && !tc.hasBlossom ? '*' : '❀'
+  const colorTree = (row) => row.replace(/❀/g, paint(blossomRgb, blossomCode256, blossomGlyph))
 
   const nodeVer = process.versions?.node?.split('.')[0] ?? '20'
   const tree = loadLogoAscii()
@@ -639,7 +675,10 @@ function didYouMean(target, env, max = 3) {
 // Colorizers for the interactive shell. Kept local so renderSplash's
 // constants stay the single source of truth for brand color; these just
 // consume detectColor's result and emit small ANSI wraps.
-function styles(mode) {
+//
+// When a theme is provided, `pink` becomes the theme's prompt color
+// (still called "pink" for API-compat with the pre-theme callers).
+function styles(mode, theme) {
   if (mode === 'none') {
     return {
       dim:  (s) => s,
@@ -647,7 +686,9 @@ function styles(mode) {
       red:  (s) => s,
     }
   }
-  const pink = mode === 'truecolor' ? fg24(MOTOI_PINK) : fg256(MOTOI_PINK_256)
+  const tc = resolveThemeColors(theme)
+  const promptRgb = tc ? tc.promptRgb : MOTOI_PINK
+  const pink = mode === 'truecolor' ? fg24(promptRgb) : fg256(MOTOI_PINK_256)
   return {
     dim:  (s) => `\x1b[2m${s}\x1b[22m`,
     pink: (s) => `${pink}${s}${ANSI_RESET}`,
@@ -655,13 +696,15 @@ function styles(mode) {
   }
 }
 
-// The interactive prompt. `❀ motoi> ` on first line; two-space indent
-// with `...>` on continuation lines so the eye tracks the outstanding
-// expression. No blossom on continuation — one blossom per submission
-// keeps the pink accent load light.
-function makePrompts(mode) {
-  const s = styles(mode)
-  const primary = s.pink('❀') + ' ' + s.dim('motoi> ')
+// The interactive prompt. Under Sakura: `❀ motoi> ` on first line;
+// two-space indent with `...>` on continuation lines. Under Hacker:
+// `> motoi> ` — bright phosphor `>` in place of the blossom, no flower.
+// One accent glyph per submission keeps the visual load light.
+function makePrompts(mode, theme) {
+  const s = styles(mode, theme)
+  const tc = resolveThemeColors(theme)
+  const glyph = tc && !tc.hasBlossom ? '>' : '❀'
+  const primary = s.pink(glyph) + ' ' + s.dim('motoi> ')
   const continuation = '  ' + s.dim('...> ')
   return { primary, continuation }
 }
@@ -708,8 +751,20 @@ export async function startRepl(opts = {}) {
   const output = opts.stdout || process.stdout
   const colorOpt = opts.color ?? 'auto'
   const mode = colorOpt === 'auto' ? detectColor(output) : colorOpt
-  const s = styles(mode)
-  const { primary, continuation } = makePrompts(mode)
+  // Resolve the theme. `opts.theme` can be a theme object (from
+  // tui/themes.js) OR a name string; when it's a string, we load it.
+  // opts.hacker is honored as a shorthand when no theme was passed.
+  let theme = null
+  if (opts.theme && typeof opts.theme === 'object') {
+    theme = opts.theme
+  } else if (opts.theme || opts.hacker) {
+    try {
+      const { activeTheme } = await import('../tui/themes.js')
+      theme = activeTheme({ theme: opts.theme, hacker: opts.hacker })
+    } catch { /* soft-fail — falls back to hardcoded pink */ }
+  }
+  const s = styles(mode, theme)
+  const { primary, continuation } = makePrompts(mode, theme)
   const prompt = opts.prompt ?? primary
   const rl = readline.createInterface({
     input: opts.stdin || process.stdin,
@@ -739,7 +794,7 @@ export async function startRepl(opts = {}) {
         ? false
         : (rl.output.isTTY === true)
   if (wantSplash) {
-    ctx.output(renderSplash({ color: colorOpt }))
+    ctx.output(renderSplash({ color: colorOpt, theme }))
   }
 
   // Multi-line accumulator: hold partial input until parens balance,

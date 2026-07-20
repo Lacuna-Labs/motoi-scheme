@@ -27,6 +27,8 @@
 import { Screen, ATTR } from './screen.js'
 import { InputReader } from './input.js'
 import { Session } from './session.js'
+import { activeTheme } from './themes.js'
+import { SAKURA } from './palette.js'
 
 // ── the whole application state ────────────────────────────────────
 
@@ -132,21 +134,39 @@ async function maybeShowSplash(opts) {
   const out = opts.stdout || process.stdout
   const clear = '\x1b[2J\x1b[H'
   const ansi = (code) => '\x1b[' + code
-  const pink   = ansi('38;2;244;160;181m')
-  const mint   = ansi('38;2;159;227;197m')
-  const cedar  = ansi('38;2;163;113;82m')
   const reset  = ansi('0m')
   const bold   = ansi('1m')
+  const dim    = ansi('2m')
+
+  // Resolve splash colors from the active theme. Every splash element
+  // (tree, leaves, trunk, title, hint, blossom) has a role; the theme
+  // decides which RGB paints it. Under Sakura → pink/mint/cedar; under
+  // Hacker → phosphor greens.
+  const theme = opts.theme || activeTheme(opts)
+  const rgbFor = (role) => {
+    // Chase role → color name → RGB. Fall back to SAKURA[name].
+    let name = theme.roles[role] || role
+    if (theme.colors && theme.colors[name]) return theme.colors[name]
+    return SAKURA[name] || SAKURA.fg
+  }
+  const fg = (rgb) => ansi('38;2;' + rgb[0] + ';' + rgb[1] + ';' + rgb[2] + 'm')
+  const trunkRgb  = rgbFor('splashTrunk')
+  const leafRgb   = rgbFor('splashLeaves')
+  const treeRgb   = rgbFor('splashTree')
+  const titleRgb  = rgbFor('splashTitle')
+  const hintRgb   = rgbFor('splashHint')
+  const blossomRgb = rgbFor('splashBlossom')
 
   const tree = [
-    '        ' + pink + '*' + reset,
-    '     ' + pink + '* * *' + reset,
-    '   ' + pink + '* * * * *' + reset,
-    '     ' + mint + '| |' + reset,
-    '     ' + cedar + '| |' + reset,
+    '        ' + fg(blossomRgb) + '*' + reset,
+    '     ' + fg(blossomRgb) + '* * *' + reset,
+    '   ' + fg(blossomRgb) + '* * * * *' + reset,
+    '     ' + fg(leafRgb) + '| |' + reset,
+    '     ' + fg(trunkRgb) + '| |' + reset,
   ]
 
-  const title = bold + 'MOTOI SCHEME · v0.75 · FANTASY CONSOLE' + reset
+  const title = bold + fg(titleRgb) +
+    'M O T O I   S C H E M E   ·   v0.75   ·   FANTASY CONSOLE' + reset
 
   out.write(clear)
   // Center the tree roughly
@@ -164,7 +184,7 @@ async function maybeShowSplash(opts) {
   // Stripes — typing animation ~500ms total, 3 rows.
   const stripeWidth = Math.min(40, cols - 4)
   const stripeChars = ['█', '█', '█']
-  const stripes = [pink, mint, cedar]
+  const stripes = [fg(rgbFor('stripe1')), fg(rgbFor('stripe2')), fg(rgbFor('stripe3'))]
   const startRow = centerRow + tree.length + 4
   for (let step = 1; step <= 20; step++) {
     for (let s = 0; s < 3; s++) {
@@ -178,7 +198,7 @@ async function maybeShowSplash(opts) {
   out.write(ansi(`${startRow + 5};1H`))
   const prompt = 'PRESS ANY KEY / CLICK TO START'
   out.write(' '.repeat(Math.max(0, Math.floor((cols - prompt.length - 2) / 2))))
-  out.write(mint + prompt + reset + ' ' + bold + '_' + reset)
+  out.write(fg(hintRgb) + prompt + reset + ' ' + bold + fg(titleRgb) + '_' + reset)
 
   // Chime — deterministic tones. Doctrine [[deterministic-audio-no-llm]].
   try {
@@ -216,6 +236,7 @@ export async function startTui(opts = {}) {
   // that startTui reads gets restored to its initial value.
   Object.assign(state, {
     screen: null, input: null, session: null,
+    theme: null,
     layout: {},
     books: [], bookTocs: {}, bookExpanded: {},
     treeIndex: 0, treeScroll: 0, treeRows: [],
@@ -238,7 +259,19 @@ export async function startTui(opts = {}) {
     _resolveExit: null,
   })
 
-  state.screen = new Screen({ out: opts.stdout || process.stdout, color: opts.color })
+  // Resolve the active theme (opts.theme > MOTOI_THEME > opts.hacker > sakura).
+  // Panel code paints role names ('pink', 'pearl', 'cedar', …) which
+  // Screen resolves through the theme + palette module. If the theme
+  // load fails, activeTheme returns the Sakura fallback shape.
+  let theme
+  try { theme = activeTheme(opts) } catch { theme = null }
+  state.theme = theme
+
+  state.screen = new Screen({
+    out: opts.stdout || process.stdout,
+    color: opts.color,
+    theme,
+  })
   state.input = new InputReader({ stdin: opts.stdin || process.stdin })
   state.session = new Session({ fuel: opts.fuel ?? 200000 })
 
@@ -249,7 +282,7 @@ export async function startTui(opts = {}) {
   // Show the retro boot splash on first launch. Persisted to
   // ~/.motoi/state.slat. Auto-dismisses after 4s. Skipped on
   // subsequent boots unless opts.splash is truthy (motoi tui --splash).
-  await maybeShowSplash(opts)
+  await maybeShowSplash({ ...opts, theme })
 
   state.books = state.session.bookList()
   if (state.books.includes('code')) {
@@ -506,11 +539,47 @@ function runSource(source) {
   const r = state.session.evalSource(src)
   if (r.stdout) appendRepl('stdout', r.stdout.replace(/\n$/, ''))
   if (r.ok) {
-    if (r.value !== '' && r.value != null) appendRepl('out', r.value)
+    if (r.value !== '' && r.value != null) appendMarkdownAwareOut(r.value)
   } else {
     appendRepl('err', 'error: ' + r.error)
   }
   if (state.cpuOpen) state.cpuText = state.session.cpuDisplay()
+}
+
+// If the returned value is a JSON-stringified string containing embedded
+// newlines + markdown-shaped lines (`# ...`, `## ...`, ```` ``` ````), we
+// unwrap it and drop each source-line into the REPL log as its own entry
+// with markdown-ish styling. Everything else takes the plain path — this
+// preserves list/number/etc. output.
+function appendMarkdownAwareOut(value) {
+  // `format()` wraps strings in JSON.stringify — so a returned prose
+  // string looks like `"# Book…\n…"`. Unwrap when we see that shape.
+  let unwrapped = value
+  if (typeof value === 'string' && value.length >= 2
+      && value.charCodeAt(0) === 34 /* " */ && value.charCodeAt(value.length - 1) === 34
+      && value.indexOf('\\n') !== -1) {
+    try { unwrapped = JSON.parse(value) } catch { /* leave as-is */ }
+  }
+  // Heuristic — only treat as markdown if it has both a newline and a
+  // header/code-fence signal. Otherwise fall through so short results
+  // (numbers, symbols, single-line strings) don't get chopped.
+  const looksMarkdown = typeof unwrapped === 'string'
+    && unwrapped.indexOf('\n') !== -1
+    && (/(^|\n)#\s/.test(unwrapped) || /```/.test(unwrapped))
+  if (!looksMarkdown) { appendRepl('out', value); return }
+  let inFence = false
+  for (const raw of unwrapped.split('\n')) {
+    const line = raw.replace(/\s+$/, '')
+    let style = { fg: 'fg', attr: 0 }
+    if (line.startsWith('```')) { inFence = !inFence; style = { fg: 'mintDark', attr: ATTR.DIM } }
+    else if (inFence)             style = { fg: 'cedarDark', attr: 0 }
+    else if (/^###\s/.test(line)) style = { fg: 'mintDark', attr: ATTR.BOLD }
+    else if (/^##\s/.test(line))  style = { fg: 'mintDark', attr: ATTR.BOLD }
+    else if (/^#\s/.test(line))   style = { fg: 'pinkDark', attr: ATTR.BOLD }
+    state.replLog.push({ kind: 'out', text: line, mdStyle: style })
+  }
+  if (state.replLog.length > 5000) state.replLog.splice(0, state.replLog.length - 5000)
+  state.replScroll = 0
 }
 
 // ── enclosing-form heuristic (mirrors ide.js) ─────────────────────
@@ -919,6 +988,24 @@ function runMetaCommand(src) {
   if (t === ',clear' || t === ',cls') { state.replLog = []; return }
   if (t.startsWith(',cpu')) { toggleCpu(); return }
   if (t.startsWith(',pair')) { togglePairMode(); return }
+  // ,book <slug> <n> — fetch a chapter + render it clean in the REPL.
+  // Same output shape as `(book/read :book 'slug :chapter n)` but goes
+  // through appendMarkdownAwareOut directly, so it's always formatted
+  // (no dependence on the eval's return-value passthrough).
+  const bookMatch = t.match(/^,book\s+(\S+)(?:\s+(\d+))?$/)
+  if (bookMatch) {
+    const slug = bookMatch[1]
+    const n = bookMatch[2] ? Number(bookMatch[2]) : null
+    const src = n != null
+      ? `(book/read :book (quote ${slug}) :chapter ${n})`
+      : `(book/read :book (quote ${slug}))`
+    appendRepl('in', src)
+    const r = state.session.evalSource(src)
+    if (r.stdout) appendRepl('stdout', r.stdout.replace(/\n$/, ''))
+    if (r.ok) { if (r.value !== '' && r.value != null) appendMarkdownAwareOut(r.value) }
+    else appendRepl('err', 'error: ' + r.error)
+    return
+  }
   // Fallback: pass through to eval — the REPL side handles ,help ,type
   // etc via the src/repl.js dispatch table, but we don't own that
   // machinery here; just tell the user.
@@ -1736,6 +1823,66 @@ function putRgbCell(scr, x, cy, ch, fgRGB, bgRGB) {
   scr.back[cy][x] = { ch, fg: fgStr, bg: bgStr, attr: 0 }
 }
 
+// xterm-256 → RGB. Uses the 6×6×6 color cube (indices 16..231) and the
+// 24-step gray ramp (232..255). Slots 0..15 use the standard xterm
+// system palette (approximate — Motoi's fb/dump only emits 16..231).
+const XTERM_256_LOW = [
+  [0,0,0], [128,0,0], [0,128,0], [128,128,0], [0,0,128], [128,0,128], [0,128,128], [192,192,192],
+  [128,128,128], [255,0,0], [0,255,0], [255,255,0], [0,0,255], [255,0,255], [0,255,255], [255,255,255],
+]
+function xterm256ToRgb(n) {
+  n = n | 0
+  if (n < 16) return XTERM_256_LOW[n] || [0, 0, 0]
+  if (n >= 232) {
+    const g = 8 + (n - 232) * 10
+    return [g, g, g]
+  }
+  const i = n - 16
+  const r = Math.floor(i / 36), g = Math.floor((i % 36) / 6), b = i % 6
+  const scale = (v) => v === 0 ? 0 : 55 + v * 40
+  return [scale(r), scale(g), scale(b)]
+}
+
+// Decode a run of `\x1b[...m▀` sequences and paint each character as an
+// RGB cell. Handles the exact shape `fb/dump` emits — `\x1b[38;5;N;48;5;Mm`
+// followed by a single grapheme — plus stray `\x1b[0m` resets. Cells that
+// don't fit in the panel are clipped, not wrapped (fb/dump is 40 rows of
+// 80 cells; wrapping would double-render each row).
+function paintAnsiLine(scr, x, y, text, maxW) {
+  let fg = null, bg = null
+  let col = 0
+  let i = 0
+  while (i < text.length && col < maxW) {
+    if (text[i] === '\x1b' && text[i + 1] === '[') {
+      const mEnd = text.indexOf('m', i + 2)
+      if (mEnd < 0) break
+      const params = text.slice(i + 2, mEnd).split(';').map((s) => parseInt(s, 10) | 0)
+      // Parse SGR params. Reset (0) clears both. `38;5;N` sets fg 256-color;
+      // `48;5;N` sets bg 256-color. Any other codes are ignored — fb/dump
+      // doesn't emit them.
+      for (let p = 0; p < params.length; p++) {
+        const v = params[p]
+        if (v === 0)      { fg = null; bg = null }
+        else if (v === 38 && params[p + 1] === 5) { fg = xterm256ToRgb(params[p + 2]); p += 2 }
+        else if (v === 48 && params[p + 1] === 5) { bg = xterm256ToRgb(params[p + 2]); p += 2 }
+      }
+      i = mEnd + 1
+      continue
+    }
+    // A literal character. fb/dump uses the half-block ▀ (multi-byte UTF-8);
+    // JS strings index by code unit, so we advance by 1 and let put occur
+    // — the fill glyph will still be ▀ as a single grapheme.
+    // Detect surrogate/multi-byte codepoints: pick a whole codepoint using
+    // codePointAt so `▀` (U+2580, a BMP char but multi-byte UTF-8) reads
+    // fine — JS still stores it as one code unit.
+    const ch = text[i]
+    if (ch === '\n' || ch === '\r') { i++; continue }
+    putRgbCell(scr, x + col, y, ch, fg, bg)
+    col++
+    i++
+  }
+}
+
 // ── stack panel ──────────────────────────────────────────────
 
 function paintStack(scr, L) {
@@ -1875,7 +2022,23 @@ function paintRepl(scr, L) {
     if (rec.kind === 'out')    { fg = 'fg' }
     if (rec.kind === 'err')    { fg = 'danger' }
     if (rec.kind === 'stdout') { fg = 'mintDark' }
+    // ANSI passthrough — fb/dump emits `\x1b[38;5;N;48;5;Mm▀` runs. When
+    // one of those lines lands in the REPL log we decode the escapes and
+    // paint each character as an RGB cell so the pixels ACTUALLY show as
+    // pixels in the panel. Non-ANSI lines take the normal path.
+    if (rec.kind === 'stdout' && rec.text.indexOf('\x1b[') !== -1) {
+      paintAnsiLine(scr, logX, logY + i, rec.text, logW)
+      continue
+    }
     const line = (prefix + rec.text).slice(0, logW)
+    // Book-of-* prose renders one visual line per source line and uses
+    // markdown-ish styling so `(book/read :book 'scheme :chapter 1)` no
+    // longer dumps a JSON-escaped wall.
+    if (rec.kind === 'out' && rec.mdStyle) {
+      scr.putText(logX, logY + i, line, rec.mdStyle.fg, 'pearlLight',
+        rec.mdStyle.attr || 0)
+      continue
+    }
     scr.putText(logX, logY + i, line, fg, 'pearlLight', 0)
   }
   // Input row.
@@ -1991,6 +2154,7 @@ const HELP_TEXT = `# Motoi Scheme TUI — help
 ## REPL
   ↑↓ history, C-a home, C-e end, C-l clear.
   ,help  ,exit  ,clear  ,cpu  ,pair — TUI shortcuts.
+  ,book <slug> <n> — fetch + pretty-render a book chapter.
   Every other line evaluates as Scheme.
 
 ## Pair programming

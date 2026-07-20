@@ -24,6 +24,7 @@ That's a program. Run it.
 - [Read the books](#read-the-books)
 - [Ask the language about itself](#ask-the-language-about-itself)
 - [Motoi Copilot — the small AI](#motoi-copilot--the-small-ai)
+- [Themes](#themes)
 - [The web IDE](#the-web-ide)
 - [Reference manual](#reference-manual)
 - [Dialects, variants, forks](#dialects-variants-forks)
@@ -247,6 +248,21 @@ At the REPL (`./bin/motoi repl`), you can use meta-commands:
 Motoi ships with **Motoi Copilot**, a small language model trained on this reference and these books. It's not required to use Motoi; it's a companion. When you have it running, you can ask it things in plain English and it will answer with runnable Motoi Scheme.
 
 Motoi Copilot is trained on the reference manual you're reading. When it answers, it can quote the reference, not confabulate. If you're building your own AI, this repo shows the whole recipe: the corpus, the reference, the training runbook.
+
+---
+
+## Themes
+
+Motoi ships with two themes. Sakura (default) is soft blossom pink; Hacker is 80s phosphor green over black. Switch with `--theme` or `--hacker`:
+
+```bash
+motoi tui                        # Sakura — soft, warm
+motoi tui --theme hacker         # phosphor green terminal
+motoi tui --hacker               # same
+motoi repl --theme hacker        # REPL wears the theme too
+```
+
+Set `MOTOI_THEME=hacker` in your shell to make it stick. Roll your own by dropping a `.slat` file in `~/motoi/themes/` — see `docs/themes.md` for the schema.
 
 ---
 

@@ -29,7 +29,8 @@ export class Screen {
   constructor(opts = {}) {
     this.out = opts.out || process.stdout
     this.mode = opts.color || detectColor(this.out)
-    this.palette = makePalette(this.mode)
+    this.theme = opts.theme || null
+    this.palette = makePalette(this.mode, { theme: this.theme })
     // Terminal size — recomputed on SIGWINCH.
     this.cols = this.out.columns || 80
     this.rows = this.out.rows || 24

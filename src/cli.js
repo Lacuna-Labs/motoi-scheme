@@ -71,7 +71,8 @@ function usage({ noColor = false } = {}) {
       row('--seed <n>',        `PRNG seed (default: process time).`),
       row('--verb-layer <p>',  `Load this verb layer instead of auto-detecting.`),
       row('--no-color',        `Disable ANSI colour output.`),
-      row('--hacker',          `Verbose stacks, fuel at exit, show macroexpansion.`),
+      row('--hacker',          `80s phosphor theme (shorthand for --theme hacker).`),
+      row('--theme <name>',    `Pick a theme (sakura | hacker | user). ~/motoi/themes/.`),
       row('--quiet',           `Suppress REPL banner.`),
       row('--json',            `Print eval/run results as JSON instead of s-exp.`),
     ]],
@@ -139,6 +140,7 @@ function extractOptions(argv) {
   let hacker = false
   let quiet = false
   let json = false
+  let theme = null
   const rest = []
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
@@ -175,6 +177,15 @@ function extractOptions(argv) {
     if (a === '--hacker')   { hacker = true; continue }
     if (a === '--quiet')    { quiet = true; continue }
     if (a === '--json')     { json = true; continue }
+    if (a === '--theme') {
+      const next = argv[i + 1]
+      if (!next || next.startsWith('--')) {
+        throw new Error(`--theme expects a name, got ${JSON.stringify(next)}`)
+      }
+      theme = next
+      i++
+      continue
+    }
     // Unknown top-level flag → refuse. Sub-command flags and -h/--help/-v
     // pass through untouched.
     if (a.startsWith('--') && !SUBCOMMAND_FLAGS.has(a) && a !== '--help' && a !== '--version') {
@@ -184,7 +195,10 @@ function extractOptions(argv) {
     }
     rest.push(a)
   }
-  return { fuel, seed, noColor, verbLayer, hacker, quiet, json, rest }
+  // --hacker is a shorthand for --theme hacker when no explicit theme
+  // was requested. Explicit --theme wins if both are passed.
+  if (!theme && hacker) theme = 'hacker'
+  return { fuel, seed, noColor, verbLayer, hacker, quiet, json, theme, rest }
 }
 
 export async function main(rawArgv = process.argv.slice(2), meta = {}) {
@@ -211,7 +225,7 @@ export async function main(rawArgv = process.argv.slice(2), meta = {}) {
     process.stderr.write(`${prefix}: ${e.message}\n`)
     return 1
   }
-  const { noColor, hacker, quiet, json } = cliOpts
+  const { noColor, hacker, quiet, json, theme } = cliOpts
 
   // Two binaries, one script: `motoi` (the tool) boots the fantasy console
   // when no subcommand is given; `motoi-scheme` (the language) boots the
@@ -231,19 +245,18 @@ export async function main(rawArgv = process.argv.slice(2), meta = {}) {
   }
 
   if (cmd === 'repl') {
-    await startRepl({ hacker, quiet, noColor })
+    await startRepl({ hacker, quiet, noColor, theme })
     return 0
   }
 
   if (cmd === 'tui') {
-    // motoi tui [--splash] — the terminal-hosted 4-region IDE. Same
-    // runtime as motoi ide, painted with the Sakura palette in ANSI.
-    // No browser, no HTTP server — pure alt-screen ANSI over
-    // stdin/stdout. --splash forces the retro boot even after first
-    // launch (Wave 4).
+    // motoi tui [--splash] [--theme <name>] — the terminal-hosted
+    // 4-region IDE. Same runtime as motoi ide, painted through the
+    // active theme (Sakura default, Hacker phosphor available).
+    // --splash forces the retro boot even after first launch.
     const splash = argv.includes('--splash')
     try {
-      await startTui({ fuel: fuelBudget, splash, hacker, quiet, noColor })
+      await startTui({ fuel: fuelBudget, splash, hacker, quiet, noColor, theme })
     } catch (e) {
       process.stderr.write(`error: ${e.message}\n`)
       return 1
