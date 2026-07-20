@@ -34,16 +34,30 @@ That's a program. Run it.
 
 ## Install and run
 
-You need Node.js 20.16 or newer.
+Motoi is `0.75-beta`. It runs on macOS and Linux with Node ≥ 20.
+
+**One-line install** (recommended):
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Lacuna-Labs/motoi-scheme/main/install.sh | bash
+```
+
+That clones to `~/.motoi`, runs `npm install`, and puts `motoi` on your PATH (via a symlink in `~/.local/bin/`). Re-running it updates.
+
+**Or, git clone directly:**
 
 ```bash
 git clone https://github.com/Lacuna-Labs/motoi-scheme.git
-cd motoi-scheme
-npm install
-./bin/motoi run examples/hello.scm    # if it exists — or make your own below
+cd motoi-scheme && npm install
+./bin/motoi repl
 ```
 
-That's the whole install. There's no build step.
+No build step. First run:
+
+```bash
+motoi run carts/cart-pico8-demo/pico8-dots.scm    # colored dots + smiley
+motoi repl                                         # interactive
+```
 
 ---
 

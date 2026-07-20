@@ -39,6 +39,19 @@ say "installing Motoi Scheme to $MOTOI_HOME"
 if [ -d "$MOTOI_HOME/.git" ]; then
   say "existing install found — pulling latest"
   (cd "$MOTOI_HOME" && git fetch origin && git checkout "$MOTOI_REF" && git pull --ff-only)
+elif [ -d "$MOTOI_HOME" ] && [ -z "$(ls -A "$MOTOI_HOME" 2>/dev/null)" ]; then
+  # Empty dir (common: a prior install died before .git was created).
+  # Remove it silently — no cruft, nothing to preserve.
+  rmdir "$MOTOI_HOME"
+  say "cloning $REPO_URL"
+  git clone --depth 1 --branch "$MOTOI_REF" "$REPO_URL" "$MOTOI_HOME"
+elif [ -e "$MOTOI_HOME" ]; then
+  # Something's there and it's not ours. Don't touch it; tell the user what to do.
+  die "$MOTOI_HOME exists but is not a Motoi git checkout.
+       Move it aside or delete it, then re-run this installer:
+         mv $MOTOI_HOME $MOTOI_HOME.old
+       or (if you're sure it's not yours):
+         rm -rf $MOTOI_HOME"
 else
   say "cloning $REPO_URL"
   git clone --depth 1 --branch "$MOTOI_REF" "$REPO_URL" "$MOTOI_HOME"
