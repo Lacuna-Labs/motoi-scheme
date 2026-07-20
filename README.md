@@ -2,7 +2,7 @@
 
 **基** — foundation. A tiny Scheme with interesting tools.
 
-Motoi is a small, valid R7RS-small Scheme you can hold in your head. It runs at the terminal, in the browser, or embedded in whatever you're building. It comes with books that teach you the language through runnable examples, a fantasy console, sound and framebuffer verbs, math and physics, a beat maker, and a small AI companion called Motoi Copilot that reads the same reference you do.
+Motoi is a small, valid R7RS-small Scheme you can hold in your head. It runs at the terminal, in the browser, or embedded in whatever you're building. It ships with a fantasy console (`motoi`) with tabs for editing, running, drawing, and making beats; a bare REPL (`motoi-scheme`); books that teach the language through runnable examples; math and physics verbs; a sound engine; a small AI companion called Motoi Copilot that reads the same reference you do; and two shipped themes (Sakura and Hacker) with a user-theme slot.
 
 ```scheme
 (display "hello") (newline)
@@ -16,10 +16,12 @@ That's a program. Run it.
 ## Table of contents
 
 - [Install and run](#install-and-run)
+- [The fantasy console](#the-fantasy-console)
+- [Make beats (Composer tab)](#make-beats-composer-tab)
 - [Your first five minutes](#your-first-five-minutes)
 - [Scheme basics](#scheme-basics)
 - [Draw colored dots](#draw-colored-dots)
-- [Make beats and notes](#make-beats-and-notes)
+- [Beats in code](#beats-in-code)
 - [Math and vectors](#math-and-vectors)
 - [Read the books](#read-the-books)
 - [Ask the language about itself](#ask-the-language-about-itself)
@@ -112,7 +114,11 @@ Every widget emits **real Scheme**. When you tap out a pattern and press P, the 
   ...)
 ```
 
-That's the file S writes. Anyone can open it, read it, tweak it, run it (`motoi run ~/motoi/carts/beat-<timestamp>.scm`), or hand it back to Motoi. The grid IS Scheme — no LLM, no black box. Round-trip: the same grid produces the same file every time. See `docs/themes.md` for aesthetic + palette customization; see `docs/composer.md` (coming) for the full widget catalog.
+That's the file S writes. Anyone can open it, read it, tweak it, run it (`motoi run ~/motoi/carts/beat-<timestamp>.scm`), or hand it to a friend. The grid IS Scheme — no LLM, no black box. Round-trip: the same grid produces the same file every time.
+
+**Why this exists.** The composer is not a widget catalog; it's a *feedback surface for the language*. A musician taps out something they hear in their head, presses S, opens the emitted `.scm` file. If the verb names read as awkward, they are. If the sleep pattern is fighting the beat, the audio abstraction is wrong. If the file is longer than the pattern deserves, the emitter is bloated. Every pattern someone saves is a data point about how Motoi sounds to human intuition. Bring your beats — and your complaints — back to us.
+
+See `docs/themes.md` for aesthetic + palette customization; `docs/composer.md` (coming) for the full widget catalog.
 
 ---
 
@@ -211,16 +217,16 @@ The demo cart lives at `carts/cart-pico8-demo/pico8-dots.scm` — try it first:
 
 ---
 
-## Make beats and notes
+## Beats in code
 
-Kicks, snares, hats, notes.
+Same beats, written directly instead of via the Composer widget. This is what the Composer *emits* — you can skip the widget and write the notation by hand.
 
 ```scheme
 (kick) (snare) (kick) (snare)
 (display "one bar of four-on-the-floor") (newline)
 ```
 
-Or write a melody using notes:
+Or a melody:
 
 ```scheme
 (note 'C4 0.5 0.6)
@@ -228,13 +234,13 @@ Or write a melody using notes:
 (note 'G4 0.5 0.6)
 ```
 
-The `note` verb takes a pitch symbol, a duration in seconds, and a velocity between 0 and 1. There are complete music carts under `carts/cart-maker-3-music/` including a Twinkle melody, an arpeggio, a drum loop, a chord progression, and a layered song.
+`note` takes a pitch symbol, a duration in seconds, and a velocity between 0 and 1. Full music carts live under `carts/cart-maker-3-music/`:
 
 ```bash
-./bin/motoi run carts/cart-maker-3-music/twinkle-melody.scm
+motoi run carts/cart-maker-3-music/twinkle-melody.scm
 ```
 
-At the terminal, the audio verbs print a trace of what would play. In the browser IDE, they route to Web Audio and you hear it.
+At the terminal, audio verbs print a trace of what would play. In the browser IDE (`motoi ide`), they route to Web Audio and you hear it.
 
 ---
 
@@ -351,11 +357,10 @@ The reference is machine-readable (SLAT format) and also the source of truth for
 
 Motoi is a base language. Other projects can build on top:
 
-- **Dialect** — a verb layer + semantics on top of Motoi. Each dialect declares its delta in a `dialect.slat`. Motoi doesn't know about the dialect; the dialect knows about Motoi.
-- **Variant** — a dialect that preserves Motoi's semantics and stays round-trippable via adapters. Variants get the compat layer for free.
-- **Fork** — a dialect (or a rename of Motoi) that walks away from Motoi's semantics. Can't round-trip back. Community-friendly, but consumers of the fork are not consumers of Motoi.
+- **Variant** — a verb layer + semantics on top of Motoi that preserves Motoi's semantics and stays round-trippable via adapters. Variants get the compat layer for free. Each variant declares its delta in a `variant.slat`. Motoi doesn't know about the variant; the variant knows about Motoi.
+- **Fork** — a rename of Motoi that walks away from its semantics. Can't round-trip back. Community-friendly, but consumers of the fork are not consumers of Motoi.
 
-Motoi is open — MIT license. Dialect it, variant it, teach with it. Forking is fine too.
+Motoi is open — Apache-2.0 license. Variant it, teach with it, fork it if you must.
 
 ---
 
@@ -363,24 +368,28 @@ Motoi is open — MIT license. Dialect it, variant it, teach with it. Forking is
 
 ```
 motoi-scheme/
-├── bin/motoi                 CLI entry point
-├── src/                      reader, interpreter, macros, base library, REPL, CLI
-├── lib/                      libraries: ai, audio, graphics, media, security, system, book, composer
+├── bin/motoi                 CLI entry point (motoi + motoi-scheme land here)
+├── src/                      reader, interpreter, macros, base library, REPL, CLI, paths
+├── lib/                      libraries: ai, audio, graphics, media, security, system, book, composer, brand
+├── tui/                      terminal UI — palette, screen, session, composer-tab, tui
+├── themes/                   shipped themes (sakura, hacker); user themes at ~/motoi/themes/
 ├── core/                     runtime bootstrap
 ├── adapters/                 host adapters (terminal, browser)
-├── carts/                    example programs (cart-maker-1 through cart-maker-6)
-├── Scheme/reference/         the reference manual (76 chapter files)
+├── carts/                    example programs (cart-maker-1 through cart-maker-6, hello.scm)
+├── Scheme/reference/         the reference manual, one file per library
 ├── scheme-books/             32 books, each in its own folder with chapters
 ├── engineering/              architecture docs
 ├── SRE-MANUAL/               ops runbooks (forge, training signals)
 ├── site/                     VitePress docs site + browser IDE
 ├── training-data/            corpora for Motoi Copilot
 ├── scripts/                  fold, audit, preflight, balance
-└── tests/                    vitest suite
+└── tests/                    node --test suite
 ```
+
+User data lives at `~/motoi/` (carts, saves, cortex, artifacts, themes). The install at `~/.motoi/` is safe to wipe and re-clone; nothing there is yours.
 
 ---
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE).
