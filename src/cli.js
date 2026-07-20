@@ -187,7 +187,7 @@ function extractOptions(argv) {
   return { fuel, seed, noColor, verbLayer, hacker, quiet, json, rest }
 }
 
-export async function main(rawArgv = process.argv.slice(2)) {
+export async function main(rawArgv = process.argv.slice(2), meta = {}) {
   // Migrate legacy ~/.motoi/{cortex.slat, reading-state.slat, artifacts/, carts/}
   // into ~/motoi/. Idempotent; never clobbers. Silent unless something moves.
   try {
@@ -212,8 +212,18 @@ export async function main(rawArgv = process.argv.slice(2)) {
     return 1
   }
   const { noColor, hacker, quiet, json } = cliOpts
-  const cmd = argv[0]
-  if (!cmd || cmd === '--help' || cmd === '-h') { process.stdout.write(usage({ noColor })); return 0 }
+
+  // Two binaries, one script: `motoi` (the tool) boots the fantasy console
+  // when no subcommand is given; `motoi-scheme` (the language) boots the
+  // REPL. Explicit subcommands always win.
+  const invokedAs = String(meta.invokedAs || 'motoi').toLowerCase()
+  const isSchemeInvocation = invokedAs.startsWith('motoi-scheme')
+  const defaultCmd = isSchemeInvocation ? 'repl' : 'tui'
+
+  const cmd = argv[0] || defaultCmd
+  if (argv[0] === '--help' || argv[0] === '-h') {
+    process.stdout.write(usage({ noColor, invokedAs })); return 0
+  }
 
   if (cmd === 'version' || cmd === '--version' || cmd === '-v') {
     process.stdout.write(`motoi ${VERSION}\n`)
