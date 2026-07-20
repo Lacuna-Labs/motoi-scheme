@@ -551,7 +551,138 @@ function evalOne(src, ctx) {
   const fuel = { n: ctx.fuel }
   let result
   for (const f of expanded) result = evaluate(f, ctx.env, fuel)
+  // Stash last-used fuel counter so the caller (startRepl) can render
+  // fuel/budget in hacker mode without another round-trip through evaluate.
+  ctx.__lastFuelRemaining = fuel.n
   return result
+}
+
+// Approximate paren balance for multi-line input. String literals are
+// stripped first so a `"(" ` inside a string doesn't tip the count. Line
+// comments (;...) are stripped too. Returns net depth: 0 = balanced,
+// positive = need more closes, negative = surplus closes (still submit
+// so the reader can raise a real parse error).
+function parenDepth(src) {
+  let depth = 0
+  let i = 0
+  while (i < src.length) {
+    const c = src[i]
+    if (c === ';') {
+      while (i < src.length && src[i] !== '\n') i++
+      continue
+    }
+    if (c === '"') {
+      i++
+      while (i < src.length && src[i] !== '"') {
+        if (src[i] === '\\' && i + 1 < src.length) i += 2
+        else i++
+      }
+      i++
+      continue
+    }
+    if (c === '(' || c === '[') depth++
+    else if (c === ')' || c === ']') depth--
+    i++
+  }
+  return depth
+}
+
+// Iterative Levenshtein for did-you-mean. O(n*m) is fine — we run it
+// against a bounded registry snapshot on error, not on every keystroke.
+function levenshtein(a, b) {
+  if (a === b) return 0
+  const la = a.length, lb = b.length
+  if (la === 0) return lb
+  if (lb === 0) return la
+  let prev = new Array(lb + 1)
+  let curr = new Array(lb + 1)
+  for (let j = 0; j <= lb; j++) prev[j] = j
+  for (let i = 1; i <= la; i++) {
+    curr[0] = i
+    for (let j = 1; j <= lb; j++) {
+      const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
+    }
+    const tmp = prev; prev = curr; curr = tmp
+  }
+  return prev[lb]
+}
+
+// Walk the env chain + verb registry into a de-duped name pool. Used for
+// did-you-mean suggestions on unbound-symbol errors.
+function collectNames(env) {
+  const names = new Set()
+  let e = env
+  while (e) {
+    if (e.vars && typeof e.vars.forEach === 'function') {
+      for (const k of e.vars.keys()) names.add(k)
+    }
+    e = e.parent
+  }
+  for (const k of Object.keys(snapshotRegistry())) names.add(k)
+  return names
+}
+
+function didYouMean(target, env, max = 3) {
+  if (!target) return []
+  const names = collectNames(env)
+  const scored = []
+  for (const n of names) {
+    const d = levenshtein(target, n)
+    // Cap distance so we never surface wildly unrelated names on a typo.
+    if (d <= Math.max(2, Math.floor(target.length / 2))) scored.push([d, n])
+  }
+  scored.sort((a, b) => a[0] - b[0] || a[1].localeCompare(b[1]))
+  return scored.slice(0, max).map(([, n]) => n)
+}
+
+// Colorizers for the interactive shell. Kept local so renderSplash's
+// constants stay the single source of truth for brand color; these just
+// consume detectColor's result and emit small ANSI wraps.
+function styles(mode) {
+  if (mode === 'none') {
+    return {
+      dim:  (s) => s,
+      pink: (s) => s,
+      red:  (s) => s,
+    }
+  }
+  const pink = mode === 'truecolor' ? fg24(MOTOI_PINK) : fg256(MOTOI_PINK_256)
+  return {
+    dim:  (s) => `\x1b[2m${s}\x1b[22m`,
+    pink: (s) => `${pink}${s}${ANSI_RESET}`,
+    red:  (s) => `\x1b[31m${s}${ANSI_RESET}`,
+  }
+}
+
+// The interactive prompt. `❀ motoi> ` on first line; two-space indent
+// with `...>` on continuation lines so the eye tracks the outstanding
+// expression. No blossom on continuation — one blossom per submission
+// keeps the pink accent load light.
+function makePrompts(mode) {
+  const s = styles(mode)
+  const primary = s.pink('❀') + ' ' + s.dim('motoi> ')
+  const continuation = '  ' + s.dim('...> ')
+  return { primary, continuation }
+}
+
+function renderError(ctx, e, s, showStack) {
+  const msg = e && e.message ? e.message : String(e)
+  ctx.output(`${s.red('!')} ${msg}`)
+  // Unbound-symbol errors carry a stable prefix from Env.get; peel the
+  // name off and offer up to 3 near-matches from the substrate.
+  const m = /^unbound symbol:\s*(\S+)/.exec(msg)
+  if (m) {
+    const suggestions = didYouMean(m[1], ctx.env)
+    if (suggestions.length) {
+      ctx.output(s.dim(`  did you mean: ${suggestions.join(', ')}?`))
+    }
+  }
+  if (showStack && e && e.stack) {
+    // Trim the first line (already printed as the message) and dim the rest.
+    const rest = String(e.stack).split('\n').slice(1)
+    for (const line of rest) ctx.output(s.dim('  ' + line.replace(/^\s+/, '')))
+  }
 }
 
 /**
@@ -565,23 +696,31 @@ function evalOne(src, ctx) {
  * @param {object} [opts.env] — pre-built environment (defaults to base env)
  * @param {object} [opts.stdin=process.stdin] — input stream
  * @param {object} [opts.stdout=process.stdout] — output stream
- * @param {string} [opts.prompt='> '] — prompt string
+ * @param {string} [opts.prompt] — override the styled prompt (rarely useful)
+ * @param {boolean} [opts.quiet] — skip the splash entirely
+ * @param {boolean} [opts.hacker] — after each eval, dim right-aligned
+ *   `fuel: n / budget · Nms`; error rendering always shows the full stack.
  */
 export async function startRepl(opts = {}) {
   const readline = await import('node:readline')
-  const fuel = opts.fuel ?? 200000
-  const env = opts.env || makeBaseEnv(fuel)
-  const prompt = opts.prompt ?? '> '
+  const fuelBudget = opts.fuel ?? 200000
+  const env = opts.env || makeBaseEnv(fuelBudget)
+  const output = opts.stdout || process.stdout
+  const colorOpt = opts.color ?? 'auto'
+  const mode = colorOpt === 'auto' ? detectColor(output) : colorOpt
+  const s = styles(mode)
+  const { primary, continuation } = makePrompts(mode)
+  const prompt = opts.prompt ?? primary
   const rl = readline.createInterface({
     input: opts.stdin || process.stdin,
-    output: opts.stdout || process.stdout,
+    output,
     terminal: true,
     prompt,
   })
 
   const ctx = {
     env,
-    fuel,
+    fuel: fuelBudget,
     output: (line) => rl.output.write(line + '\n'),
     exit: () => rl.close(),
   }
@@ -590,32 +729,76 @@ export async function startRepl(opts = {}) {
   // - TTY: full splash. Color mode auto-detected (truecolor/256).
   // - Non-TTY (piped, redirected, dumb): suppress entirely — the prompt
   //   is the only signal a script consumer wants.
-  // Callers can force with opts.splash = 'always' | 'never'.
-  const wantSplash = opts.splash === 'always'
-    ? true
-    : opts.splash === 'never'
-      ? false
-      : (rl.output.isTTY === true)
+  // Callers can force with opts.splash = 'always' | 'never'; opts.quiet
+  // trumps everything.
+  const wantSplash = opts.quiet
+    ? false
+    : opts.splash === 'always'
+      ? true
+      : opts.splash === 'never'
+        ? false
+        : (rl.output.isTTY === true)
   if (wantSplash) {
-    const colorOpt = opts.color ?? 'auto'
     ctx.output(renderSplash({ color: colorOpt }))
   }
+
+  // Multi-line accumulator: hold partial input until parens balance,
+  // switching the prompt to the continuation form in the meantime.
+  let buffer = ''
+  const setPrompt = (p) => { rl.setPrompt(p) }
+
   rl.prompt()
   rl.on('line', (line) => {
-    const trimmed = line.trim()
-    if (!trimmed) { rl.prompt(); return }
-    try {
-      if (trimmed.startsWith(',')) {
+    // Only strip whitespace on a truly-fresh line; mid-buffer we keep
+    // the raw text (with a newline separator) so string literals and
+    // comments span faithfully across submissions.
+    if (buffer === '' && line.trim() === '') { rl.prompt(); return }
+    const src = buffer === '' ? line : buffer + '\n' + line
+
+    // Meta-commands are single-line; never accumulate them.
+    if (buffer === '' && src.trim().startsWith(',')) {
+      const trimmed = src.trim()
+      try {
         const [cmd, ...argv] = trimmed.split(/\s+/)
         const handler = META_COMMANDS[cmd]
         if (!handler) ctx.output(`unknown meta-command: ${cmd}. Try ,help.`)
         else handler.run(ctx, argv)
-      } else {
-        const result = evalOne(trimmed, ctx)
-        if (result !== undefined) ctx.output(format(result))
+      } catch (e) {
+        renderError(ctx, e, s, opts.hacker === true)
+        if (ctx.env.__llmLastError) ctx.env.__llmLastError.value = e.message
+      }
+      rl.prompt()
+      return
+    }
+
+    // Not enough closing parens yet — hold the buffer and switch prompt.
+    if (parenDepth(src) > 0) {
+      buffer = src
+      setPrompt(continuation)
+      rl.prompt()
+      return
+    }
+
+    buffer = ''
+    setPrompt(prompt)
+    const trimmed = src.trim()
+    if (!trimmed) { rl.prompt(); return }
+    const t0 = performance.now()
+    try {
+      const result = evalOne(trimmed, ctx)
+      if (result !== undefined) ctx.output(format(result))
+      if (opts.hacker) {
+        const dt = (performance.now() - t0).toFixed(1)
+        const remaining = ctx.__lastFuelRemaining ?? fuelBudget
+        const used = fuelBudget - remaining
+        const line = `fuel: ${used} / ${fuelBudget} · ${dt}ms`
+        const cols = (rl.output.columns && rl.output.columns > line.length)
+          ? rl.output.columns
+          : line.length
+        ctx.output(s.dim(' '.repeat(cols - line.length) + line))
       }
     } catch (e) {
-      ctx.output(`error: ${e.message}`)
+      renderError(ctx, e, s, opts.hacker === true)
       // Stash for (fix (last-error)) / ,fix.
       if (ctx.env.__llmLastError) {
         ctx.env.__llmLastError.value = e.message
