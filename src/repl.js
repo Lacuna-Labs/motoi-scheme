@@ -119,11 +119,7 @@ function loadLogoAscii() {
  *           no tree, no hint. Callers who want a one-line banner.
  */
 export function renderSplash({ color = 'auto', version = VERSION, width = 42, plain = false } = {}) {
-  const w = Math.max(20, Math.min(width, 80))
-  const wordmark = `MOTOI SCHEME  v${version}`
-  const hint = 'type ,help for commands'
-
-  if (plain) return wordmark
+  if (plain) return `Motoi Scheme  v${version}`
 
   // Resolve color mode.
   let mode
@@ -132,48 +128,51 @@ export function renderSplash({ color = 'auto', version = VERSION, width = 42, pl
   else if (color === false) mode = 'none'
   else mode = color
 
-  const bar = '▂'.repeat(w)
-  const stripe = (rgb, code256, s) => {
+  const paint = (rgb, code256, s) => {
     if (mode === 'truecolor') return fg24(rgb) + s + ANSI_RESET
     if (mode === '256')       return fg256(code256) + s + ANSI_RESET
     return s
   }
+  const dim = (s) => mode === 'none' ? s : `\x1b[2m${s}\x1b[22m`
+  const bold = (s) => mode === 'none' ? s : `\x1b[1m${s}\x1b[22m`
 
+  // Color the ❀ blossoms pink — the tree carries Sakura-roundness by design.
+  const colorTree = (row) => row.replace(/❀/g, paint(MOTOI_PINK, MOTOI_PINK_256, '❀'))
+
+  const nodeVer = process.versions?.node?.split('.')[0] ?? '20'
   const tree = loadLogoAscii()
-  let logoBlock
-  if (tree) {
-    // Right-of-tree column: wordmark on the tree's middle row, hint on
-    // the row just below (also within tree bounds — keeps the header
-    // compact). Both are vertically centered against the tree so the
-    // whole lockup reads as one unit.
-    const treeLines = tree.split('\n')
-    const midRow = Math.floor(treeLines.length / 2)
-    const hintRow = Math.min(treeLines.length - 1, midRow + 1)
-    logoBlock = treeLines
-      .map((row, i) => {
-        const pad = ' '.repeat(3)
-        if (i === midRow)  return row + pad + wordmark
-        if (i === hintRow && hintRow !== midRow) return row + pad + hint
-        return row
-      })
-      .join('\n')
-  } else {
-    // No tree yet — wordmark on line 1, hint on line 2, both right-
-    // aligned within the stripe's column so the block sits under the
-    // stripes visually.
-    const pad = Math.max(0, w - wordmark.length)
-    const hintPad = Math.max(0, w - hint.length)
-    logoBlock = ' '.repeat(pad) + wordmark + '\n' + ' '.repeat(hintPad) + hint
-  }
+  const treeLines = tree.split('\n')
 
-  return [
-    stripe(MOTOI_PINK,  MOTOI_PINK_256,  bar),
-    stripe(MOTOI_GREEN, MOTOI_GREEN_256, bar),
-    stripe(MOTOI_BROWN, MOTOI_BROWN_256, bar),
+  // Layout, matching the Sakura lockup: tree on the left, four lines of
+  // brand text on the right, hint on the tree's ground row.
+  //
+  //   ❀ ❀ ·          Motoi Scheme  v0.75.0-beta
+  //   ❀ ❀ ❀          the base Scheme · node 20
+  //   · ❀ ·          a small language for humans and AI
+  //     |
+  //    ~~~~          ,help · ,ask motoi · ,exit
+  //
+  // We align every text line at a fixed left column so the tree stays
+  // in its column even if row widths vary.
+  const treeCol = Math.max(...treeLines.map(l => l.length)) + 3
+  const pad = (l) => l + ' '.repeat(Math.max(0, treeCol - l.length))
+  const rightLines = [
+    `${bold('Motoi Scheme')}  ${dim('v' + version)}`,
+    dim(`the base Scheme · node ${nodeVer}`),
+    dim('a small language for humans and AI'),
     '',
-    logoBlock,
-    '',
-  ].join('\n')
+    dim(',help · ,ask motoi · ,exit'),
+  ]
+
+  const rows = treeLines.map((row, i) => {
+    const painted = colorTree(row)
+    // padded-length uses uncolored row width so column stays stable
+    const leftPad = pad(row).slice(row.length)
+    const right = rightLines[i] ?? ''
+    return painted + leftPad + right
+  })
+
+  return rows.join('\n') + '\n'
 }
 
 /**
