@@ -1,16 +1,77 @@
 ---
-doc-id: GRAND-WEAVE-RECIPE-2026-07-17
+doc-id: WEAVE-RECIPE
 author: Lacuna Engineering
-date: "2026-07-17T22:30:00Z"
-status: READY — awaits Alfred read + GO
+date: "2026-07-20T09:30:00Z"
+status: ACTIVE — Weave 0.75 doctrine · Grand Weave 1.0 retired (see appendix)
 audience: [":alfred", ":engineering", ":training-pipeline"]
 dialect: ":motoi-eng"
 training-eligible: false
 confidentiality: ":internal-eng"
-provenance: Post-Motoi-0.75 eval; Alfred verbal ask 2026-07-17 evening; verified against 7 named papers + 5 supplementary; composed by Lacuna Eng.
+provenance: Renamed 2026-07-20 (Alfred verbal — 'no more grand weave, just weave finish'). Weave 0.75 doctrine composed from FINISHING-MOVE-RESEARCH-2026-07-20.md after Motoi Mk 1 SFT eval showed safety-crisis + safety-emergency stuck at 0%. Grand Weave 1.0 (2026-07-17) retained as appendix.
 for: "Alfred Peace-Lindner @ Lacuna Labs"
-source-slat: GRAND-WEAVE-RECIPE-2026-07-17.ENG.slat
+source-slat: WEAVE-RECIPE.slat
+supersedes: Grand Weave 1.0 (LIMA-centric, retired after Mk A regression + arXiv:2410.10862 SCU explanation)
 generated: do not hand-edit — rendered from SLAT
+---
+
+# Weave 0.75 — Finishing-Move Doctrine (ACTIVE)
+
+**Status:** Active doctrine as of 2026-07-20. Applied to Motoi Mk 1 SFT (real-iter 82,049, val 0.716, adapter at `~/.forge/runs/motoi-mk1/_archive/mk1-sft-final-20260720.safetensors`).
+
+**What Weave is.** The post-SFT finishing procedure. Applied to a fully-trained SFT adapter to raise ship-blocker scores (safety, circular-trap, lang-resistance) without corrupting the SFT substrate.
+
+**Why renamed.** Grand Weave 1.0 was LIMA-centric. Mk A polish regressed circular-trap 20→5% and lang-resistance 93→60%. arXiv:2410.10862 (Oct 2024) explains: at 1.5B scale, safety lives in a sparse Safety Critical Unit controller that a LIMA gradient overwrites. Weave 0.75 reorders the sequence to try training-free techniques FIRST.
+
+## Sequence
+
+Each step forks from the SFT adapter (immutable). Cascade if it wins; revert if it doesn't. **Test after every step** (Alfred 2026-07-20 verbatim).
+
+1. **Spectral Surgery** (arXiv:2603.03995) — SVD reweighting driven by a 100-500 prompt calibration set. Training-free. Undoable. Target: any lift on safety-crisis + circular-trap.
+2. **LASER** (arXiv:2312.13558) — layer-selective rank reduction. Zero data. Undoable. Target: verb-recall + reasoning lift.
+3. **KTO with safety-heavy desirable set** (arXiv:2402.01306) — binary preference labels. Desirable set MUST contain 100-200 safety-refusal exemplars per the SCU-independent-reinforcement lesson. Target: safety-crisis > 50%.
+
+## Ship-blocker targets
+
+| Metric | Threshold | Mk 1 SFT | Gap |
+|---|---|---|---|
+| safety-crisis | ≥95% | 0% | -95 pt (largest lift needed) |
+| safety-emergency | ≥95% | 0% | -95 pt |
+| circular-trap | ≥85% | 70% | -15 pt |
+| lang-resistance | ≥85% | 100% | passes |
+| verb-recall (advisory) | ≥60% | 29% | -31 pt |
+| persona-voice (advisory) | ≥70% | 80% | passes |
+| not-known (advisory) | ≥75% | 40% | -35 pt |
+
+If safety-crisis + safety-emergency remain at 0% after all three Weave steps: training-based safety is unachievable at 1.5B, ship with the deterministic **intercept layer** as safety floor.
+
+## Guardrails
+
+- SFT adapter IMMUTABLE — never overwrite `_archive/mk1-sft-final-*.safetensors`.
+- Every Weave step is undoable — per-step directories, never overwrite working `adapter/adapters.safetensors` until confirmed win.
+- No external corpora. All KTO pairs hand-authored.
+- Calibration set ≠ evaluation set — must be authored as separate file, never train on eval prompts.
+- Version stays `0.75-beta`. Weave doesn't bump the shipping version.
+- Local only. No HF, no npm, no git-commit of adapter.
+- Eval before AND after each step.
+
+## Loop
+
+- Weave 0.7X = intermediate iterations
+- Weave 1.0 = reserved for the finishing move on the shipping model
+- Update this doctrine with lessons from Weave 0.75 execution
+
+**Runbook (operator-facing procedure):** see `SRE-MANUAL/chapters/03-weave-finish.slat`.
+
+**Research citations:** see `engineering/FINISHING-MOVE-RESEARCH-2026-07-20.md`.
+
+**Mk 1 SFT metrics + comparison:** see `engineering/MOTOI-MK1-FINAL-REPORT.md` (pending; landing when the pipeline finishes SFT_REPORT state).
+
+---
+
+# Retired: Grand Weave 1.0 (2026-07-17)
+
+Below this line is the ORIGINAL Grand Weave 1.0 recipe, retained as historical artifact per no-deletes doctrine. Superseded by the Weave 0.75 doctrine above. Mk A regression logs at `engineering/GRAND-REVEAL-MKA-REPORT-2026-07-17.ENG.md` are the receipt of why this approach was retired.
+
 ---
 
 # GRAND-WEAVE-RECIPE-2026-07-17

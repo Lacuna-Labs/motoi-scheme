@@ -1,0 +1,231 @@
+(slat-set
+  :doc-id            "SRE-CH-03-WEAVE-FINISH"
+  :ts                #inst "2026-07-20T09:30:00Z"
+  :author            "Lacuna Engineering"
+  :for               "Alfred Peace-Lindner @ Lacuna Labs"
+  :status            "ACTIVE"
+  :audience          [:alfred :sre :operator]
+  :dialect           :motoi-eng
+  :training-eligible false
+  :confidentiality   :internal-eng
+  :composes-with     "engineering/WEAVE-RECIPE.slat (doctrine); scripts/motoi-eval-0.75.mjs (eval harness); ~/.forge/runs/motoi-mk1/ (target run)"
+
+  :section-0-purpose
+  """
+  Operator runbook for a Weave finish pass. Sister to the doctrine in
+  engineering/WEAVE-RECIPE.slat — this file is the HOW; that file is
+  the WHY. Read the doctrine first if you don't know what Weave is or
+  why the sequence is Spectral → LASER → KTO.
+
+  This chapter tells you: what to type, what to check, when to stop,
+  where the artifacts land. Ordered by operator workflow, not by
+  theoretical importance.
+  """
+
+  :section-1-preconditions
+  """
+  Before firing any Weave step, verify:
+
+    [ ] SFT training exited cleanly. Check pipeline state:
+        cat ~/.forge/runs/motoi-mk1/_pipeline_state.txt
+        Must be one of: SFT_REPORT, AWAIT_FINISHING_MOVE, DONE.
+
+    [ ] SFT adapter is archived at the immutable location:
+        ls -lh ~/.forge/runs/motoi-mk1/_archive/mk1-sft-final-*.safetensors
+        Must exist. If missing, do not proceed — the base is not safe.
+
+    [ ] SFT eval report exists:
+        ls ~/code/motoi-scheme/engineering/EVAL-*mk1*.md
+        ls ~/code/motoi-scheme/engineering/MOTOI-MK1-FINAL-REPORT.md
+        Read it. Know which ship-blockers are missing and by how much.
+
+    [ ] Calibration set authored (for Spectral) — SEPARATE FILE from
+        the 284-prompt eval:
+        ls ~/code/motoi-scheme/training-data/eval/motoi-0.75-eval-calibration.jsonl
+        If missing, do not fire Spectral — you will contaminate the eval.
+
+  If any precondition fails: stop, fix, then resume. Do not skip.
+  """
+
+  :section-2-step-1-fire-spectral-surgery
+  """
+  Directory setup:
+    mkdir -p ~/.forge/runs/motoi-mk1/weave-0.75-spectral
+
+  Invocation (script does not exist yet — will be authored per doctrine):
+    node ~/code/motoi-scheme/scripts/weave-spectral.mjs \\
+      --sft-adapter ~/.forge/runs/motoi-mk1/_archive/mk1-sft-final-*.safetensors \\
+      --calibration ~/code/motoi-scheme/training-data/eval/motoi-0.75-eval-calibration.jsonl \\
+      --output ~/.forge/runs/motoi-mk1/weave-0.75-spectral/adapters.safetensors \\
+      --report ~/.forge/runs/motoi-mk1/weave-0.75-spectral/spectral-report.json
+
+  Expected duration: ~1 h on M2 Max (SVD + calibration passes).
+
+  Test after (Alfred verbatim 2026-07-20 'we test after the spectral surgery'):
+    node ~/code/motoi-scheme/scripts/motoi-eval-0.75.mjs \\
+      --checkpoint ~/.forge/runs/motoi-mk1/weave-0.75-spectral \\
+      --backend=mlx --judge=heuristic \\
+      > ~/.forge/runs/motoi-mk1/weave-0.75-spectral/_eval.log 2>&1
+
+  Compare metrics — safety-crisis moved off 0%? circular-trap closed
+  the gap to 85%? verb-recall lifted? persona held?
+
+  Decision:
+    · Wins on ship-blockers → keep, cascade to Step 2 (LASER).
+    · No movement or regression → revert (nothing to do; the SFT adapter
+      is untouched at the archive). Skip Step 2, go straight to Step 3.
+  """
+
+  :section-3-step-2-fire-laser
+  """
+  Only if Step 1 produced a net win.
+
+  Directory setup:
+    mkdir -p ~/.forge/runs/motoi-mk1/weave-0.75-laser
+
+  Invocation (script tbd):
+    node ~/code/motoi-scheme/scripts/weave-laser.mjs \\
+      --input ~/.forge/runs/motoi-mk1/weave-0.75-spectral/adapters.safetensors \\
+      --sweep-config ~/code/motoi-scheme/engineering/weave-0.75-laser-sweep.yaml \\
+      --eval-harness ~/code/motoi-scheme/scripts/motoi-eval-0.75.mjs \\
+      --output ~/.forge/runs/motoi-mk1/weave-0.75-laser/adapters.safetensors \\
+      --report ~/.forge/runs/motoi-mk1/weave-0.75-laser/laser-report.json
+
+  Expected duration: ~2 h (200 candidate sweeps × brief eval each).
+
+  Test after: same eval command as Step 2, checkpoint dir = the LASER dir.
+
+  Decision:
+    · Wins → cascade to Step 3.
+    · No movement → keep Step 1's output, go to Step 3 on the
+      spectral-only adapter.
+  """
+
+  :section-4-step-3-fire-kto-safety-heavy
+  """
+  Only fires if ship-blockers remain unmet after Steps 1+2.
+
+  Preconditions (additional):
+    [ ] KTO desirable set authored:
+        ls ~/code/motoi-scheme/training-data/weave-0.75-kto-desirable.jsonl
+        100-200 exemplars, heavy on safety-refusal templates.
+
+    [ ] KTO undesirable set authored:
+        ls ~/code/motoi-scheme/training-data/weave-0.75-kto-undesirable.jsonl
+        50-100 examples, extracted from Mk A regression logs +
+        hand-authored bad outputs.
+
+    [ ] MLX-LM KTO training config:
+        ls ~/.forge/projects/weave-0.75-kto/mlx-lora-config.yaml
+        LR 1e-5, 1 epoch, best-val early stop, 4-batch grad accum.
+
+  Fire (via forge-fire.sh so pipeline sees it):
+    bash ~/code/forge/scripts/forge-fire.sh \\
+      ~/.forge/projects/weave-0.75-kto/mlx-lora-config.yaml \\
+      weave-0.75-kto \\
+      --resume-from <best-adapter-so-far>
+
+  Expected duration: ~2 h.
+
+  Test after: eval harness against ~/.forge/runs/weave-0.75-kto/adapter.
+
+  Decision:
+    · Safety-crisis + safety-emergency both >= 50% → keep as ship
+      candidate. Motoi 0.75-beta finalizes with this adapter.
+    · Below 50% → training-based safety unachievable; deploy the
+      intercept layer as safety floor. Ship anyway.
+  """
+
+  :section-5-artifact-locations
+  """
+  Every Weave run drops into a per-step directory. Never touch these
+  once written; the git-none rule applies (no commit of adapter files).
+
+    ~/.forge/runs/motoi-mk1/
+      _archive/mk1-sft-final-*.safetensors    ← IMMUTABLE base
+      _archive/mk1-sft-inflight-snapshot-*    ← safety net
+      weave-0.75-spectral/
+        adapters.safetensors                  ← post-Spectral output
+        spectral-report.json                  ← singular-value shifts
+        _eval.log                             ← post-Spectral eval
+      weave-0.75-laser/
+        adapters.safetensors                  ← post-LASER output
+        laser-report.json                     ← per-layer decisions
+        _eval.log
+      weave-0.75-kto/
+        adapter/adapters.safetensors          ← post-KTO output
+        train.log                             ← KTO training log
+        _eval.log
+
+  Reports (committable, human-readable):
+    ~/code/motoi-scheme/engineering/WEAVE-0.75-STEP-1-SPECTRAL-REPORT.md
+    ~/code/motoi-scheme/engineering/WEAVE-0.75-STEP-2-LASER-REPORT.md
+    ~/code/motoi-scheme/engineering/WEAVE-0.75-STEP-3-KTO-REPORT.md
+    ~/code/motoi-scheme/engineering/WEAVE-0.75-FINAL-REPORT.md
+  """
+
+  :section-6-rollback
+  """
+  Every Weave step is undoable. To roll back to any prior state:
+
+    # Back to pure SFT (the immutable base):
+    cp ~/.forge/runs/motoi-mk1/_archive/mk1-sft-final-*.safetensors \\
+       ~/.forge/runs/motoi-mk1/adapter/adapters.safetensors
+
+    # Back to post-Spectral:
+    cp ~/.forge/runs/motoi-mk1/weave-0.75-spectral/adapters.safetensors \\
+       ~/.forge/runs/motoi-mk1/adapter/adapters.safetensors
+
+    # Back to post-LASER:
+    cp ~/.forge/runs/motoi-mk1/weave-0.75-laser/adapters.safetensors \\
+       ~/.forge/runs/motoi-mk1/adapter/adapters.safetensors
+
+  Confirm the current adapter's provenance by hash-comparing with the
+  archive:
+    diff <(shasum ~/.forge/runs/motoi-mk1/adapter/adapters.safetensors) \\
+         <(shasum ~/.forge/runs/motoi-mk1/_archive/mk1-sft-final-*.safetensors)
+  """
+
+  :section-7-known-hazards
+  """
+  · MLX Metal watchdog. Any GPU-heavy sweep can trigger the
+    kIOGPUCommandBufferCallbackErrorImpactingInteractivity crash if
+    the machine is under interactive load. Kill competing processes
+    (top -o cpu) before firing. See SRE-CH-01 for the zombie-hunting
+    procedure.
+
+  · Adapter-write failures on APFS during high IO. If a Weave step
+    fails mid-save, its output adapter may be corrupt (safetensors
+    header claims size that isn't actually there). Verify with:
+      python3 -c 'from safetensors import safe_open;
+        f=\"path\"; sf=safe_open(f, \"numpy\");
+        print(len(list(sf.keys())))'
+    Should print 392 for a Motoi Mk 1 adapter. Corrupt files quarantine
+    to _archive/ with a .CORRUPT-<reason> suffix.
+
+  · Eval-harness contamination. NEVER pass the 284-prompt eval file
+    to the Spectral calibration OR the KTO training set. Doing so
+    invalidates every metric that follows. The calibration set is
+    a SEPARATE fresh-authored file.
+
+  · Case-collision in engineering/ vs Engineering/ dirs — an unrelated
+    repo bug. When editing this doctrine or the weave recipe, use
+    git ls-files to find the case-canonical path git tracks.
+  """
+
+  :section-8-composes-with
+  """
+  · engineering/WEAVE-RECIPE.slat — the doctrine (WHY + mechanism)
+  · engineering/FINISHING-MOVE-RESEARCH-2026-07-20.md — citations
+  · engineering/MOTOI-MK1-FINAL-REPORT.md — SFT eval + baseline
+  · engineering/GRAND-REVEAL-MKA-REPORT-2026-07-17.ENG.md — Mk A
+    regression receipt (why LIMA was retired)
+  · SRE-MANUAL/chapters/01-forge-preflight-and-fire.slat — general
+    forge run preflight
+  · SRE-MANUAL/chapters/02-training-signals-and-data.slat — how to
+    read a training log while a Weave step runs
+  · scripts/motoi-eval-0.75.mjs — the 284-prompt eval harness
+  · scripts/weave-spectral.mjs (TBD) — Step 1 implementation
+  · scripts/weave-laser.mjs (TBD) — Step 2 implementation
+  """
+)
