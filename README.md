@@ -53,12 +53,66 @@ cd motoi-scheme && npm install
 ./bin/motoi repl
 ```
 
-No build step. First run:
+No build step.
+
+**Two commands land on your PATH:**
 
 ```bash
-motoi run carts/cart-pico8-demo/pico8-dots.scm    # colored dots + smiley
-motoi repl                                         # interactive
+motoi              # the fantasy console — boots the TUI, splash + tabs + composer
+motoi-scheme       # the language — drops you into the Scheme REPL
 ```
+
+Same underlying binary; different default surface. Sub-commands still work either way (`motoi run f.scm`, `motoi eval "(+ 1 2)"`, `motoi tui`, `motoi repl`, etc.).
+
+**First run:**
+
+```bash
+motoi                                              # cherry-tree splash + fantasy console
+motoi run carts/cart-pico8-demo/pico8-dots.scm     # colored dots + smiley
+motoi-scheme                                       # REPL
+```
+
+---
+
+## The fantasy console
+
+Type `motoi`. You get a splash — pink cherry blossoms fading in petal-by-petal over a wordmark that reads `MOTOI SCHEME · v0.75 · FANTASY CONSOLE` — then the TUI. Panels:
+
+- **Tree** (left) — books, chapters, a "buffers" area for scratch
+- **Editor** (center) — write Scheme, eval it, run it
+- **REPL** (right) — interactive prompt, `❀ motoi>`
+- **Canvas** (F-key toggle) — 80×80 framebuffer painted as half-blocks in the panel; `(fb/dump)` and `(render)` paint into it
+- **Stack / CPU** (F4, F5) — live introspection
+- **Composer** (F6) — the beat maker (see below)
+
+Tab cycles focus. F-keys toggle the optional panels.
+
+---
+
+## Make beats (Composer tab)
+
+Boot the TUI (`motoi`), press **F6**. A 4×16 grid appears: **KICK · SNARE · HAT · NOTE** across 16 steps.
+
+- **Arrow keys** — move the cursor cell
+- **SPACE** — toggle the current cell
+- **P** — play the pattern (kicks and snares fire through the audio engine; in the browser IDE they route to Web Audio and you hear it)
+- **S** — save the pattern as a Scheme cart to `~/motoi/carts/beat-<timestamp>.scm`
+- **C** — clear the grid
+- **T** — set BPM (default 120)
+
+Every widget emits **real Scheme**. When you tap out a pattern and press P, the composer generates:
+
+```scheme
+(begin
+  (kick) (hat)             ;; step 1
+  (sleep-ms 125)           ;; wait
+  (hat)                    ;; step 3
+  (sleep-ms 125)
+  (kick) (snare) (hat)     ;; step 5
+  ...)
+```
+
+That's the file S writes. Anyone can open it, read it, tweak it, run it (`motoi run ~/motoi/carts/beat-<timestamp>.scm`), or hand it back to Motoi. The grid IS Scheme — no LLM, no black box. Round-trip: the same grid produces the same file every time. See `docs/themes.md` for aesthetic + palette customization; see `docs/composer.md` (coming) for the full widget catalog.
 
 ---
 

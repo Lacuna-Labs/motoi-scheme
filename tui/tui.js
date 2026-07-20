@@ -29,6 +29,11 @@ import { InputReader } from './input.js'
 import { Session } from './session.js'
 import { activeTheme } from './themes.js'
 import { SAKURA } from './palette.js'
+import {
+  initComposerState,
+  handleComposerKey,
+  paintComposer,
+} from './composer-tab.js'
 
 // ── the whole application state ────────────────────────────────────
 
@@ -78,6 +83,11 @@ const state = {
   stackTimer: null,
   stackFrames: [],
   stackPeak: 0,
+  // Composer panel — beat-maker widget. Own file: tui/composer-tab.js.
+  // When enabled the panel takes over the whole right-of-tree column
+  // (editor + REPL together), same slot semantics as canvas/stack take
+  // in a slice — but composer wants the space to be usable.
+  composer: initComposerState(),
   // Inline "run in box" — output card painted directly below the form.
   // { tabId, line, endLine, stdout, value, error, scroll } | null.
   runCard: null,
@@ -249,6 +259,7 @@ export async function startTui(opts = {}) {
     cpuOpen: false, cpuText: '',
     canvasOpen: false, canvasTimer: null, canvasEncoding: 'half', canvasLastFrame: -1,
     stackOpen: false, stackTimer: null, stackFrames: [], stackPeak: 0,
+    composer: initComposerState(),
     runCard: null,
     runningMode: 'idle', runningUntil: 0,
     menuOpen: null, menuItemIdx: 0,
@@ -738,6 +749,27 @@ function stopStackPolling() {
   if (state.stackTimer) { clearInterval(state.stackTimer); state.stackTimer = null }
 }
 
+// ── composer panel (beat maker) ──────────────────────────────────
+//
+// Toggling the composer swaps the whole right-of-tree column between
+// "editor + REPL" and "COMPOSER". The widget lives in tui/composer-
+// tab.js — see doctrines [[fantasy-console-cart-template]] +
+// [[deterministic-audio-no-llm]]. When enabled we snap focus to the
+// panel so the user can drive it immediately; toggling off returns
+// focus to the editor.
+
+function toggleComposer() {
+  if (!state.composer) state.composer = initComposerState()
+  state.composer.enabled = !state.composer.enabled
+  if (state.composer.enabled) {
+    state.focus = 'composer'
+    statusFlash('composer: beat maker — arrows move, space toggles, P play')
+  } else {
+    if (state.focus === 'composer') state.focus = 'editor'
+    statusFlash('composer off')
+  }
+}
+
 // ── tab reorder / jump ────────────────────────────────────────────
 
 function moveActiveTab(delta) {
@@ -808,14 +840,12 @@ function handleKey(key) {
   if (key.name === 'F4') { toggleCpu(); render(); return }
   if (key.name === 'F5') { togglePairMode(); render(); return }
   if (key.name === 'F6') {
-    // Cycle focus. When canvas or stack panels are open, they get a
-    // slot in the rotation — but only visible-slot focus is honored;
-    // the actual key routing stays in tree/editor/repl since neither
-    // canvas nor stack take text input.
-    const cycle = ['tree', 'editor', 'repl']
-    if (state.canvasOpen && state.layout && state.layout.canvasW > 0) cycle.push('canvas')
-    if (state.stackOpen  && state.layout && state.layout.stackW  > 0) cycle.push('stack')
-    state.focus = cycle[(cycle.indexOf(state.focus) + 1) % cycle.length]
+    // Toggle the COMPOSER panel — beat-maker widget lives in
+    // tui/composer-tab.js. When enabled, it takes over the right-of-
+    // tree column (editor + REPL together). Focus jumps to the panel
+    // automatically so the user can drive it immediately; toggling it
+    // off drops focus back to the editor.
+    toggleComposer()
     render()
     return
   }
@@ -861,17 +891,38 @@ function handleKey(key) {
   if (key.name === 'tab' && !key.shift) {
     // Ghost-accept has priority in editor.
     if (state.focus === 'editor' && state.ghost) { acceptGhost(); render(); return }
-    const cycle = ['tree', 'editor', 'repl']
-    if (state.canvasOpen && state.layout && state.layout.canvasW > 0) cycle.push('canvas')
-    if (state.stackOpen  && state.layout && state.layout.stackW  > 0) cycle.push('stack')
+    // When the composer panel is up, it OWNS the right column — editor
+    // + REPL are hidden, so the cycle degenerates to tree ↔ composer.
+    // Otherwise the standard tree → editor → repl cycle applies with
+    // canvas/stack slots when those are open.
+    let cycle
+    if (state.composer && state.composer.enabled) {
+      cycle = ['tree', 'composer']
+    } else {
+      cycle = ['tree', 'editor', 'repl']
+      if (state.canvasOpen && state.layout && state.layout.canvasW > 0) cycle.push('canvas')
+      if (state.stackOpen  && state.layout && state.layout.stackW  > 0) cycle.push('stack')
+    }
     state.focus = cycle[(cycle.indexOf(state.focus) + 1) % cycle.length]
     render()
     return
   }
 
   // Route by focus.
-  if (state.focus === 'tree')   return handleTreeKey(key)
-  if (state.focus === 'repl')   return handleReplKey(key)
+  if (state.focus === 'tree')     return handleTreeKey(key)
+  if (state.focus === 'repl')     return handleReplKey(key)
+  if (state.focus === 'composer') {
+    handleComposerKey(key, state, {
+      render,
+      statusFlash,
+      // Play — feed the emitted (begin …) to the running Session.
+      // Doctrine [[deterministic-audio-no-llm]] — LLM never touches
+      // this path; the widget hands raw Scheme to the same evalSource
+      // the REPL uses. Result echoes into the REPL log too.
+      play: (src) => runSource(src),
+    })
+    return
+  }
   if (state.focus === 'canvas' || state.focus === 'stack') {
     // Canvas/stack panels are read-only surfaces. Everything but Tab
     // (already handled) is a no-op — this keeps stray keystrokes from
@@ -1229,6 +1280,7 @@ const MENUS = {
     { label: 'Toggle Canvas panel',  run: () => toggleCanvas() },
     { label: 'Toggle CPU panel',     run: () => toggleCpu() },
     { label: 'Toggle Stack panel',   run: () => toggleStack() },
+    { label: 'Toggle Composer',      run: () => toggleComposer() },
     { label: 'Open Settings tab',    run: () => openSettingsTab() },
   ],
   Help: [
@@ -1367,11 +1419,19 @@ function render() {
   paintStripes(scr, L)
   paintMenuBar(scr, L)
   paintTree(scr, L)
-  paintEditor(scr, L)
-  if (state.canvasOpen && L.canvasW > 0) paintCanvas(scr, L)
-  if (state.stackOpen  && L.stackW  > 0) paintStack(scr, L)
-  if (state.cpuOpen) paintCpu(scr, L)
-  paintRepl(scr, L)
+  // Composer takes over the right column when enabled — editor + REPL
+  // + canvas/stack/cpu all get hidden underneath it. This matches how
+  // Canvas + Stack panels swap in for their slice, only bigger: the
+  // whole right-of-tree region belongs to the widget while it's up.
+  if (state.composer && state.composer.enabled) {
+    paintComposer(scr, L, state)
+  } else {
+    paintEditor(scr, L)
+    if (state.canvasOpen && L.canvasW > 0) paintCanvas(scr, L)
+    if (state.stackOpen  && L.stackW  > 0) paintStack(scr, L)
+    if (state.cpuOpen) paintCpu(scr, L)
+    paintRepl(scr, L)
+  }
   paintStatus(scr, L)
   paintMenuDropdown(scr, L)
   paintGhost(scr, L)
@@ -1426,7 +1486,7 @@ function paintMenuBar(scr, L) {
   // Right-side status: pair mode + editor mode.
   const right = 'pair:' + state.pairMode + '  editor:' + state.editorMode
     + (state.editorMode === 'vim' ? '(' + state.vimMode + ')' : '')
-    + '  F1 help  F6 focus  ^C bye'
+    + '  F1 help  F6 composer  ^C bye'
   const rx = Math.max(x + 2, L.W - right.length - 1)
   scr.putText(rx, y, right, 'mintDark', 'pearl', 0)
 }
@@ -1550,6 +1610,7 @@ function paintSettingsBuffer(scr, x, y, w, h) {
     '  ' + (state.canvasOpen ? '[x]' : '[ ]') + ' Canvas display (F3 · Alt-C toggles)',
     '  ' + (state.cpuOpen    ? '[x]' : '[ ]') + ' CPU display    (F4 toggles)',
     '  ' + (state.stackOpen  ? '[x]' : '[ ]') + ' Stack panel    (F7 · Alt-K toggles)',
+    '  ' + (state.composer && state.composer.enabled ? '[x]' : '[ ]') + ' Composer panel (F6 toggles — 4×16 beat maker)',
     '',
     'Use the Settings menu (Alt-S) to reopen this tab.',
   ]
@@ -2123,13 +2184,24 @@ const HELP_TEXT = `# Motoi Scheme TUI — help
   EDITOR    center      tabbed buffers + chapter views
   CANVAS    toggle F3   80×80 fantasy-console screen (half-block)
   CPU       toggle F4   little 8-bit machine for Book of Code ch 12
+  COMPOSER  toggle F6   4×16 beat maker (owns the right column)
   STACK     toggle F7   live evaluation frames
   REPL      bottom      talk to Motoi, ↑↓ recalls history
 
 ## Global keys
   F1  help      F2  explain form   F3  canvas panel
-  F4  cpu       F5  pair mode      F6  cycle focus
+  F4  cpu       F5  pair mode      F6  composer panel
   F7  stack     F8  run form (inline output card)
+  Tab cycles focus (includes COMPOSER when the panel is open)
+
+## COMPOSER (F6)
+  4 rows × 16 columns — KICK · SNARE · HAT · NOTE.
+  ↑↓←→ move cursor · SPACE / Enter toggle current cell.
+  P play — emits (begin (kick) (sleep-ms 125) …) and evals through
+    the REPL. Deterministic; identical grid → identical output.
+  S save — writes ~/motoi/carts/beat-<YYYYMMDDHHMMSS>.scm.
+  C clear — empty the grid.
+  T set BPM — type digits, Enter accepts, Esc cancels. Default 120.
   F10 File menu
   Alt-F/T/S/H open menus (File · Tab · Settings · Help)
   Alt-C toggle canvas · Alt-K toggle stack
