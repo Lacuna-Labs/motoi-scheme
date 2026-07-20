@@ -1,14 +1,14 @@
-// sakura-scheme — public API surface
+// motoi-scheme — public API surface
 //
 // This module is the ONLY entry point consumers should import from.
 // Everything else in src/ is internal. See PUBLIC-API.md for the full
 // list of exported symbols and their contracts.
 //
 // Consumers pin a SemVer range in their package.json:
-//   "sakura-scheme": "^1.4.0"
+//   "motoi-scheme": "^0.1.0"
 //
 // Then import cleanly:
-//   import { parse, evaluate, Env, makeBaseEnv } from 'sakura-scheme'
+//   import { parse, evaluate, Env, makeExtendedBaseEnv } from 'motoi-scheme'
 
 // Reader — tokenizer + parser + source-position map.
 export {
@@ -35,6 +35,19 @@ export {
 // Base library — 80+ primitives (arithmetic, list, string, R7RS subset).
 export { makeBaseEnv } from './base.js'
 
+// Extended base — makeBaseEnv + lib/* installers (media, game, ai,
+// system, r7rs-small, alg, sprite, eng, time, ops). Consumers that
+// want to actually run the reference examples (audio/play, entity/*,
+// scene/*, draw verbs) should reach for this instead of makeBaseEnv.
+export { makeExtendedBaseEnv, installLibs, getMediaState } from './lib-loader.js'
+
+// CORE-first — Phase 1 of the CORE-vs-MODULE restructure (Alfred lock
+// 2026-07-16). makeCoreEnv installs the 322-verb CORE partition and
+// nothing else. Modules load on demand via (import (motoi ...)) — see
+// modules/*/MANIFEST.slat. isCore(name) and coreCoverage(env) are
+// introspection helpers for docs-emitter and the RAG lookup layer.
+export { installCore, makeCoreEnv, CORE_VERBS, coreCoverage, isCore } from './lib-loader.js'
+
 // Macros — hygienic syntax-rules + define-macro.
 export {
   MacroTable,
@@ -57,7 +70,7 @@ export {
   __resetRegistry,
 } from './verbRegistry.js'
 
-// Introspection surface — what REPL, CLI, docs, and Sakura all read.
+// Introspection surface — what REPL, CLI, docs, and downstream dialects all read.
 export {
   help,
   describe,
@@ -96,12 +109,21 @@ export {
 //   if (VERSION.split('.')[0] !== '0') throw new Error('expected motoi-scheme@0.x')
 export const VERSION = '0.1.0'
 
-// NOTE: `dispatch.js` was extracted with the six-file cut but currently
-// carries several hard imports of Curator internals (logbus, card-api,
-// canvasPower, chipSink, chipEvent, chatChipBus, eventLog,
-// correlationContext). Cleanly extracting it requires splitting the
-// core dispatcher (~500 LOC) from the Curator-specific security policy
-// (~350 LOC). That carve-out is queued as a follow-up sprint; for
-// v1.4.0 the file lives in the repo (history preserved per Step (a)
-// gate) but is NOT exported from this index. Curator continues to
-// import its own copy at curator-web/src/scheme/runtime/dispatch.js.
+// Dispatcher — the parse → gate → run chokepoint. Ships hermetic with
+// no-op sinks; a dialect wires its own audit-bus / chip queue / event
+// log via `installDispatchHooks({...})` before the first dispatch.
+// See src/dispatch.js for the seam surface.
+export {
+  dispatchScheme,
+  walkVerbCalls,
+  TIER_PERMS,
+  AUDIT_LINE_KEYS,
+  installDispatchHooks,
+  resetDispatchHooks,
+  currentDispatchCaller,
+  currentCorrelationId,
+  mintCorrelationId,
+  withCorrelation,
+  __resetRateBuckets,
+  __setPowerTierReader,
+} from './dispatch.js'

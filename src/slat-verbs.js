@@ -108,7 +108,7 @@ function wrapStructured(fn, verbName) {
 // ─────────────────────────────────────────────────────────────────────────
 
 /**
- * fromSlatValues(v) — convert slat-binding values into Sakura Scheme
+ * fromSlatValues(v) — convert slat-binding values into Motoi Scheme
  * values, in place. Deep-walks arrays and plain objects.
  *
  *   SlatValue('symbol', 'foo')      → Sym('foo')
@@ -141,7 +141,7 @@ function fromSlatValues(v) {
 }
 
 /**
- * toSlatValues(v) — convert Sakura Scheme values into slat-binding values,
+ * toSlatValues(v) — convert Motoi Scheme values into slat-binding values,
  * in place. Inverse of fromSlatValues.
  *
  *   Sym('foo')                       → SlatValue('symbol', 'foo')
@@ -218,7 +218,7 @@ export const slatLoadsVerb = wrapStructured(function slatLoadsVerbBody(text) {
 /**
  * (slat-load text) → list-of-values
  *
- * Iterate forms from a line-delimited text stream. Sakura Scheme has no
+ * Iterate forms from a line-delimited text stream. Motoi Scheme has no
  * stream/port abstraction in the base env, so we accept a STRING of one
  * form per line. Returns an array of parsed values (empty list if the
  * text is empty). Bad lines produce (_bad-line :input ... :error ...)
@@ -485,7 +485,7 @@ export function installSlatVerbs(env) {
       namespace: 'slat',
       tier: 'base',
       source: 'src/slat-verbs.js',
-      since: 'sakura-scheme@1.5',
+      since: 'motoi-scheme@0.1',
     })
   }
 

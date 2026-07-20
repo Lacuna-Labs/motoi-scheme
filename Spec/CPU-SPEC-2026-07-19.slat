@@ -1,0 +1,121 @@
+;; ═══════════════════════════════════════════════════════════════
+;; MOTOI 8-BIT CPU — INSTRUCTION-SET SPEC
+;;
+;; Provenance: 2026-07-19 (Marcus, infra lane). The single source of
+;; truth for the CPU that lib/system/cpu.js implements and that
+;; Book of Code Chapter 12 walks through.
+;;
+;; Purpose: keep the chapter prose and the running CPU aligned. If
+;; the chapter says LOAD is 0x02, this file says LOAD is 0x02, and
+;; the code emits 0x02. Same three places. One number.
+;;
+;; Convention: hex opcodes uppercase, mnemonics uppercase, register
+;; names A/B (general) plus PC/SP/FLAGS (implicit).
+;; ═══════════════════════════════════════════════════════════════
+
+(spec
+  :doc "MOTOI-CPU"
+  :version "1.0"
+  :author "marcus@lacuna-eng"
+  :date "2026-07-19"
+  :audience "book-of-code · ide · training"
+  :dialect "motoi"
+  :provenance "authored"
+  :training-eligible #t
+  :confidentiality "public")
+
+(architecture
+  :word-width 8
+  :memory 256
+  :registers ("A" "B" "PC" "SP" "FLAGS")
+  :stack-base #xFF
+  :stack-grows "down"
+  :flags ((:Z 1 "zero")
+          (:N 2 "negative (bit 7 set)")
+          (:C 4 "carry / borrow")
+          (:H 8 "halt"))
+  :encoding "variable — 1-byte opcode + 0-or-1-byte operand"
+  :endianness "n/a (single-byte operands)"
+  :fetch-decode-execute "PC → opcode → operand? → exec → advance-PC-unless-jumped")
+
+;; ─── the opcode table (source of truth) ────────────────────────────
+
+(opcode :code #x01 :mnemonic "NOP"   :size 1 :effect "no-op; PC advances by 1")
+(opcode :code #x02 :mnemonic "LOAD"  :size 2 :effect "A ← imm8")
+(opcode :code #x03 :mnemonic "LOADM" :size 2 :effect "A ← mem[addr]")
+(opcode :code #x04 :mnemonic "STORE" :size 2 :effect "mem[addr] ← A")
+(opcode :code #x05 :mnemonic "MOV"   :size 2 :effect "copy A into register (0=A 1=B); MOV A is a no-op")
+(opcode :code #x06 :mnemonic "ADD"   :size 1 :effect "A ← A + B; set Z/N/C")
+(opcode :code #x07 :mnemonic "SUB"   :size 1 :effect "A ← A - B; set Z/N/C (C = borrow)")
+(opcode :code #x08 :mnemonic "AND"   :size 1 :effect "A ← A & B; set Z/N; C cleared")
+(opcode :code #x09 :mnemonic "OR"    :size 1 :effect "A ← A | B; set Z/N; C cleared")
+(opcode :code #x0A :mnemonic "XOR"   :size 1 :effect "A ← A ^ B; set Z/N; C cleared")
+(opcode :code #x0B :mnemonic "NOT"   :size 1 :effect "A ← ~A & 0xFF; set Z/N; C cleared")
+(opcode :code #x0C :mnemonic "JMP"   :size 2 :effect "PC ← addr (unconditional)")
+(opcode :code #x0D :mnemonic "JZ"    :size 2 :effect "if Z: PC ← addr")
+(opcode :code #x0E :mnemonic "JNZ"   :size 2 :effect "if not Z: PC ← addr")
+(opcode :code #x0F :mnemonic "CALL"  :size 2 :effect "mem[SP] ← PC+2; SP--; PC ← addr")
+(opcode :code #x10 :mnemonic "RET"   :size 1 :effect "SP++; PC ← mem[SP]")
+(opcode :code #x11 :mnemonic "PUSH"  :size 1 :effect "mem[SP] ← A; SP--")
+(opcode :code #x12 :mnemonic "POP"   :size 1 :effect "SP++; A ← mem[SP]")
+(opcode :code #xFF :mnemonic "HALT"  :size 1 :effect "FLAGS.H ← 1; loop stops")
+
+;; ─── verbs the CPU exposes to Scheme ───────────────────────────────
+
+(verb :name "cpu/boot!"          :effect "reset all state; return :A :B :PC :SP :FLAGS :halted? alist")
+(verb :name "cpu/load-program!"  :arg "'((MNEMONIC operand?) …) or a flat byte list" :effect "assemble if nested; write to mem[0..]; reset PC=0")
+(verb :name "cpu/step!"          :effect "execute one instruction; return mnemonic as symbol, or #f if halted")
+(verb :name "cpu/run!"           :arg "[max-instructions default 10000]" :effect "loop until HALT or cap; return count")
+(verb :name "cpu/state"          :arg "[bytes-to-show default 16]" :effect "return current register + partial memory alist")
+(verb :name "cpu/display"        :effect "return fixed-width ASCII display: regs + 16×16 memory grid + next-instr")
+(verb :name "cpu/assemble"       :effect "'((LOAD 5) (HALT)) → (2 5 255)")
+(verb :name "cpu/disassemble"    :effect "bytes → list of ((:pc N) (:mnemonic M) (:operand N)) records")
+(verb :name "cpu/read-mem"       :arg "addr" :effect "return byte at addr")
+(verb :name "cpu/write-mem!"     :arg "addr val" :effect "poke byte")
+(verb :name "cpu/halted?"        :effect "return #t if HALT flag is set")
+(verb :name "cpu/opcodes"        :effect "introspection — return the whole opcode table as alist records")
+
+;; ─── canonical programs (for tests + Book of Code cross-ref) ───────
+
+(program
+  :name "add-5-plus-3"
+  :goal "compute 5 + 3 → A = 8; halt"
+  :source ((LOAD 5)
+           (MOV B)
+           (LOAD 3)
+           (ADD)
+           (HALT))
+  :bytes (2 5 5 1 2 3 6 255)
+  :expected ((:A 8) (:B 5) (:halted? #t)))
+
+(program
+  :name "count-down-from-5"
+  :goal "decrement A from 5 to 0 using a loop; ends with A=0, Z set"
+  :source ((LOAD 5)         ;; A ← 5
+           (MOV B)          ;; B ← 5
+           (LOAD 1)         ;; A ← 1  (loop constant to subtract)
+           (SUB)            ;; A ← 1 - 5 = ...   -- kids see this in ch 12
+           (JZ 12)
+           (HALT)))
+
+;; ─── book-of-code alignment note ───────────────────────────────────
+;;
+;; Ada's authored chapters (10 · 11 · 12) may have arrived earlier with
+;; teaching-simplified opcode NUMBERS (e.g. HALT = 7). Those pedagogical
+;; opcodes are fine inside prose but the RUNNABLE `cpu/*` verbs use the
+;; numbers in this file. When the chapter says "let's run this on our
+;; CPU", the shipped code MUST use these mnemonics; the chapter's own
+;; toy-CPU examples can keep smaller numbers as classroom scaffolding.
+;;
+;; Cross-reference rule for the Book of Code lane:
+;;   * If prose introduces the machine → keep it small, keep it 7-op.
+;;   * If prose runs on `cpu/*` → use LOAD/ADD/HALT with THESE numbers.
+;;
+;; Marcus + Ada resolve any conflict by treating this file as canonical
+;; for the shipped CPU and the chapter as canonical for its own toy CPU.
+
+(cross-reference
+  :file "scheme-books/book-of-code/12-the-cpu-fetch-decode-execute.book.slatl"
+  :chapter 12
+  :rule "shipped-cpu-verbs-use-this-spec"
+  :toy-cpu-in-chapter-is-different "yes, and that's fine — it's pedagogical scaffolding")

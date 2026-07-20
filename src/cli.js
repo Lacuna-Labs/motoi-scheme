@@ -14,7 +14,7 @@
 
 import { parse } from './reader.js'
 import { evaluate } from './interp.js'
-import { makeBaseEnv } from './base.js'
+import { makeCoreEnv } from '../core/index.js'
 import { expandProgram } from './macro.js'
 import { help } from './introspect.js'
 import { startRepl } from './repl.js'
@@ -22,6 +22,8 @@ import { emitDocs } from './docs-emitter.js'
 import { slatLoads, slatDumps, slatToJsonl, jsonlToSlat } from './slat.js'
 import { readFile, writeFile } from 'node:fs/promises'
 import { VERSION } from './index.js'
+import { startIdeServer } from './ide-server.js'
+import { startTui } from '../tui/tui.js'
 
 function usage() {
   return `motoi ${VERSION} — the base Scheme dialect
@@ -32,6 +34,8 @@ Commands:
   repl                     Interactive REPL. Loads current dir's verb layer if present.
   eval "<code>"            Evaluate one expression, print result.
   run <file.scm>           Run a program file to completion.
+  ide [--port N] [--host]  Launch the 3-panel browser IDE (default 127.0.0.1:3737).
+  tui                      Launch the 4-region in-terminal IDE. Same runtime as ide.
   help <verb>              Print help for a verb (same as REPL ,help).
   docs                     Print MD reference to stdout, or --serve to launch local doc site.
   docs regen               Regenerate reference/ MD from live registry. Idempotent.
@@ -58,7 +62,7 @@ function format(v) {
 }
 
 function evalSource(src, fuelBudget = 200000) {
-  const env = makeBaseEnv(fuelBudget)
+  const env = makeCoreEnv({ fuel: { n: fuelBudget } })
   const forms = parse(src)
   const { forms: expanded } = expandProgram(forms, { fuel: { n: fuelBudget } })
   const fuel = { n: fuelBudget }
@@ -67,7 +71,75 @@ function evalSource(src, fuelBudget = 200000) {
   return result
 }
 
-export async function main(argv = process.argv.slice(2)) {
+// Extract known top-level options from argv, returning { fuel, seed,
+// noColor, verbLayer, rest }. Leaves everything else (subcommand + its
+// arguments) in `rest` for downstream to handle. Documented in usage()
+// but until 2026-07-16 only --fuel was recognised; --seed, --no-color,
+// and --verb-layer were declared but any occurrence crashed with
+// "unknown command". This walker now consumes all four uniformly.
+//
+// --seed and --verb-layer are captured but not yet wired to the
+// evaluator (parked for a follow-up); they are accepted so scripts and
+// docs that pass them do not break. --no-color is captured for later
+// REPL/output plumbing.
+function extractOptions(argv) {
+  let fuel = 200000
+  let seed = null
+  let noColor = false
+  let verbLayer = null
+  const rest = []
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a === '--fuel') {
+      const next = argv[i + 1]
+      const n = parseInt(next, 10)
+      if (!Number.isFinite(n) || n <= 0) {
+        throw new Error(`--fuel expects a positive integer, got ${JSON.stringify(next)}`)
+      }
+      fuel = n
+      i++
+      continue
+    }
+    if (a === '--seed') {
+      const next = argv[i + 1]
+      const n = parseInt(next, 10)
+      if (!Number.isFinite(n)) {
+        throw new Error(`--seed expects an integer, got ${JSON.stringify(next)}`)
+      }
+      seed = n
+      i++
+      continue
+    }
+    if (a === '--verb-layer') {
+      const next = argv[i + 1]
+      if (!next || next.startsWith('--')) {
+        throw new Error(`--verb-layer expects a path, got ${JSON.stringify(next)}`)
+      }
+      verbLayer = next
+      i++
+      continue
+    }
+    if (a === '--no-color') {
+      noColor = true
+      continue
+    }
+    rest.push(a)
+  }
+  return { fuel, seed, noColor, verbLayer, rest }
+}
+
+export async function main(rawArgv = process.argv.slice(2)) {
+  let fuelBudget
+  let argv
+  let cliOpts
+  try {
+    cliOpts = extractOptions(rawArgv)
+    fuelBudget = cliOpts.fuel
+    argv = cliOpts.rest
+  } catch (e) {
+    process.stderr.write(`error: ${e.message}\n`)
+    return 1
+  }
   const cmd = argv[0]
   if (!cmd || cmd === '--help' || cmd === '-h') { process.stdout.write(usage()); return 0 }
 
@@ -81,11 +153,50 @@ export async function main(argv = process.argv.slice(2)) {
     return 0
   }
 
+  if (cmd === 'tui') {
+    // motoi tui [--splash] — the terminal-hosted 4-region IDE. Same
+    // runtime as motoi ide, painted with the Sakura palette in ANSI.
+    // No browser, no HTTP server — pure alt-screen ANSI over
+    // stdin/stdout. --splash forces the retro boot even after first
+    // launch (Wave 4).
+    const splash = argv.includes('--splash')
+    try {
+      await startTui({ fuel: fuelBudget, splash })
+    } catch (e) {
+      process.stderr.write(`error: ${e.message}\n`)
+      return 1
+    }
+    return 0
+  }
+
+  if (cmd === 'ide') {
+    // motoi ide [--port N] [--host HOST]
+    // The IDE is a browser-hosted 3-panel VS Code-style surface:
+    // file tree · tabbed editor · REPL panel. Runs against the same
+    // CORE roster the REPL has, so every book/*, cpu/*, composer/*
+    // verb works the same way.
+    let port = 3737
+    let host = '127.0.0.1'
+    for (let i = 1; i < argv.length; i++) {
+      const a = argv[i]
+      if (a === '--port') { port = parseInt(argv[++i], 10) || port; continue }
+      if (a === '--host') { host = argv[++i] || host; continue }
+    }
+    try {
+      await startIdeServer({ port, host, fuel: fuelBudget })
+    } catch (e) {
+      process.stderr.write(`error: ${e.message}\n`)
+      return 1
+    }
+    // Keep the process alive — the server will hold the event loop.
+    return new Promise(() => {})
+  }
+
   if (cmd === 'eval' || cmd === '-e') {
     const src = argv.slice(1).join(' ')
     if (!src) { process.stderr.write('usage: motoi eval "<code>"\n'); return 1 }
     try {
-      const result = evalSource(src)
+      const result = evalSource(src, fuelBudget)
       if (result !== undefined) process.stdout.write(format(result) + '\n')
       return 0
     } catch (e) {
@@ -99,7 +210,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (!file) { process.stderr.write('usage: motoi run <file.scm>\n'); return 1 }
     try {
       const src = await readFile(file, 'utf8')
-      const result = evalSource(src)
+      const result = evalSource(src, fuelBudget)
       if (result !== undefined) process.stdout.write(format(result) + '\n')
       return 0
     } catch (e) {

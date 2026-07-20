@@ -11,7 +11,7 @@
 // Per-call-site metadata would mean threading the env through dispatch
 // and lookup; for 1.0 the same shape across callers is the simpler win.
 //
-// Categories (per docs/sakura/HELLO-SURFACE-1.0.md §8.8.3):
+// Categories (per engineering/HELLO-SURFACE-1.0.ENG.slat §8.8.3):
 //
 //   read           — pure observe; safe for any tier
 //   paint          — visual side-effects only (dots, glyphs)
@@ -239,7 +239,7 @@ export function hasVerb(name) {
  * the bang-convention or write-prefix) without an explicit perm, throws.
  *
  * Throwing at app startup is the point: a verb that looks like a write
- * needs the author to think about whether Sakura can fire it. The
+ * needs the author to think about which dialect callers can fire it. The
  * registry check is the cheapest place to catch the omission.
  *
  * Returns the list of inferred-state-change verbs (empty when clean).

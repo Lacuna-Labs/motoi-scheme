@@ -1,4 +1,4 @@
-// sakura-scheme — introspection surface
+// motoi-scheme — introspection surface
 //
 // One source of truth for what a verb IS: what it does, what it takes,
 // what it returns, where it lives. REPL, CLI, docs, and Sakura all
@@ -20,7 +20,7 @@ function nameOf(x) {
 /**
  * Return the full metadata blob for a verb as a plain object.
  * Callers: `,help card/open` in REPL, `(help 'card/open)` in Scheme,
- * `sakura-scheme help card/open` in the CLI.
+ * `motoi help card/open` in the CLI.
  *
  * @param {string|Sym} name
  * @returns {object|null} the metadata, or null if no such verb
@@ -32,7 +32,9 @@ export function help(name) {
     name: meta.name || nameOf(name),
     doc: meta.doc || '',
     contract: meta.contract || null,
-    arity: meta.arity || null,
+    // arity may legitimately be 0 (e.g. `newline`, `pi`) — coalesce with
+    // ?? so a truthy-check doesn't strip the zero into null.
+    arity: meta.arity ?? null,
     examples: meta.examples || [],
     namespace: meta.namespace || null,
     tier: meta.tier || null,

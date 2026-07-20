@@ -9,16 +9,16 @@ Motoi Scheme is the **base** dialect. Small. Open source. Nobody's product.
 - `src/` — the engine (reader, interp, base, macro, dispatch, registry, repl, cli, docs-emitter, slat).
 - `bin/motoi` — CLI entry point.
 - `bindings/{js,python}/` — language bindings for SLAT and reader.
-- `Engineering/` — architecture + eng docs.
-- `Scheme/` — the language reference + book + tutorial.
-- `Words/` — vocabulary and taxonomy.
-- `Spec/` — dialect protocol, SLAT format spec.
+- `engineering/` — architecture + eng docs.
+- `scheme/` — the language reference + book + tutorial.
+- `words/` — vocabulary and taxonomy.
+- `spec/` — dialect protocol, SLAT format spec.
 
 ## Doctrines that apply here
 
-- **The reference IS the language.** `Scheme/MOTOI-SCHEME-REFERENCE.slat`
+- **The reference IS the language.** `scheme/MOTOI-SCHEME-REFERENCE.slat`
   is canonical. When code and reference disagree, reference wins.
-- **The 16-chapter invariant** applies to Scheme/BOOK (when authored). Overflow
+- **The 16-chapter invariant** applies to scheme/BOOK (when authored). Overflow
   → appendices.
 - **SLAT is the working format.** MD stays archived. Never delete source MD.
 - **Training-ready tagging.** Every record: `:doc`, `:section`, `:audience`,
@@ -36,6 +36,21 @@ Motoi Scheme is the **base** dialect. Small. Open source. Nobody's product.
 - Not a language server, browser bundle, or IDE plugin — those are later.
 - Not a place to put dialect verbs. `card/*`, `shop/*`, `sys/*`, `net/*` live
   in their consumer repos, not here.
+
+## scratch/ — the working area
+
+`scratch/` is the ephemeral working directory. Every WIP file, intermediate
+artifact, agent draft, one-off script, or generated batch lands there — NOT
+at the repo root. Gitignored except for `scratch/README.slat` (documents the
+convention) and `scratch/.gitkeep`.
+
+**Promotion:** when a scratch artifact is final, `git mv` it to its
+first-class path (`engineering/`, `scheme/`, `spec/`, `training-data/`, etc.)
+and commit. Leave no dangling references in scratch/.
+
+**Rule for agents:** if you're not sure whether an artifact is first-class,
+put it in `scratch/`. Better to leave a working note there than to pollute
+the tree.
 
 ## Where things came from (first pass)
 

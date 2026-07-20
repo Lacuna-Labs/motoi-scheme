@@ -1,8 +1,8 @@
-// sakura-scheme — verb-metadata → Markdown reference emitter
+// motoi-scheme — verb-metadata → Markdown reference emitter
 //
 // Reads the live verb registry and writes one .md file per verb
 // (grouped by namespace) into an output directory, plus an index.md.
-// Callers: `sakura-scheme docs regen`, `.lacuna/triggers.yaml` on
+// Callers: `motoi docs regen`, `.lacuna/triggers.yaml` on
 // verb-added, weekly cron on the doc site rebuild.
 
 import { mkdir, writeFile } from 'node:fs/promises'

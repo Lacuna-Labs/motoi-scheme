@@ -45,6 +45,25 @@ import { registerVerbMeta, defaultMetaFor } from './verbRegistry.js'
 const MISSING_PERM_WARNED = new Set()
 export function __resetMissingPermWarnings() { MISSING_PERM_WARNED.clear() }
 
+// ── stack hooks (2026-07-19, Marcus TUI wave) ─────────────────────────
+//
+// A ledger module (lib/system/stack.js) can attach {push, pop} hooks so
+// panels can present a live call stack without reaching into evaluator
+// internals. Additive: when no hooks are attached, applyStep is exactly
+// what it was. The hooks fire only around Closure application, which is
+// where user-visible Scheme frames live; JS primitives are hidden — the
+// intent is to show the *reader's* call stack, not the evaluator's.
+//
+// setStackHooks({ push(name, kind), pop() })  → replaces both hooks
+// clearStackHooks()                            → back to no-ops
+let _STACK_PUSH = null
+let _STACK_POP  = null
+export function setStackHooks({ push, pop } = {}) {
+  _STACK_PUSH = typeof push === 'function' ? push : null
+  _STACK_POP  = typeof pop  === 'function' ? pop  : null
+}
+export function clearStackHooks() { _STACK_PUSH = null; _STACK_POP = null }
+
 export class Env {
   constructor(parent = null) {
     this.vars = new Map()
@@ -110,6 +129,10 @@ export class Env {
     // Only treat function bindings as verbs — closures / data are
     // language values, not dispatcher-gated calls.
     if (typeof val === 'function') {
+      // Stack-panel hook (2026-07-19). Tag the fn with its verb name so
+      // applyStep can push a labeled frame. Best-effort — some primitives
+      // are exotic and reject assignment; ignore.
+      try { if (!val.__verbName) val.__verbName = name } catch { /* frozen fn */ }
       // v2.20.0-A5 perm-audit floor: warn (NOT throw) the first time a
       // verb registers without an explicit `meta.perm`. The legacy
       // 2-arg path still works (defaultMetaFor infers from the name);
@@ -276,11 +299,17 @@ const SPECIAL_FORMS = new Set([
   'quote', 'if', 'define', 'set!', 'lambda', 'begin',
   'let', 'let*', 'letrec', 'quasiquote', 'when', 'and',
   'or', 'unless', 'cond', 'case',
+  // R7RS §5.5 / §4.2.7 / §4.2.4 / §4.2.5 — 2026-07-18 finalization.
+  'define-record-type', 'guard', 'do', 'delay',
 ])
 
 function evalStep(form, env, fuel) {
   if (--fuel.n < 0) throw new Error('fuel exhausted')
-  if (form instanceof Sym) return env.get(form.name)
+  if (form instanceof Sym) {
+    // Keyword literals (:foo) self-evaluate — used for kwargs in cortex/*, etc.
+    if (form.name.length > 1 && form.name.charCodeAt(0) === 58 /* ':' */) return form
+    return env.get(form.name)
+  }
   if (!Array.isArray(form)) return form        // number / string / boolean / fn — self-evaluating
   if (form.length === 0) return []
 
@@ -301,9 +330,17 @@ function evalStep(form, env, fuel) {
           // `rest` to a list of all args past the fixed ones. parseParams
           // splits the `.` marker out of the param list.
           const { params, restParam } = parseParams(form[1].slice(1))
-          env.define(name, new Closure(params, form.slice(2), env, restParam))
+          const closure = new Closure(params, form.slice(2), env, restParam)
+          // Stack-panel hook — same idea as JS primitives, so a lambda
+          // defined via (define (f ...) ...) shows its own name.
+          try { closure.__verbName = name } catch { /* frozen */ }
+          env.define(name, closure)
         } else {                                       // (define x v)
-          env.define(form[1].name, evaluate(form[2], env, fuel))
+          const val = evaluate(form[2], env, fuel)
+          if (val instanceof Closure && !val.__verbName) {
+            try { val.__verbName = form[1].name } catch { /* frozen */ }
+          }
+          env.define(form[1].name, val)
         }
         return undefined
       }
@@ -436,6 +473,123 @@ function evalStep(form, env, fuel) {
         }
         return undefined
       }
+      // R7RS §5.5 — define-record-type. Expands to:
+      //   (define TYPE (_make-record-type 'name field1 field2 ...))
+      //   (define (CONSTRUCTOR f1 f2 ...) (_make-record TYPE f1 f2 ...))
+      //   (define (PREDICATE v) (_record-of-type? v TYPE))
+      //   (define (FIELD-ACCESSOR v) (_record-ref v 'field))
+      //   (define (FIELD-MUTATOR v x) (_record-set! v 'field x))
+      case 'define-record-type': {
+        // (define-record-type <name>
+        //   (<constructor> field1 ...)
+        //   <predicate>
+        //   (<field> <accessor> [<mutator>]) ...)
+        const typeName = form[1].name
+        const ctorSpec = form[2]      // (ctor-name f1 f2 ...)
+        const predName = form[3].name
+        const fieldSpecs = form.slice(4)
+        const ctorName = ctorSpec[0].name
+        const ctorFields = ctorSpec.slice(1).map((s) => s.name)
+        // 1. Create the type object.
+        const makeRT = env.get('_make-record-type')
+        const allFields = fieldSpecs.map((fs) => fs[0].name)
+        const typeObj = makeRT(new Sym(typeName), ...allFields.map((f) => new Sym(f)))
+        env.define(typeName, typeObj)
+        // 2. Constructor.
+        const makeRec = env.get('_make-record')
+        env.define(ctorName, (...args) => {
+          // Constructor takes ctorFields; fill any others with undefined.
+          const values = allFields.map((f) => {
+            const idx = ctorFields.indexOf(f)
+            return idx >= 0 ? args[idx] : undefined
+          })
+          return makeRec(typeObj, ...values)
+        }, { perm: 'read' })
+        // 3. Predicate.
+        const recQ = env.get('_record-of-type?')
+        env.define(predName, (v) => recQ(v, typeObj), { perm: 'read' })
+        // 4. Accessors + mutators.
+        const recRef = env.get('_record-ref')
+        const recSet = env.get('_record-set!')
+        for (const fs of fieldSpecs) {
+          const fieldName = fs[0].name
+          const accessorName = fs[1].name
+          env.define(accessorName, (v) => recRef(v, new Sym(fieldName)), { perm: 'read' })
+          if (fs.length > 2) {
+            const mutatorName = fs[2].name
+            env.define(mutatorName, (v, x) => recSet(v, new Sym(fieldName), x), { perm: 'state-change' })
+          }
+        }
+        return undefined
+      }
+      // R7RS §6.11 — guard. (guard (var clause ...) body ...) — evaluate
+      // body; if it raises, bind var to the condition and run clauses like
+      // cond. If no clause matches, re-raise. Simplified: no re-raise
+      // continuation (raise-continuable maps to raise).
+      case 'guard': {
+        // form = ['guard', [var-sym, clause, clause, ...], body, ...]
+        const spec = form[1]
+        const varSym = spec[0]
+        const clauses = spec.slice(1)
+        const body = form.slice(2)
+        try {
+          let result
+          for (const b of body) result = evaluate(b, env, fuel)
+          return result
+        } catch (err) {
+          // Only catch SchemeError / values raised via `raise`; native
+          // errors flow through too (R7RS treats any raised value as a
+          // condition object).
+          const condition = err.isSchemeError || err instanceof Error ? err : err
+          const e2 = new Env(env)
+          e2.define(varSym.name, condition)
+          for (const clause of clauses) {
+            const test = clause[0]
+            const isElse = test instanceof Sym && test.name === 'else'
+            const t = isElse ? true : evaluate(test, e2, fuel)
+            if (t !== false) {
+              if (clause.length === 1) return t
+              let result
+              for (let j = 1; j < clause.length; j++) result = evaluate(clause[j], e2, fuel)
+              return result
+            }
+          }
+          // No clause matched — re-raise.
+          throw err
+        }
+      }
+      // R7RS §4.2.4 — do. Iteration construct.
+      //   (do ((var init step) ...) (test result ...) body ...)
+      case 'do': {
+        const bindings = form[1]         // [[var init step], ...]
+        const testClause = form[2]       // [test result ...]
+        const body = form.slice(3)
+        const e2 = new Env(env)
+        // Init.
+        for (const b of bindings) e2.define(b[0].name, evaluate(b[1], env, fuel))
+        while (true) {
+          const test = evaluate(testClause[0], e2, fuel)
+          if (test !== false) {
+            // Termination — evaluate result forms.
+            let result
+            for (let j = 1; j < testClause.length; j++) result = evaluate(testClause[j], e2, fuel)
+            return result
+          }
+          // Body for side-effects.
+          for (const b of body) evaluate(b, e2, fuel)
+          // Step. Compute all steps in the CURRENT env before assigning
+          // (R7RS §4.2.4 parallel semantics).
+          const newVals = bindings.map((b) => b.length > 2 ? evaluate(b[2], e2, fuel) : e2.get(b[0].name))
+          for (let i = 0; i < bindings.length; i++) e2.set(bindings[i][0].name, newVals[i])
+        }
+      }
+      // R7RS §4.2.5 — delay. Wrap the expression in a lazy promise.
+      case 'delay': {
+        const expr = form[1]
+        const promise = { __promise__: true, forced: false, value: undefined, thunk: null }
+        promise.thunk = new Closure([], [expr], env)
+        return promise
+      }
       default:
         break
     }
@@ -473,30 +627,53 @@ export function apply(fn, args, fuel) {
  * evaluated for side-effects). The trampoline unwinds the Tail.
  */
 function applyStep(fn, args, fuel) {
-  if (typeof fn === 'function') return fn(...args)
-  if (fn instanceof Closure) {
-    const e = new Env(fn.env)
-    // Index loop instead of forEach — closure-per-call (the cb) +
-    // forEach's iteration protocol cost out of the hot apply path.
-    // applyStep is the trampoline target for every Scheme function
-    // call; even tiny per-call wins matter on deep let-loops.
-    const params = fn.params
-    const pLen = params.length
-    for (let i = 0; i < pLen; i++) e.define(params[i], args[i])
-    // Variadic tail (R7RS §4.1.4) — gather any args past the fixed
-    // params into a list bound to `restParam`. Covers both the fully-
-    // variadic `(lambda args body)` shape (params=[]) and the future
-    // dotted-tail `(lambda (a b . rest) body)` shape (params=['a','b']).
-    // Skip the slice when there are no extra args; an empty list is
-    // observably identical and we save one allocation per call.
-    if (fn.restParam) {
-      e.define(fn.restParam, args.length > pLen ? args.slice(pLen) : [])
+  if (typeof fn === 'function') {
+    // Stack hook (2026-07-19). Push a frame for named primitives so a
+    // panel can show "we're inside `book/read`" while it runs. Anonymous
+    // JS fns (arrow closures inside apply, etc.) are skipped — they'd
+    // just be noise. finally-pop keeps the ledger balanced even if the
+    // primitive throws.
+    if (_STACK_PUSH && fn.__verbName) {
+      _STACK_PUSH(fn.__verbName, 'primitive')
+      try { return fn(...args) }
+      finally { if (_STACK_POP) _STACK_POP() }
     }
-    const body = fn.body
-    const bLen = body.length
-    if (bLen === 0) return undefined
-    for (let i = 0; i < bLen - 1; i++) evaluate(body[i], e, fuel)
-    return new Tail(body[bLen - 1], e)
+    return fn(...args)
+  }
+  if (fn instanceof Closure) {
+    // Stack hook — push a frame for the duration of body-run. The all-
+    // but-last body forms use non-tail `evaluate`, so their recursive
+    // frames stack under this one; the last-form Tail replaces this
+    // frame in the outer trampoline. We pop right before returning so
+    // the "peak" ledger captures the maximum depth reached.
+    const pushed = !!_STACK_PUSH
+    if (pushed) _STACK_PUSH(fn.__verbName || '(lambda)', 'closure')
+    try {
+      const e = new Env(fn.env)
+      // Index loop instead of forEach — closure-per-call (the cb) +
+      // forEach's iteration protocol cost out of the hot apply path.
+      // applyStep is the trampoline target for every Scheme function
+      // call; even tiny per-call wins matter on deep let-loops.
+      const params = fn.params
+      const pLen = params.length
+      for (let i = 0; i < pLen; i++) e.define(params[i], args[i])
+      // Variadic tail (R7RS §4.1.4) — gather any args past the fixed
+      // params into a list bound to `restParam`. Covers both the fully-
+      // variadic `(lambda args body)` shape (params=[]) and the future
+      // dotted-tail `(lambda (a b . rest) body)` shape (params=['a','b']).
+      // Skip the slice when there are no extra args; an empty list is
+      // observably identical and we save one allocation per call.
+      if (fn.restParam) {
+        e.define(fn.restParam, args.length > pLen ? args.slice(pLen) : [])
+      }
+      const body = fn.body
+      const bLen = body.length
+      if (bLen === 0) return undefined
+      for (let i = 0; i < bLen - 1; i++) evaluate(body[i], e, fuel)
+      return new Tail(body[bLen - 1], e)
+    } finally {
+      if (pushed && _STACK_POP) _STACK_POP()
+    }
   }
   throw new Error('not a function: ' + String(fn))
 }

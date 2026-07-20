@@ -9,6 +9,7 @@ import { Env, apply, Closure } from './interp.js'
 import { Sym } from './reader.js'
 import { registerVerbMeta } from './verbRegistry.js'
 import { installSlatVerbs } from './slat-verbs.js'
+import { installR7RSCompletions } from './r7rs-completions.js'
 
 // The bricklay cache was Curator-specific host state. Extracted engine
 // keeps the `bricklay-pack-native` primitive but drops the cache — the
@@ -74,8 +75,40 @@ export function makeBaseEnv(fuel) {
   def('length', (a) => a.length)
   def('range', (a, b) => { const r = []; for (let i = a; i < b; i++) r.push(i); return r })
 
-  def('for-each', (fn, lst) => { for (const x of lst) apply(fn, [x], fuelBox); return undefined })
-  def('map', (fn, lst) => lst.map((x) => apply(fn, [x], fuelBox)))
+  // (for-each fn xs [ys …]) — R7RS §6.10. Multi-list form iterates
+  // pairwise; the callback receives one arg from each list per step.
+  // Length is the shortest list; no error on ragged inputs (matches
+  // R7RS behaviour that "the shortest list determines the length").
+  def('for-each', (fn, ...lists) => {
+    if (lists.length === 0) return undefined
+    if (lists.length === 1) {
+      for (const x of lists[0]) apply(fn, [x], fuelBox)
+      return undefined
+    }
+    const n = lists.reduce((m, l) => Math.min(m, l.length), Infinity)
+    for (let i = 0; i < n; i++) {
+      const args = lists.map((l) => l[i])
+      apply(fn, args, fuelBox)
+    }
+    return undefined
+  })
+  // (map fn xs [ys …]) — R7RS §6.10, "Patch 2" (2026-07-19). Prior form
+  // was single-list only; the multi-list form evaluates the callback
+  // once per index with one arg from each list. `(map + xs ys)` sums two
+  // lists pairwise. Backwards-compatible: single-list callers work
+  // unchanged. If the fn has a fixed lower arity the runtime error
+  // surfaces from apply, not from map.
+  def('map', (fn, ...lists) => {
+    if (lists.length === 0) return []
+    if (lists.length === 1) return lists[0].map((x) => apply(fn, [x], fuelBox))
+    const n = lists.reduce((m, l) => Math.min(m, l.length), Infinity)
+    const out = new Array(n)
+    for (let i = 0; i < n; i++) {
+      const args = lists.map((l) => l[i])
+      out[i] = apply(fn, args, fuelBox)
+    }
+    return out
+  })
   def('filter', (fn, lst) => lst.filter((x) => apply(fn, [x], fuelBox) !== false))
   def('reduce', (fn, init, lst) => lst.reduce((acc, x) => apply(fn, [acc, x], fuelBox), init))
   // (apply fn args) — invoke `fn` with the list `args` as the argument
@@ -224,6 +257,16 @@ export function makeBaseEnv(fuel) {
   def('atan2', (y, x) => Math.atan2(y, x))
   def('pi', Math.PI)                            // (pi) → 3.14159…
   def('expt', (b, p) => Math.pow(b, p))
+  // Exp/log family — Wave 0, per architect-motoi-core-runtime-completion
+  // 2026-07-16 §4 :exp-log. Thin wrappers over the ES Math intrinsics.
+  // `log` is the natural logarithm (R7RS §6.2.6), `log10`/`log2`/`exp2`
+  // are pedagogical conveniences the kid picks up in growth-curve carts.
+  // Also surfaced as math/* in lib/math/basic.js during Wave 1.
+  def('exp', (x) => Math.exp(x))
+  def('log', (x) => Math.log(x))
+  def('log2', (x) => Math.log2(x))
+  def('log10', (x) => Math.log10(x))
+  def('exp2', (x) => Math.pow(2, x))
   def('floor', (x) => Math.floor(x))
   def('ceil', (x) => Math.ceil(x))
   // R7RS §6.2.6 spells it `ceiling`. We keep `ceil` as the short-form
@@ -284,8 +327,14 @@ export function makeBaseEnv(fuel) {
     x1 < x2 + w2 && x2 < x1 + w1 && y1 < y2 + h2 && y2 < y1 + h1)
 
   // ── equality, predicates, strings, lookup ───────────────────────────
-  def('eq?', (a, b) => a === b)
-  def('equal?', (a, b) => deepEqual(a, b))
+  // NOTE: `eq?` and `equal?` were previously ALSO defined at lines 116-117
+  // above using the smart `_eqQ` shared with `=?`. Those definitions
+  // handle Sym-by-name and deep list equality; the SIMPLE strict/deep
+  // pair that used to live here shadowed them silently, which broke
+  // (eq? (sym "foo") (sym "foo")) for freshly constructed Sym instances.
+  // We keep the smart definitions in force here. Both `eq?` and `equal?`
+  // remain structural per Motoi's `=?` doctrine (PICO-8-style DWIM
+  // equality — Dr. Imani's beginner-friendliness research pass).
   def('zero?', (x) => x === 0)
   def('positive?', (x) => x > 0)
   def('negative?', (x) => x < 0)
@@ -608,18 +657,26 @@ export function makeBaseEnv(fuel) {
   // without a follow-up install call. Pre-launch polish item #1.
   installSlatVerbs(e)
 
+  // R7RS-small + SRFI-1/13 + SRFI-125 completions — the FILL PASS from
+  // the 2026-07-18 language finalization audit. Adds fold/iota/find/
+  // string-split/string-join/hash-table-*/bytevector-*/error/raise/
+  // char predicates/etc — the standard/conventional coverage Motoi was
+  // missing pre-lock. See src/r7rs-completions.js for the full list
+  // and per-verb R7RS/SRFI citations.
+  installR7RSCompletions(e, fuelBox)
+
   return e
 }
 
 // ── Rich metadata for every base primitive. ────────────────────────────
 //
 // The introspection surface (`,help car`, `help('car')`, the CLI
-// `sakura-scheme help car`) needs the shape the extraction plan
+// `motoi help car`) needs the shape the extraction plan
 // §"Verb metadata — the ergonomics contract" spells out: name, arity,
 // doc, at least one worked example. Without this, the REPL says
 // "unknown verb: car" for every base primitive.
 //
-// The table lives at module scope so `sakura-scheme help car` works
+// The table lives at module scope so `motoi help car` works
 // even before any evaluator env has been built — the CLI's `help` path
 // never touches an Env. We register at module load once; every fresh
 // REPL/CLI process gets the full manifest with zero setup cost.
@@ -752,12 +809,12 @@ function registerBaseMetadata() {
       perm: 'read',
       tier: 'base',
       source: 'src/base.js',
-      since: 'sakura-scheme@1.0',
+      since: 'motoi-scheme@0.1',
     })
   }
 }
 
-// Register once at module load so `sakura-scheme help car` works even
+// Register once at module load so `motoi help car` works even
 // before makeBaseEnv is called (the CLI's `help` command path never
 // touches an Env).
 registerBaseMetadata()

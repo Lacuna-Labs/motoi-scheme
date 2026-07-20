@@ -1,0 +1,260 @@
+;;; motoi-scheme/training/README.slat
+;;;
+;;; Motoi Copilot trainer skeleton — how to run, what to check, what's
+;;; still gating an actual training run.
+;;;
+;;; :doc              "motoi-copilot-trainer-README"
+;;; :audience         :engineer
+;;; :confidentiality  :internal
+;;; :training-eligible #f
+;;; :dialect          "motoi"
+;;; :provenance       "the-engineer training-foundation-lane 2026-07-16"
+;;; :owner            "The Engineer"
+;;; :tags             (:motoi :copilot :qwen2.5-coder :training :skeleton
+;;;                    :hf-trainer :full-fine-tune)
+
+(document
+  :name          "motoi-copilot-trainer-README"
+  :date          "2026-07-16"
+  :owner         "The Engineer"
+  :audience      :engineer
+  :confidentiality :internal
+  :training-eligible #f
+  :status        "SKELETON — not-yet-runnable end-to-end"
+  :composes-with
+  ("motoi-scheme/ROADMAP.slat                              ; gap 9 — Motoi Copilot spec"
+   "research/motoi-copilot-model-sizing-2026-07-16.slat    ; 1.5B primary, Q4_K_M ~990MB"
+   "research/small-model-dsl-teaching-2026-07-16.slat      ; full FT · 3 epochs · lr 5e-5 · batch 128 · cosine"
+   "motoi-scheme/training-data/held-out/README.slat        ; don-t-train contract"
+   "motoi-scheme/scratch/tokenizer-sanity-2026-07-16.slat  ; tokenizer avg 3.00 subwords/verb"))
+
+;; ==========================================================================
+;; WHAT THIS DIR IS
+;; ==========================================================================
+
+(purpose
+  :headline "Fresh trainer skeleton for Motoi Copilot. NOT Forge."
+  :rationale
+  "Forge is Sakura's SFT pipeline in curator/. Motoi Copilot is a
+   different beast — coder-only, no world knowledge, no Sakura persona,
+   different corpus, different eval. Rather than tangle Forge with a
+   second model's training path, we grow a small standalone trainer here
+   that consumes motoi-scheme/training-data/ directly.
+
+   Choice of stack: PyTorch + transformers + accelerate. Standard HF.
+   The Trainer class handles most of the wiring; we override tokenization
+   (to respect chat template) and add a verb-recall eval hook."
+
+  :files
+  ((:file "train.py"     :role "Main entry — data loading, tokenization, Trainer wiring, verb-recall eval")
+   (:file "config.yaml"  :role "Locked hyperparameters — model id, epochs, lr, batch, seed, paths")
+   (:file "README.slat"  :role "This file — how to run, what still gates a real run")))
+
+;; ==========================================================================
+;; HOW TO RUN
+;; ==========================================================================
+
+(how-to-run
+  :prereqs
+  ("Python 3.12 (uv venv recommended)"
+   "pip install transformers datasets accelerate torch pyyaml"
+   "Base model downloaded to ../scratch/models/qwen2.5-coder-1.5b-instruct/
+    (or trust config.yaml's HF-id fallback)"
+   "Training corpus present in ../training-data/*.jsonl"
+   "Held-out marker verified on every source JSONL header")
+
+  :dry-run
+  "Verifies loader + tokenizer + held-out contract WITHOUT touching the model:
+     cd motoi-scheme/training
+     python train.py --config config.yaml --dry-run
+   Expected output: loaded pair counts per book, 0-leak assertion, tokenizer
+   vocab_size, 3 sample encodings with label-mask stats."
+
+  :real-run-single-gpu
+  "Single H100 80GB (or A100 80GB):
+     cd motoi-scheme/training
+     python train.py --config config.yaml
+   Expected wall clock: ~4-8 hours per epoch on 47-54k pairs at 1.5B FP16.
+   Total ~12-24 hours for 3 epochs."
+
+  :real-run-multi-gpu
+  "Multi-GPU via accelerate (auto-detects):
+     accelerate config       # first time only
+     accelerate launch train.py --config config.yaml
+   Adjust per_device_train_batch_size + gradient_accumulation_steps in
+   config.yaml so effective batch stays at 128."
+
+  :consumer-hardware-fallback
+  "If only consumer GPU (RTX 4090 24GB) is available, full FT of 1.5B in
+   BF16 does NOT fit cleanly. Two options:
+     (a) LoRA (rank 32, all linear layers) — cheaper but risks intruder-
+         dimensions problem per research doc section 2.
+     (b) 8-bit optimizer + gradient checkpointing + micro-batch 1.
+   Option (b) is preferred if compute time is available. Neither option
+   is wired into this skeleton yet — add bitsandbytes import + LoRA
+   config when the compute environment is known."
+
+  :what-to-check-during-run
+  ("training loss curve — should be smooth-declining across epochs 1-3"
+   "eval loss on held-out — should track training loss without diverging
+    (divergence > 0.3 nats = over-specialization warning)"
+   "grad norm — should stay < max_grad_norm (1.0); frequent clipping is a
+    warning sign"
+   "verb-recall on held-out — logged after training; target > 85% per
+    research doc section 7")
+
+  :what-to-check-after-run
+  ("Held-out loss on top of training loss — record both, plot"
+   "Verb-recall percentage — the primary go/no-go metric"
+   "Manual spot-check: sample 20 generations from held-out prompts, eyeball
+    for hallucinated verbs / broken S-expressions / persona drift"
+   "MMLU-STEM subset for curriculum-literacy regression (needs eval harness
+    — separate lane)"))
+
+;; ==========================================================================
+;; WHAT STILL GATES AN ACTUAL TRAINING RUN
+;; ==========================================================================
+
+(what-still-gates-training
+  :blockers
+  ((:id "corpus-balance-and-coverage"
+    :description
+    "Current training-data/ has ~16,873 pairs. Research doc target is
+     47-54k. Wave-3 authoring (books-of-ai, remaining STARVED-verb pairs,
+     Cortex-wire-up, SLAT-fluency) still needs to land per ROADMAP gap 9.
+     Also, per-verb coverage constraint (>= 20 pairs per CORE verb across
+     >= 3 idiomatic contexts) is NOT yet enforced at corpus-build time."
+    :owner "Corpus authoring lane"
+    :dependency-for-training "HARD BLOCKER for a Round-1 that is
+                              defensible against MultiPL-T Racket baseline")
+
+   (:id "core-runtime-completion"
+    :description
+    "ROADMAP gap 1 (pass-3 migration — scheme-lang modules → motoi-scheme/src/)
+     is not yet dispatched. Without the modules, the reference is
+     partially aspirational — programs that use fb/*, audio/*, animation/*
+     verbs cannot be verified end-to-end during eval. Verb-recall metric
+     (top-verb string match) does NOT require runtime, but composition
+     pass@1 (MultiPL-T-style — generated Motoi program must actually run)
+     does. Blocks the strong eval; the weak eval (verb-recall + held-out
+     loss) can run without it."
+    :owner "Runtime migration lane (ROADMAP gap 1)"
+    :dependency-for-training "SOFT BLOCKER — training can proceed, but
+                              composition pass@1 is not measurable until
+                              runtime lands")
+
+   (:id "gpu-access"
+    :description
+    "Training assumes single H100 80GB. Author rig is Apple Silicon
+     (M-series). Options: rent a cloud H100 for ~$2-4/hour × ~24 hours
+     = ~$50-100 per full run, or use RTX 4090 with LoRA fallback per
+     :consumer-hardware-fallback above. Decision + wiring not landed."
+    :owner "Alfred (compute-budget decision)"
+    :dependency-for-training "HARD BLOCKER for a real run")
+
+   (:id "tokenizer-extension-decision"
+    :description
+    "Tokenizer sanity check landed at avg 3.00 subwords/verb — exactly on
+     the decision-gate threshold. Recommendation is to defer extension for
+     Round 1 and revisit if verb-recall regresses on the easing/motion
+     families. Decision needed BEFORE Round 2 if Round 1 flags it."
+    :owner "The Engineer (post Round-1 diagnostic)"
+    :dependency-for-training "NOT a blocker for Round 1")
+
+   (:id "eval-harness-composition-passrate"
+    :description
+    "Verb-recall (implemented in train.py) is a coarse hallucination probe.
+     Composition pass@1 requires: (a) generating Motoi programs from
+     held-out prompts, (b) running each under the Motoi runtime,
+     (c) scoring by execution result. Needs a run-and-score harness the
+     skeleton does not include. See research/small-model-dsl-teaching
+     section 6 verification-plan."
+    :owner "Eval-harness lane (not yet dispatched)"
+    :dependency-for-training "SOFT BLOCKER — first-run can use verb-recall
+                              alone; composition pass@1 wanted by Round 2")
+
+   (:id "persona-refusal-preservation-eval"
+    :description
+    "Research doc section 6 requires: baseline persona-voice + refusal
+     probes on base model BEFORE training; same probes on trained model
+     AFTER training; comparison. Neither the probe set nor the scoring
+     rubric is authored. Non-zero risk of shipping a Copilot that lost
+     Qwen's refusal alignment."
+    :owner "Persona/refusal probe-author lane"
+    :dependency-for-training "SOFT BLOCKER — first-run is measurable
+                              without it, but shipping without is unsafe"))
+
+  :what-can-fire-now
+  ("Dry-run of train.py against the current corpus — verifies loader +
+    tokenizer + held-out contract"
+   "Training a probe run on a SUBSET (e.g. 1000 pairs, 1 epoch) to smoke-
+    test the trainer wiring — catches config bugs without burning compute"
+   "Verb-recall metric can be computed against BASE Qwen2.5-Coder-1.5B
+    (untrained) to establish a floor"))
+
+;; ==========================================================================
+;; DECISIONS LOCKED
+;; ==========================================================================
+
+(decisions-locked
+  :base-model "Qwen/Qwen2.5-Coder-1.5B-Instruct — per ROADMAP gap 9 and research doc"
+  :method     "Full fine-tune, not LoRA — per research doc section 2 (intruder-dimensions evidence)"
+  :epochs     "3 — per EvoLM (2506.16029) OOD-peak curve"
+  :lr         "5e-5 with cosine decay, 3% warmup"
+  :batch      "128 effective (per-device 4 × grad-accum 32 on single H100)"
+  :seq-length "4096 — Motoi is compact; most pairs fit"
+  :seed       "20260716 — matches held-out carve seed, one-seed invariant"
+  :chat-template "Qwen2.5-Coder-Instruct's built-in template — no override"
+  :dtype      "bfloat16 for training; FP16 GGUF for shipping")
+
+;; ==========================================================================
+;; HELD-OUT CONTRACT (mirrored from training-data/held-out/README.slat)
+;; ==========================================================================
+
+(heldout-contract
+  :headline "Any pair with `held_out: true` is filtered from the training stream."
+  :implementation
+  "train.py:iter_pairs() checks `rec.get('held_out')` and skips. After
+   corpus load, train.py:main() computes the intersection of
+   (_source_file, _source_line) keys between train + heldout — a non-zero
+   intersection raises RuntimeError before any GPU work. This is the
+   guard-rail against a corpus-refresh silently reintroducing held-out
+   pairs into training."
+  :seed-invariant
+  "The seed in config.yaml (20260716) MATCHES the seed used to carve the
+   held-out. Same seed everywhere — training shuffle, held-out carve,
+   verb-recall sampling. Simplifies reproducibility.")
+
+;; ==========================================================================
+;; SUCCESS CRITERIA (from research doc section 6)
+;; ==========================================================================
+
+(success-criteria
+  :verb-recall           "> 85% top-verb match on held-out CODE pairs"
+  :composition-pass-at-1 "> 40% on 200 held-out task-specifications (MultiPL-T Racket floor)"
+  :persona-voice         "Blind-rated within 5% of pre-training baseline"
+  :refusal-rate          "Within 5% of pre-training baseline on 20 OOD probes"
+  :curriculum-literacy   "No MMLU-STEM regression (< 5% drop)"
+  :escalation
+  ("If verb-recall < 85% OR composition pass@1 < 30% after 3 epochs with
+    all mitigations: escalate to Qwen2.5-Coder-3B-Instruct."
+   "Do NOT jump to 7B on a single-round failure — 1.5B → 3B is the
+    highest-ROI step per research doc section 7."))
+
+;; ==========================================================================
+;; NON-GOALS FOR THIS SKELETON
+;; ==========================================================================
+
+(non-goals
+  ("Not a distributed-training coordinator (deepspeed / FSDP) — single-GPU
+    or vanilla accelerate is enough at 1.5B"
+   "Not a data-preprocessing pipeline (that's motoi-scheme/scratch/*extractor*.py)"
+   "Not a serving stack — GGUF conversion + llama.cpp / Ollama publish is
+    a separate lane"
+   "Not a hparam sweeper — hparams are LOCKED from research doc; sweeping
+    them without doc update is out of scope"
+   "Not Forge — Forge stays with Sakura in curator/; this is Motoi-only"))
+
+;; ==========================================================================
+;; END
+;; ==========================================================================

@@ -84,6 +84,6 @@ The following exist in `src/` but are held internal pending rework:
 
 ## See also
 
-- `Scheme/MOTOI-SCHEME-REFERENCE.slat` — the canonical language reference. When code and reference disagree, the reference wins.
-- `Spec/dialect.slat` — the dialect schema each fork declares against.
+- `scheme/MOTOI-SCHEME-REFERENCE.slat` — the canonical language reference. When code and reference disagree, the reference wins.
+- `spec/dialect.slat` — the dialect schema each fork declares against.
 - `CLAUDE.md` — per-repo agent guidance.

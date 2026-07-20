@@ -297,6 +297,76 @@ function applyTransformer(tr, useForm, fuel) {
   throw new Error(`macro: no syntax-rules clause matched ${useForm[0] && useForm[0].name}`)
 }
 
+// ── R7RS §4.2.4 do — built-in desugar ────────────────────────────────────
+//
+// (do ((var init [step]) ...) (test result ...) body ...)
+//   ==>
+// (let loop~N ((var init) ...)
+//   (if test
+//       (begin result ... )                ;; or unspecified if no results
+//       (begin body ... (loop~N step ...))))
+//
+// * `step` is optional per R7RS; when omitted it defaults to `var` (the
+//   binding is left unchanged for the next iteration).
+// * `result ...` is optional; when absent the loop returns unspecified —
+//   R7RS `(if #f #f)`. We emit that literally for the empty-result case.
+// * `body ...` is optional; when absent the loop does no per-iteration
+//   work aside from the step update and test.
+// * The loop name is a fresh gensym so it can't collide with any name
+//   the user introduced. Uses the existing hygiene machinery.
+function desugarDo(form) {
+  // form = [do, bindings, testClause, body...]
+  if (!Array.isArray(form) || form.length < 3) {
+    throw new Error('do: expected (do ((var init step) ...) (test result ...) body ...)')
+  }
+  const bindings = form[1]
+  const testClause = form[2]
+  const body = form.slice(3)
+
+  if (!Array.isArray(bindings)) {
+    throw new Error('do: bindings must be a list')
+  }
+  if (!Array.isArray(testClause) || testClause.length < 1) {
+    throw new Error('do: test clause must be (test result ...)')
+  }
+
+  const vars = []
+  const inits = []
+  const steps = []
+  for (const b of bindings) {
+    if (!Array.isArray(b) || b.length < 2 || b.length > 3 || !(b[0] instanceof Sym)) {
+      throw new Error('do: each binding must be (var init [step])')
+    }
+    vars.push(b[0])
+    inits.push(b[1])
+    // step defaults to var if omitted (R7RS: binding unchanged next iter)
+    steps.push(b.length === 3 ? b[2] : b[0])
+  }
+
+  const test = testClause[0]
+  const results = testClause.slice(1)
+
+  const loopName = gensym('do-loop')
+
+  // (begin result ...) — or the R7RS unspecified sentinel if no results.
+  const thenBranch = results.length === 0
+    ? [sym('if'), false, false]                  // (if #f #f) — unspecified
+    : results.length === 1
+      ? results[0]
+      : [sym('begin'), ...results]
+
+  // Body iteration: (begin body ... (loop step ...))
+  const stepCall = [loopName, ...steps]
+  const elseBranch = body.length === 0
+    ? stepCall
+    : [sym('begin'), ...body, stepCall]
+
+  // Named-let: (let loop~N ((var init) ...) (if test then else))
+  const namedLetBindings = vars.map((v, i) => [v, inits[i]])
+  return [sym('let'), loopName, namedLetBindings,
+          [sym('if'), test, thenBranch, elseBranch]]
+}
+
 // ── the expansion pass ────────────────────────────────────────────────────
 //
 // expandTop(forms, opts) walks a top-level program, collecting
@@ -366,6 +436,20 @@ function expandForm(form, table, fuel, depth = 0) {
     }
     // `quote` subtree is data — do not expand inside it.
     if (head.name === 'quote') return form
+
+    // R7RS §4.2.4 `do` — built-in desugaring to named-let (Wave 0, per
+    // architect-motoi-core-runtime-completion-2026-07-16 §4 :do-loop).
+    // Kept at the macro layer (not interp.js) so the 3B backup base
+    // surface stays clean — interpreter core doesn't grow. Runs BEFORE
+    // user-macro-table lookup so user shadowing of `do` still works if
+    // they explicitly redefine it (rare, but preserved).
+    if (head.name === 'do' && !table.has('do')) {
+      const rewritten = desugarDo(form)
+      const result = expandForm(rewritten, table, fuel, depth + 1)
+      const usePos = posOf(form)
+      if (usePos) tagPos(result, usePos)
+      return result
+    }
 
     // A macro use — expand, then RE-EXPAND the result (macros can emit
     // macros). Bounded by fuel AND depth. The expanded form inherits the

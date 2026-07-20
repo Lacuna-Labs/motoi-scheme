@@ -1,0 +1,232 @@
+;; ═══════════════════════════════════════════════════════════════
+;; VIRTUAL SHAPE VOCABULARY — Motoi Compat Contract
+;;
+;; The small standard shape descriptors any Motoi verb's
+;; :virtual-shape field can use.
+;;
+;; PURPOSE:
+;;   When a variant lacks the primitives to satisfy a verb's
+;;   :reduction, Rosetta emits a :virtual binding. The virtual
+;;   binding is a shape-conformant STUB — a lambda that returns
+;;   a structurally-correct sentinel value declared by the verb's
+;;   :virtual-shape.
+;;
+;;   This vocabulary is the closed set of :kinds a verb author
+;;   may use in :virtual-shape. Small vocabulary is a feature:
+;;   the more kinds, the harder Rosetta's virtualization
+;;   contract is to reason about.
+;;
+;; DOCTRINE:
+;;   [[identity-slat-rosetta-compat-architecture-2026-07-19]]
+;;   [[variant-not-dialect-terminology-2026-07-19]]
+;;   [[no-contaminants-provenance-rule-2026-07-17]]
+;;
+;; RECORD SHAPE per shape kind:
+;;   (shape
+;;     :kind <symbol>
+;;     :summary "<one line>"
+;;     :declaration-syntax "<the SLAT sub-form used in a verb's :virtual-shape>"
+;;     :slots (<attr> ...)                      ;; auxiliary attrs the shape carries
+;;     :example-real "<a real value of this shape>"
+;;     :example-virtual "<the virtual sentinel Rosetta returns when the verb is virtualized>"
+;;     :meaningful-on-virtual (<verb-or-op> ...) ;; operations that behave meaningfully on the sentinel
+;;     :notes "<one paragraph>")
+;;
+;; Sentinel design principle:
+;;   A virtual sentinel must satisfy the type predicates a caller
+;;   might apply to a real value of the shape. E.g., a virtualized
+;;   port sentinel satisfies (port?) and (input-port?) so that
+;;   downstream code branching on those predicates does not crash.
+;;   Reads/writes on the sentinel return declared defaults (EOF for
+;;   reads, void for writes) so that downstream code proceeds without
+;;   propagating an error.
+;;
+;; ═══════════════════════════════════════════════════════════════
+(dialect :applies ("motoi") :note "Virtual shape vocabulary — canonical Motoi-side declaration. Consumed by verb authors when declaring :virtual-shape and by Rosetta when generating virtual sentinels.")
+
+(schema
+  :version "1.0"
+  :date "2026-07-19"
+  :approved-by "Alfred (2026-07-19): 'small standard, ten to fifteen shape kinds, one paragraph each'"
+  :extension-policy "New shape kinds require a doctrine memory + Alfred cosign. Small vocabulary is load-bearing — do not grow it casually."
+  :vocabulary-count 14)
+
+;; ─── 1. port ──────────────────────────────────────────────
+
+(shape
+  :kind port
+  :summary "A textual or binary port for I/O."
+  :declaration-syntax "(:kind port :direction <in|out|inout> :closable <bool> :readable-with <op...> :writable-with <op...> :binary <bool>)"
+  :slots (:direction :closable :readable-with :writable-with :binary)
+  :example-real "(open-input-file \"path\") -> #<input-port>"
+  :example-virtual "#<virtual-port :direction in :closable #t :binary #f :contents-empty #t>"
+  :meaningful-on-virtual (port? input-port? output-port? textual-port? binary-port? close-port read-char read-u8 write-char write-u8)
+  :notes "Virtual port sentinels satisfy the R7RS port predicates so branching survives. Reads return eof-object immediately (as if the port were empty). Writes are dropped silently. close-port is a no-op that returns void. The sentinel is opaque; program logic that only branches on shape/direction/binary/closable proceeds without change.")
+
+;; ─── 2. record ────────────────────────────────────────────
+
+(shape
+  :kind record
+  :summary "A structured record with named fields."
+  :declaration-syntax "(:kind record :type-name <symbol> :fields ((<field> <sub-shape>) ...))"
+  :slots (:type-name :fields)
+  :example-real "#<my-record foo=1 bar=\"x\">"
+  :example-virtual "#<virtual-record :type-name my-record :fields ((foo :virtual) (bar :virtual))>"
+  :meaningful-on-virtual (<record>? <field-accessor>)
+  :notes "The virtual sentinel satisfies the type predicate produced by define-record-type. Field accessors return virtual sentinels of the declared field :sub-shape (or virtualized #f when the sub-shape is a scalar boolean). No mutation is honored (mutators are no-ops).")
+
+;; ─── 3. list-of ───────────────────────────────────────────
+
+(shape
+  :kind list-of
+  :summary "A proper list whose elements are of a declared shape."
+  :declaration-syntax "(:kind list-of :element-kind <sub-shape> :length-hint <integer|:unbounded>)"
+  :slots (:element-kind :length-hint)
+  :example-real "'(1 2 3) ; list-of number"
+  :example-virtual "'()  ; empty list is a valid list-of anything"
+  :meaningful-on-virtual (list? pair? null? length car cdr map for-each)
+  :notes "Empty list is the safe virtual sentinel: it satisfies list? and null?, terminates iteration immediately in map/for-each, and carries no data to leak inconsistent state. Callers that require non-empty lists must guard with null? — this is idiomatic Scheme anyway.")
+
+;; ─── 4. number ────────────────────────────────────────────
+
+(shape
+  :kind number
+  :summary "A numeric value with optional range and exactness constraints."
+  :declaration-syntax "(:kind number :range (<min> <max>) :exactness <exact|inexact|either> :domain <integer|rational|real|complex>)"
+  :slots (:range :exactness :domain)
+  :example-real "42 ; number in range [0, +inf)"
+  :example-virtual "0 ; conservative default within declared range, or nearest bound"
+  :meaningful-on-virtual (number? = < > <= >= zero? + - * / abs)
+  :notes "Virtual sentinel defaults to 0 when 0 is within :range, else to :range min. Arithmetic on the sentinel returns further sentinels of the same shape (0 + 0 = 0 keeps working). The exactness slot lets Rosetta pick 0 vs 0.0 correctly.")
+
+;; ─── 5. string ────────────────────────────────────────────
+
+(shape
+  :kind string
+  :summary "A textual string with optional length hint and encoding."
+  :declaration-syntax "(:kind string :length-hint <integer|:unbounded> :encoding <utf8|ascii|opaque>)"
+  :slots (:length-hint :encoding)
+  :example-real "\"hello\""
+  :example-virtual "\"\""
+  :meaningful-on-virtual (string? string-length string-append string=? substring)
+  :notes "Empty string is the safe virtual sentinel: satisfies string?, has length 0, concatenation is identity, substring on any range returns \"\". Caller code that branches on string-length > 0 sees the empty-string branch — a graceful null path.")
+
+;; ─── 6. symbol ────────────────────────────────────────────
+
+(shape
+  :kind symbol
+  :summary "A symbolic name."
+  :declaration-syntax "(:kind symbol :name-hint <symbol|:any> :from-set (<sym> ...))"
+  :slots (:name-hint :from-set)
+  :example-real "'ready"
+  :example-virtual "'virtual-symbol"
+  :meaningful-on-virtual (symbol? eq? symbol=? symbol->string)
+  :notes "Virtual sentinel is a fixed symbol 'virtual-symbol (or, if :from-set is declared, the first symbol in that set). Callers using symbol dispatch (case, eq?) will see the sentinel and can add a virtual-symbol match arm if they need to. Otherwise the case falls through to the else clause, which is the correct null behavior.")
+
+;; ─── 7. boolean ───────────────────────────────────────────
+
+(shape
+  :kind boolean
+  :summary "A Scheme boolean (#t or #f)."
+  :declaration-syntax "(:kind boolean :default-virtual <#t|#f>)"
+  :slots (:default-virtual)
+  :example-real "#t"
+  :example-virtual "#f"
+  :meaningful-on-virtual (boolean? not eq? boolean=? if when unless)
+  :notes "Virtual sentinel defaults to #f (Scheme's convention for 'no answer'), overridable by :default-virtual. Callers branching on the result take the #f branch — usually the safe path. If a verb needs #t as its virtual default (e.g., 'is this system healthy?' → #t so client doesn't panic), the verb author sets :default-virtual #t.")
+
+;; ─── 8. procedure ─────────────────────────────────────────
+
+(shape
+  :kind procedure
+  :summary "A first-class callable procedure."
+  :declaration-syntax "(:kind procedure :signature (<arg-shape> ...) -> <return-shape> :arity <n|<n,m>|:variadic>)"
+  :slots (:signature :arity)
+  :example-real "(lambda (x) (* x x))"
+  :example-virtual "(lambda args <virtual return-shape sentinel>)"
+  :meaningful-on-virtual (procedure? apply call-with-values)
+  :notes "Virtual sentinel is a lambda of the declared arity that ignores its arguments and returns the virtual sentinel of the declared :return-shape. Callers who apply the procedure receive a shape-conformant no-op result. Higher-order code (map, for-each) keeps working — the map produces a list of sentinels.")
+
+;; ─── 9. promise ───────────────────────────────────────────
+
+(shape
+  :kind promise
+  :summary "A delayed computation (R7RS §4.2.5)."
+  :declaration-syntax "(:kind promise :resolves-to <sub-shape>)"
+  :slots (:resolves-to)
+  :example-real "(delay (+ 1 2))"
+  :example-virtual "(make-promise <virtual sub-shape sentinel>)"
+  :meaningful-on-virtual (force make-promise)
+  :notes "Virtual sentinel is a pre-forced promise (via make-promise) that carries the virtual sentinel of :resolves-to. Calling force on it returns the inner sentinel — the caller sees a valid resolved promise, just of a null value.")
+
+;; ─── 10. hash-table ───────────────────────────────────────
+
+(shape
+  :kind hash-table
+  :summary "A key-value hash-table (SRFI-69 shape; some variants may map to R7RS mapping libraries)."
+  :declaration-syntax "(:kind hash-table :key-kind <sub-shape> :value-kind <sub-shape> :size-hint <integer|:unbounded>)"
+  :slots (:key-kind :value-kind :size-hint)
+  :example-real "(make-hash-table)"
+  :example-virtual "an empty hash-table (or opaque record marked virtual-hash-table if the variant lacks hash-tables)"
+  :meaningful-on-virtual (hash-table? hash-table-ref hash-table-size hash-table-keys)
+  :notes "Empty hash-table is the safe virtual sentinel: satisfies the predicate, size 0, keys and values return '(), hash-table-ref returns the caller's default. If a variant does not implement hash-tables at all, Rosetta emits an opaque record with a :virtual-hash-table tag; the variant's runtime must recognize this tag.")
+
+;; ─── 11. bytevector ───────────────────────────────────────
+
+(shape
+  :kind bytevector
+  :summary "A vector of bytes (u8), R7RS §6.9."
+  :declaration-syntax "(:kind bytevector :length-hint <integer|:unbounded>)"
+  :slots (:length-hint)
+  :example-real "#u8(1 2 3)"
+  :example-virtual "#u8()"
+  :meaningful-on-virtual (bytevector? bytevector-length bytevector-copy utf8->string)
+  :notes "Empty bytevector is the safe virtual sentinel: satisfies bytevector?, length 0, decoding to string yields \"\". Iteration terminates immediately.")
+
+;; ─── 12. effect-channel ──────────────────────────────────
+
+(shape
+  :kind effect-channel
+  :summary "An abstract effect channel (framebuffer / audio / sensor / actuator / remote-service)."
+  :declaration-syntax "(:kind effect-channel :target <symbol> :as <sub-shape> :direction <in|out|both>)"
+  :slots (:target :as :direction)
+  :example-real "a framebuffer handle, or a subscribed cortex stream"
+  :example-virtual "an opaque record tagged with :virtual-channel :target <target>, whose ops are no-ops"
+  :meaningful-on-virtual (channel-alive? channel-target)
+  :notes "Effect channels represent long-lived side-effect resources whose implementations are variant-specific (Sakura may have a screen, a headless Lacuna may not). The virtual sentinel is a tagged record that satisfies the channel predicate and reports its declared :target. Reads produce the virtual :as sentinel; writes are dropped. Programs that only need to *branch* on 'do I have a channel to X?' see #t for channel-alive?, or the verb author sets :direction and the shape can honestly report #f.")
+
+;; ─── 13. never ────────────────────────────────────────────
+
+(shape
+  :kind never
+  :summary "The verb never returns (e.g., exit, error, infinite loop)."
+  :declaration-syntax "(:kind never)"
+  :slots ()
+  :example-real "(exit 0) does not return"
+  :example-virtual "the virtual stub either raises a specific exception the caller can guard, or performs an emergency-exit — verb author declares which via :on-virtual (raise|exit)"
+  :meaningful-on-virtual ()
+  :notes "For verbs that never return (control-transfer, exit, error), :kind never signals that Rosetta should not synthesize a value. The virtual stub instead performs an approximate escape: by default (raise 'motoi/virtual-unreachable), which the caller may guard. This is the only shape where the virtual is NOT a value — it is a control effect. Use sparingly.")
+
+;; ─── 14. any ──────────────────────────────────────────────
+
+(shape
+  :kind any
+  :summary "Dynamic type — return type not statically known."
+  :declaration-syntax "(:kind any)"
+  :slots ()
+  :example-real "any Scheme value"
+  :example-virtual "#f"
+  :meaningful-on-virtual ()
+  :notes "Escape hatch for verbs whose return type is dynamic (e.g., eval, apply-when-argument-is-code). The virtual sentinel is #f — the most common 'no answer' value in Scheme. Verb authors should prefer more specific shapes; :kind any signals to reviewers that a more specific shape could not be extracted. If more than 10% of verbs use :kind any, we have a vocabulary gap.")
+
+;; ─── EOF marker ──────────────────────────────────────────
+
+(count
+  :shapes 14
+  :note "14 shape kinds. Extensions require doctrine memory + Alfred cosign.")
+
+;; End of virtual shape vocabulary.
+;;
+;; Consumed by:
+;;   IDENTITY-SLAT-V1.slat — verb :virtual-shape field declares a shape from this file
+;;   COMPAT-MANIFEST-SCHEMA.slat — Rosetta emits sentinels matching these shapes

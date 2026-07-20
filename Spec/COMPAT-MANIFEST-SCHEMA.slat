@@ -1,0 +1,225 @@
+;; ═══════════════════════════════════════════════════════════════
+;; COMPAT MANIFEST SCHEMA — Rosetta output format
+;;
+;; PURPOSE:
+;;   Defines the format Rosetta produces after reading a Motoi
+;;   identity SLAT + a variant's primitive registry + policy.
+;;   Variants load compat manifests at startup to know how to bind
+;;   each Motoi verb.
+;;
+;; DOCTRINE:
+;;   [[identity-slat-rosetta-compat-architecture-2026-07-19]] —
+;;     Rosetta emits one of four bindings per verb: :native | :reduced
+;;     | :virtual | :break.
+;;   [[variant-not-dialect-terminology-2026-07-19]] — this manifest is
+;;     what a VARIANT loads to satisfy the Motoi contract.
+;;   [[no-contaminants-provenance-rule-2026-07-17]] — every binding
+;;     traces to a specific verb record + a specific decision by the
+;;     Rosetta compilation algorithm. No LLM inference.
+;;
+;; RELATIONSHIPS:
+;;   IDENTITY-SLAT-V1.slat — the input format Rosetta consumes
+;;   R7RS-SMALL-PRIMITIVE-FLOOR.slat — the guaranteed floor
+;;   VIRTUAL-SHAPE-VOCABULARY.slat — where virtual sentinel kinds come from
+;;
+;; DETERMINISM CONTRACT:
+;;   Given the same (identity-slat, primitive-registry, policy), Rosetta
+;;   MUST produce the same manifest bit-for-bit. Compilation is a pure
+;;   function. This is enforced by:
+;;     - No wall-clock timestamps in bindings (only in header)
+;;     - No iteration-order dependence (verbs sorted lexicographically
+;;       before emit)
+;;     - No random tiebreaking — the algorithm is total
+;;
+;; FILE SHAPE:
+;;   One (manifest-header ...) record.
+;;   One (binding ...) record per verb in the source identity SLAT.
+;;   One (manifest-footer ...) record with counts + hashes.
+;;
+;; ═══════════════════════════════════════════════════════════════
+(dialect :applies ("motoi" "variants") :note "Emitted by Motoi-side Rosetta. Consumed by any variant runtime that accepts the Motoi contract.")
+
+;; ─── SCHEMA ────────────────────────────────────────────────
+
+(schema
+  :version "1.0"
+  :date "2026-07-19"
+  :approved-by "Alfred (2026-07-19): 'deterministic and locked in. Computer science and engineering.'"
+  :extension-policy "Adding a new binding kind is a MAJOR schema change. Adding a new binding field is minor.")
+
+;; ─── HEADER RECORD SCHEMA ─────────────────────────────────
+
+(header-schema
+  :required (:source-identity-slat-sha
+             :source-primitive-registry-sha
+             :source-policy-sha
+             :ts-compiled
+             :rosetta-version
+             :target-variant
+             :target-variant-version
+             :binding-count
+             :counts-by-kind)
+  :optional (:notes :cosigners)
+  :field-docs
+    ((:source-identity-slat-sha "SHA-256 of the input identity SLAT (matches its footer :identity-hash).")
+     (:source-primitive-registry-sha "SHA-256 of the variant's declared primitive registry.")
+     (:source-policy-sha "SHA-256 of the variant's declared policy (virtualization + break rules).")
+     (:ts-compiled "ISO-8601 timestamp of compilation. INFORMATIONAL ONLY — does not affect the manifest's semantic identity.")
+     (:rosetta-version "SemVer of the Rosetta compiler that produced this manifest.")
+     (:target-variant "Symbol identifying the target variant (e.g., sakura, lacuna).")
+     (:target-variant-version "SemVer of the target variant at compilation time.")
+     (:binding-count "Number of (binding ...) records that follow.")
+     (:counts-by-kind "Plist of (:native N :reduced M :virtual K :break J) summing to :binding-count. Emitted as a summary for humans; validator re-derives from records.")
+     (:notes "Free-text notes."))
+  :example
+    "(manifest-header
+       :source-identity-slat-sha \"sha256:...\"
+       :source-primitive-registry-sha \"sha256:...\"
+       :source-policy-sha \"sha256:...\"
+       :ts-compiled \"2026-08-01T12:00:00Z\"
+       :rosetta-version \"0.1.0\"
+       :target-variant sakura
+       :target-variant-version \"0.85.0\"
+       :binding-count 459
+       :counts-by-kind (:native 210 :reduced 187 :virtual 58 :break 4))")
+
+;; ─── BINDING RECORD SCHEMA — the load-bearing artifact ────
+
+(binding-schema
+  :required (:name :binding-kind)
+  :binding-kind-values (:native :reduced :virtual :break)
+  :fields-by-kind
+    ((:native
+        :required-additional (:variant-symbol)
+        :field-docs
+          ((:variant-symbol "The name (symbol) bound in the variant's runtime environment. Usually equal to the Motoi verb name but may differ if the variant uses aliases."))
+        :example
+          "(binding :name car :binding-kind :native :variant-symbol car)")
+     (:reduced
+        :required-additional (:reduction :primitives-required)
+        :field-docs
+          ((:reduction "The reduction lambda copied verbatim from the identity SLAT. The variant's runtime installs this as the binding for :name. All names in the reduction must be present in the variant's environment — that is the reason Rosetta chose :reduced.")
+           (:primitives-required "The list of primitive names the reduction requires. Redundant with :reduction; useful for auditors."))
+        :example
+          "(binding :name safe-divide :binding-kind :reduced :reduction (lambda (n d) (if (zero? d) 0 (/ n d))) :primitives-required (zero? / if))")
+     (:virtual
+        :required-additional (:virtual-shape :sentinel-generator :missing-primitives)
+        :field-docs
+          ((:virtual-shape "The :virtual-shape declaration copied from the identity SLAT.")
+           (:sentinel-generator "A lambda of the verb's arity that returns a sentinel value satisfying :virtual-shape. Generated by Rosetta from the shape vocabulary rules.")
+           (:missing-primitives "The list of primitive names that were absent from the variant's registry, causing the reduction path to fail. Auditable for later fill-in."))
+        :example
+          "(binding :name framebuffer/blit :binding-kind :virtual :virtual-shape (:kind boolean :default-virtual #f) :sentinel-generator (lambda args #f) :missing-primitives (fb/copy-rect))")
+     (:break
+        :required-additional (:reason :missing-primitives :policy-rule-id)
+        :field-docs
+          ((:reason "Human-readable one-line reason (comes from the policy rule that fired).")
+           (:missing-primitives "The primitive names that were absent from the variant's registry.")
+           (:policy-rule-id "The id of the policy rule that refused virtualization (auditable — variants can adjust policy and re-compile)."))
+        :example
+          "(binding :name sys/spawn-shell :binding-kind :break :reason \"Variant policy refuses virtualization of shell exec.\" :missing-primitives (sys/exec) :policy-rule-id \"policy-no-virtual-shell\")"))
+  :consistency-rules
+    (":name must appear exactly once across the manifest."
+     "For :binding-kind :reduced, every symbol in :reduction that is not a Scheme special form must be resolvable in the target variant's primitive registry."
+     "For :binding-kind :virtual, :virtual-shape :kind must be in VIRTUAL-SHAPE-VOCABULARY.slat; :sentinel-generator must be a lambda of the verb's declared arity."
+     "For :binding-kind :break, :missing-primitives must be non-empty."
+     "For :binding-kind :native, no reduction is emitted (variant uses its own implementation)."))
+
+;; ─── FOOTER RECORD SCHEMA ─────────────────────────────────
+
+(footer-schema
+  :required (:binding-count-actual
+             :manifest-hash
+             :recomputed-counts-by-kind)
+  :field-docs
+    ((:binding-count-actual "Actual number of (binding ...) records parsed. Must equal header :binding-count.")
+     (:manifest-hash "SHA-256 of the concatenation of all normalized (binding ...) records + the header WITH :ts-compiled ZEROED. Because :ts-compiled is informational, it is excluded from the hash so that identical (identity-slat, registry, policy) inputs produce identical manifest-hashes across time.")
+     (:recomputed-counts-by-kind "Recomputed :native/:reduced/:virtual/:break counts. Validator errors if they disagree with header :counts-by-kind.")))
+
+;; ─── ROSETTA COMPILATION ALGORITHM ────────────────────────
+
+(rosetta-algorithm
+  :name "Rosetta v0.1 compilation algorithm"
+  :inputs (identity-slat primitive-registry policy)
+  :output compat-manifest
+  :steps
+    ("1. Verify identity SLAT header hashes match locally cached floor + vocab SLATs. Refuse on mismatch."
+     "2. Run identity SLAT validators V01–V09 (fatal). Abort on failure."
+     "3. Build name-to-verb-record map from identity SLAT."
+     "4. Topologically sort verbs by reduction dependencies (V07). Cycles are fatal."
+     "5. For each verb V in reverse-topological order (i.e., leaves first):"
+     "     a. If V's :name is present in the variant's primitive-registry → emit (binding :name V :binding-kind :native ...)"
+     "     b. Else, walk V's :reduction free identifiers. If every non-syntactic identifier is either (a) in floor and provided by variant, or (b) a verb bound as :native or :reduced in a prior step → emit (binding :name V :binding-kind :reduced :reduction <copy> ...)"
+     "     c. Else consult policy. Compute the set of missing primitives = (:reduction free-ids - variant-provided)."
+     "        - If policy allows virtualization for V's :library or shape → emit (binding :name V :binding-kind :virtual :virtual-shape <copy> :sentinel-generator <derive> :missing-primitives <list>)"
+     "        - Else → emit (binding :name V :binding-kind :break :reason <from policy rule> :missing-primitives <list> :policy-rule-id <id>)"
+     "6. Sort bindings lexicographically by :name."
+     "7. Compute counts-by-kind."
+     "8. Emit header, bindings, footer. Compute manifest-hash with :ts-compiled zeroed.")
+  :guarantees
+    ("Deterministic: same inputs, same manifest-hash."
+     "Total: every verb in identity SLAT receives exactly one binding record."
+     "Traceable: :missing-primitives on :virtual/:break bindings show exactly why."
+     "Auditable: manifest is human-readable Scheme data."))
+
+;; ─── VALIDATOR RULES (for manifest consumers) ─────────────
+
+(validator-rule :id M01 :level fatal :summary "Every verb in source identity SLAT appears exactly once in the manifest.")
+(validator-rule :id M02 :level fatal :summary "Every :binding-kind :reduced binding's :reduction free identifiers resolve in the variant's environment (primitive registry ∪ other native/reduced bindings).")
+(validator-rule :id M03 :level fatal :summary "Every :binding-kind :virtual binding's :virtual-shape :kind is in VIRTUAL-SHAPE-VOCABULARY.slat.")
+(validator-rule :id M04 :level fatal :summary "Every :binding-kind :break binding has non-empty :missing-primitives.")
+(validator-rule :id M05 :level fatal :summary "Header :binding-count equals footer :binding-count-actual.")
+(validator-rule :id M06 :level fatal :summary "Header :counts-by-kind equals footer :recomputed-counts-by-kind.")
+(validator-rule :id M07 :level fatal :summary "Footer :manifest-hash matches recomputed hash (with :ts-compiled zeroed).")
+(validator-rule :id M08 :level fatal :summary "Bindings are sorted lexicographically by :name (canonicalization for hash stability).")
+(validator-rule :id M09 :level warn  :summary ":break count < 5% of total. High break count indicates the variant should extend its registry or loosen policy.")
+(validator-rule :id M10 :level warn  :summary "Variant version in header matches variant version in registry.")
+
+;; ─── LOADER CONTRACT (APPENDIX) ───────────────────────────
+
+(loader-contract
+  :audience "Variant runtime authors."
+  :notes
+    ("A variant's Motoi-compat loader is a 50-line Scheme routine that reads the manifest at startup and installs bindings into the variant's evaluation environment."
+     "The loader trusts the manifest — validation is Rosetta's job at compile time, not the loader's at load time. The loader should verify :manifest-hash on load but not re-run validators V01–V07."
+     "For each binding, the loader defines the Motoi verb name in the variant's environment according to :binding-kind."
+     "See appendix below for the canonical loader implementation.")
+  :appendix-loader
+    "
+;; Canonical Motoi-compat manifest loader — variant runtime side.
+;; Reads a manifest SLAT and installs bindings into env.
+;; This is the ONLY point where Motoi verbs become callable in the variant.
+
+(define (motoi/install-compat-manifest env manifest-path)
+  (let* ((raw       (slat/read-file manifest-path))
+         (header    (slat/find raw 'manifest-header))
+         (bindings  (slat/find-all raw 'binding))
+         (footer    (slat/find raw 'manifest-footer)))
+    (unless (slat/hash-verified? raw)
+      (error 'motoi/manifest-tampered manifest-path))
+    (for-each
+      (lambda (b)
+        (let ((name (slat/get b :name))
+              (kind (slat/get b :binding-kind)))
+          (case kind
+            ((:native)
+             (env-alias! env name (slat/get b :variant-symbol)))
+            ((:reduced)
+             (env-define! env name (slat/get b :reduction)))
+            ((:virtual)
+             (env-define! env name (slat/get b :sentinel-generator)))
+            ((:break)
+             (env-define! env name
+               (lambda args
+                 (error 'motoi/verb-broken
+                        name
+                        (slat/get b :reason)
+                        (slat/get b :missing-primitives))))))))
+      bindings)
+    (log/info 'motoi/manifest-installed
+              :verbs (length bindings)
+              :variant (slat/get header :target-variant)
+              :hash (slat/get footer :manifest-hash))))
+")
+
+;; End of COMPAT MANIFEST SCHEMA.

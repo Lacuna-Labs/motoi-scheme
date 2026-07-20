@@ -32,26 +32,90 @@
 // and even that is a defence-in-depth nicety; untrusted input shouldn't
 // reach the parser at all (it's data, not code).
 
-import { parse } from '../reader.js'
-import { Sym } from '../reader.js'
-import { expandProgram } from '../macro.js'
+import { parse, Sym } from './reader.js'
+import { expandProgram } from './macro.js'
 import { getVerbMeta, validateRegistry } from './verbRegistry.js'
-import { emit } from '../../lib/logbus.js'
-import { _setCurrentCaller, _getCurrentCaller } from '../../surface/card-api/index.js'
-import { getTier as canvasPowerGetTier } from '../../lib/canvasPower.js'
-import { write as chipWrite } from '../../lib/chipSink.js'
-import { chipEvent } from '../../lib/chipEvent.js'
-// LEGAL-FLOOR (Alfred 2026-06-14 02:12:34) — per-verb event log.
-// Every dispatcher accept/reject emits one start + one complete/fail
-// through `logEvent`. Sibling to the legacy logbus audit lines (kept
-// for back-compat); eventLog is the FOREVER CODE evidence layer.
-import { logEvent } from './eventLog.js'
-import { currentCorrelationId, withCorrelation, mintCorrelationId } from './correlationContext.js'
-// Multiplier #17 (show-reasoning) — every accepted dispatch publishes a
-// `reasoning` event on chatChipBus so the ReasoningDrawer can render
-// Intent / Route / Context / Prefs without any extra event-log wiring.
-// Best-effort: never wedges a dispatch.
-import { publish as chatChipPublish } from '../../lib/chatChipBus.js'
+
+// ── Hermetic side-effect seams (Motoi doctrine) ─────────────────────
+//
+// A dialect built on top of Motoi may need the dispatcher to write to
+// its own audit bus, event log, chip queue, correlation context, and
+// substrate-power throttle. Motoi is the BASE dialect and ships none
+// of those stacks — it must run hermetic. So we provide the smallest
+// possible local stand-ins here plus injection points a dialect can
+// wire up without patching this file.
+//
+// The default behaviours are the honest floor:
+//   emit / auditVerb / chipEmit / chatChipEmit  → no-op
+//   currentCaller                                → module-scope slot
+//   powerTier                                    → 'full'
+//   evLog.{start,complete,fail}                  → no-op handle
+//   correlationId                                → per-dispatch UUID-ish
+//
+// A dialect wires its own by calling `installDispatchHooks({...})`
+// before the first dispatchScheme() call. Any subset is honoured; the
+// rest keep the no-op floor.
+
+const _defaultHooks = {
+  emit:                () => {},
+  chipEmit:            () => {},
+  chipShape:           (x) => x,
+  chatChipEmit:        () => {},
+  evLog:               {
+    start:    () => ({}),
+    complete: () => {},
+    fail:     () => {},
+  },
+  currentCorrelationId: () => null,
+  withCorrelation:      (_id, fn) => fn(),
+  mintCorrelationId:    (prefix) =>
+    `${prefix || 'corr'}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+  powerTier:           () => 'full',
+  operatorId:          () => 'anonymous',
+}
+
+let _hooks = { ..._defaultHooks }
+
+/**
+ * Wire dialect-specific side-effect sinks into the dispatcher. Any
+ * omitted keys retain the hermetic no-op default. Callable more than
+ * once (later calls override earlier); intended to be called at
+ * substrate startup, before the first dispatchScheme.
+ */
+export function installDispatchHooks(hooks = {}) {
+  _hooks = { ..._defaultHooks, ...hooks }
+}
+
+/** Reset hooks to the hermetic defaults. Test-seam. */
+export function resetDispatchHooks() {
+  _hooks = { ..._defaultHooks }
+}
+
+// Current-caller carrier. In dialects with a card layer this lives in
+// the card surface API so nested (card-do ...) invocations don't
+// escalate tier. In Motoi we keep the exact same stack-disciplined
+// seam locally: a module-scope slot, get/set pair, honoured by
+// dispatchScheme's try/finally block.
+let _currentCaller = null
+function _setCurrentCaller(c) { _currentCaller = c }
+function _getCurrentCaller()  { return _currentCaller }
+export function currentDispatchCaller() { return _currentCaller }
+
+// Convenience getters that read from `_hooks` at call time (so a late
+// installDispatchHooks still takes effect for subsequent dispatches).
+const emit             = (...a) => _hooks.emit(...a)
+const chipEmit         = (...a) => _hooks.chipEmit(...a)
+const chipShape        = (x)    => _hooks.chipShape(x)
+const chatChipEmit     = (...a) => _hooks.chatChipEmit(...a)
+const evLog = {
+  start:    (...a) => _hooks.evLog.start(...a),
+  complete: (...a) => _hooks.evLog.complete(...a),
+  fail:     (...a) => _hooks.evLog.fail(...a),
+}
+const currentCorrelationId = () => _hooks.currentCorrelationId()
+const mintCorrelationId    = (p) => _hooks.mintCorrelationId(p)
+const withCorrelation      = (id, fn) => _hooks.withCorrelation(id, fn)
+const powerTierRead        = () => _hooks.powerTier()
 
 // Tier → permission set. Higher tiers inherit lower.
 //
@@ -172,15 +236,15 @@ const POWER_ALLOW = {
 }
 
 // Injectable reader so tests can pin the substrate tier without
-// touching the real canvasPower controller (which attaches battery /
-// visibility / frame-budget listeners on first read).
+// touching the live power controller (which in a dialect may attach
+// battery / visibility / frame-budget listeners on first read).
 let _powerTierReader = null
 export function __setPowerTierReader(fn) {
   _powerTierReader = typeof fn === 'function' ? fn : null
 }
 function substratePowerTier() {
   try {
-    const t = _powerTierReader ? _powerTierReader() : canvasPowerGetTier()
+    const t = _powerTierReader ? _powerTierReader() : powerTierRead()
     return POWER_ALLOW[t] ? t : 'full'
   } catch {
     return 'full'
@@ -192,14 +256,10 @@ function substratePowerTier() {
 // When a verb's registry meta declares `chip` ('paint.applied' /
 // 'motion.applied' / 'look.changed'), the dispatcher emits one chip.v1
 // envelope per accepted call — zero per-verb code. Best-effort: a chip
-// write must never fail a dispatch.
+// emission must never fail a dispatch.
 function _operatorId() {
-  try {
-    if (typeof localStorage === 'undefined') return 'anonymous'
-    return localStorage.getItem('curator.account.namespace') || 'anonymous'
-  } catch {
-    return 'anonymous'
-  }
+  try { return _hooks.operatorId() || 'anonymous' }
+  catch { return 'anonymous' }
 }
 
 // W1-6 (Abel §1.5, no-false-claims): a withStars-wrapped verb that fails
@@ -213,7 +273,7 @@ function isErrorEnvelope(value) {
 
 function emitVerbChip(call, meta, traceId) {
   try {
-    chipWrite(chipEvent({
+    chipEmit(chipShape({
       kind: meta.chip,
       platform: 'system',
       operator_id: _operatorId(),
@@ -224,7 +284,7 @@ function emitVerbChip(call, meta, traceId) {
       },
       tags: ['verb', meta.chip.split('.')[0]],
     }))
-  } catch { /* chipSink best-effort — never block a dispatch */ }
+  } catch { /* chip emission best-effort — never block a dispatch */ }
 }
 
 // Walk a parsed Scheme AST and yield every application form whose head
@@ -382,7 +442,7 @@ function trace(decision, payload) {
       summary: `${payload.verb}: ${decision}${payload.reason ? ' — ' + payload.reason : ''}`,
       detail: payload,
     })
-  } catch { /* logbus best-effort */ }
+  } catch { /* audit-bus best-effort */ }
 }
 
 // ── audit-line shape (v2.20.0-L2a) ──────────────────────────────────
@@ -390,7 +450,7 @@ function trace(decision, payload) {
 // The chip economy's audit-line FLOOR. Every verb call that survives
 // the gate chain emits one structured line; every verb call that the
 // gate chain rejects emits one too. Both shapes carry the same shared
-// fields so a downstream consumer (logbus, chipSink, future Cortex
+// fields so a downstream consumer (audit bus, chip sink, future
 // mirror) can grep on `traceId` to stitch together a single dispatch.
 //
 // Shape (verbatim — keep this comment + AUDIT_LINE_KEYS in sync):
@@ -443,7 +503,7 @@ function mintTraceId() {
 /**
  * auditVerb — emit ONE structured audit line per verb call.
  *
- * Sibling subscribers (logbus → chipSink → future Cortex mirror) read
+ * Sibling subscribers (audit-bus → chip sink → future mirror) read
  * the `detail` payload, which carries the verbatim shape above. The
  * legacy aggregated trace still fires AFTER the per-verb lines so any
  * existing listener that grepped on `dispatch.accepted` keeps working.
@@ -460,7 +520,7 @@ function auditVerb(decision, line) {
           : `${line.verb}: rejected — ${line.result && line.result.code}`,
       detail: line,
     })
-  } catch { /* logbus best-effort */ }
+  } catch { /* audit-bus best-effort */ }
 }
 
 // Build the per-verb audit line. Pulled into a helper so reject + accept
@@ -545,7 +605,7 @@ export function dispatchScheme(source, caller, runner) {
 
   // Mint a trace id at the top so every audit line in this dispatch —
   // accepts and rejects alike — can be stitched back together with one
-  // grep across the four sinks (logbus, chipSink, Atlas, Cortex).
+  // grep across the sinks (audit bus, chip queue, mirrors).
   const traceId = mintTraceId()
 
   // LEGAL-FLOOR (Alfred 2026-06-14): ensure correlation_id for the whole
@@ -574,14 +634,14 @@ export function dispatchScheme(source, caller, runner) {
     // envelope shape), so we emit start+fail in one tick. Best-effort —
     // an eventLog failure must NEVER block a dispatch.
     try {
-      const h = logEvent.start({
+      const h = evLog.start({
         verb: call.name,
         cart: callerCtx.address || null,
         caller: callerCtx.tier,
         args: call.args,
         correlation_id: correlationId,
       })
-      logEvent.fail(h, { error_class: code, error_message: reason })
+      evLog.fail(h, { error_class: code, error_message: reason })
     } catch { /* never wedge a dispatch */ }
     // Keep the legacy aggregated reject trace too — existing listeners
     // that grep `dispatch.rejected` shouldn't regress. Strip `meta`
@@ -772,7 +832,7 @@ export function dispatchScheme(source, caller, runner) {
     // NEVER block dispatch. start+complete (or start+fail) per gated
     // call.
     try {
-      const h = logEvent.start({
+      const h = evLog.start({
         verb: call.name,
         cart: callerCtx.address || null,
         caller: callerCtx.tier,
@@ -780,12 +840,12 @@ export function dispatchScheme(source, caller, runner) {
         correlation_id: correlationId,
       })
       if (runnerError) {
-        logEvent.fail(h, {
+        evLog.fail(h, {
           error_class: 'runtime',
           error_message: runnerError && runnerError.message ? runnerError.message : String(runnerError),
         })
       } else {
-        logEvent.complete(h, { result_value: value })
+        evLog.complete(h, { result_value: value })
       }
     } catch { /* never wedge a dispatch */ }
     // W2-5 / D-5 — auto-emit the verb's declared chip on success.
@@ -805,7 +865,7 @@ export function dispatchScheme(source, caller, runner) {
   }
 
   // Keep the legacy aggregated `dispatch.accepted` trace too. Existing
-  // listeners (e.g. the System card's logbus filter) grepped this
+  // listeners (e.g. a System card's audit-bus filter) grepped this
   // action; we don't break them. The detail payload now carries
   // traceId so the aggregated line can be cross-referenced with the
   // per-verb ones.
@@ -825,7 +885,7 @@ export function dispatchScheme(source, caller, runner) {
   try {
     const callerReasoning = (caller && caller.reasoning) || {}
     const routeVerbs = gatedCalls.map(({ call }) => call.name)
-    chatChipPublish('reasoning', {
+    chatChipEmit('reasoning', {
       traceId,
       understood_as:     callerReasoning.understood_as || null,
       route: {
