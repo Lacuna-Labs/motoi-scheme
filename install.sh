@@ -36,22 +36,39 @@ fi
 
 say "installing Motoi Scheme to $MOTOI_HOME"
 
+MOTOI_USER="$HOME/motoi"
+
 if [ -d "$MOTOI_HOME/.git" ]; then
   say "existing install found — pulling latest"
   (cd "$MOTOI_HOME" && git fetch origin && git checkout "$MOTOI_REF" && git pull --ff-only)
-elif [ -d "$MOTOI_HOME" ] && [ -z "$(ls -A "$MOTOI_HOME" 2>/dev/null)" ]; then
-  # Empty dir (common: a prior install died before .git was created).
-  # Remove it silently — no cruft, nothing to preserve.
-  rmdir "$MOTOI_HOME"
+elif [ -d "$MOTOI_HOME" ]; then
+  # $MOTOI_HOME exists but isn't a git checkout — probably a legacy install
+  # from before user-data moved to ~/motoi/. Preserve any user files, then
+  # remove and clone fresh. Never overwrites files already at ~/motoi/.
+  say "preserving legacy user data at ~/motoi/ before re-install"
+  mkdir -p "$MOTOI_USER"
+  for f in cortex.slat reading-state.slat; do
+    if [ -f "$MOTOI_HOME/$f" ] && [ ! -f "$MOTOI_USER/$f" ]; then
+      mv "$MOTOI_HOME/$f" "$MOTOI_USER/$f" && say "  moved $f → ~/motoi/"
+    fi
+  done
+  for d in artifacts carts saves; do
+    if [ -d "$MOTOI_HOME/$d" ]; then
+      mkdir -p "$MOTOI_USER/$d"
+      for item in "$MOTOI_HOME/$d"/*; do
+        [ -e "$item" ] || continue
+        name=$(basename "$item")
+        if [ ! -e "$MOTOI_USER/$d/$name" ]; then
+          mv "$item" "$MOTOI_USER/$d/$name"
+        fi
+      done
+      say "  merged $d/ → ~/motoi/$d/"
+    fi
+  done
+  say "removing legacy ~/.motoi/ install"
+  rm -rf "$MOTOI_HOME"
   say "cloning $REPO_URL"
   git clone --depth 1 --branch "$MOTOI_REF" "$REPO_URL" "$MOTOI_HOME"
-elif [ -e "$MOTOI_HOME" ]; then
-  # Something's there and it's not ours. Don't touch it; tell the user what to do.
-  die "$MOTOI_HOME exists but is not a Motoi git checkout.
-       Move it aside or delete it, then re-run this installer:
-         mv $MOTOI_HOME $MOTOI_HOME.old
-       or (if you're sure it's not yours):
-         rm -rf $MOTOI_HOME"
 else
   say "cloning $REPO_URL"
   git clone --depth 1 --branch "$MOTOI_REF" "$REPO_URL" "$MOTOI_HOME"

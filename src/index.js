@@ -107,7 +107,7 @@ export {
 // Version pin. Consumers can check at runtime:
 //   import { VERSION } from 'motoi-scheme'
 //   if (VERSION.split('.')[0] !== '0') throw new Error('expected motoi-scheme@0.x')
-export const VERSION = '0.1.0'
+export const VERSION = '0.75.0-beta'
 
 // Dispatcher — the parse → gate → run chokepoint. Ships hermetic with
 // no-op sinks; a dialect wires its own audit-bus / chip queue / event

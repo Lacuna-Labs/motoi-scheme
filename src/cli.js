@@ -22,6 +22,7 @@ import { emitDocs } from './docs-emitter.js'
 import { slatLoads, slatDumps, slatToJsonl, jsonlToSlat } from './slat.js'
 import { readFile, writeFile } from 'node:fs/promises'
 import { VERSION } from './index.js'
+import { migrateLegacyMotoiData } from './paths.js'
 import { startIdeServer } from './ide-server.js'
 import { startTui } from '../tui/tui.js'
 
@@ -129,6 +130,15 @@ function extractOptions(argv) {
 }
 
 export async function main(rawArgv = process.argv.slice(2)) {
+  // Migrate legacy ~/.motoi/{cortex.slat, reading-state.slat, artifacts/, carts/}
+  // into ~/motoi/. Idempotent; never clobbers. Silent unless something moves.
+  try {
+    const moved = migrateLegacyMotoiData()
+    if (moved.length > 0) {
+      process.stderr.write(`[motoi] migrated ${moved.length} legacy file(s) from ~/.motoi/ to ~/motoi/\n`)
+    }
+  } catch { /* soft-fail — migration is best-effort */ }
+
   let fuelBudget
   let argv
   let cliOpts
