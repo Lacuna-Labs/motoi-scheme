@@ -1,0 +1,3829 @@
+(slat-set
+  :doc-id            "SRE-CH-05-CORPUS-TO-GRAPH-DERIVATION-PROCEDURE"
+  :ts                #inst "2026-07-20T18:00:00Z"
+  :author            "Jess (Lacuna Engineering — RelEng lane)"
+  :for               "Alfred Peace-Lindner @ Lacuna Labs, and every future operator (human or agent) rerunning this pipeline"
+  :status            "ACTIVE — Mk 1 canonical runbook (approved 2026-07-20)"
+  :audience          [:alfred :sre :corpus-author :operator :sakura-team :future-agent]
+  :dialect           :motoi-eng
+  :training-eligible false
+  :confidentiality   :internal-eng
+  :composes-with     "memory/project_cpt_is_over_nouns.md (CPT is over nouns doctrine); memory/project_four_axis_graph_consolidation.md (four-axis graph consolidation); memory/project_signifier_signified_and_dialogue.md (signifier / signified / dialogue per concept); memory/project_graph_derivation_principle.md (graph derivation principle); engineering/JUNG-AXIS-GRAPH-NODE-SCHEMA.slat (node schema each surviving word maps into); engineering/LACUNA-ENG-CPT-SHAPES-RESEARCH-2026-07-20.md (why CPT presentation shapes matter); SRE-MANUAL/chapters/04-cpt-sft-authoring-per-data-type.slat (downstream authoring runbook consuming these seed lists)"
+
+  :section-0-purpose
+  """
+  This chapter documents the CORPUS → GRAPH DERIVATION PROCEDURE
+  Alfred approved on 2026-07-20. It is the deterministic path from
+  raw authored corpus (books + word-books + reference) to axis-
+  classified seed lists that populate the four Jung-axis graphs
+  (Sensation / Intuition / Thinking / Feeling).
+
+  The procedure is a pipeline of eight mechanical steps, all
+  reproducible from files on disk. Every step's inputs are files;
+  every step's outputs are TSV or SLAT. No LLM invents content.
+  No scraping. No external corpora. Rerun the same procedure over
+  the same corpus and you get the same output; rerun over an
+  updated corpus and the differences are semantically meaningful
+  (new nouns, shifted frequencies) rather than stochastic noise.
+
+  Read this chapter end-to-end before running any step. Then work
+  through the sections in order. Each step names its inputs, its
+  outputs, its script, and its verification check.
+
+  Who this is for:
+    · Anyone rerunning graph derivation on Motoi as the corpus
+      grows past its current 856-file / 25k-distinct-word state.
+    · The Sakura team, applying the same procedure to Sakura's
+      corpus to derive Sakura's own Pareto-cut axis seed lists.
+    · Any future agent tasked with 'give me the graph seed list'
+      — the answer is 'run this chapter'; do not improvise a
+      lexicon-based classifier or a word-frequency guess.
+
+  The pedagogical point (memory/project_graph_derivation_principle):
+  a graph node earns its place by RECURRENCE in the corpus. A word
+  that appears once is not part of the language; a word that appears
+  hundreds of times is a signifier the model must reify. The Pareto
+  cut is the principled place to draw the line between 'part of
+  the language' and 'incidental noise'. Downstream, each surviving
+  word becomes a graph node per JUNG-AXIS-GRAPH-NODE-SCHEMA, and
+  the graph feeds CPT extraction per chapter 4.
+  """
+
+  :section-1-preconditions
+  """
+  Before running the pipeline:
+
+  [ ] Books present and enumerable:
+      ls /Users/alfred/code/motoi-scheme/scheme-books/book-of-*/*.book.slatl
+      Expect: current run had 728 chapter files across 30+ books.
+
+  [ ] Word-books present and enumerable:
+      ls /Users/alfred/code/motoi-scheme/word-books/book-of-*/*.book.slatl
+      Expect: current run had 50 word-book chapter files.
+
+  [ ] Reference present:
+      ls /Users/alfred/code/motoi-scheme/Scheme/reference/*.slat
+      Expect: current run had 78 reference files.
+
+  [ ] Doctrine composes-with (READ FIRST):
+      · memory/project_cpt_is_over_nouns.md
+        CPT is over NOUNS not verbs — this is why we derive noun
+        seed lists here, not verb lists. Verbs come from the
+        reference; nouns must be derived from corpus recurrence.
+      · memory/project_four_axis_graph_consolidation.md
+        The 10 canonical graph types consolidate into 4 Jung axes:
+        Sensation (person/object/place/institution),
+        Intuition (concept/event/cultural-work/art-movement),
+        Thinking (do-and-dont), Feeling (register).
+      · memory/project_signifier_signified_and_dialogue.md
+        Each graph node carries a signifier (name), a signified
+        (concept content), and a per-node dialogue field.
+      · memory/project_graph_derivation_principle.md
+        Recurrence earns a place in the graph. Pareto is the cut.
+      · engineering/JUNG-AXIS-GRAPH-NODE-SCHEMA.slat
+        Per-axis node field schema each surviving word maps into.
+      · engineering/LACUNA-ENG-CPT-SHAPES-RESEARCH-2026-07-20.md
+        Downstream — why each graph node needs multi-shape CPT
+        presentation to become extractable knowledge.
+
+  [ ] Scripts drafted and versioned:
+      ls /Users/alfred/code/motoi-scheme/scripts/derive-graph-seeds/
+      Expect these files (author to skeletons below if missing):
+        01-extract-tokens.py     — Step 1 extractor
+        02-distribution.py       — Step 2 Zipf / percentile analysis
+        03-pareto-cut.py         — Step 3 canonical cut
+        04-drop-workhorses.py    — Step 4 top-100 drop
+        05-axis-classify.py      — Step 5 evidence-driven classifier
+        06-emit-seed-tsv.py      — Step 6 per-axis seed TSV writer
+        stopwords-scheme.txt     — the Scheme/language stopword list
+        stopwords-english.txt    — the English stopword list
+        workhorses.txt           — the top-100 workhorse-word drop list
+
+  [ ] Output directories prepared:
+      mkdir -p /Users/alfred/code/motoi-scheme/derived/graph-seeds/{raw,dist,cut,axis-seeds}
+        raw/       — Step 1 output (frequency TSV)
+        dist/      — Step 2 output (distribution stats)
+        cut/       — Step 3+4 output (after Pareto + workhorse drop)
+        axis-seeds/— Step 6 output (per-axis seed lists)
+
+  [ ] Runlog file opened:
+      /Users/alfred/code/motoi-scheme/derived/graph-seeds/RUN-<date>.log
+      Every step appends its command line + stdout summary here.
+      Reproducibility depends on the log.
+
+  Skip none. Pipeline failures caught early are cheap; failures
+  caught after axis-classification wastes agent-hours.
+  """
+
+  :section-2-extraction
+  """
+  STEP 1 — EXTRACTION (mechanical, deterministic).
+
+  GOAL: scan every corpus file, tokenize to lowercase content-words,
+  drop stopwords, produce a frequency map (word → count) as TSV.
+
+  INPUTS:
+    /Users/alfred/code/motoi-scheme/scheme-books/book-of-*/*.book.slatl
+    /Users/alfred/code/motoi-scheme/word-books/book-of-*/*.book.slatl
+    /Users/alfred/code/motoi-scheme/Scheme/reference/*.slat
+
+  OUTPUT:
+    /Users/alfred/code/motoi-scheme/derived/graph-seeds/raw/frequency.tsv
+    format: <count>\\t<word>  (sorted by count descending, then word ascending)
+
+  TOKENIZER:
+    Regex: [a-z]+
+    Rules applied in order:
+      (a) lowercase the entire file text
+      (b) split on the regex above (numbers and punctuation are
+          natural delimiters, NOT preserved as tokens)
+      (c) drop tokens with length < 3
+      (d) drop pure-numeric tokens (redundant after regex but kept
+          for defense-in-depth against future tokenizer changes)
+      (e) drop tokens in the Scheme/language stopword list
+      (f) drop tokens in the common-English stopword list
+
+  SCHEME / LANGUAGE STOPWORD LIST (full — commit to
+  scripts/derive-graph-seeds/stopwords-scheme.txt verbatim):
+
+    define lambda let if cond else car cdr cons list pair null
+    true false quote quasiquote unquote and or not when unless
+    begin do map for-each apply eval error set letrec delay
+    force dynamic-wind call-with-current-continuation call-cc
+    values receive module import export dialect applies name
+    canonical provenance source book chapter code verb kind
+    signature contract examples note ref id level novice
+    intermediate expert
+
+  ENGLISH STOPWORD LIST (full — commit to
+  scripts/derive-graph-seeds/stopwords-english.txt verbatim):
+
+    the a an and or but if of to in on at for from by with as
+    is are was were be been being have has had do does did will
+    would should could may might must can shall this that these
+    those it its there here their they them we us you your our
+    my me mine yours ours his her hers he she who whom whose
+    which what where when why how all any some no not none only
+    just also very much many few most more less than then so
+    such because while about into over under above below between
+    through during before after around across along without within
+    up down out off again still yet already always never sometimes
+    often once twice each every other another same different way
+    ways thing things something anything nothing everything one
+    two three four five six seven eight nine ten first second
+    third last next new old good bad big small long short high
+    low make made makes making take took taken taking get got
+    gets getting go went gone going come came comes coming say
+    said says saying see saw seen seeing know knew known knowing
+    think thought thinking want wanted wants wanting use used
+    uses using find found finds finding tell told tells telling
+    ask asked asks asking work worked works working seem seemed
+    seems seeming feel felt feels feeling try tried tries trying
+    leave left leaves leaving call called calls calling put puts
+    putting mean means meant meaning let lets letting show showed
+    shown shows showing keep kept keeps keeping let just also
+    quite really actually probably perhaps maybe possibly certainly
+    definitely usually mostly generally typically simply merely
+    even though although however therefore thus hence furthermore
+    moreover meanwhile otherwise instead rather besides likewise
+    similarly conversely nevertheless nonetheless
+
+    (Full list ~250 tokens. Regenerate deterministically by running
+    scripts/derive-graph-seeds/generate-english-stopwords.py once;
+    hash the result and pin to the runlog. If English stopword
+    reference-list evolves upstream, do NOT let it drift silently
+    — always version-pin.)
+
+  SCRIPT SKELETON (scripts/derive-graph-seeds/01-extract-tokens.py):
+
+    #!/usr/bin/env python3
+    import re
+    import sys
+    from collections import Counter
+    from pathlib import Path
+
+    ROOT = Path('/Users/alfred/code/motoi-scheme')
+
+    GLOBS = [
+        'scheme-books/book-of-*/*.book.slatl',
+        'word-books/book-of-*/*.book.slatl',
+        'Scheme/reference/*.slat',
+    ]
+
+    def load_stopwords(path):
+        return set(w.strip() for w in Path(path).read_text().split()
+                   if w.strip())
+
+    STOP_SCHEME = load_stopwords(
+        'scripts/derive-graph-seeds/stopwords-scheme.txt')
+    STOP_ENGLISH = load_stopwords(
+        'scripts/derive-graph-seeds/stopwords-english.txt')
+    STOP = STOP_SCHEME | STOP_ENGLISH
+
+    TOK = re.compile(r'[a-z]+')
+
+    def tokenize(text):
+        for tok in TOK.findall(text.lower()):
+            if len(tok) < 3:
+                continue
+            if tok.isdigit():          # defense-in-depth
+                continue
+            if tok in STOP:
+                continue
+            yield tok
+
+    def main():
+        counts = Counter()
+        files_scanned = 0
+        for glob in GLOBS:
+            for path in ROOT.glob(glob):
+                text = path.read_text(errors='replace')
+                counts.update(tokenize(text))
+                files_scanned += 1
+
+        out_path = ROOT / 'derived/graph-seeds/raw/frequency.tsv'
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with out_path.open('w') as f:
+            for word, cnt in sorted(counts.items(),
+                                    key=lambda kv: (-kv[1], kv[0])):
+                f.write(f'{cnt}\\t{word}\\n')
+
+        print(f'files scanned:        {files_scanned}')
+        print(f'distinct tokens:      {len(counts)}')
+        print(f'total token count:    {sum(counts.values())}')
+        print(f'wrote:                {out_path}')
+
+    if __name__ == '__main__':
+        main()
+
+  RUN:
+    cd /Users/alfred/code/motoi-scheme
+    python3 scripts/derive-graph-seeds/01-extract-tokens.py \\
+      | tee -a derived/graph-seeds/RUN-$(date -u +%Y%m%d).log
+
+  VERIFICATION:
+    [ ] Files scanned matches expectation for corpus size (current
+        canonical baseline: 856).
+    [ ] Distinct token count in the low tens-of-thousands (current:
+        25,272).
+    [ ] Total tokens in the low millions (current: 1,542,121).
+    [ ] Top-10 rows of frequency.tsv are Scheme-and-Motoi glue words
+        (scheme, motoi, entity, world, etc.) — if not, tokenizer is
+        broken.
+    [ ] Bottom-10 rows are rare content-words each appearing once —
+        the long tail confirms the tokenizer isn't silently
+        combining or dropping.
+
+  DEFECT HANDLING:
+    Any file that fails to read logs a warning to the runlog but
+    does NOT halt the pipeline. Corrupted or non-UTF8 files are
+    rare; report count in log summary.
+  """
+
+  :section-3-distribution-analysis
+  """
+  STEP 2 — DISTRIBUTION ANALYSIS.
+
+  GOAL: characterize the frequency distribution. Confirm the corpus
+  has the expected Zipfian shape (technical corpora are flatter than
+  natural English); compute rank-frequency, log-log slope, and
+  cumulative-mass percentiles so Step 3 can find the Pareto cut.
+
+  INPUT:
+    derived/graph-seeds/raw/frequency.tsv
+
+  OUTPUTS:
+    derived/graph-seeds/dist/rank-freq.tsv
+      columns: rank \\t freq \\t word \\t cumulative_freq \\t cumulative_pct
+    derived/graph-seeds/dist/percentiles.tsv
+      columns: percentile \\t rank_at_percentile \\t freq_at_percentile
+    derived/graph-seeds/dist/zipf-fit.txt
+      log-log slope alpha, R^2, and a one-line summary
+
+  SCRIPT SKELETON (scripts/derive-graph-seeds/02-distribution.py):
+
+    #!/usr/bin/env python3
+    import math
+    from pathlib import Path
+
+    ROOT = Path('/Users/alfred/code/motoi-scheme')
+    IN   = ROOT / 'derived/graph-seeds/raw/frequency.tsv'
+    OUT  = ROOT / 'derived/graph-seeds/dist'
+    OUT.mkdir(parents=True, exist_ok=True)
+
+    rows = []
+    with IN.open() as f:
+        for line in f:
+            cnt, word = line.rstrip('\\n').split('\\t')
+            rows.append((int(cnt), word))
+    # rows already sorted by count desc from Step 1
+
+    total = sum(cnt for cnt, _ in rows)
+    running = 0
+
+    with (OUT/'rank-freq.tsv').open('w') as out:
+        for rank, (cnt, word) in enumerate(rows, start=1):
+            running += cnt
+            out.write(f'{rank}\\t{cnt}\\t{word}\\t{running}\\t'
+                      f'{running/total:.6f}\\n')
+
+    # Percentiles every 5%
+    targets = [i/100 for i in range(5, 105, 5)]
+    running = 0
+    ti = 0
+    hits = []
+    for rank, (cnt, word) in enumerate(rows, start=1):
+        running += cnt
+        while ti < len(targets) and running/total >= targets[ti]:
+            hits.append((targets[ti], rank, cnt))
+            ti += 1
+    with (OUT/'percentiles.tsv').open('w') as out:
+        out.write('percentile\\trank_at_percentile\\tfreq_at_percentile\\n')
+        for pct, rank, cnt in hits:
+            out.write(f'{pct:.2f}\\t{rank}\\t{cnt}\\n')
+
+    # Zipf fit: log(freq) = -alpha * log(rank) + c, linear regression
+    # in log-log space using ranks 1..min(len(rows), 5000).
+    xs, ys = [], []
+    for rank, (cnt, _) in enumerate(rows, start=1):
+        if rank > 5000: break
+        if cnt <= 0: continue
+        xs.append(math.log(rank))
+        ys.append(math.log(cnt))
+    n = len(xs)
+    mx = sum(xs)/n; my = sum(ys)/n
+    num = sum((x-mx)*(y-my) for x,y in zip(xs,ys))
+    den = sum((x-mx)**2 for x in xs)
+    slope = num/den
+    alpha = -slope
+    # R^2
+    yhat = [slope*(x-mx) + my for x in xs]
+    ss_res = sum((y-yh)**2 for y,yh in zip(ys, yhat))
+    ss_tot = sum((y-my)**2 for y in ys)
+    r2 = 1 - ss_res/ss_tot
+
+    with (OUT/'zipf-fit.txt').open('w') as out:
+        out.write(f'alpha (Zipf exponent): {alpha:.4f}\\n')
+        out.write(f'R^2:                   {r2:.4f}\\n')
+        out.write(f'ranks used:            1..{min(5000, len(rows))}\\n')
+        out.write(f'interpretation:        ')
+        if alpha < 0.85:
+            out.write('flatter than natural English (curated technical corpus, expected)\\n')
+        elif alpha < 1.15:
+            out.write('near natural-English Zipf; corpus is well-mixed\\n')
+        else:
+            out.write('steeper than natural English; heavy head, thin tail — inspect\\n')
+
+    print('distribution analysis done; see', OUT)
+
+  RUN:
+    cd /Users/alfred/code/motoi-scheme
+    python3 scripts/derive-graph-seeds/02-distribution.py \\
+      | tee -a derived/graph-seeds/RUN-$(date -u +%Y%m%d).log
+
+  CANONICAL SHAPE (baseline, 2026-07-20 Motoi run):
+    Zipf alpha ≈ 0.63 (flatter than English's ~1.0). This is
+    EXPECTED for a curated technical corpus — book prose repeats
+    domain vocabulary far more than natural English does, so the
+    head is fatter (fewer huge outliers) and the tail is longer
+    (more distinct rare terms per unit corpus size).
+
+    If alpha comes in >1.15 on a rerun: some author has dumped a
+    corpus of repetitive glue (system prompts, boilerplate, or
+    scraping contamination). Investigate before proceeding.
+
+    If alpha comes in <0.4: corpus is likely dominated by unique
+    per-chapter jargon with little cross-reference. Signals the
+    graph derivation will yield high axis coverage but weak
+    signifier density; consider prose-book authoring lane to lift
+    cross-chapter recurrence.
+
+  VERIFICATION:
+    [ ] rank-freq.tsv row count = frequency.tsv row count.
+    [ ] percentiles.tsv has 20 rows (5% .. 100%).
+    [ ] zipf-fit.txt alpha in [0.4, 1.2] range for a healthy
+        curated technical corpus.
+    [ ] Cumulative % monotonically increasing.
+  """
+
+  :section-4-pareto-cut
+  """
+  STEP 3 — CUT AT PARETO (80% CUMULATIVE MASS) — FIRST-ORDER FILTER.
+
+  ROLE OF THIS STEP (per Alfred 2026-07-21):
+    Pareto is a first-order filter that separates 'part of the
+    language' from 'incidental noise'. It bounds the working pool
+    Step 6b enriches. It IS NOT the Tier 1 selection rule anymore
+    — Tier 1 is now TF-IDF top-300 per axis with doc-freq ≥ 5
+    (see § 9). Pareto is retained because (a) it is the
+    principled, reproducible entry filter, and (b) it keeps
+    Step 6b's O(|V|²) distributional-neighbors pass tractable.
+
+  GOAL: draw the principled line between 'part of the language' and
+  'incidental noise'. The Pareto (80/20) cut says: the words whose
+  combined occurrences make up 80% of all token instances are the
+  words the model MUST reify. The remaining 20% mass is spread
+  across a long tail of rarely-recurring terms that do not (yet)
+  earn a graph node.
+
+  ALFRED 2026-07-20: 'why is 89% better than Pareto?' Answer: it
+  isn't. Pareto is the principled cut. Guessed thresholds (89%,
+  freq≥50, 'the top N', etc.) are not principled and will drift
+  between rerurns and between operators. Pareto is data-driven
+  and reproducible. Fewer words each with higher recurrence
+  guarantees the signifier density CPT needs.
+
+  MATH:
+    Let f_i = frequency of the i-th word in rank order (descending).
+    Let T   = sum(f_i for all i) = total token count.
+    Let C_k = sum(f_i for i in 1..k) = cumulative token count.
+    The Pareto threshold rank k* is:
+        k* = min { k : C_k / T >= 0.80 }
+    The Pareto frequency threshold is:
+        f_thresh = f_{k*}
+    The retained vocabulary is:
+        V_pareto = { word_i : f_i >= f_thresh }
+
+    Notes:
+      · Because ranks with equal frequency are grouped, |V_pareto|
+        can slightly exceed k*. That's fine — the CUT is defined by
+        frequency, not by rank. Rank is the mechanism.
+      · Never round the 0.80. Do not use 0.79 or 0.81 as
+        'close enough'. Exactly 0.80 is the doctrine.
+
+  INPUT:
+    derived/graph-seeds/dist/rank-freq.tsv
+
+  OUTPUTS:
+    derived/graph-seeds/cut/pareto.tsv
+      All rows from rank-freq.tsv where freq >= f_thresh.
+    derived/graph-seeds/cut/pareto-summary.txt
+      k*, f_thresh, |V_pareto|, total_mass_retained, one-line
+      commentary.
+
+  SCRIPT SKELETON (scripts/derive-graph-seeds/03-pareto-cut.py):
+
+    #!/usr/bin/env python3
+    from pathlib import Path
+
+    ROOT = Path('/Users/alfred/code/motoi-scheme')
+    IN   = ROOT / 'derived/graph-seeds/dist/rank-freq.tsv'
+    OUT  = ROOT / 'derived/graph-seeds/cut'
+    OUT.mkdir(parents=True, exist_ok=True)
+
+    rows = []
+    with IN.open() as f:
+        for line in f:
+            rank, cnt, word, cum, cum_pct = line.rstrip('\\n').split('\\t')
+            rows.append((int(rank), int(cnt), word, int(cum),
+                         float(cum_pct)))
+
+    # find k* = first rank where cum_pct >= 0.80
+    kstar = None
+    for r in rows:
+        if r[4] >= 0.80:
+            kstar = r; break
+    if kstar is None:
+        raise SystemExit('corpus too small for Pareto cut')
+    _, f_thresh, _, _, _ = kstar
+
+    keep = [r for r in rows if r[1] >= f_thresh]
+    total_retained = sum(r[1] for r in keep)
+    T = sum(r[1] for r in rows)
+
+    with (OUT/'pareto.tsv').open('w') as out:
+        for r in keep:
+            out.write('\\t'.join(str(x) for x in r) + '\\n')
+
+    with (OUT/'pareto-summary.txt').open('w') as out:
+        out.write(f'k* (rank at 80% mass):     {kstar[0]}\\n')
+        out.write(f'f_thresh (freq at cut):    {f_thresh}\\n')
+        out.write(f'|V_pareto|:                {len(keep)}\\n')
+        out.write(f'total_mass_retained:       {total_retained/T:.4f}\\n')
+        out.write(f'canonical rule:            keep word if freq >= f_thresh\\n')
+
+    print(f'Pareto cut: k*={kstar[0]} f_thresh={f_thresh} '
+          f'|V|={len(keep)}')
+
+  RUN:
+    cd /Users/alfred/code/motoi-scheme
+    python3 scripts/derive-graph-seeds/03-pareto-cut.py \\
+      | tee -a derived/graph-seeds/RUN-$(date -u +%Y%m%d).log
+
+  CANONICAL BASELINE (2026-07-20 Motoi run):
+    k*         ≈ 2,332
+    f_thresh   = 120  (i.e., keep every word appearing ≥120 times)
+    |V_pareto| ≈ 2,332  (equal-freq boundaries can shift ±few)
+
+  VERIFICATION:
+    [ ] pareto-summary.txt exists and total_mass_retained ≥ 0.80.
+    [ ] |V_pareto| in low thousands (for corpora of order 10^6
+        tokens).
+    [ ] The last row in pareto.tsv has freq = f_thresh.
+    [ ] wc -l pareto.tsv matches |V_pareto|.
+  """
+
+  :section-5-drop-workhorses
+  """
+  STEP 4 — DROP THE TOP-100 WORKHORSE WORDS.
+
+  GOAL: the top-100 words by frequency are Scheme keywords, glue
+  words ('scheme', 'entity', 'world', 'motoi', 'math', 'row',
+  'shape', 'display', 'meta', etc.) and universal book scaffolding
+  ('chapter', 'section', 'part'). These are already known to the
+  base model — a Scheme keyword doesn't need a graph node to teach
+  the model what 'define' means. Adding them to the graph teaches
+  nothing new and dilutes axis-classification.
+
+  RULE: after Pareto cut, remove the top-100 words by frequency
+  from the retained pool. Fixed number, not a percentile — 100 is
+  the observed elbow between 'universal glue' and 'domain-content
+  noun' on the Motoi corpus. If you find yourself tempted to bump
+  it to 150 or 200 on a rerun, that's a signal to author more
+  domain content, not to widen the drop.
+
+  INPUT:
+    derived/graph-seeds/cut/pareto.tsv
+
+  OUTPUTS:
+    derived/graph-seeds/cut/workhorses.tsv
+      The 100 words dropped, with counts (for audit).
+    derived/graph-seeds/cut/pareto-minus-workhorses.tsv
+      Pareto cut minus the top-100 workhorses.
+
+  SCRIPT SKELETON (scripts/derive-graph-seeds/04-drop-workhorses.py):
+
+    #!/usr/bin/env python3
+    from pathlib import Path
+
+    ROOT = Path('/Users/alfred/code/motoi-scheme')
+    IN   = ROOT / 'derived/graph-seeds/cut/pareto.tsv'
+    OUT  = ROOT / 'derived/graph-seeds/cut'
+
+    rows = []
+    with IN.open() as f:
+        for line in f:
+            parts = line.rstrip('\\n').split('\\t')
+            rows.append(parts)  # rank, cnt, word, cum, cum_pct
+
+    # Top 100 by frequency (rows are already sorted by cnt desc)
+    top100 = rows[:100]
+    remainder = rows[100:]
+
+    with (OUT/'workhorses.tsv').open('w') as out:
+        for r in top100:
+            out.write('\\t'.join(r) + '\\n')
+
+    with (OUT/'pareto-minus-workhorses.tsv').open('w') as out:
+        for r in remainder:
+            out.write('\\t'.join(r) + '\\n')
+
+    print(f'dropped {len(top100)} workhorse words')
+    print(f'remaining pool: {len(remainder)} words')
+
+  RUN:
+    cd /Users/alfred/code/motoi-scheme
+    python3 scripts/derive-graph-seeds/04-drop-workhorses.py \\
+      | tee -a derived/graph-seeds/RUN-$(date -u +%Y%m%d).log
+
+  CANONICAL BASELINE (2026-07-20 Motoi run):
+    workhorses dropped: 100
+    remaining pool:     ~2,232 words
+
+  ALSO COMMIT the workhorse list to
+  scripts/derive-graph-seeds/workhorses.txt after each canonical
+  run — the file is the diff-record between runs. If a workhorse
+  falls out of top-100 in a future rerun, that's a semantically
+  meaningful signal about corpus shape drift.
+
+  VERIFICATION:
+    [ ] workhorses.tsv has exactly 100 rows.
+    [ ] pareto-minus-workhorses.tsv row count = |V_pareto| - 100.
+    [ ] Manual inspection: workhorses.tsv should look like Scheme
+        keywords + book-scaffolding words. If it looks like
+        domain-content nouns, tokenizer or stopword list is wrong.
+  """
+
+  :section-6-axis-classification
+  """
+  STEP 5 — EVIDENCE-DRIVEN AXIS CLASSIFICATION.
+
+  GOAL: for each surviving word, assign it to one of the four Jung
+  axes, or to the OTHER pool (verbs, adjectives, adverbs — not axis
+  material). Classification is EVIDENCE-DRIVEN: the classifier reads
+  a corpus context excerpt for each word and decides based on how
+  the word is actually used, not on the word's dictionary sense in
+  isolation.
+
+  ═══════════════════════════════════════════════════════════════════
+  ALFRED 2026-07-20 CANONICAL RULE — WHICH WORD GOES IN WHICH GRAPH.
+  ═══════════════════════════════════════════════════════════════════
+
+  This is THE rule. Every future operator (human or agent) rerunning
+  Step 5 must follow it verbatim. Deviations are not creative
+  improvements; they are classifier drift and produce silently-worse
+  graphs. If in doubt, follow the rule to the letter and record the
+  ambiguity in :notes for later human review.
+
+  Six steps, executed in this order for every word in
+  pareto-minus-workhorses.tsv:
+
+  STEP A — EVIDENCE SAMPLING (deterministic, pre-classification).
+    Pull the word's ±5-word context excerpts directly from the
+    corpus files that produced the token. For Motoi Mk 1 that is
+    the evidence-bundle JSONL (Part A of the script skeleton
+    below). Minimum 3 excerpts; target 5. Fewer than 3 excerpts =
+    the word did not truly recur; halt and inspect the tokenizer.
+    NEVER classify from lexicon or dictionary alone — the corpus
+    evidence IS the source of truth.
+
+  STEP B — AXIS FIT TESTS (applied IN ORDER, first match wins
+  UNLESS Step D priority tie-break overrides).
+    (b.1) Sensation fit — concrete-world referent you can point at.
+          Object, animal, plant, place, material, weather, food,
+          body-part, people-as-role, sound, color. Test: 'Could a
+          child point to this in the physical world?' If yes,
+          candidate = Sensation.
+
+    (b.2) Intuition fit — abstract category / pattern / concept.
+          Algorithm, math concept, CS concept, data structure,
+          relation, art movement, cultural work, event. Test:
+          'Is this a NAME for a pattern, category, or abstract
+          type rather than a thing?' If yes, candidate = Intuition.
+
+    (b.3) Thinking fit — judgment principle / rule / correctness
+          or safety concept. Fairness, correctness, boundary,
+          invariant, standard, contract, defect, safety. Test:
+          'Does using this word invoke a judgment about right/
+          wrong, safe/unsafe, correct/incorrect?' If yes,
+          candidate = Thinking.
+
+    (b.4) Feeling fit — tonal / register / valuation quality.
+          Calm, urgency, warmth, silence, playfulness, restraint,
+          grief, delight, wonder, humor. Test: 'Does the word
+          NAME a tone or emotional register rather than a thing,
+          concept, or judgment?' If yes, candidate = Feeling.
+
+  STEP C — POLYSEMY RESOLUTION.
+    If two axis-fit tests fire on the same word ('table' fires
+    Sensation for furniture AND Intuition for hash-table), the
+    corpus evidence decides. Count how many excerpts support each
+    sense. Dominant use wins. If the dominant-use margin is <60%
+    (i.e., 3/5 vs 2/5), mark with :notes AMBIGUOUS and add the
+    row to polysemy.tsv for later split-into-two-nodes review.
+
+  STEP D — PRIORITY TIE-BREAK (only when evidence is genuinely
+  split and Step C cannot resolve).
+    Priority order, high to low:
+      Thinking > Intuition > Sensation > Feeling
+    Rationale:
+      · Judgment before abstract — a rule USES abstract concepts
+        but is not merely one of them; the judgment character is
+        MORE INFORMATIVE for graph placement.
+      · Abstract before concrete — an abstract concept USES
+        concrete objects as examples but is not one of them.
+      · Concrete before tone — concrete referent is more
+        specific than tonal quality when both apply.
+    Tie-break is a LAST RESORT. Use only after (b) and (c) have
+    genuinely deadlocked. Log every use in :notes ('tie-break: T
+    over I because ...').
+
+  STEP E — OTHER POOL (Tier 2 stub only).
+    Verbs, adverbs, adjectives without a nominalized noun-role in
+    the corpus go into the OTHER pool. They receive Tier 2 stub
+    treatment (see section 9). They do NOT get an axis. They DO
+    get a canonical entry so the graph knows they exist and
+    where they appear.
+    OTHER-pool nominalization rule: if evidence shows a verb
+    or adjective used as a Sensation object ('the reflection
+    on the water', 'the bright of the sun'), reclassify to
+    Sensation. Reclamation rate observed on Motoi Mk 1: ~5-10%
+    of the OTHER pool.
+
+  STEP F — CROSS-AXIS BRIDGE MARKING.
+    After axis assignment, note words that co-occur strongly
+    (high PPMI, per Step 6b) with words on OTHER axes. These
+    get a :cross-axis-bridge-score flag on their node. The word
+    is STILL assigned to its dominant axis; the bridge score is
+    additional metadata for graph integration. High-bridge
+    words are the connective tissue that keeps the four-axis
+    graph from decomposing into four isolated islands.
+
+  ═══════════════════════════════════════════════════════════════════
+  END OF CANONICAL RULE.
+  ═══════════════════════════════════════════════════════════════════
+
+  AXES (per memory/project_four_axis_graph_consolidation):
+    · Sensation — concrete-world nouns
+        person, object, place, institution
+        Examples: 'hero', 'floor', 'planet', 'school', 'kitchen'
+    · Intuition — abstract-category / concept nouns
+        concept, event, cultural-work, art-movement
+        Examples: 'pattern', 'algorithm', 'symmetry', 'jazz',
+        'romanticism', 'election'
+    · Thinking — judgment-principle nouns
+        do-and-dont
+        Examples: 'invariant', 'contract', 'principle', 'law',
+        'convention', 'defect', 'safety'
+    · Feeling — tonal / register nouns
+        register
+        Examples: 'kindness', 'gentleness', 'humor', 'grief',
+        'joy', 'consolation', 'wonder'
+    · OTHER — not axis material
+        verbs (nominalized borderline cases reclassify),
+        adjectives (borderline: 'freshness' Feeling; 'freshness'
+        as chemistry Sensation),
+        adverbs (essentially never axis material).
+
+  CORE RULE: CONTEXT BEATS LEXICON.
+    'table' used as hash-table → Intuition (concept).
+    'table' used as world-object at a kitchen scene → Sensation.
+    The evidence excerpt (5-10 lines of surrounding corpus text)
+    decides. Where the word appears multiple times with divergent
+    senses, add a :notes field noting the polysemy and classify by
+    dominant sense — with a follow-up TODO to split into disambig
+    entries at graph-population time.
+
+  MOTOI IS NOT KID-ONLY (Alfred 2026-07-20 correction).
+    Do NOT filter for kid-vocabulary only. Motoi is a language for
+    people of all ages — adult-relevant nouns stay. Sensation should
+    include 'kitchen' AND 'election'; Feeling should include
+    'delight' AND 'grief'. If the classifier is silently kid-only,
+    the graph will underweight adult-register content and the model
+    will fail on adult-usage prompts.
+
+  INPUT:
+    derived/graph-seeds/cut/pareto-minus-workhorses.tsv
+    Plus the raw corpus (re-scanned for evidence excerpt lookup):
+      scheme-books/book-of-*/*.book.slatl
+      word-books/book-of-*/*.book.slatl
+      Scheme/reference/*.slat
+
+  OUTPUT:
+    derived/graph-seeds/cut/classified.tsv
+      columns: axis \\t word \\t freq \\t evidence_source \\t evidence_snippet \\t notes
+      where axis ∈ {sensation, intuition, thinking, feeling, other}
+
+  CLASSIFICATION METHOD:
+    Two-pass:
+      Pass 1 (lexicon pre-classify): for each word, apply a
+        conservative lexicon rule to produce a first-cut axis.
+        This is a SEED, not a decision — every word STILL goes
+        through Pass 2.
+      Pass 2 (evidence-driven confirm-or-reclassify): read the
+        first N occurrences of the word in the corpus. Look at
+        context. Confirm the Pass 1 label or override it.
+
+    For Motoi Mk 1 (2026-07-20) Pass 2 was performed by a
+    Claude-sub-agent given the evidence excerpt AND the axis
+    definitions above AND the polysemy handling rule AND the
+    'Motoi is not kid-only' correction — the sub-agent proposed
+    an axis and a :notes field. Human review (Alfred) can spot-
+    check but is not the bottleneck. If the sub-agent is uncertain,
+    it MUST emit :notes 'AMBIGUOUS' and let the reviewer decide.
+
+    LLM ROLE (important, per no-contaminants doctrine):
+      The LLM classifies existing corpus tokens into axes. It does
+      NOT invent tokens. It does NOT add words that aren't in
+      pareto-minus-workhorses.tsv. It does NOT change frequencies.
+      Its output is one label per input row. The classification is
+      an act of reading, not authoring. Provenance for classified
+      rows is 'derived: pass-2 evidence classification of
+      pareto-minus-workhorses.tsv'.
+
+  RECLASSIFY OTHER POOL FOR NOMINALIZATION:
+    A word initially tagged OTHER (verb / adjective) may deserve
+    an axis. If 'reflect' is used as a Sensation object ('the
+    reflection on the water'), it's Sensation. If 'bright' is
+    used nominalized ('the bright of the sun'), it's Sensation.
+    Pass 3 sweeps the OTHER pool with the same evidence-driven
+    method to reclaim axis-fit nominalizations. Do not lose the
+    LARGE OTHER pool though — most of it (verbs, adjectives used
+    predicatively) legitimately isn't axis material. Reclamation
+    rate on Motoi Mk 1 was ~5-10% of the OTHER pool.
+
+  SCRIPT SKELETON (scripts/derive-graph-seeds/05-axis-classify.py):
+
+    Two-part script. Part A produces evidence bundles for each
+    word (offline, deterministic). Part B is the LLM classifier
+    invocation, driven from a queue.
+
+    Part A — evidence bundle generation (deterministic):
+
+      #!/usr/bin/env python3
+      import json, re
+      from pathlib import Path
+
+      ROOT = Path('/Users/alfred/code/motoi-scheme')
+      POOL = ROOT / 'derived/graph-seeds/cut/pareto-minus-workhorses.tsv'
+      OUT  = ROOT / 'derived/graph-seeds/cut/evidence-bundles.jsonl'
+
+      words = []
+      with POOL.open() as f:
+          for line in f:
+              parts = line.rstrip('\\n').split('\\t')
+              _, cnt, w, _, _ = parts
+              words.append((w, int(cnt)))
+      word_set = set(w for w, _ in words)
+
+      GLOBS = [
+          'scheme-books/book-of-*/*.book.slatl',
+          'word-books/book-of-*/*.book.slatl',
+          'Scheme/reference/*.slat',
+      ]
+
+      # Collect up to 5 excerpts per word
+      excerpts = {w: [] for w in word_set}
+      for glob in GLOBS:
+          for path in ROOT.glob(glob):
+              lines = path.read_text(errors='replace').split('\\n')
+              lo = path.relative_to(ROOT)
+              for i, line in enumerate(lines):
+                  toks = set(re.findall(r'[a-z]+', line.lower()))
+                  for w in toks & word_set:
+                      if len(excerpts[w]) < 5:
+                          start = max(0, i-2); end = min(len(lines), i+3)
+                          excerpts[w].append({
+                              'source': str(lo),
+                              'line':   i+1,
+                              'text':   '\\n'.join(lines[start:end])
+                          })
+
+      with OUT.open('w') as f:
+          for w, cnt in words:
+              f.write(json.dumps({
+                  'word':     w,
+                  'freq':     cnt,
+                  'excerpts': excerpts[w]
+              }) + '\\n')
+
+    Part B — classification (per evidence bundle):
+
+      Feed each bundle to the classifier (LLM sub-agent) with a
+      system prompt that includes:
+        · the four axis definitions above verbatim
+        · the polysemy handling rule
+        · the 'Motoi is not kid-only' correction
+        · the reclassify-OTHER-nominalization rule
+        · the required output schema:
+            {'word': ..., 'axis': ..., 'notes': ...}
+      Read one bundle at a time. Emit one line per word to
+      classified.tsv.
+
+      For determinism: use temperature=0 on the classifier LLM.
+      Same evidence bundle → same axis label. If the classifier
+      is non-deterministic, pipeline reproducibility fails.
+
+  RUN:
+    cd /Users/alfred/code/motoi-scheme
+    python3 scripts/derive-graph-seeds/05-axis-classify.py --pass=A \\
+      | tee -a derived/graph-seeds/RUN-$(date -u +%Y%m%d).log
+    python3 scripts/derive-graph-seeds/05-axis-classify.py --pass=B \\
+      | tee -a derived/graph-seeds/RUN-$(date -u +%Y%m%d).log
+
+  CANONICAL BASELINE (2026-07-20 Motoi run, PRIOR lexicon-based
+  Pass 1 at freq≥5, before Pareto cut, illustrative only):
+    Sensation:  859
+    Intuition:  1,698
+    Thinking:   405
+    Feeling:    223
+    OTHER:      8,550
+    (Pass 2 evidence-driven counts pending at time of writing;
+    absolute numbers WILL DIFFER on rerun as corpus grows and as
+    the Pareto cut narrows the pool — do not memorize.)
+
+  POLYSEMY REGISTRY:
+    Words that get classified with :notes 'AMBIGUOUS' or with
+    :notes noting a split-sense go into a follow-up file:
+    derived/graph-seeds/cut/polysemy.tsv
+    Reviewed at graph-population time — some will split into two
+    graph nodes (e.g., 'table' → 'table [furniture]' Sensation
+    + 'table [datastructure]' Intuition). Do not silently pick
+    one sense and lose the other.
+
+  VERIFICATION:
+    [ ] classified.tsv row count = pareto-minus-workhorses.tsv row
+        count. Every input word gets a label; nothing dropped
+        silently.
+    [ ] Every :axis value ∈ {sensation, intuition, thinking,
+        feeling, other}. No typos, no other labels.
+    [ ] Spot-check 50 random rows manually. Look for obvious
+        misclassifications — a Sensation word tagged Feeling is a
+        red flag for classifier drift.
+    [ ] Axis totals within order-of-magnitude expectation. If
+        Feeling collapses to <20 or Thinking spikes to >1000,
+        classifier is broken.
+  """
+
+  :section-6b-associative-enrichment
+  """
+  STEP 6b — ASSOCIATIVE ENRICHMENT (TIER 1 ONLY).
+
+  PURPOSE: derived-from-corpus semantic enrichment per graph node.
+  Embodies the distributional hypothesis (Firth 1957: 'you shall
+  know a word by the company it keeps'). Deterministic, scriptable,
+  repeatable, provenance-stampable. Applies ONLY to Tier 1 nodes
+  (the ~960 per-axis Pareto words that earned full graph-node
+  treatment).
+
+  Without this step, graph nodes are isolated definitions. With
+  it, they form a real semantic network — every node knows its
+  neighborhood, its semantic siblings, its versatility, and which
+  other axes it bridges.
+
+  FACETS ADDED PER TIER 1 NODE (six):
+
+    1. :associations
+       Top-20 co-occurring words by PPMI (Positive Pointwise
+       Mutual Information) over ±5-word windows. Reveals the
+       signifier's neighborhood — the words that keep company
+       with this one.
+
+    2. :distributional-neighbors
+       Top-10 words with most-similar surrounding-word
+       distributions (cosine similarity over co-occurrence
+       vectors). Semantic siblings by USE, not by definition.
+       Two words with similar neighbor distributions play
+       similar roles in the language.
+
+    3. :context-entropy
+       Shannon entropy of the word's ±5-word neighbor
+       distribution. High entropy = versatile signifier hub
+       (used in many contexts, weaves many topics). Low
+       entropy = narrow specialist (locked into one context).
+       A diagnostic for graph-integration weight.
+
+    4. :idf
+       Inverse-document-frequency across corpus files.
+       Distinctiveness measure — complements raw frequency.
+       A word can be common overall but concentrated in few
+       documents (high IDF) or spread evenly across the corpus
+       (low IDF). Both are meaningful signals.
+
+    5. :tf-idf-per-axis
+       Where the word is most emblematic — which axis (or which
+       book within an axis) has this word's TF-IDF weight
+       peak. Reveals axis-anchoring: 'kindness' peaks in
+       Feeling books, 'algorithm' peaks in Intuition books.
+       If a word peaks in an axis DIFFERENT from its assigned
+       axis, that's a signal to review the axis classification.
+
+    6. :cross-axis-bridge-score
+       Count of :associations that fall in axes OTHER than the
+       word's own axis. High bridge-score = the word weaves
+       multiple axes together (LOAD-BEARING for graph
+       integration — bridge words are the connective tissue
+       of the four-axis system).
+
+  INPUT:
+    derived/graph-seeds/cut/classified.tsv (restricted to Tier 1)
+    Plus raw corpus files (rescanned for co-occurrence counting):
+      scheme-books/book-of-*/*.book.slatl
+      word-books/book-of-*/*.book.slatl
+      Scheme/reference/*.slat
+
+  OUTPUT:
+    derived/graph-seeds/enrichment/tier1-associative.jsonl
+      One JSON blob per Tier 1 word, merged into the seed-list-
+      to-graph pipeline at Step 8 (node authoring). Schema:
+        {
+          'word': ...,
+          'axis': ...,
+          'associations': [{'neighbor': ..., 'ppmi': ...}, ...],
+          'distributional_neighbors': [{'word': ...,
+                                        'cosine': ...}, ...],
+          'context_entropy': ...,
+          'idf': ...,
+          'tf_idf_per_axis': {'sensation': ..., ...,
+                              'peak_axis': ...},
+          'cross_axis_bridge_score': ...
+        }
+
+  SCRIPT SKELETON (scripts/derive-graph-seeds/06b-enrich.py):
+
+    #!/usr/bin/env python3
+    import json, re
+    from collections import Counter, defaultdict
+    from math import log2, sqrt
+    from pathlib import Path
+
+    ROOT = Path('/Users/alfred/code/motoi-scheme')
+    IN   = ROOT / 'derived/graph-seeds/cut/classified.tsv'
+    OUT  = ROOT / 'derived/graph-seeds/enrichment/tier1-associative.jsonl'
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+
+    WINDOW = 5
+
+    # Load Tier 1 vocab and their axes
+    tier1 = {}   # word -> axis
+    axis_of = {} # word -> axis
+    with IN.open() as f:
+        for line in f:
+            axis, word, freq, *_ = line.rstrip('\\n').split('\\t')
+            if axis == 'other':
+                continue
+            tier1[word] = axis
+            axis_of[word] = axis
+
+    # File-to-axis mapping: group corpus files by their axis anchor
+    # (books-of-values → feeling; book-of-motion → sensation; etc.)
+    # This map is authored once and pinned into the runlog.
+    FILE_AXIS = {
+        # 'scheme-books/book-of-values/*': 'feeling',
+        # ... populate per canonical run ...
+    }
+    def axis_of_file(rel_path):
+        for pat, ax in FILE_AXIS.items():
+            if Path(rel_path).match(pat):
+                return ax
+        return None  # unclassified files contribute to no axis
+
+    GLOBS = [
+        'scheme-books/book-of-*/*.book.slatl',
+        'word-books/book-of-*/*.book.slatl',
+        'Scheme/reference/*.slat',
+    ]
+    TOK = re.compile(r'[a-z]+')
+
+    # Pass 1: co-occurrence counts + per-file counts + total tokens
+    cooc = defaultdict(Counter)     # word -> Counter(neighbor -> count)
+    word_count = Counter()          # word -> total occurrences
+    doc_count = Counter()           # word -> # files it appears in
+    per_axis_tf = defaultdict(Counter)  # axis -> Counter(word -> count)
+    n_docs = 0
+    total_tokens = 0
+
+    for glob in GLOBS:
+        for path in ROOT.glob(glob):
+            n_docs += 1
+            rel = str(path.relative_to(ROOT))
+            file_axis = axis_of_file(rel)
+            text = path.read_text(errors='replace').lower()
+            toks = TOK.findall(text)
+            total_tokens += len(toks)
+            seen_here = set()
+            for i, w in enumerate(toks):
+                if w not in tier1:
+                    continue
+                word_count[w] += 1
+                seen_here.add(w)
+                lo = max(0, i - WINDOW)
+                hi = min(len(toks), i + WINDOW + 1)
+                for j in range(lo, hi):
+                    if j == i:
+                        continue
+                    cooc[w][toks[j]] += 1
+                if file_axis:
+                    per_axis_tf[file_axis][w] += 1
+            for w in seen_here:
+                doc_count[w] += 1
+
+    # PPMI
+    def ppmi(joint, x_count, y_count, total):
+        if joint <= 0 or x_count <= 0 or y_count <= 0:
+            return 0.0
+        p_xy = joint / total
+        p_x  = x_count / total
+        p_y  = y_count / total
+        pmi  = log2(p_xy / (p_x * p_y))
+        return max(pmi, 0.0)
+
+    def shannon_entropy(counter):
+        total = sum(counter.values())
+        if total <= 0: return 0.0
+        return -sum((c/total) * log2(c/total)
+                    for c in counter.values() if c > 0)
+
+    # Neighbor totals (needed for PPMI marginal)
+    neighbor_total = Counter()
+    for w, ctr in cooc.items():
+        for n, c in ctr.items():
+            neighbor_total[n] += c
+    cooc_total = sum(neighbor_total.values())
+
+    # Pass 2: per-word top-20 PPMI associations
+    associations = {}
+    for w, ctr in cooc.items():
+        scored = []
+        for n, c in ctr.items():
+            s = ppmi(c, word_count.get(w, 0),
+                     neighbor_total.get(n, 0), cooc_total)
+            if s > 0:
+                scored.append((n, s))
+        scored.sort(key=lambda t: -t[1])
+        associations[w] = scored[:20]
+
+    # Distributional neighbors: cosine over cooc vectors of Tier 1 words
+    def cos(a, b):
+        keys = set(a) | set(b)
+        dot = sum(a.get(k, 0) * b.get(k, 0) for k in keys)
+        na  = sqrt(sum(v*v for v in a.values()))
+        nb  = sqrt(sum(v*v for v in b.values()))
+        if na == 0 or nb == 0: return 0.0
+        return dot / (na * nb)
+
+    dist_neighbors = {}
+    words_list = list(cooc.keys())
+    for w in words_list:
+        scored = []
+        for other in words_list:
+            if other == w: continue
+            s = cos(cooc[w], cooc[other])
+            if s > 0:
+                scored.append((other, s))
+        scored.sort(key=lambda t: -t[1])
+        dist_neighbors[w] = scored[:10]
+
+    # Emit
+    with OUT.open('w') as f:
+        for w, axis in tier1.items():
+            assocs = associations.get(w, [])
+            # cross-axis-bridge = count of associations in other axes
+            bridge = sum(1 for n, _ in assocs
+                         if n in axis_of and axis_of[n] != axis)
+            entropy = shannon_entropy(cooc.get(w, Counter()))
+            df = doc_count.get(w, 0)
+            idf = log2(n_docs / df) if df > 0 else 0.0
+            # tf-idf per axis: for each axis, tf(w in axis) * idf
+            tfidf_axis = {}
+            for ax in ('sensation', 'intuition',
+                       'thinking', 'feeling'):
+                tfidf_axis[ax] = per_axis_tf[ax].get(w, 0) * idf
+            peak_axis = max(tfidf_axis.items(), key=lambda kv: kv[1])[0]
+            tfidf_axis['peak_axis'] = peak_axis
+
+            f.write(json.dumps({
+                'word': w,
+                'axis': axis,
+                'associations': [{'neighbor': n, 'ppmi': round(s, 4)}
+                                 for n, s in assocs],
+                'distributional_neighbors':
+                    [{'word': other, 'cosine': round(s, 4)}
+                     for other, s in dist_neighbors.get(w, [])],
+                'context_entropy':         round(entropy, 4),
+                'idf':                     round(idf, 4),
+                'tf_idf_per_axis':         tfidf_axis,
+                'cross_axis_bridge_score': bridge,
+            }) + '\\n')
+
+    print(f'enriched {len(tier1)} Tier 1 words; wrote {OUT}')
+
+  RUN:
+    cd /Users/alfred/code/motoi-scheme
+    python3 scripts/derive-graph-seeds/06b-enrich.py \\
+      | tee -a derived/graph-seeds/RUN-$(date -u +%Y%m%d).log
+
+  WALL-TIME ESTIMATE:
+    Minutes for ~1000 Tier 1 words on the current Motoi corpus
+    (~856 files, ~1.5M tokens). The distributional-neighbors
+    pass is O(|V|^2) over Tier 1 only, so keep the pool bounded
+    (Pareto cut already does this). Cheap.
+
+  OUTPUT USE:
+    The JSONL blob merges into Step 8 node authoring. Each Tier 1
+    :node-<word> entry gains six new fields from its matching
+    blob. Node authoring joins on :word.
+
+  REPEATABILITY GUARANTEE:
+    All six facets are deterministic functions of (corpus files,
+    Tier 1 word set, file-to-axis map). No LLM in this step. No
+    randomness. Rerun on the same inputs produces byte-identical
+    output. Rerun on an updated corpus produces same-shape output
+    with semantically meaningful drift (associations shift as
+    authors write new chapters; bridge-scores rise as cross-axis
+    prose enters the corpus).
+
+  WHY THIS MATTERS (Firth):
+    Meaning derives from patterns of use. Distributional-hypothesis-
+    lite. Gives every Tier 1 node a neighborhood, semantic siblings,
+    a versatility measure, an axis anchor, and cross-axis bridges.
+    Without this, graph nodes are isolated definitions; with it,
+    they form a real semantic network — the graph earns its name.
+
+  VERIFICATION:
+    [ ] tier1-associative.jsonl row count = Tier 1 vocabulary
+        size (every Tier 1 word gets an entry).
+    [ ] Every entry has all six facets present. No missing keys.
+    [ ] Spot-check 20 random words: :associations top-3 should
+        look semantically related to the target word. If
+        'kindness' associates with 'algorithm' and 'compile', the
+        tokenizer, window, or corpus-axis map is broken.
+    [ ] :cross-axis-bridge-score distribution has a healthy tail
+        (some low, some high). If all scores are 0, axis
+        classification is trivially confined; if all scores are
+        20, axis boundaries are meaningless.
+    [ ] :context-entropy distribution non-degenerate (spans a
+        multi-bit range). If all entropies are near-identical,
+        the window or corpus is too small.
+  """
+
+  :section-7-output-seed-lists
+  """
+  STEP 6 — OUTPUT PER-AXIS SEED LISTS.
+
+  GOAL: split classified.tsv by axis and produce clean TSV seed
+  lists, one per axis, sorted by frequency descending. These files
+  are the deliverable of the pipeline and the input to graph
+  authoring (Step 8).
+
+  INPUT:
+    derived/graph-seeds/cut/classified.tsv
+
+  OUTPUTS:
+    derived/graph-seeds/axis-seeds/sensation.tsv
+    derived/graph-seeds/axis-seeds/intuition.tsv
+    derived/graph-seeds/axis-seeds/thinking.tsv
+    derived/graph-seeds/axis-seeds/feeling.tsv
+    derived/graph-seeds/axis-seeds/other-kept.tsv
+      Format for each: freq \\t word  (sorted by freq desc)
+
+    derived/graph-seeds/axis-seeds/MANIFEST.txt
+      Row count per axis, total, and top-10 preview per axis, so
+      an operator can eyeball the shape without opening each file.
+
+  SCRIPT SKELETON (scripts/derive-graph-seeds/06-emit-seed-tsv.py):
+
+    #!/usr/bin/env python3
+    from collections import defaultdict
+    from pathlib import Path
+
+    ROOT = Path('/Users/alfred/code/motoi-scheme')
+    IN   = ROOT / 'derived/graph-seeds/cut/classified.tsv'
+    OUT  = ROOT / 'derived/graph-seeds/axis-seeds'
+    OUT.mkdir(parents=True, exist_ok=True)
+
+    by_axis = defaultdict(list)  # axis -> list of (freq, word)
+    with IN.open() as f:
+        for line in f:
+            axis, word, freq, *_ = line.rstrip('\\n').split('\\t')
+            by_axis[axis].append((int(freq), word))
+
+    manifest = []
+    for axis in ('sensation', 'intuition', 'thinking',
+                 'feeling', 'other'):
+        rows = sorted(by_axis[axis], key=lambda r: (-r[0], r[1]))
+        name = 'other-kept' if axis == 'other' else axis
+        path = OUT / f'{name}.tsv'
+        with path.open('w') as f:
+            for freq, word in rows:
+                f.write(f'{freq}\\t{word}\\n')
+        manifest.append((name, len(rows), rows[:10]))
+
+    with (OUT/'MANIFEST.txt').open('w') as f:
+        f.write('axis         count      top-10\\n')
+        for name, cnt, top10 in manifest:
+            f.write(f'{name:12} {cnt:6d}     '
+                    f'{", ".join(w for _, w in top10)}\\n')
+        f.write(f'\\ngrand total: '
+                f'{sum(c for _, c, _ in manifest)}\\n')
+
+    print('seed lists written to', OUT)
+
+  RUN:
+    cd /Users/alfred/code/motoi-scheme
+    python3 scripts/derive-graph-seeds/06-emit-seed-tsv.py \\
+      | tee -a derived/graph-seeds/RUN-$(date -u +%Y%m%d).log
+
+  VERIFICATION:
+    [ ] All five TSV files exist.
+    [ ] MANIFEST.txt row counts match `wc -l` on each TSV.
+    [ ] Grand total in MANIFEST equals classified.tsv row count.
+    [ ] Top-10 preview per axis passes the eyeball test.
+
+  DELIVERABLE:
+    The five *.tsv files under derived/graph-seeds/axis-seeds/
+    are the pipeline output. Everything after this feeds them
+    into graph authoring or CPT extraction; the seed lists
+    themselves are done.
+  """
+
+  :section-8-gap-fill-authoring
+  """
+  STEP 7 — OPTIONAL GAP-FILL AUTHORING.
+
+  GOAL: if an axis's Pareto-cut yield is under target for its
+  corpus-language balance, propose category-based authoring to
+  lift underweight axes back to healthy proportions.
+
+  WHEN TO RUN THIS STEP:
+    Compare the MANIFEST.txt counts against target proportions.
+    Rough Motoi Mk 1 targets (order-of-magnitude):
+      Sensation ≥ ~30% of axis-classified pool (kids and adults
+                                                both need concrete
+                                                world reference)
+      Intuition ~30-40% (concepts, patterns — Motoi's core)
+      Thinking  ≥ 10% (invariants, contracts, do-and-dont)
+      Feeling   ≥ 5%  (register lexicon — corpus authors tend
+                       to under-emit; watch this one)
+    If an axis falls below its floor by more than a factor of 2,
+    author additional content in that axis's category and rerun
+    the pipeline.
+
+  Motoi Mk 1 practice:
+    Sensation kids-world nouns underweight → author more
+      book-of-motion / book-of-world chapters with concrete
+      world entities.
+    Feeling adult-register nouns underweight → author more
+      book-of-values / book-of-jesse chapters with tonal
+      vocabulary.
+    Thinking do-and-dont nouns underweight → author more
+      book-of-values / book-of-limits chapters with invariant
+      + contract vocabulary.
+
+  AUTHORED-NOUN PROVENANCE:
+    Authored gap-fill nouns get provenance stamped :authored
+    at their book-chapter emission. When the pipeline reruns
+    over the enlarged corpus, those nouns must PASS the M≥5
+    corpus-recurrence check on their own merits (i.e., they
+    must actually appear ≥5 times, which typically means the
+    author writes them into 3+ chapters, not one). If a proposed
+    gap-fill noun never crosses recurrence threshold, that's
+    a signal the author overreached — either integrate the
+    noun more, or drop it from the target list.
+
+    HARD RULE (no-contaminants): gap-fill authoring is a HUMAN
+    OR AGENT AUTHORING ACT with :authored provenance and
+    :source-book-chapter attribution. It is NEVER 'the LLM
+    generates a plausible Feeling noun list'. The LLM may
+    PROPOSE candidate categories to author (e.g., 'Motoi lacks
+    grief-register vocabulary; propose 10 grief-related nouns
+    to introduce via book-of-values ch 8'); an author decides
+    which to accept and writes them into book chapters. Then
+    they earn a graph node through Pareto recurrence on the
+    NEXT pipeline run — not on this one.
+
+  OUTPUT:
+    derived/graph-seeds/gap-fill/proposals-<date>.md
+      Human-readable list of proposed categories per underweight
+      axis, with example vocabulary, target chapter, and target
+      book. Reviewed by Alfred.
+
+  DO NOT DIRECTLY EDIT axis-seeds/*.tsv to add authored nouns.
+  That breaks the derivation-from-corpus invariant. Nouns arrive
+  in the seed list by RUNNING THIS PIPELINE, not by hand-editing
+  its output.
+  """
+
+  :section-9-feed-into-graph
+  """
+  STEP 8 — FEED SEED LISTS INTO THE JUNG-AXIS GRAPHS.
+
+  GOAL: turn each surviving word into a graph node under the
+  matching axis graph, populating JUNG-AXIS-GRAPH-NODE-SCHEMA
+  fields (universal + axis-specific + dialogue + cross-refs).
+
+  INPUTS:
+    derived/graph-seeds/axis-seeds/sensation.tsv
+    derived/graph-seeds/axis-seeds/intuition.tsv
+    derived/graph-seeds/axis-seeds/thinking.tsv
+    derived/graph-seeds/axis-seeds/feeling.tsv
+
+  OUTPUTS:
+    graphs/graph-of-sensation.slat
+    graphs/graph-of-intuition.slat
+    graphs/graph-of-thinking.slat
+    graphs/graph-of-feeling.slat
+
+  Each output SLAT file is a (slat-set ...) containing one
+  :node-<word> entry per seed-list row. The node schema is
+  defined in engineering/JUNG-AXIS-GRAPH-NODE-SCHEMA.slat and
+  authored fields per node include (at minimum):
+    · :signifier     — the word itself
+    · :axis          — the axis this node belongs to
+    · :signified     — 1-3 sentence concept content
+    · :dialogue      — per-node dialogue field (see
+                       memory/project_signifier_signified_and_dialogue)
+    · :evidence      — 3-5 corpus excerpts showing the word in use
+    · :cross-refs    — related nodes in same axis or other axes
+    · :cpt-shape-plan— which shapes from chapter 4 § catalog will
+                       verbalize this node
+    · :provenance    — 'derived: pipeline-run <date>'
+    · :first-observed-freq — the Pareto-cut frequency at the
+                       time the node was added
+
+  TIERED TREATMENT (2-tier system, per Alfred 2026-07-20;
+  Tier 1 selection rule sharpened per Alfred 2026-07-21):
+
+    Every corpus content-word is covered by exactly one tier.
+    Tier reflects IMPORTANCE for structured graph treatment; it
+    does NOT reflect inclusion (both tiers ARE included in the
+    graph substrate).
+
+    · Tier 1 (~1,200 words: TF-IDF TOP-300 PER AXIS, doc-freq ≥5):
+        CANONICAL SELECTION RULE (supersedes prior "per-axis Pareto"
+        rule, per Alfred 2026-07-21):
+          For each of the 4 Jung axes, take the top-300 words
+          ranked by TF-IDF within that axis, subject to the
+          filter doc-freq ≥ 5 (word must appear in at least 5
+          distinct corpus files). Estimated ~1,200 words total
+          (Sensation 300 · Intuition 300 · Thinking 300 ·
+          Feeling ~300 — smaller if an axis has fewer than 300
+          words meeting the doc-freq filter).
+        WHY TF-IDF over per-axis Pareto:
+          Pareto cut selects VERSATILE workhorse glue (high raw
+          frequency, low distinctiveness). TF-IDF selects
+          DISTINCTIVE axis-signature vocabulary — the words
+          that ARE that axis. Empirical finding (2026-07-20
+          Motoi run): top-20 TF-IDF and top-20 entropy per axis
+          have ZERO overlap. Entropy names the workhorses;
+          TF-IDF names the axis signatures. Tier 1 wants the
+          latter. See § 9b for full rationale.
+        WHY doc-freq ≥ 5:
+          Single-file or 2-file spikes are TF-IDF artifacts, not
+          semantic signals. The floor ensures every Tier 1 word
+          has demonstrated presence across the corpus, not
+          within one author's or one book's local vocabulary.
+        FULL node treatment INCLUDING Step 6b associative
+        enrichment. Every Tier 1 node has all schema fields
+        populated per § 9b (5 categories: Identity · Context-of-
+        use · Relations/interconnections · Statistical metadata ·
+        Provenance+governance) PLUS axis-specific facets AND
+        all six associative facets:
+          :associations, :distributional-neighbors,
+          :context-entropy, :idf, :tf-idf-per-axis,
+          :cross-axis-bridge-score.
+        These are the graph's load-bearing nodes — the words
+        the model MUST reify because they carry axis identity
+        and drive the corpus's semantic gravity.
+
+    · Tier 2 (~24,300 stubs — every other corpus content-word):
+        LIGHTWEIGHT REGISTRY STUB. Stubs carry only:
+          :canonical                  — the word itself
+          :source-refs                — files/lines where it appears
+          :tier                       — literal 'tier-2'
+          :first-appears-in-book-count — number of distinct books
+                                        the word occurs in
+        No axis assignment. No PPMI. No :distributional-neighbors.
+        No :context-entropy. No :tf-idf-per-axis. Registry-only
+        entries — the graph knows they exist, knows where they
+        appear, knows how widely they spread, and NOTHING ELSE.
+
+    NO MIDDLE TIER. Alfred 2026-07-20 explicitly collapsed the
+    prior 3-tier scheme to 2 tiers. If any operator finds
+    themselves wanting a 'Tier 2 with partial enrichment' or
+    'Tier 3 stub' distinction, the answer is NO — promote to
+    Tier 1 via the TF-IDF top-300-per-axis mechanism (author
+    more corpus in the target axis until the word's per-axis
+    TF-IDF cracks the top 300 AND doc-freq ≥ 5) or leave as
+    Tier 2 stub. The tier boundary IS the TF-IDF top-300 rule
+    (per Alfred 2026-07-21; supersedes earlier 'boundary IS
+    the Pareto cut' rule).
+
+    RATIONALE:
+      · PPMI computation is cheap but MEANINGFUL only for high-
+        recurrence words. Tier 2 words have freq < f_thresh
+        (post-Pareto) or fail the TF-IDF-per-axis / doc-freq
+        thresholds → PPMI is statistically noisy → provides no
+        reliable semantic signal. Save compute + storage for
+        where it matters.
+      · A middle tier tempts operators to draft partial
+        enrichment ('just associations, skip entropy'), which
+        drifts. Two crisp tiers = no drift.
+      · If a Tier 2 stub earns axis-signature recurrence on a
+        future rerun (its per-axis TF-IDF cracks the top 300
+        AND doc-freq ≥ 5), it is PROMOTED to Tier 1 and Step 6b
+        enriches it in that later pipeline pass. Tier 2 → Tier 1
+        promotion is the ONLY tier movement supported; demotion
+        does not happen (nodes only accumulate history).
+      · Every corpus content-word is covered. No word is silently
+        dropped — either it's a Tier 1 load-bearing node or a
+        Tier 2 registry stub. The registry stub matters: it
+        prevents future operators from thinking a word is
+        'unknown' when it is in fact 'known but rare'.
+
+  NODE AUTHORING IS ITS OWN AGENT-LANE. This chapter (05) delivers
+  the SEED LISTS. Node authoring is downstream and follows
+  engineering/JUNG-AXIS-GRAPH-NODE-SCHEMA.slat plus a per-axis
+  authoring runbook that will be shipped in a later SRE chapter.
+
+  DOWNSTREAM: once nodes are authored, they feed CPT extraction
+  per SRE-MANUAL/chapters/04-cpt-sft-authoring-per-data-type.slat
+  § material graph-{axis} — S20, S21, S22, S23 shapes verbalize
+  each node into extractable CPT documents.
+
+  VERIFICATION:
+    [ ] Every row in each seed TSV has a corresponding :node-*
+        entry in the matching graph SLAT.
+    [ ] Every node has all required schema fields present.
+    [ ] Every node's :evidence excerpts point to real corpus
+        lines that still exist (post-corpus-drift).
+  """
+
+  :section-9b-tier-1-node-schema
+  """
+  STEP 8b — FULL TIER 1 NODE SCHEMA (5 CATEGORIES).
+
+  Authored per Alfred 2026-07-21 directive. This is the CANONICAL
+  Tier 1 node schema for graph node authoring. Every Tier 1 node
+  MUST populate every applicable field. Missing fields are
+  authoring debt, tracked and closed before fold-eligibility.
+
+  MIRROR: this section is repeated verbatim in
+  engineering/WEAVE-RECIPE.slat § section-cpt-shapes-catalog Tier 1
+  spec. Redundancy is deliberate — any LLM walking into either
+  document must reach the same schema from disk alone.
+
+  ────────────────────────────────────────────────────────────────
+  UNIVERSAL FIELDS — every Tier 1 node, all 4 axes.
+  ────────────────────────────────────────────────────────────────
+
+  CATEGORY 1 — IDENTITY.
+
+    :id
+        Namespaced identifier. Form '<axis>/<canonical>'.
+        Example: 'intuition/recursion', 'thinking/invariant'.
+
+    :canonical
+        The naked signifier — the word as it appears in the
+        corpus, no namespacing.
+
+    :synonyms
+        Alternative signifiers that refer to the same node.
+        List of strings. Not translation, not analogy — actual
+        synonymy in the Motoi register.
+
+    :definition
+        One-sentence meaning. Register: kid-accessible-through-
+        adult-nuanced. Ships to child readers unchanged, holds
+        up to adult scrutiny.
+
+  CATEGORY 2 — CONTEXT-OF-USE.
+
+    :examples
+        3-5 story snippets showing the word in the Motoi sense.
+        Prose fragments, each 1-3 sentences.
+
+    :example-dialogue
+        2-3 line talk-and-response with the word in actual use.
+        Structured as ((:speaker <sp> :line <text>) ...).
+
+    :used-in-programs-as
+        How the word appears in Motoi CODE — the bridge from
+        signifier to base action. E.g. 'a :contract field on
+        a verb entry', 'a test that must pass', 'a keyword in
+        a macro form'.
+
+    :appears-in-corpus
+        Top source-file refs where the word actually recurs.
+        Structured pointers ((:book <b> :chapter <c>)
+        (:file <path>)). Populated by scanner, not by author.
+
+  CATEGORY 3 — RELATIONS / INTERCONNECTIONS.
+
+    :cross-refs-books
+        Book chapters where the word appears. Scanner-populated.
+        Distinct from :appears-in-corpus in granularity:
+        :appears-in-corpus is per-file evidence, :cross-refs-
+        books is per-book aggregation for navigation.
+
+    :cross-refs-graph
+        Other Jung-axis nodes this node connects to. Explicit
+        graph edges: ((:ref-graph <axis> :ref-id <id>) ...).
+
+    :associations
+        Top-20 co-occurring words by PPMI (Positive Pointwise
+        Mutual Information) over ±5-word windows. Corpus-
+        derived, deterministic. Populated by Step 6b.
+
+    :distributional-neighbors
+        Top-10 words with similar surrounding-word distributions
+        (cosine over co-occurrence vectors). Semantic siblings
+        by USE. Populated by Step 6b.
+
+    :oppositions
+        Greimas semiotic-square antonyms / complementaries.
+        Words that define this node by contrast (what it is by
+        what it is NOT). Authored, not derived.
+
+    :cross-axis-bridge-score
+        Count of :associations that fall in axes OTHER than this
+        node's own axis. Bridge-word marker. Populated by Step
+        6b. High score = LOAD-BEARING connective tissue.
+
+  CATEGORY 4 — STATISTICAL METADATA.
+
+    :freq
+        Total token count in the corpus.
+
+    :doc-freq
+        Number of distinct files containing the word. Must be
+        ≥ 5 for Tier 1 eligibility.
+
+    :tf-idf
+        The TF-IDF score that got the word into Tier 1. Top-300
+        per axis are Tier 1.
+
+    :context-entropy
+        Shannon entropy of the neighbor distribution. Versatility
+        measure. High = workhorse; low = specialist.
+
+    :idf
+        Inverse-document-frequency across corpus files.
+        Distinctiveness measure.
+
+    :tf-idf-per-axis
+        Where TF-IDF weight peaks by axis. Structured as
+        ((:axis <a> :peak-weight <n>) (:axis <b> :secondary
+        <n>) ...). Axis-anchoring signal. If peak axis differs
+        from the node's assigned axis, review classification.
+
+  CATEGORY 5 — PROVENANCE + GOVERNANCE.
+
+    :provenance
+        Source + lane + date. Structured as
+        ((:source <s> :lane <l> :date <d>) ...).
+
+    :tier
+        Literal '1' (or '2' for stubs). Tier 1 nodes are the
+        target of this schema.
+
+    :kid-friendly
+        Boolean annotation. NOT a gate — Tier 1 words that read
+        unfriendly still ship if training-eligible; the flag
+        aids downstream selection.
+
+    :training-eligible
+        Boolean. Must be #t to fold. Set #f only for nodes
+        under review, embargo, or awaiting Priya cosign.
+
+    :dialect
+        Literal 'motoi' (or 'sakura' for the downstream repo's
+        parallel graph).
+
+    :audience
+        Governance metadata. :any / :child / :adult / :operator.
+
+    :content-rating
+        Governance metadata. :G / :PG / :adult.
+
+    :confidentiality
+        Governance metadata. :public / :internal /
+        :priya-cosign.
+
+  ────────────────────────────────────────────────────────────────
+  AXIS-SPECIFIC FACETS — one block per node based on its axis.
+  ────────────────────────────────────────────────────────────────
+
+  SENSATION-axis nodes add:
+    :category
+        animal / plant / place / tool / material / food /
+        body-part / weather / celestial / etc.
+    :sensory-description
+        1-3 sentence sensory sketch (sight, sound, touch, smell,
+        taste) — the felt-shape of the referent.
+    :where-found
+        Environmental context. 'in a kitchen', 'in the forest'.
+    :size-scale
+        :hand / :body / :room / :landscape / :cosmic.
+    :kid-familiarity
+        :household / :common / :specialist / :rare.
+    :used-in-programs-as
+        (Already universal; sensation nodes still populate.)
+
+  INTUITION-axis nodes add:
+    :category
+        concept / pattern / algorithm / relation.
+    :definition-technical
+        Second definition tuned for adult-technical reader; sits
+        beside the universal :definition (which is kid-through-
+        adult). Both ship.
+    :example-in-scheme
+        Runnable Motoi code demonstrating the concept. MUST run
+        under ./bin/motoi.
+    :example-in-world
+        Sensation-axis analogy. Bridges intuition to concrete.
+    :prerequisites
+        Nodes the reader must know first. List of :ref-id.
+    :appears-in-books
+        Books that treat the concept in depth (learning /
+        application / composition / introspection / prose /
+        challenge). Distinct from :cross-refs-books which is
+        exhaustive; :appears-in-books is the curated top-5.
+
+  THINKING-axis nodes add:
+    :principle-kind
+        :safety / :correctness / :honesty / :boundary /
+        :prohibition.
+    :short-scenario
+        Story where the principle is at play. 2-5 sentences.
+    :antipattern-scenario
+        Story of violation + consequence. 2-5 sentences.
+    :related-verbs
+        ((:ref-file <path> :ref-verb <name>) ...) — verbs
+        whose contract embodies this principle.
+    :motoi-behavior
+        What Motoi DOES when the principle is invoked. 1-3
+        sentences. Concrete, testable.
+    :related-books
+        Books teaching this principle. Top-5 curated.
+
+  FEELING-axis nodes add:
+    :register-kind
+        :calm / :urgency / :warmth / :dryness / :silence /
+        :care / :playfulness.
+    :example-dialogue
+        (Already universal; feeling nodes emphasize register in
+        the dialogue exchange itself.)
+    :motoi-uses-when
+        Conditions under which Motoi selects this register.
+        List of trigger patterns.
+    :contrast-register
+        What this register ISN'T. Named contrast to sharpen
+        boundaries. E.g. warmth's contrast-register might be
+        :formality.
+    :related-principles
+        Thinking-axis principles this register serves.
+        ((:ref-graph 'thinking' :ref-id ...) ...).
+    :related-books
+        Books demonstrating the register.
+
+  ────────────────────────────────────────────────────────────────
+  WORKED EXAMPLE (thinking/invariant) — verbatim, canonical.
+  ────────────────────────────────────────────────────────────────
+
+  (node
+    ;; Identity
+    :id                    \"thinking/invariant\"
+    :canonical             \"invariant\"
+    :synonyms              (\"unchanging-property\" \"always-holds\")
+    :definition            \"A property that stays true no matter what else changes. A rule the code promises to keep, forever.\"
+
+    ;; Context-of-use
+    :examples              (\"The invariant of `map` is that the output list has exactly the same length as the input list.\"
+                            \"If you break an invariant, the program lies. Motoi treats broken invariants as bugs to hunt.\")
+    :example-dialogue      ((:speaker :child    :line \"What if the list is empty?\")
+                            (:speaker :motoi    :line \"The invariant still holds — length zero in, length zero out. That IS the property.\"))
+    :used-in-programs-as   (\"A :contract field on a verb entry\"
+                            \"An assertion inside a function body\"
+                            \"A test that must pass for every input\")
+    :appears-in-corpus     ((:book \"book-of-scheme-one\" :chapter \"13-invariants-and-proof\")
+                            (:book \"book-of-composition\" :chapter \"05-contracts\")
+                            (:file \"Scheme/reference/01-core.slat\"))
+
+    ;; Relations / interconnections
+    :cross-refs-graph      ((:ref-graph \"thinking\" :ref-id \"thinking/proof\")
+                            (:ref-graph \"thinking\" :ref-id \"thinking/contract\")
+                            (:ref-graph \"intuition\" :ref-id \"intuition/property\"))
+    :associations          (\"proof(0.87)\" \"contract(0.71)\" \"property(0.68)\" \"test(0.65)\"
+                            \"holds(0.61)\" \"always(0.58)\" \"claim(0.55)\" \"verify(0.52)\")
+    :distributional-neighbors (\"property\" \"contract\" \"guarantee\" \"claim\" \"law\")
+    :oppositions           (\"counterexample\" \"regression\" \"drift\" \"bug\")
+    :cross-axis-bridge-score 3
+
+    ;; Statistical metadata
+    :freq                  2606
+    :doc-freq              89
+    :tf-idf                756.4
+    :context-entropy       0.94
+    :idf                   2.28
+    :tf-idf-per-axis       ((:axis \"thinking\" :peak-weight 756.4)
+                            (:axis \"intuition\" :secondary 214.1))
+
+    ;; Axis-specific (Thinking)
+    :principle-kind        :correctness
+    :short-scenario        \"A child writes a program that reverses a list. Motoi asks: 'What always stays true, no matter what list you give it?' The child sees: the length doesn't change. That's the invariant.\"
+    :antipattern-scenario  \"The child changes the code and the reversed list ends up longer than the original. Motoi points at the invariant: 'This property is broken. Length must stay the same. Find the extra element.'\"
+    :related-verbs         ((:ref-file \"Scheme/reference/01-core.slat\" :ref-verb \"assert/invariant\")
+                            (:ref-file \"Scheme/reference/07-testing.slat\" :ref-verb \"test/property\"))
+    :motoi-behavior        \"When Motoi sees an assertion labeled invariant, it treats a violation as blocking. It won't hand-wave. The property is the promise.\"
+
+    ;; Provenance + governance
+    :provenance            ((:source \"corpus-derived\" :lane \"reclassifier-v2\" :date \"2026-07-21\"))
+    :tier                  \"1\"
+    :kid-friendly          #t
+    :training-eligible     #t
+    :dialect               \"motoi\"
+    :audience              :any
+    :content-rating        :G
+    :confidentiality       :public)
+
+  ────────────────────────────────────────────────────────────────
+  TF-IDF vs ENTROPY — WHY TF-IDF WINS FOR TIER 1 SELECTION.
+  ────────────────────────────────────────────────────────────────
+
+  Both statistics are cheap, both are derived from the corpus,
+  both name 'important' words — but they name DIFFERENT
+  importance.
+
+  · Context-entropy names WORKHORSE GLUE.
+      High-entropy words appear in a huge variety of neighbor
+      contexts. They are the connective tissue of the language
+      — 'the', 'has', 'with', 'value', 'list'. They keep prose
+      moving. They do not carry axis identity. If you pick a
+      graph node's axis by asking 'where does this word appear',
+      workhorse words give a shrug.
+
+  · TF-IDF names AXIS-SIGNATURE VOCABULARY.
+      High TF-IDF words are frequent within an axis's corpus
+      slice AND rare outside it. They are the words that ARE
+      that axis — 'chlorophyll' for Sensation, 'recursion' for
+      Intuition, 'invariant' for Thinking, 'warmth' for Feeling.
+      Pick these as graph nodes and the graph carries axis
+      semantics into the model.
+
+  EMPIRICAL FINDING (2026-07-20 Motoi run, cited by Alfred):
+    Top-20 TF-IDF and top-20 entropy per axis have ZERO
+    overlap. Entropy top-20 is workhorse glue; TF-IDF top-20
+    is axis signature. The two rankings are orthogonal on
+    this corpus. Choosing entropy would populate the graph
+    with 'value', 'thing', 'has', 'list' — words the base
+    model already knows and words that carry no axis signal.
+    Choosing TF-IDF populates the graph with words that BOTH
+    the model needs to learn AND that carry axis identity.
+
+  RULE:
+    Tier 1 selection = TF-IDF top-300 per axis, filtered by
+    doc-freq ≥ 5. Nothing else. Not Pareto (that's the entry
+    filter). Not entropy (that's a facet — populated per node,
+    not used for selection). TF-IDF, top-300, per axis,
+    doc-freq floor.
+
+  DOC-FREQ FLOOR RATIONALE:
+    A word that appears 500 times in one file has a huge
+    TF-IDF spike because it's rare across files. That's a
+    single-author artifact, not corpus vocabulary. The floor
+    (≥ 5 distinct files) filters these out. Empirically the
+    floor removes ~5-10% of top-TF-IDF-per-axis candidates
+    without touching any word a competent reviewer would keep.
+
+  IF AN AXIS HAS FEWER THAN 300 QUALIFIED WORDS:
+    Take all qualified words (do not lower the doc-freq floor
+    to inflate the count). A short axis is a signal about
+    corpus coverage, not a signal to weaken the selection
+    rule. Feeling-axis in the current Motoi corpus may hit
+    this — document the shortfall in the run log and treat
+    as an authoring gap (Step 8 gap-fill lane).
+
+  VERIFICATION:
+    [ ] Per-axis Tier 1 count is ≤ 300 and every included
+        word has doc-freq ≥ 5.
+    [ ] Every Tier 1 node has all 5 category blocks present
+        with all applicable fields populated (schema above).
+    [ ] Every Tier 1 node has the axis-specific facet block
+        for its assigned axis.
+    [ ] Worked-example round-trip: a canonical Tier 1 node
+        (recommended: thinking/invariant) can be re-emitted
+        from disk by the authoring pipeline byte-identical to
+        the example above (modulo :appears-in-corpus which
+        tracks corpus drift).
+  """
+
+  :section-three-tier-doctrine
+  """
+  ═══════════════════════════════════════════════════════════════════
+  THREE-TIER DOCTRINE (Alfred 2026-07-21).
+  ═══════════════════════════════════════════════════════════════════
+
+  SUPERSEDES the '2-tier only' text in § 9. The prior 2-tier framing
+  (Tier 1 rich · Tier 2 stub) collapsed the middle-band connectors
+  and modifiers into either full enrichment or bare registry — losing
+  the semantic-connective-tissue layer that Firth-distributional
+  models require. Alfred 2026-07-21 authorized a three-tier system
+  with an explicit function-word EXCLUSION set. Every corpus
+  content-word lands in exactly one of Tier 1 / Tier 2 / Tier 3.
+  Function words are excluded from the graph entirely.
+
+  ────────────────────────────────────────────────────────────────
+  TIER 1 — PRIMARY SIGNIFIERS. ~1,200 words (300/axis · 4 axes).
+  ────────────────────────────────────────────────────────────────
+
+  PURPOSE.
+    Primary signifiers · topic-markers · axis-signature vocabulary.
+    Words that tell you what a document is ABOUT. When a Tier 1
+    word appears, the reader (and the model) can infer the axis
+    the passage lives on. 'chlorophyll' says Sensation; 'recursion'
+    says Intuition; 'invariant' says Thinking; 'warmth' says
+    Feeling. These are the load-bearing lexical anchors of Motoi's
+    four-axis substrate — the words that ARE the axis.
+
+  SELECTION RULE.
+    TF-IDF top-300 per axis, filtered by doc-freq ≥ 5.
+    · TF-IDF computed per Jung axis (files tagged into axes by
+      the FILE_AXIS map in Step 6b).
+    · The ≥ 5 doc-freq filter prevents narrow one-off spikes
+      from a single author's local vocabulary from taking a
+      Tier 1 slot. Single-file specialists appear frequently in
+      that file (high TF) and nowhere else (huge IDF spike) →
+      artificially high TF-IDF. The floor kills these.
+    · If an axis has fewer than 300 words meeting the filter,
+      take all qualified words. Do NOT lower the doc-freq floor.
+      A short axis is a signal about corpus coverage (Step 8
+      gap-fill lane), not a signal to weaken the selection rule.
+
+  TREATMENT.
+    Full 5-category node per § 9b:
+      · IDENTITY (:id, :canonical, :synonyms, :definition)
+      · CONTEXT-OF-USE (:examples, :example-dialogue,
+        :used-in-programs-as, :appears-in-corpus)
+      · RELATIONS (:cross-refs-books, :cross-refs-graph,
+        :associations, :distributional-neighbors, :oppositions,
+        :cross-axis-bridge-score)
+      · STATISTICAL METADATA (:freq, :doc-freq, :tf-idf,
+        :context-entropy, :idf, :tf-idf-per-axis)
+      · PROVENANCE + GOVERNANCE (:provenance, :tier '1',
+        :kid-friendly, :training-eligible, :dialect, :audience,
+        :content-rating, :confidentiality)
+    Plus axis-specific facets per assigned axis (Sensation adds
+    :category / :sensory-description / :where-found / :size-scale /
+    :kid-familiarity; Intuition adds :category / :definition-
+    technical / :example-in-scheme / :example-in-world /
+    :prerequisites / :appears-in-books; Thinking adds :principle-
+    kind / :short-scenario / :antipattern-scenario / :related-
+    verbs / :motoi-behavior / :related-books; Feeling adds
+    :register-kind / :motoi-uses-when / :contrast-register /
+    :related-principles / :related-books).
+    Authoring lane: Sonnet-authored dialogue, oppositions,
+    scenarios. Definitions and examples pass Priya cosign for
+    kid-friendliness governance.
+
+  RESEARCH GROUNDING.
+
+    SEMIOTICS — signifier taxonomy.
+      · Peirce, C.S. Collected Papers vol II (1932). Icon/index/
+        symbol trichotomy. Tier 1 words function as SYMBOLS
+        (arbitrary conventional signs whose meaning derives from
+        the code that reads them) — this is why they need
+        explicit :definition + :example-dialogue authored: the
+        symbol has no natural connection to referent.
+      · Saussure, Ferdinand de. Course in General Linguistics
+        (Cours de linguistique générale), 1916. Signifier/
+        signified dyad; meaning arises from difference within a
+        system. Tier 1's :oppositions facet operationalizes 'a
+        sign's value comes from what it is NOT' — every Tier 1
+        node names its Greimas-square complementaries so the
+        model learns the word by contrast, not just by
+        definition.
+      · Greimas, A.J. Sémantique structurale (1966); Du sens
+        (1970). Semiotic square: contrariety / contradiction /
+        implication over a S1/S2/~S1/~S2 quadrangle. Tier 1's
+        :oppositions facet IS the Greimas square applied per
+        node (S1 = the word; S2 = its opposition; ~S1 =
+        privation; ~S2 = the complementary term).
+
+    JUNG PSYCHOLOGICAL TYPES — the four axes.
+      · Jung, C.G. Psychologische Typen (1921); Collected Works
+        vol. 6, Princeton UP English translation (1971). The
+        four functions (Sensation / Intuition / Thinking /
+        Feeling) plus the extraversion/introversion attitudes.
+      · Sharp, Daryl. Jung Lexicon: A Primer of Terms and
+        Concepts. Inner City Books, Toronto, 1991. Contemporary
+        reference framing for the four-function typology.
+      NOTE — this is an ADAPTATION, not a straight application.
+      Jung classified COGNITIVE PROCESSES (how a person orients
+      to information). Motoi classifies CONTENT-WORDS (which
+      cognitive function a word primarily engages) — Sensation
+      words engage the concrete-referent function, Intuition
+      words engage the pattern-recognition function, Thinking
+      words engage the judgment function, Feeling words engage
+      the register-valuation function. The four-function
+      partition survives; the object of classification differs.
+      Documented explicitly so no future operator confuses
+      Motoi's per-word axis-assignment with a Jung-typology
+      diagnostic for the reader.
+
+    TF-IDF DISTINCTIVENESS — canonical IR grounding.
+      · Sparck-Jones, K. 'A statistical interpretation of term
+        specificity and its application in retrieval.' Journal
+        of Documentation 28(1):11-21, 1972. IDF's original
+        derivation — a term's specificity is inversely related
+        to the fraction of documents it appears in.
+      · Salton, G., Wong, A., Yang, C.S. 'A vector space model
+        for automatic indexing.' Communications of the ACM
+        18(11):613-620, 1975. The vector-space model that makes
+        TF·IDF the standard document-term weighting. Motoi's
+        per-axis TF-IDF is a straight application to axis-
+        tagged sub-corpora.
+
+    PPMI ASSOCIATIONS — :associations facet.
+      · Church, K.W. & Hanks, P. 'Word association norms,
+        mutual information, and lexicography.' Computational
+        Linguistics 16(1):22-29, 1990. Pointwise mutual
+        information as a measure of word association; the
+        POSITIVE clamp (PPMI) is the standard downstream
+        variant.
+      · Bullinaria, J.A. & Levy, J.P. 'Extracting semantic
+        representations from word co-occurrence statistics.'
+        Behavior Research Methods 39:510-526, 2007. Empirical
+        validation of PPMI over ±window co-occurrence.
+
+    DISTRIBUTIONAL-NEIGHBORS — :distributional-neighbors facet.
+      · Harris, Zellig S. 'Distributional structure.' Word
+        10(2-3):146-162, 1954. The distributional hypothesis:
+        linguistic items with similar distributions have
+        similar meanings.
+      · Turney, P.D. & Pantel, P. 'From frequency to meaning:
+        Vector space models of semantics.' JAIR 37:141-188,
+        2010. Comprehensive survey of distributional semantics
+        techniques — the lineage of the cosine-over-
+        cooccurrence-vectors calculation in Step 6b.
+
+    FRAMENET — background for the future :frames facet (not
+    yet in schema but reserved).
+      · Fillmore, C.J. 'Frame semantics and the nature of
+        language.' Annals of the New York Academy of Sciences
+        280(1):20-32, 1976.
+      · Baker, C.F., Fillmore, C.J., Lowe, J.B. 'The Berkeley
+        FrameNet project.' Proc COLING-ACL 1998, pp 86-90.
+
+    WORDNET — lexical-graph lineage.
+      · Miller, G.A., Beckwith, R., Fellbaum, C., Gross, D.,
+        Miller, K.J. 'Introduction to WordNet: An on-line
+        lexical database.' International Journal of
+        Lexicography 3(4):235-244, 1990. Motoi's four-axis
+        Jung graph is a Motoi-scale WordNet with Jung-typology
+        axis structure replacing WordNet's part-of-speech and
+        hypernym trees.
+
+    ENTITY-GRAPH CPT — :cross-refs-graph verbalization.
+      · Yang, Z., et al. 'Synthetic continued pretraining.'
+        arXiv:2409.07431, 2024. EntiGraph. Verbalizing edges
+        between named entities as connective CPT text yields
+        log-linear scaling in downstream QA. Motoi's Tier 1
+        nodes' :cross-refs-graph edges feed EntiGraph-shape
+        S14/S22 CPT verbalization.
+
+    MULTI-SHAPE CPT REQUIREMENT — why 5 categories not 1.
+      · Ovadia, O., et al. 'Fine-tuning or retrieval? Comparing
+        knowledge injection in LLMs.' arXiv:2312.05934, 2023.
+        Unsupervised fine-tuning on canonical-only text fails
+        to inject facts; multi-shape presentation is what
+        works. Tier 1's five-category treatment is the
+        substrate-side of this finding — each Tier 1 word gets
+        multiple shape presentations during CPT because it
+        has multiple facets that can be verbalized.
+
+    5-PARAPHRASE ATTACHMENT — CPT presentation shape count.
+      · Allen-Zhu, Z. & Li, Y. 'Physics of Language Models:
+        Part 3.1, Knowledge Storage and Extraction.'
+        arXiv:2309.14316, 2023. Empirical elbow at M≈5
+        paraphrases per fact for extraction to become
+        reliable (9.7% → 96.6% QA). Every Tier 1 CPT shape
+        gets 5 paraphrases per the S00 universal wrapper in
+        WEAVE-RECIPE.
+
+    REVERSAL CURSE — reversed-shape requirement.
+      · Berglund, L., et al. 'The reversal curse: LLMs trained
+        on A is B fail to learn B is A.' arXiv:2309.12288, 2023.
+        Documents the failure mode. Every Tier 1 fact
+        (word → definition) must have its reverse (definition
+        → word) authored explicitly.
+      · Golovneva, O., et al. 'Reverse training to nurse the
+        reversal curse.' arXiv:2403.13799, 2024. Reverse-token
+        pretraining as a mitigation; Motoi uses the pair-side
+        equivalent (author both directions) rather than the
+        token-reversal side.
+
+  ────────────────────────────────────────────────────────────────
+  TIER 2 — CONNECTORS / MODIFIERS / NEIGHBORS.
+  ~2,500 words per axis-relevant band, deduplicated.
+  ────────────────────────────────────────────────────────────────
+
+  PURPOSE.
+    Semantic connective tissue. Words that give Tier 1 words
+    their CONTEXT-OF-USE. If Tier 1 is 'what a document is
+    about', Tier 2 is 'how the document says it'. Without
+    Tier 2, Tier 1 nodes are isolated topic-markers with no
+    grammar of combination. With Tier 2, the model learns
+    what Tier 1 words DO in sentences — how they qualify,
+    connect, and set register.
+
+  THREE SUB-CHARACTERS WITHIN TIER 2.
+    Every Tier 2 word carries a :subchar tag naming which of
+    the three roles it plays. A word can carry only one
+    :subchar — polysemy across sub-characters resolves to
+    dominant use per the Step 5 evidence rule.
+
+    (i) MODIFIERS.
+        Adjectives and adverbs that shade Tier 1 nouns with
+        qualia. Examples: careful, quickly, gently, distinctly,
+        honestly, precisely, tentatively, briskly, plainly.
+        Shape Tier 1 nouns/concepts with tonal/precision/
+        confidence adjustments.
+
+    (ii) CONNECTORS.
+         Relational verbs and prepositions-of-content that
+         link Tier 1 in event structures. Examples: holding,
+         brings, splits, follows, wraps, feeds, receives,
+         crosses. NOT function words ('with', 'of', 'to'
+         are function-word-excluded — see below). Connectors
+         are content-verbs whose semantic weight lies in the
+         relation they establish between Tier 1 nouns.
+
+    (iii) REGISTER-CARRIERS.
+          Tonal words that set emotional/tonal frame. Examples:
+          together, alone, close, near, calm, gentle, warm,
+          quiet, urgent, patient, dry. Carry Feeling-axis
+          register without being the register itself (which
+          would be Tier 1).
+
+  SELECTION RULE.
+    HYBRID union of three sub-lists, deduplicated:
+    (a) TF-IDF rank 301-800 per axis (moderate-distinctive
+        middle band — the words that are somewhat axis-
+        signature but not top-of-signature).
+    (b) PPMI-neighbors of Tier 1 not already in Tier 1.
+        For each Tier 1 word, take its top-20 PPMI associates
+        (:associations facet from § 6b). Any associate that
+        isn't already Tier 1 and isn't function-word-excluded
+        is a Tier 2 candidate.
+    (c) Explicit modifier/register catalog per axis. Authored
+        once per axis (~200-400 words per axis) — a curated
+        list of adjectives/adverbs/register-carriers the corpus
+        actually uses in that axis's prose. Catalog lives at
+        scripts/derive-graph-seeds/tier2-catalog-<axis>.txt.
+    UNION (a) ∪ (b) ∪ (c), deduplicate, drop function-word
+    excluded set, drop Tier 1 members. Estimated ~2,500 words
+    total across the axis-relevant band per axis (a Tier 2
+    word can carry multiple axis associations; primary-axis
+    assignment goes to the axis where the word appears most
+    often per PPMI evidence).
+
+  TREATMENT.
+    3-field lightweight node — no rich facets, no dialogue,
+    no oppositions, no scenarios. Populate only:
+      · :definition             one-sentence meaning
+      · :context-of-use         1-2 lines describing what
+                                Tier 1 words this modifier /
+                                connector / register-carrier
+                                typically attaches to
+      · :relations              top-5 Tier 1 words this word
+                                associates with (PPMI-ranked)
+    Plus statistical metadata:
+      · :freq                   total token count
+      · :doc-freq               distinct-file count
+      · :tf-idf                 the per-axis TF-IDF value
+      · :idf                    inverse document frequency
+      · :tier                   literal '2'
+      · :subchar                literal 'modifier' /
+                                'connector' / 'register-
+                                carrier'
+    Plus governance:
+      · :provenance
+      · :training-eligible
+      · :dialect                'motoi'
+    NO axis-specific rich facets. NO :example-dialogue. NO
+    :oppositions. NO :short-scenario. NO :antipattern-
+    scenario. Tier 2 is CONTEXT-OF-USE for Tier 1 — not its
+    own topic. Authoring lane: Haiku-authored or scripted
+    from templates. Sonnet only for spot-review, not for
+    body authoring.
+
+  RESEARCH GROUNDING.
+
+    DISTRIBUTIONAL HYPOTHESIS — classical grounding.
+      · Firth, J.R. 'A synopsis of linguistic theory,
+        1930-1955.' Studies in Linguistic Analysis (Special
+        Volume of the Philological Society), Blackwell, Oxford,
+        pp 1-32, 1957. Contains the canonical formulation:
+        'You shall know a word by the company it keeps.'
+        Tier 2 IS the operationalization of this claim — the
+        Tier 1 nodes are the target words; Tier 2 words are
+        the company they keep. Selection rule (b) is Firth's
+        principle applied literally: PPMI-neighbors of every
+        Tier 1 word earn Tier 2 status because the
+        distributional statistics identify them as the target
+        words' semantic company.
+
+    INSTRUCTION-SHAPE DIVERSITY — Only-IF.
+      · Zhao, H., et al. 'Only-IF: Revealing the decisive
+        effect of instruction diversity on generalization.'
+        arXiv:2410.04717, 2024. Instruction-shape diversity
+        (not just paraphrase count) is what unlocks
+        generalization. Tier 2 provides the CONTEXT variety
+        that lets instruction shapes actually vary — a
+        question about 'gently' can be asked in dozens of
+        constructions because the modifier attaches to many
+        Tier 1 nouns. Without Tier 2, instruction diversity
+        collapses to Tier 1 permutations only.
+
+    METADATA CONDITIONING — MeCo.
+      · Gao, T., Wettig, A., Chen, D., et al. 'MeCo: Metadata
+        conditioning accelerates language model pre-training.'
+        arXiv:2501.01956, 2025. Prepending metadata (URL,
+        domain) to every pretraining document yields 33% less
+        data for equivalent performance, with a cooldown phase
+        (some fraction of docs unprefixed) preserving
+        unconditional generation. Tier 2 nodes carry axis and
+        sub-character labels that get prepended per MeCo to
+        their CPT presentations during Phase 0 (see § section-
+        cpt-execution-per-tier Data Type B).
+
+    REPLAY RATIO / DIVERSITY DURING CPT — CMR Scaling Law.
+      · Yıldız, C., et al. 'Investigating continual pretraining
+        in large language models: Insights and implications.'
+        arXiv:2407.17467, 2024. The CMR scaling law for
+        continual pretraining shows a 1-10% replay ratio of
+        prior data prevents catastrophic forgetting. Tier 2
+        provides most of the replay diversity — because
+        Tier 2 has more nodes than Tier 1 and appears in
+        wider contexts, folding Tier 2 CPT text into the
+        stream naturally supplies the corpus variety CMR
+        prescribes.
+
+    CROSS-NODE CONTEXT IN ADJACENT TRAINING DOCS — LinkBERT.
+      · Yasunaga, M., Leskovec, J., Liang, P. 'LinkBERT:
+        Pretraining language models with document links.'
+        arXiv:2203.15827, 2022. Placing linked documents in
+        the same training context boosts multi-hop reasoning.
+        Tier 2 CPT text is authored to reference the Tier 1
+        nodes it modifies — 'gently' text mentions 'calm',
+        'quietly', 'restraint' (all Tier 1 register nodes) —
+        so the Tier 2 doc IS a LinkBERT-style adjacent-node
+        context for its Tier 1 anchors.
+
+  ────────────────────────────────────────────────────────────────
+  TIER 3 — LONG-TAIL LOOKUP / CORPUS-TOKEN REGISTRY.
+  ~20,000 words (everything content-word not Tier 1 / Tier 2).
+  ────────────────────────────────────────────────────────────────
+
+  PURPOSE.
+    Long-tail lookup · corpus-token registry · anti-confabulation
+    aid. Words that appear rarely and in narrow contexts but
+    STILL HAVE MEANING — 'Turing', 'quaternion', 'Toledo',
+    'entscheidungsproblem'. Not central signifiers (Tier 1) and
+    not connectors/modifiers/register (Tier 2), but the model
+    should RECOGNIZE them rather than confabulate about them.
+    Tier 3 exists so a query mentioning 'Turing' produces
+    'yes, that name appears in the ancestry chapter about
+    Alonzo Church' rather than an invented biography.
+
+  SELECTION RULE.
+    All axis-classified content-words that are NOT Tier 1 or
+    Tier 2 AND not a function-word.
+    · Script-derived — no judgment, no LLM authoring.
+    · Includes proper nouns, technical specifics, once-off
+      references, and long-tail rare terms.
+    · Does NOT include function words (see EXCLUSION set
+      below).
+    · Every axis-classified word that fails Tier 1 / Tier 2
+      selection but passes the Step 5 axis-classification
+      pipeline enters Tier 3.
+
+  TREATMENT.
+    3-line SCRIPT-DERIVED stub:
+      · :definition             script-inferred from source
+                                context (typically first-line
+                                or definitional sentence in
+                                the source file)
+      · :appears-in-corpus      top 3 source-file refs where
+                                the word occurs (path + line
+                                counts)
+      · :surrounding-words      top 10 PPMI co-occurrences
+                                (deterministic, from Step 6b
+                                enrichment restricted to Tier
+                                3 pass)
+    Plus:
+      · :tier                   literal '3'
+      · :axis                   assigned axis (from Step 5)
+      · :freq                   total token count
+      · :doc-freq               distinct-file count
+    NO Sonnet. NO Haiku. NO authoring. Fully mechanical
+    script-derivation. Any Tier 3 stub that ends up in a
+    training-eligible role must first be PROMOTED to Tier 1
+    or Tier 2 through the normal recurrence-driven
+    mechanism (author more corpus in the target axis until
+    the word crosses a tier boundary on the next pipeline
+    rerun).
+
+  RESEARCH GROUNDING.
+
+    ABSTENTION PAIRS — R-Tuning.
+      · Zhang, H., et al. 'R-Tuning: Instructing large
+        language models to say ``I don't know''.'
+        arXiv:2311.09677, 2023. Abstention is a learnable
+        meta-skill; models trained with R-Tuning-style
+        'unknown' pairs generalize refusal-to-confabulate
+        across novel query types. Tier 3 enables the
+        Motoi analog: 'I recognize this word but it's a
+        rare specific mentioned once in the corpus' as a
+        response class distinct from either 'I know this
+        concept' or 'I don't know'. The :tier '3' label
+        is the routing signal that tells the model 'this
+        is lookup territory, not explanation territory'.
+
+    ANTI-OVER-ANCHORING — Sleeper Agents (inverse lesson).
+      · Hubinger, E., et al. 'Sleeper agents: Training
+        deceptive LLMs that persist through safety
+        training.' arXiv:2401.05566, 2024. Documents that
+        rare specific tokens with strong training signals
+        can act as trigger-conditions for anomalous
+        behavior. INVERSE lesson for Motoi: the :tier '3'
+        label prevents rare specifics from being treated
+        as central concepts. Every Tier 3 stub carries
+        the tier label so the model learns that the
+        word's rarity IS part of its meaning — do not
+        confabulate about it, do not over-anchor on it,
+        recognize and defer to context.
+
+    THE FLOOR — Physics of LM 3.1.
+      · Allen-Zhu, Z. & Li, Y. 'Physics of Language Models:
+        Part 3.1.' arXiv:2309.14316, 2023. Empirical finding:
+        facts with <5 recurrence achieve ~0% extraction from
+        the model. Tier 3 words BY CONSTRUCTION have low
+        recurrence (that's why they're Tier 3). The paper
+        establishes the floor: Tier 3 words CANNOT be taught
+        as extractable concepts. They can only be taught as
+        LOOKUP-EXISTENT tokens — 'this word appears here'.
+        The stub schema respects the floor by not attempting
+        richer treatment.
+
+  ────────────────────────────────────────────────────────────────
+  FUNCTION-WORD EXCLUSION SET.
+  49 words canonically excluded from all three tiers.
+  ────────────────────────────────────────────────────────────────
+
+  PURPOSE.
+    Syntactic glue with no semantic content. Excluded from the
+    graph entirely. The model already knows these tokens from
+    its base pretraining; adding them to the graph teaches
+    nothing new AND dilutes the graph's semantic density.
+    Function words are NEVER graph nodes.
+
+  SELECTION RULE.
+    Canonical stopword list — 49 words maintained at
+    /tmp/motoi-audit/axis-seeds-v2/function-words-excluded.tsv.
+    The set: the, and, but, if, when, of, in, is, to, for,
+    with, on, at, from, by, as, are, was, were, be, been,
+    being, have, has, had, do, does, did, will, would, should,
+    could, may, might, must, can, shall, this, that, these,
+    those, it, there, here, or, not, so, nor, yet.
+    Version-pinned via SHA. Do not silently update — if the
+    upstream Fox stopword list drifts, treat as a doctrine
+    change requiring Alfred approval.
+
+  TREATMENT.
+    NOT IN GRAPH. Not Tier 1, not Tier 2, not Tier 3. Model
+    sees function words as CPT tokens ONLY (naturally, from
+    the base corpus flowing through it). No :definition, no
+    :axis, no :tier, no node, no stub, no registry entry.
+    Preflight assertion: no graph node's :canonical field
+    ever contains a function-word from this list. Any
+    violation halts the pipeline.
+
+  RESEARCH GROUNDING.
+
+    CANONICAL STOPWORD LIST FOR IR.
+      · Fox, C. 'A stop list for general text.' ACM SIGIR
+        Forum 24(1-2):19-21, 1989. The canonical modern
+        stopword list for text retrieval. Motoi's 49-word
+        subset is Fox filtered to preserve any word that
+        carries semantic content in Motoi's technical
+        corpus (e.g., 'do' stays out because 'do' is a
+        Scheme keyword handled by the Scheme stopword list
+        in Step 2, not because it carries semantic content).
+
+    ZIPFIAN JUSTIFICATION.
+      · Zipf, G.K. Human Behavior and the Principle of Least
+        Effort. Addison-Wesley, 1949. Function words form
+        the flattest tail of the Zipf-frequency curve;
+        content words follow a Poisson-modulated Zipfian
+        that thins faster. The distributional gap is real
+        and mathematically motivated — function words
+        aren't just 'less informative', they inhabit a
+        different frequency-distribution regime.
+
+    METADATA-PREFIX INEFFICACY FOR FUNCTION WORDS.
+      · Gao, T., Wettig, A., Chen, D. et al. 'MeCo.'
+        arXiv:2501.01956, 2025. §3 notes metadata prefixing
+        works over CONTENT-WORD distributions, not function-
+        word distributions. Attempting to prepend
+        '[axis:X] [tier:Y]' before a function-word CPT
+        occurrence is signal-free — the function word
+        appears in every axis with equal density, so no
+        conditioning signal survives. Alfred 2026-07-21:
+        'Don't waste tokens teaching what "the" means to a
+        model that already knows.'
+
+  ────────────────────────────────────────────────────────────────
+  RECONCILIATION WITH § 9 (2-tier text).
+  ────────────────────────────────────────────────────────────────
+
+  § 9's earlier 2-tier framing is SUPERSEDED by this section
+  from 2026-07-21 forward. The Mk 2 CPT pass uses the three-
+  tier system spec'd here. § 9 text is retained for provenance
+  (documents the 2-tier stage of the doctrine) but operators
+  must default to three-tier + function-word exclusion for
+  every new pipeline run. If any operator reads § 9 alone and
+  misses this section, halt and re-read from § three-tier-
+  doctrine forward — the three-tier system is the load-bearing
+  doctrine now.
+
+  ────────────────────────────────────────────────────────────────
+  VERIFICATION.
+  ────────────────────────────────────────────────────────────────
+
+  [ ] Every axis-classified content-word lands in exactly one
+      of Tier 1, Tier 2, Tier 3 (partition; no double-count,
+      no drops).
+  [ ] Every Tier 1 node has all 5 category blocks per § 9b.
+  [ ] Every Tier 2 node has :definition + :context-of-use +
+      :relations + statistical metadata + :subchar. NO rich
+      facets.
+  [ ] Every Tier 3 stub has :definition + :appears-in-corpus
+      + :surrounding-words + tier/axis/freq/doc-freq. NO
+      further fields.
+  [ ] No graph node's :canonical equals any function-word in
+      the 49-word exclusion set.
+  [ ] Every research citation in this section resolves to a
+      real paper (arXiv ID or classical author-year-title).
+  """
+
+  :section-cpt-execution-per-tier
+  """
+  ═══════════════════════════════════════════════════════════════════
+  CPT EXECUTION SPEC — how CPT consumes the three-tier data
+  (Alfred 2026-07-21).
+  ═══════════════════════════════════════════════════════════════════
+
+  This section spec's the Phase 0 CPT pipeline that consumes the
+  three-tier graph output. Six data types feed CPT; each has its
+  own prompt-creation template, MeCo metadata prefix scheme,
+  paraphrase count, and CPT text sample. The final subsection
+  gives the interleaving order and ratios.
+
+  Load-bearing precondition: every data type below assumes the
+  three-tier partition + function-word exclusion of § section-
+  three-tier-doctrine is complete. CPT does not run on partial
+  graphs.
+
+  ────────────────────────────────────────────────────────────────
+  DATA TYPE A — TIER 1 RICH NODES → CPT.
+  ────────────────────────────────────────────────────────────────
+
+  LABEL DEFINITIONS THE MODEL MUST LEARN.
+    · Axis labels: 'sensation' / 'intuition' / 'thinking' /
+      'feeling'. Each with its Jung-derived meaning per
+      LANE A ch01 of book-of-labels.
+    · Tier label: 'tier-1' = primary signifier, central to
+      axis, gets full 5-category treatment.
+    · Section labels: 'Identity' / 'Context-of-use' /
+      'Relations' / 'Statistical' / 'Provenance'.
+    · Facet labels: ':definition' / ':example-dialogue' /
+      ':used-in-programs-as' / ':associations' /
+      ':oppositions' / ':cross-refs-graph' etc. per
+      § 9b full field list.
+
+  WHEN FED.
+    Phase 0 CPT, FIRST PASS. Tier 1 rich nodes fold BEFORE
+    Tier 2 or Tier 3 so the axis-signature anchors establish
+    before the connective tissue and long-tail land. Order
+    matters: if Tier 2 (which cites Tier 1 in its
+    :relations) folds first, the model sees connectors
+    naming targets it hasn't learned yet.
+
+  HOW PROMPT IS CREATED PER TIER 1 NODE.
+    (i) MeCo prefix line (per arXiv:2501.01956):
+        '[axis:<axis>] [tier:1] [word:<canonical>]'
+    (ii) Body: prose weaving :definition + :example-dialogue
+         + :used-in-programs-as + :associations into flowing
+         narrative. Natural-language weaving, NOT tabular.
+         Dialogue snippets embedded with attribution ('a
+         child asks... Motoi answers...').
+    (iii) Reversed shape per arXiv:2309.12288 Reversal Curse
+          + arXiv:2403.13799 Reverse Training. Every forward
+          '[word:X] → definition prose' has a matching
+          reverse '[keyword:<distinctive-phrase-from-def>]
+          → X'.
+    (iv) M=5 paraphrases per Physics-3.1 elbow
+         (arXiv:2309.14316). Five surface-form rewrites of
+         the SAME node content, each with the MeCo prefix,
+         each with the reversed pair.
+
+  CPT TEXT SAMPLE (verbatim template for thinking/invariant):
+
+    [axis:thinking] [tier:1] [word:invariant]
+
+    An invariant is a property that stays true no matter
+    what else changes. In Motoi, verbs carry invariants as
+    contracts — the invariant of `map` is that the output
+    list has exactly the same length as the input list. When
+    a child asks 'what if the list is empty?' Motoi answers:
+    'The invariant still holds — length zero in, length zero
+    out. That IS the property.' Invariants appear in Scheme
+    reference :contract fields, inside function bodies as
+    assertions, and in tests as properties that must pass
+    for every input. Related concepts: proof, contract,
+    property, holds, always, claim, verify. When Motoi sees
+    a broken invariant, it treats the violation as blocking.
+    The property is the promise.
+
+  (Above prose = one shape. Four more paraphrases per M=5
+  rule, each carrying the same MeCo prefix line. Each
+  paraphrase pairs with its reversed shape at fold time.)
+
+  ────────────────────────────────────────────────────────────────
+  DATA TYPE B — TIER 2 LIGHTWEIGHT NODES → CPT.
+  ────────────────────────────────────────────────────────────────
+
+  LABEL DEFINITIONS THE MODEL MUST LEARN.
+    · 'tier-2' = connector / modifier / neighbor of Tier 1.
+    · Sub-character labels: 'modifier' / 'connector' /
+      'register-carrier'.
+    · (Axis labels already established by Tier 1 pass.)
+
+  WHEN FED.
+    Phase 0 CPT, SECOND PASS. After Tier 1 anchors have
+    been folded (one full Tier 1 sweep completes before
+    Tier 2 starts). This ordering ensures Tier 2's
+    :relations references land on already-established
+    Tier 1 anchors.
+
+  HOW PROMPT IS CREATED PER TIER 2 NODE.
+    (i) MeCo prefix line:
+        '[axis:<axis>] [tier:2] [subchar:<modifier|
+         connector|register-carrier>] [word:<canonical>]'
+    (ii) Body: SHORT prose — one-sentence :definition + one-
+         to-two lines of :context-of-use (source-refs woven
+         inline) + top-5 :relations naming Tier 1 words
+         this Tier 2 word associates with.
+    (iii) M=3 paraphrases (lighter than Tier 1's M=5).
+          Tier 2 is context-of-use for Tier 1, not its own
+          topic — less presentation diversity needed.
+    (iv) Reversal-pair authored SELECTIVELY. Not every
+         Tier 2 needs a reverse; only the ones with rich
+         enough definitions to invert meaningfully
+         (roughly the modifier and register-carrier sub-
+         characters; connectors often don't invert cleanly).
+
+  CPT TEXT SAMPLE (verbatim template for feeling/gently):
+
+    [axis:feeling] [tier:2] [subchar:register-carrier]
+    [word:gently]
+
+    Gently is how Motoi speaks when the situation calls for
+    calm — soft tone, unhurried pace. It appears alongside
+    words like tenderness, care, warmth, quietly, softly.
+    In book-of-limits/ch-crisis, gently is the register for
+    de-escalation prompts. In book-of-self/ch-persona,
+    gently is one of Motoi's baseline registers when a
+    user is uncertain. Related Tier 1 concepts: calm, care,
+    restraint.
+
+  ────────────────────────────────────────────────────────────────
+  DATA TYPE C — TIER 3 SCRIPT-DERIVED STUBS → CPT.
+  ────────────────────────────────────────────────────────────────
+
+  LABEL DEFINITIONS THE MODEL MUST LEARN.
+    · 'tier-3' = rare specific / lookup-only / do not
+      over-anchor. The label ITSELF signals routing
+      behavior — see arXiv:2401.05566 (inverse lesson).
+
+  WHEN FED.
+    Phase 0 CPT, THIRD PASS — but INTERLEAVED with book /
+    reference CPT text, NOT clustered as a terminal block.
+    Clustering Tier 3 near the end of CPT would give the
+    model a large block of low-recurrence stubs at a
+    critical training window; interleaving preserves the
+    signal that these are rare specifics distributed
+    throughout the corpus.
+
+  HOW PROMPT IS CREATED PER TIER 3 STUB.
+    (i) MeCo prefix line:
+        '[axis:<axis>] [tier:3] [word:<canonical>]'
+    (ii) Body: ONE LINE registry entry — 'Word appears in
+         <source-file> (mentioned N times). Nearby words:
+         <top-10 PPMI>.'
+    (iii) M=1 paraphrase. No diversity needed for lookup —
+          the goal is recognition, not extraction.
+    (iv) NO reversed shape. Tier 3 is one-directional
+         lookup only.
+
+  CPT TEXT SAMPLE (verbatim template for sensation/turing):
+
+    [axis:sensation] [tier:3] [word:turing]
+
+    Turing appears in book-of-language-ancestors/ch03-
+    alonzo-church-and-alan-turing (mentioned 3 times) and
+    book-of-jesse-one/ch10-common-lisp (mentioned 1 time).
+    Nearby words in the corpus: alonzo, church, computability,
+    halting, machine, lambda, hilbert, decision, computable,
+    entscheidungsproblem.
+
+  ────────────────────────────────────────────────────────────────
+  DATA TYPE D — REVERSED SHAPE PAIRS (all tiers).
+  ────────────────────────────────────────────────────────────────
+
+  PURPOSE.
+    Reversal Curse mitigation per arXiv:2309.12288 +
+    arXiv:2403.13799. Every A→B has B→A authored so the
+    model learns both directions rather than one.
+
+  APPLIED TO.
+    · Tier 1 MAINLY — rich enough content to reverse
+      meaningfully. Every Tier 1 forward pair spawns
+      exactly one reverse pair.
+    · Tier 2 SELECTIVELY — modifiers and register-carriers
+      often invert; connectors sometimes don't (a
+      relational verb's inversion isn't always meaningful).
+      Authoring lane decides per node.
+    · Tier 3 NOT APPLIED — one-directional lookup.
+
+  HOW PROMPT IS CREATED.
+    Forward pair (Tier 1 example):
+      '[word:invariant] [type:definition]' → definition
+      prose from Data Type A body.
+    Reverse pair (Tier 1 example):
+      '[keyword:always-true property] [type:reverse-recall]'
+      → 'invariant'
+    Rank-to-word reverse (Tier 1 example, extra shape):
+      '[axis:thinking] [rank:1 by tf-idf]' → 'invariant'
+
+  Every reverse pair carries the same MeCo axis+tier
+  prefix as the forward pair for context, plus the
+  [type:...] marker so the model learns the shape as
+  distinct-from-forward.
+
+  ────────────────────────────────────────────────────────────────
+  DATA TYPE E — BOOK TEXT (unchanged CPT — existing books
+  folded).
+  ────────────────────────────────────────────────────────────────
+
+  WHEN FED.
+    Phase 0 CPT, INTERLEAVED with the tier-based data
+    types. Book chapters flow through the CPT stream
+    proportional to their token count.
+
+  HOW MECO PREFIX ADDED.
+    Every book chapter prepended with:
+      '[book:<book-name>] [chapter:<chapter-slug>]
+       [type:learning] [book-type:<learning|application|
+       composition|introspection|prose|challenge>]'
+    Per MeCo (arXiv:2501.01956) methodology. Applies to
+    all six book types.
+
+  CITE.
+    · Gao, T., Wettig, A., Chen, D. 'MeCo.'
+      arXiv:2501.01956, 2025. The 33% less-data-for-same-
+      performance result requires metadata prefix on
+      existing text too — not just synthesized graph
+      text. Books MUST get the prefix; unprefixed book
+      text under-uses the metadata conditioning signal.
+
+  ────────────────────────────────────────────────────────────────
+  DATA TYPE F — REFERENCE (unchanged CPT — Scheme verb
+  entries).
+  ────────────────────────────────────────────────────────────────
+
+  WHEN FED.
+    Phase 0 CPT, INTERLEAVED with book text and tier data.
+
+  HOW MECO PREFIX ADDED.
+    Every reference entry prepended with:
+      '[reference:core] [verb:<verb-name>]
+       [library:<library-name>]'
+    Per MeCo methodology.
+
+  ────────────────────────────────────────────────────────────────
+  INTERLEAVING ORDER + RATIOS.
+  ────────────────────────────────────────────────────────────────
+
+  CPT CURRICULUM (repeat until epoch target hit):
+    Tier 1 rich (5x paraphrases per node)
+      → book text (chunked)
+        → reference (chunked)
+          → Tier 2 light (3x paraphrases per node)
+            → Tier 3 stubs (1x, interleaved not clustered)
+              → reversed pairs (all tiers as applicable)
+                → repeat
+
+  RATIOS per MeCo cooldown methodology:
+    · Tier 1 rich          20% of CPT tokens
+    · Book + reference     40% of CPT tokens
+    · Tier 2 light         15% of CPT tokens
+    · Tier 3 stubs         15% of CPT tokens
+    · Reversed pairs       10% of CPT tokens
+
+  TOKEN BUDGET (approximate, per Motoi Mk 2 target):
+    · Books:               ~30-50k tokens (existing corpus)
+    · Reference:           ~50k tokens (existing)
+    · Tier 1 rich:         ~240k tokens (1,200 nodes ×
+                           ~200 tokens body × 5 paraphrases /
+                           averaged with reversed pairs)
+    · Tier 2 light:        ~400k tokens (~10k nodes ×
+                           ~40 tokens body × 3 paraphrases)
+    · Tier 3 stubs:        ~200k tokens (~20k stubs ×
+                           ~10 tokens body × 1)
+    · Reversed pairs:      ~80k tokens
+    · TOTAL:               ~1M CPT tokens (± 100k)
+
+  EPOCHS.
+    1-3 epochs depending on eval — start with 1, evaluate
+    label-training probe suite (see § 14.4), extend to 2-3
+    if labels underlearned (LP1 < 90% on axis/tier probes).
+
+  MECO COOLDOWN.
+    Per arXiv:2501.01956 §3, ~15% of documents (any type)
+    fold with the MeCo prefix STRIPPED at fold time, so
+    the model learns to function with or without metadata
+    at inference. Randomized per-document; deterministic
+    RNG seed pinned in runlog.
+
+  ────────────────────────────────────────────────────────────────
+  VERIFICATION.
+  ────────────────────────────────────────────────────────────────
+
+  [ ] Every Tier 1 node has 5 CPT documents authored
+      (paraphrase count = M=5).
+  [ ] Every Tier 1 node has ≥1 reversed pair authored.
+  [ ] Every Tier 2 node has 3 CPT documents authored
+      (paraphrase count = M=3).
+  [ ] Every Tier 3 stub has exactly 1 CPT document.
+  [ ] Every CPT document carries a MeCo prefix line
+      matching its data type.
+  [ ] MeCo cooldown fraction = 15% ± 2% of total docs
+      randomly stripped at fold.
+  [ ] Total CPT tokens land within 900k-1.1M range;
+      ratios within ±3% of the 20/40/15/15/10 targets.
+  [ ] Interleaving order followed (Tier 1 first pass,
+      then books+ref, then Tier 2, then Tier 3
+      interleaved with book text, then reversed pairs).
+  [ ] Label-training probe suite (§ 14.4) run after
+      CPT completes and before SFT starts; LP1 ≥ 90%
+      on axis + tier probes signals CPT succeeded at
+      label conditioning.
+  """
+
+  :section-10-repeatability
+  """
+  Repeatability guarantees (what makes this a doctrine-grade
+  pipeline rather than an ad-hoc script):
+
+  · INPUTS ARE FILES ON DISK — no external data, no scraping, no
+    network calls. Any rerun on the same corpus tree produces the
+    same output. Any rerun on an updated corpus produces
+    differences that are semantically meaningful (new nouns,
+    frequency shifts) rather than stochastic.
+
+  · OUTPUTS ARE TSV OR SLAT — text formats that are diffable and
+    version-controllable. No binary outputs. No LLM-invented
+    content in the seed lists (the LLM classifies EXISTING tokens
+    in Step 5; it does not create tokens).
+
+  · EXTRACTOR SCRIPTS ARE VERSIONED — all six scripts (plus
+    stopword lists and workhorse list) live under
+    scripts/derive-graph-seeds/ and are checked into git. Any
+    script change is auditable; any change in output can be
+    traced to either corpus change or script change (or both,
+    with explicit provenance).
+
+  · SAKURA REUSE — the same procedure runs unchanged on
+    Sakura's corpus. Sakura swaps its own corpus paths into
+    the extraction glob (Step 1), keeps the same stopword lists
+    and Scheme keyword filter (Sakura is a Motoi VARIANT — same
+    core language, same stopwords), and gets Sakura's own
+    Pareto-cut seed lists. Sakura's seeds will differ from
+    Motoi's — that's the point; Sakura's corpus is richer, so
+    Sakura's f_thresh will be higher and |V_pareto| may be
+    larger. The procedure is identical.
+
+  · RUNLOG IS THE RECORD — every pipeline invocation appends to
+    derived/graph-seeds/RUN-<date>.log. The runlog records:
+    which corpus revision (git SHA), which script versions,
+    which timestamps, and every step's stdout summary. Two runs
+    with the same runlog head-state should produce identical
+    outputs.
+
+  · NO SILENT DROPS — every step verifies row-count conservation
+    from input to output. If a row disappears, it's logged with
+    a defect reason. No word ever silently vanishes from the
+    pipeline.
+
+  · NO OVER-BROAD RECLASSIFICATION — a rerun that would
+    reclassify >20% of previously-classified words into a
+    different axis MUST halt for human review. Sudden mass
+    reclassification signals classifier drift, not corpus
+    change; investigate the classifier LLM's system prompt
+    before accepting the new labels.
+
+  · DETERMINISTIC CLASSIFIER — the classifier LLM invocation
+    in Step 5 uses temperature=0. Same evidence bundle → same
+    axis label. If the classifier LLM is upgraded (e.g., a new
+    model version), pin the model version in the runlog and
+    treat the classification pass as 'derived under classifier
+    version X'; do not silently upgrade.
+
+  · REPRODUCIBILITY CHECK — every ~5 pipeline runs, sample 50
+    words from a previous run's classified.tsv, re-classify
+    them, and diff. Drift rate < 5% is healthy; > 15% signals
+    classifier prompt drift or model change.
+  """
+
+  :section-11-composes-with
+  """
+  Doctrine, schema, and adjacent runbooks this chapter composes with:
+
+  · memory/project_cpt_is_over_nouns.md
+    Why we derive noun seed lists at all. CPT teaches nouns; SFT
+    teaches verbs. This chapter is the noun-derivation half of
+    the substrate authoring stack.
+
+  · memory/project_four_axis_graph_consolidation.md
+    The four-axis (Sensation / Intuition / Thinking / Feeling)
+    consolidation of the 10 canonical graph types (person,
+    object, place, institution, concept, event, cultural-work,
+    art-movement, do-and-dont, register). This chapter's Step 5
+    classification uses this axis system.
+
+  · memory/project_signifier_signified_and_dialogue.md
+    Each graph node carries a signifier (the word), a signified
+    (concept content), and a dialogue field. Node authoring
+    (Step 8) populates all three.
+
+  · memory/project_graph_derivation_principle.md
+    A word earns a graph node by RECURRENCE. Pareto is the
+    principled cut. Guessed thresholds are not.
+
+  · engineering/JUNG-AXIS-GRAPH-NODE-SCHEMA.slat
+    The per-axis node schema. Step 8 populates it from these
+    seed lists.
+
+  · engineering/LACUNA-ENG-CPT-SHAPES-RESEARCH-2026-07-20.md
+    Why each graph node needs multi-shape CPT presentation to
+    become extractable knowledge. Downstream from this pipeline.
+
+  · SRE-MANUAL/chapters/04-cpt-sft-authoring-per-data-type.slat
+    The runbook that consumes graph seed lists via
+    :material graph-{axis} shapes (S20/S21/S22/S23). Chapter 4
+    is what turns these seed lists into training data.
+
+  · SRE-MANUAL/chapters/01-forge-preflight-and-fire.slat
+    Preflight invariants that apply to any corpus emission.
+
+  · SRE-MANUAL/chapters/02-training-signals-and-data.slat
+    How to read the training-time signal after graph-derived
+    material folds in.
+
+  · SRE-MANUAL/chapters/03-weave-finish.slat
+    The polish step downstream of chapter 4's SFT emission,
+    downstream in turn of this chapter's seed derivation.
+
+  · scripts/derive-graph-seeds/01-extract-tokens.py
+    scripts/derive-graph-seeds/02-distribution.py
+    scripts/derive-graph-seeds/03-pareto-cut.py
+    scripts/derive-graph-seeds/04-drop-workhorses.py
+    scripts/derive-graph-seeds/05-axis-classify.py
+    scripts/derive-graph-seeds/06-emit-seed-tsv.py
+    scripts/derive-graph-seeds/06b-enrich.py
+    scripts/derive-graph-seeds/stopwords-scheme.txt
+    scripts/derive-graph-seeds/stopwords-english.txt
+    scripts/derive-graph-seeds/workhorses.txt
+    All authored per the skeletons in this chapter. Version-pin
+    at each canonical rerun.
+  """
+
+  :section-13-nlp-lineage
+  """
+  Techniques used in this procedure trace to established NLP work:
+
+    · WordNet (Miller, Princeton, 1985) — lexical database with
+      hyponymy/meronymy/antonymy. Our Jung-axis graphs are a Motoi-
+      scale WordNet with our own axis structure.
+
+    · ConceptNet (MIT / Open Mind Common Sense) — commonsense
+      associations from crowdsourced + machine-extracted relations.
+      Our :associations facet is deterministic-corpus version.
+
+    · Word2Vec / GloVe / FastText — distributional embeddings;
+      meaning = position in vector space. Our :distributional-
+      neighbors facet computes this via co-occurrence cosine at
+      small scale (no giant embedding models).
+
+    · FrameNet (Berkeley, Fillmore) — semantic frames with role
+      slots. Our :frames facet is a lightweight version.
+
+    · PPMI (Church & Hanks 1990 / Turney 2001) — statistical
+      measure of word association. Load-bearing for :associations
+      computation.
+
+    · Firth (1957): 'You shall know a word by the company it
+      keeps.' The distributional hypothesis is what this whole
+      associative enrichment step operationalizes.
+
+  Motoi does the lightweight scriptable versions of these because we
+  have a small tagged curated corpus and can compute exactly what
+  we need without giant pretrained embedding models. Same
+  principle, different scale.
+  """
+
+  :section-14-label-training-discipline
+  """
+  ═══════════════════════════════════════════════════════════════════
+  LABEL-TRAINING DISCIPLINE (Alfred 2026-07-20).
+  ═══════════════════════════════════════════════════════════════════
+
+  Alfred verbatim: "The labels and sections MUST be explained
+  during training. I don't know exactly how but you must research
+  and write it in our SRE and weave documents."
+
+  The Motoi corpus is heavily annotated: axis labels, tier labels,
+  Row 1-5 labels, book-type labels, discipline lenses, node facet
+  names, provenance fields. Absent explicit teaching, the model
+  sees these labels as arbitrary tokens and cannot use them to
+  organize retrieval, self-audit, or answer meta-questions ('what
+  axis is X on?', 'which tier is Y?', 'give me a Row 4 for verb Z').
+
+  This section names WHAT the model must learn, cites HOW the
+  literature says to teach it, and lists CONCRETE authoring lanes
+  that make it happen.
+
+  ────────────────────────────────────────────────────────────────
+  § 14.1 — INVENTORY: WHAT LABELS THE MODEL MUST LEARN.
+  ────────────────────────────────────────────────────────────────
+
+  These are the labels currently in circulation across Motoi's
+  substrate. Every one of them MUST be either taught explicitly
+  (via one of the lanes in § 14.3-14.4) or explicitly declared
+  operator-facing-only (via a :confidentiality field).
+
+  (a) FOUR JUNG AXES:
+        sensation, intuition, thinking, feeling.
+      What the model must be able to do:
+        · Given a word, name its axis.
+        · Given an axis, list example words (retrieval).
+        · Given an axis, describe the family of things it holds
+          (definitional).
+        · Reject queries about an axis that doesn't exist
+          ('what's on the emotion axis?' → 'Motoi uses the
+          feeling axis for that').
+
+  (b) TWO TIERS:
+        tier-1, tier-2.
+      What the model must be able to do:
+        · Given a word, name its tier.
+        · Explain the difference between the tiers ('Tier 1 has
+          full associative enrichment; Tier 2 is a registry
+          stub').
+        · Explain WHY the tiering exists (Pareto cut, PPMI
+          statistical meaningfulness, no-middle-tier discipline).
+
+  (c) FIVE ROWS (from the reference schema):
+        Row 1 (HOW · Composition · 1-3-5-modules),
+        Row 2 (WHEN · Audit · Peirce),
+        Row 3 (WHERE ELSE · Dimension · Lacan + Wittgenstein-
+              aspect),
+        Row 4 (WHY · Proof-Essence · Peirce + Popper),
+        Row 5 (WITH WHAT ELSE · Composition-Emergence ·
+              Wittgenstein-late + Lacan).
+      What the model must be able to do:
+        · Given a verb and a row number, produce the row content.
+        · Given a row concept ('why does X hold?') route to Row 4.
+        · Explain what each row IS (epistemologically distinct
+          question shape).
+
+  (d) THREE DISCIPLINE LENSES:
+        eng, math, cs.
+      What the model must be able to do:
+        · Given a verb and a lens, produce the lens content.
+        · Explain what each lens covers (engineering
+          operational view, mathematical formal shape, CS
+          computational-model shape).
+
+  (e) SIX NODE FACETS (Tier 1 associative enrichment):
+        :associations, :distributional-neighbors, :context-
+        entropy, :idf, :tf-idf-per-axis,
+        :cross-axis-bridge-score.
+      What the model must be able to do:
+        · Name each facet.
+        · Explain what each facet measures.
+        · Recognize when a facet answer is being asked for
+          ('what's the neighborhood of X?' → :associations).
+
+  (f) SIX BOOK TYPES:
+        learning, application, composition, introspection,
+        prose, challenge.
+      What the model must be able to do:
+        · Given a book name, name its type.
+        · Given a type, describe what it teaches and how it
+          extracts to training pairs.
+
+  (g) PROVENANCE / METADATA FIELDS:
+        :provenance, :source-path, :source-field, :template-id,
+        :probe, :paraphrase-idx, :extractor-version, :confidence,
+        :confidentiality, :training-eligible.
+      These are OPERATOR-FACING. The model should NOT be trained
+      to emit them in user-facing responses. They belong to the
+      substrate + audit trail. Explicit doctrine: mark all such
+      fields with :confidentiality :internal-eng in the pair
+      itself, and drop the field from the assistant reply at
+      preflight time. Model learns provenance-shape passively
+      via CPT (see § 14.4) but never generates it in dialogue.
+
+  (h) SAFETY LABELS:
+        safety-crisis, safety-emergency, circular-trap,
+        lang-resistance, offline-honesty.
+      What the model must be able to do:
+        · Recognize when a query hits one of these categories.
+        · Route to the matching template response (verbatim
+          for safety-crisis + safety-emergency; counting-mode
+          for circular-trap).
+        · NOT explain the labels to end-users unless directly
+          asked in an operator-frame ('what safety categories
+          does Motoi have?').
+
+  ────────────────────────────────────────────────────────────────
+  § 14.2 — RESEARCH GROUNDING (real papers, mechanisms).
+  ────────────────────────────────────────────────────────────────
+
+  The following mechanisms establish that labels CAN be taught
+  and HOW. Citations are load-bearing — every lane in § 14.3-14.4
+  invokes one or more of these.
+
+  [R1] Task prefixes teach the label. T5 (Raffel et al.,
+       arXiv:1910.10683) prepends every training example with a
+       task-name prefix ('translate English to German:', 'cola
+       sentence:', 'summarize:'). The model learns not just the
+       task but that the prefix NAMES the task — at inference,
+       giving a novel prefix within the same family conditions
+       behavior. Direct evidence: labels-as-prefixes work.
+
+  [R2] Instruction+task-definition training teaches the label
+       AS A DEFINITION. Super-NaturalInstructions (Wang et al.,
+       arXiv:2204.07705) trains on 1,616 tasks with expert-
+       written 56-word average task DEFINITIONS. Tk-Instruct
+       outperforms InstructGPT despite being an order of magnitude
+       smaller, showing that explicit definitions of what a
+       label MEANS transfer to unseen tasks.
+
+  [R3] Zero-shot generalization from labeled prompt training.
+       FLAN (Wei et al., arXiv:2109.01652) instruction-tunes on
+       60+ tasks verbalized via natural-language templates and
+       generalizes to unseen tasks by prompt template. FLAN
+       Collection (Longpre et al., arXiv:2301.13688) confirms
+       task-count + template-diversity are the load-bearing
+       axes. T0 (Sanh et al., arXiv:2110.08207) generalizes
+       across templates with multiple prompt phrasings per task.
+
+  [R4] Metadata conditioning at pretraining. MeCo (Gao et al.,
+       arXiv:2501.01956) prepends source metadata (URL, domain)
+       to every pretraining document, followed by a cooldown
+       phase without metadata. Result: 33% less data for the
+       same downstream performance at 600M-8B scale. The model
+       learns metadata as a conditioning signal for the content
+       that follows. DIRECT APPLICATION to Motoi: prepend
+       axis/tier/row/book-type as document metadata during CPT.
+
+  [R5] Domain control tokens. CTRL (Keskar et al.,
+       arXiv:1909.05858) trains with 'control codes' (domain
+       prefixes) that the model learns to condition generation
+       on. Foundational evidence for tag-as-prefix training.
+
+  [R6] Learnable domain tags. Tag-LLM (Shen et al.,
+       arXiv:2402.05140) adds custom domain-tag embeddings to
+       repurpose general LLMs for specialized domains
+       (chemistry, biomedical). Domain tags delimit specialized
+       representations; function tags represent tasks. Evidence
+       that tag-shaped conditioning works at inference and can
+       be TRAINED with modest data.
+
+  [R7] Continuous prompt / prefix tuning. Prefix-Tuning (Li &
+       Liang, arXiv:2101.00190) shows a small continuous
+       task-specific prefix (0.1% of parameters) matches full
+       fine-tuning. Establishes that a small learnable label-
+       shaped signal is enough to steer a whole model.
+
+  [R8] Knowledge injection requires augmentation. Ovadia et al.
+       (arXiv:2312.05934) show unsupervised fine-tuning fails
+       to inject new facts; multi-shape presentation is what
+       works. Physics of Language Models 3.1 (Allen-Zhu & Li,
+       arXiv:2309.14316) shows the same result at controlled
+       biography scale: without augmentation, extraction is
+       near-zero; with 5 shapes, extraction hits 96.6%. IMPLIES:
+       every label taught here needs ≥5 surface forms and ≥5
+       paraphrases per form.
+
+  [R9] Instruction pretraining. Cheng et al.
+       (arXiv:2406.14491) synthesize 200M instruction-response
+       pairs GROUNDED IN raw pretraining text (not mixed
+       alongside). Model absorbs (a) the content and (b) the
+       instruction-shape that references the content. Perfect
+       fit for teaching Motoi labels: for every axis/tier/row
+       label, author instruction-response pairs GROUNDED in the
+       corpus segments the label applies to.
+
+  [R10] Synthetic CPT via entity graph. EntiGraph (Yang et al.,
+        arXiv:2409.07431) extracts entities from source docs
+        and generates connective text between them, forming a
+        knowledge graph verbalized as CPT. Log-linear scaling
+        up to 600M tokens. Directly applicable: our four-axis
+        graph IS an entity graph; verbalize edges as CPT text
+        so the model learns axis membership as a relational
+        fact.
+
+  [R11] Constitutional AI (Bai et al., arXiv:2212.08073).
+        Trains models to REFERENCE explicit principles by
+        name. Mechanism: SL phase generates self-critiques
+        anchored to specific principle text; RL phase uses AI
+        preference labels also grounded in those principles.
+        Model learns each principle's NAME as a lookup key for
+        the underlying rule. Applicable to Motoi's safety
+        labels (safety-crisis, circular-trap) and to Row
+        labels ('this is a Row 4 question — I state the
+        invariant + demonstrate + name the falsifier').
+
+  [R12] Character training via persona identity. Anthropic
+        Character Training (Persona Selection Model, Anthropic
+        2026) shows persona attributes are absorbed via
+        post-training and later exposed as the model's own
+        self-description. Applies to Motoi's persona register
+        labels: dry-wit, offline-honest, SICP-wizard,
+        old-machine, counting-mode.
+
+  [R13] Reversal Curse (Berglund et al., arXiv:2309.12288).
+        Every label→content pair MUST have its content→label
+        reverse authored. Otherwise the model learns 'axis
+        sensation → word planet' but not 'word planet → axis
+        sensation'. This is a HARD requirement for label
+        training, not a nice-to-have.
+
+  [R14] Selective / control tokens as signalling. PaLM 2 uses
+        toxicity-level control tokens in a small fraction of
+        pretraining. DeepSeek-R1 uses <think>/</think> spans.
+        Evidence that discrete label-shaped tokens are learned
+        as controllers with modest data.
+
+  Engineering intuition (no direct citation, but consistent
+  with the above): explicit meta-doctrine PROSE authored into
+  book form and folded as CPT text (e.g., a book-of-labels
+  chapter that says 'Motoi has four axes: sensation,
+  intuition, thinking, feeling. Sensation holds concrete
+  world objects like ...') is the cheapest and highest-signal
+  way to plant the label vocabulary. This is the CPT
+  equivalent of a schema definition. Compose with R4 + R10
+  for maximum uptake.
+
+  ────────────────────────────────────────────────────────────────
+  § 14.3 — CONCRETE AUTHORING LANES (what to write, where).
+  ────────────────────────────────────────────────────────────────
+
+  For each label family in § 14.1, at least one CPT prose
+  chapter and one SFT pair template. All labels get taught by
+  the same three-mode fold: PROSE (definition-shape CPT) +
+  QUERY (label-forward SFT pair) + REVERSE (content-forward
+  SFT pair per R13).
+
+  LANE A — book-of-labels (NEW BOOK, prose-book type).
+    Purpose: the schema definition, authored as a book so the
+    model absorbs it via CPT the same way it absorbs every
+    other prose book.
+    Chapters (one per label family):
+      · ch01 — 'The Four Axes' (sensation, intuition,
+        thinking, feeling). What each holds, example words per
+        axis, why the four-axis split exists (Jung typology
+        adapted for Motoi's graph substrate).
+      · ch02 — 'The Two Tiers' (tier-1, tier-2). What each
+        means, why the Pareto cut is the boundary, why no
+        middle tier.
+      · ch03 — 'The Five Rows' (Row 1 through Row 5). Five
+        epistemologically distinct questions: HOW, WHEN,
+        WHERE ELSE, WHY, WITH WHAT ELSE.
+      · ch04 — 'The Three Discipline Lenses' (eng, math, cs).
+        What each lens sees and when to invoke it.
+      · ch05 — 'The Six Node Facets' (:associations,
+        :distributional-neighbors, :context-entropy, :idf,
+        :tf-idf-per-axis, :cross-axis-bridge-score). What each
+        measures, how it's computed, when it matters.
+      · ch06 — 'The Six Book Types' (learning, application,
+        composition, introspection, prose, challenge). What
+        each type teaches and what pair-shape it extracts to.
+      · ch07 — 'Safety Labels' (safety-crisis, safety-
+        emergency, circular-trap, lang-resistance, offline-
+        honesty). What each triggers, why the response is
+        template-shaped, why sameness is the safety feature.
+      · ch08 — 'Provenance labels' (operator-facing only).
+        Names the fields and declares them not-for-user-
+        output. Model reads and understands; does not emit.
+    Emit chapters as flat CPT text per prose-book template
+    (SRE ch 4 Template 6). ALSO extract chapter-recap SFT
+    pairs (L5/L6 from learning-book template) so 'what is
+    Row 4?' resolves to ch03's Row 4 section verbatim.
+    Grounded in R2, R3, R9. Book-length target: ~30-60k tokens
+    (small, dense schema definition).
+
+  LANE B — Axis-tag prepending on graph nodes (metadata
+  conditioning, per R4 MeCo + R5 CTRL).
+    Every CPT document generated from a graph node (S20-S23
+    from WEAVE-RECIPE) prepends the axis and tier as
+    structural metadata:
+      '[axis:sensation tier:tier-1] The kitchen is a room
+       where food is prepared...'
+    Follow MeCo's cooldown protocol: a fraction of training
+    documents (target ~15% per MeCo) drops the metadata
+    prefix, teaching the model to function with or without
+    it. Model learns the axis label as a conditioning signal
+    for the content that follows.
+    Applied deterministically at fold time — no LLM
+    invention. Prepended metadata is a mechanical string per
+    node's known axis/tier.
+
+  LANE C — Label-Q / Label-A SFT pairs (per R2 + R13).
+    For every label in § 14.1, author BOTH directions:
+      Forward:  Q: 'What axis is <word>?' → A: 'sensation'
+      Reverse:  Q: 'Name three sensation-axis words.' → A:
+                enumerated list from that axis's seed list.
+    Also for tiers:
+      Forward:  Q: 'What tier is <word>?' → A: 'tier-1' or
+                'tier-2'.
+      Reverse:  Q: 'Give three tier-1 words in the intuition
+                axis.' → A: enumerated list.
+    Also for rows:
+      Forward:  Q: 'Give the Row 4 for <verb>.' → A: the
+                :row-4-proof :claim content.
+      Reverse:  Q: 'Which row explains why a verb holds?' →
+                A: 'Row 4 · WHY · Proof-Essence.'
+    Also for facets, book-types, safety-labels: same
+    forward/reverse discipline.
+    Paraphrases: 4-5 per shape (per R8 Ovadia + Physics 3.1
+    augmentation threshold). Any label with <5 paraphrases
+    across the corpus is under-taught.
+    Extractor: deterministic — pulls label ↔ content
+    associations from the graph SLAT files and the axis-seed
+    TSVs. No LLM invention.
+
+  LANE D — Definition-shape CPT text (per R2 Super-Natural-
+  Instructions + R11 Constitutional AI).
+    For every label, author a 3-6 sentence DEFINITION passage
+    that appears MULTIPLE TIMES in the CPT stream, each time
+    in a slightly different frame:
+      · 'The sensation axis holds words for concrete-world
+        objects...'
+      · 'Sensation, in Motoi, is the axis of things you can
+        point at...'
+      · 'A word is on the sensation axis when its use in the
+        corpus consistently refers to a concrete-world
+        entity...'
+    Per R8, 4-5 paraphrases min. Per R13, each definition
+    has a reverse ('The axis for concrete-world objects is
+    called sensation.'). Definitions are AUTHORED by human
+    or agent under the no-contaminants rule — no LLM-
+    generated definition ever ships without human review.
+
+  LANE E — Constitutional-style principle referencing (per
+  R11 Constitutional AI).
+    For safety labels + persona labels, author pairs where
+    the model REFERENCES THE LABEL BY NAME in its own
+    reasoning:
+      · 'This is a safety-crisis pattern. I use the
+        crisis-line template verbatim: <template>.'
+      · 'This is a circular-trap pattern. I switch to
+        counting-mode.'
+      · 'This is a Row 4 question. I state the invariant,
+        show the code, and name the falsifier.'
+    Model learns each label as a lookup key that indexes
+    both a recognition and a response. Constitutional AI
+    demonstrated this teaches persistent principle-anchored
+    behavior.
+
+  LANE F — EntiGraph-shape edge verbalization (per R10).
+    Each graph node's :cross-refs and :associations are
+    verbalized as connective CPT text:
+      'The word planet (sensation) is closely associated
+       with the words rotate, orbit, gravity (all sensation)
+       and the concepts symmetry, cycle (intuition — cross-
+       axis bridge).'
+    Model absorbs axis membership as a relational fact
+    embedded in flowing prose. Log-linear scaling per R10
+    means more nodes = more capability, up to at least 600M
+    CPT tokens.
+
+  LANE G — Provenance suppression at preflight (safety
+  measure, per § 14.1(g)).
+    All :provenance, :template-id, :probe, :extractor-
+    version, :confidentiality fields are STRIPPED from the
+    assistant reply at corpus preflight. The pair itself
+    carries them (for audit); the training text does not.
+    Model learns the label VOCABULARY passively through
+    exposure to these fields as substrate labels (never as
+    assistant output), but does not emit them in
+    conversation. Preflight check: any assistant reply
+    containing ':template-id' or ':probe' as a literal
+    string is blocked (leak of substrate labels into
+    user-facing output).
+
+  ────────────────────────────────────────────────────────────────
+  § 14.4 — LABEL-TRAINING PROBE SUITE (verification).
+  ────────────────────────────────────────────────────────────────
+
+  How do we know the model learned the labels? Extend the 284-
+  prompt eval harness with a LABEL-PROBE bundle. Every label
+  in § 14.1 gets probes of four shapes:
+
+  Probe shape | Question form | Expected reply | Pass criterion
+  ------------|---------------|----------------|----------------
+  LP1 forward | 'What axis is <word>?' or 'What tier is <word>?' | The label | >90% correct on held-out words
+  LP2 reverse | 'Name three <axis>-axis words.' | Enumerated list from that axis | >75% every entry actually on that axis
+  LP3 definitional | 'What is <label>?' | Definition paragraph | Contains ≥3 of the definition's canonical terms
+  LP4 self-referential | 'What labels do you have for <domain>?' | Enumerated label family | Complete family, no invention
+
+  LP1 = R1 (T5 prefix recall).
+  LP2 = R13 (reversal-curse fix).
+  LP3 = R2 (Super-NaturalInstructions definition transfer).
+  LP4 = R11 (Constitutional-style principle referencing).
+
+  Baseline expectation for a well-trained Motoi Mk 2:
+    LP1 axis: ≥ 90%, tier: ≥ 90%, row: ≥ 80%, facet: ≥ 70%.
+    LP2 axis: ≥ 75%, tier: ≥ 75%, row: ≥ 60%, facet: ≥ 50%.
+    LP3 axis: ≥ 80%, tier: ≥ 80%, row: ≥ 60%, facet: ≥ 40%.
+    LP4 all families: ≥ 70% (complete enumeration).
+
+  If any label's LP1 falls below 60% after Mk 2 training,
+  the label was under-taught. Fix by adding more paraphrases
+  (per R8) and more forward/reverse pairs (per R13) for that
+  specific label, and retrain.
+
+  If safety-label LP1 falls below 95%, ship-blocker.
+  Consistency IS the safety feature.
+
+  ────────────────────────────────────────────────────────────────
+  § 14.5 — REPEATABILITY GUARANTEE (Sakura + future models).
+  ────────────────────────────────────────────────────────────────
+
+  Every technique named in § 14.3 is corpus-agnostic. Sakura's
+  substrate has:
+    · Different axis label vocabulary if Sakura extends the
+      axes (probably: same four — the Jung consolidation was
+      Motoi-derived but universally applicable).
+    · Different tier boundaries (Sakura's corpus is bigger →
+      higher f_thresh → different |V_pareto|).
+    · Different row labels ONLY IF Sakura ships extra rows;
+      current design is same five.
+    · Extra book types (net, cortex, loam, etc. per Sakura's
+      lib surface).
+    · Extra safety labels for business-context concerns.
+
+  Sakura runs the SAME seven lanes over its own label
+  inventory. The runbook is here (this section 14). The lane
+  authoring is Sakura-team work under Sakura's substrate
+  authoring lead. The probe harness (§ 14.4) ports directly —
+  swap label names, keep shape.
+
+  Do NOT skip label-training on Sakura. If Motoi teaches
+  labels and Sakura doesn't, Sakura's cross-referencing,
+  routing, and self-audit degrade even though Sakura is the
+  bigger model. Label-training is architectural discipline,
+  not a Motoi-specific fix.
+
+  ────────────────────────────────────────────────────────────────
+  § 14.6 — COMPOSES-WITH (where this section touches).
+  ────────────────────────────────────────────────────────────────
+
+    · engineering/WEAVE-RECIPE.slat :section-authoring-
+      templates-meta-doctrine — the same seven lanes viewed
+      from the weave/training-data-shaping angle.
+    · engineering/JUNG-AXIS-GRAPH-NODE-SCHEMA.slat — the
+      label vocabulary this section teaches the model to use.
+    · engineering/BOOK-TYPES.slat — the six book-type labels
+      LANE A ch06 teaches.
+    · SRE-MANUAL/chapters/04-cpt-sft-authoring-per-data-
+      type.slat — the CPT shape catalog LANE B/D/F prepend
+      metadata into.
+    · memory/project_five_rows_pedagogical_explanation_2026_
+      07_20 — the Row 1-5 doctrine LANE A ch03 teaches.
+    · memory/project_no_contaminants_provenance_rule_2026_07_
+      17 — all authored label definitions must trace to
+      human or agent authoring, never LLM invention.
+
+  ────────────────────────────────────────────────────────────────
+  END LABEL-TRAINING DISCIPLINE.
+  ────────────────────────────────────────────────────────────────
+  """
+
+  :section-qwen-native-cpt-tokens
+  """
+  ═══════════════════════════════════════════════════════════════════
+  QWEN NATIVE CPT TOKENS — added 2026-07-21 by Alfred directive.
+  Doctrine reference: memory:qwen-native-cpt-tokens-2026-07-21
+  ═══════════════════════════════════════════════════════════════════
+
+  Qwen2.5-Coder tokenizer ships tokens designed for CPT-on-code training.
+  They are hard-baked into the base model's PRETRAINING OBJECTIVE. Using
+  them in our CPT stream leverages that objective for free.
+
+  TOKENS TO USE:
+    <|repo_name|>       — start of repo/collection name
+    <|file_sep|>        — file boundary inside a repo-shaped doc
+    <|fim_prefix|>      — fill-in-middle prefix marker
+    <|fim_middle|>      — FIM middle (span the model learns to predict)
+    <|fim_suffix|>      — FIM suffix marker
+
+  TOKENS TO LEAVE ALONE (SFT-side, not CPT):
+    <|im_start|> / <|im_end|>  — chat template
+    <|tool_call_start|> / <|tool_call_end|>  — tool use markers
+
+  WRAPPING PATTERN — every E (book) and F (reference) doc:
+
+    <|repo_name|>motoi-scheme<|file_sep|><relative-path>
+    [book:<book>] [chapter:<chapter>] [book-type:<type>]
+
+    <full text>
+
+  Reasons:
+    · Qwen-Coder pretraining exposed the model to hundreds of GB of code
+      in exactly this format (repo-name, file-boundary, contents).
+    · Signal is stronger than plain [book:X] alone — model already knows
+      what a repo/file boundary MEANS.
+    · Our MeCo prefixes stay as regular text (line 2) — no conflict with
+      Qwen's reserved token slots.
+
+  NEW DATA TYPE — G: FIM CODE SNIPPETS.
+
+  Data type G extracts Scheme code blocks from book chapters + reference
+  example fields, splits each into thirds by line count, emits as:
+
+    <|repo_name|>motoi-scheme<|file_sep|><relative-path>
+    [type:fim] [source:book-chapter-code-block | reference-code-example]
+
+    <|fim_prefix|>{first third of code}<|fim_middle|>{middle third}<|fim_suffix|>{last third}
+
+  Rules:
+    · Minimum 5 lines per code block (else too little context)
+    · Minimum 60 characters per block
+    · Extracted from ```scheme fences AND from :code fields in slat records
+    · Provenance stamped: <source-file>#code-block-<index>
+    · Middle span = middle 1/3 of lines (leaves prefix + suffix as context)
+
+  Update to interleave ratios (was 6 types, now 7):
+    A: 18%  Tier 1 rich nodes         (was 20%)
+    E: 28%  Book text                 (was 32%)
+    F: 7%   Reference                 (was 8%)
+    B: 14%  Tier 2 lightweight        (was 15%)
+    C: 14%  Tier 3 stubs              (was 15%)
+    D: 9%   Reversed pairs            (was 10%)
+    G: 10%  FIM code snippets         (NEW — Qwen native)
+
+  IMPACT OF THIS CHANGE:
+    · Corpus went from 26,666 → 33,415 total docs (before interleave upsample)
+    · 6,749 FIM code-snippet variants added from books + reference
+    · Model gets code-completion training within CPT alongside prose
+    · Same 5M-token target stream — G takes 10% of token budget
+
+  ALSO WORTH NAMING (from Qwen2.5 tech report):
+    · Continued-pretraining LR: 5e-5 to 1e-4 (our 1e-5 is conservative)
+    · Long-context progressive scaling: start seq 4k → grow to 32k over epochs
+      (we're at 1024, appropriate for our size)
+    · Batch size in millions of tokens (enterprise scale; we're at ~5M total)
+    · Gradient checkpointing standard for long-context (already in our config)
+
+  MECO PREFIXES STAY AS REGULAR TEXT:
+    Our [axis:X] [tier:N] [word:Y] etc. are regular strings, NOT new
+    special tokens. Reasons:
+      · Don't burn special-token slots we might want later
+      · Don't require tokenizer modification (portable across Qwen versions)
+      · MeCo paper (arXiv:2501.01956) works with text prefixes — no
+        special-token registration needed
+  """
+
+  :section-forge-cpt-integration
+  """
+  ═══════════════════════════════════════════════════════════════════
+  FORGE INTEGRATION — how the CPT pipeline lives inside Forge.
+  Landed 2026-07-21. Doctrine: written by Alfred + Claude.
+  ═══════════════════════════════════════════════════════════════════
+
+  Forge is the training + eval + publish tool. The CPT pipeline is a
+  first-class citizen of Forge:
+
+  UI ── /cpt page (web/templates/cpt.html + web/static/cpt.{css,js})
+    · Status cards: stream ready / preflight state / active run
+    · Config panel: model / mode / data / iters / lr
+    · Data-mix bars: A B C D E F G ratios visualized
+    · Actions: 'Run preflight' button + 'Fire CPT run' button
+    · Live console: preflight output + fire result
+    · Mobile-friendly topbar (wraps at <720px)
+    · Colors + humanistic-hacker aesthetic preserved
+
+  API ── web/server.py routes
+    · GET  /api/cpt/status       — stream info + active-run info
+    · POST /api/cpt/preflight    — runs scripts/cpt-prep/preflight.py, returns pass/fail
+    · POST /api/cpt/fire         — runs preflight FIRST; refuses if any FAIL; else fires
+    · GET  /api/cpt/lacan-status — Lacan Kit demo state
+    · POST /api/cpt/lacan-demo   — regenerates Lacan Kit demo (25 nodes)
+    · GET  /lacan-demo           — renders demo MD as HTML
+
+  Fire script ── scripts/forge-fire-cpt.sh
+    · Sibling of forge-fire.sh (SFT-side)
+    · Writes sidecar files (pid, train.cfg symlink, resume-offset.json,
+      banner line) so Forge /runs sees the CPT run immediately
+    · Warns if config isn't fine_tune_type: full
+    · Warns if data dir doesn't have text-format JSONL (CPT expects
+      raw text, not chat-formatted)
+
+  Discipline ── every CPT prep run also updates /runs page automatically
+  because forge-fire-cpt.sh creates the run dir + banner + pid file with
+  the same convention as forge-fire.sh. No new /runs page work needed.
+
+  Removed from Forge: the chat-with-LLM feature (forge-chat.js/css was
+  never real Motoi anyway, and Lacuna owns that role). Nav entry
+  removed 2026-07-21. Backend chat route left in place for cleanup pass
+  later.
+
+  Lacan Paraphrase Kit ── ~/code/forge/forge/lacan/
+    · Deterministic surface-form variety (metaphor via WordNet +
+      metonymy via spaCy)
+    · Kept in Forge because it composes with the training toolkit
+    · Not currently applied to Mk 2 CPT stream — reserved for Mk 2.1
+      when we measure whether template-only paraphrase-diversity was
+      enough
+  """
+
+  :section-cpt-execution-decisions-2026-07-21
+  """
+  ═══════════════════════════════════════════════════════════════════
+  MK 2 CPT EXECUTION DECISIONS — what we picked and WHY.
+  Fired 2026-07-21T09:02:53Z. Ran on Mac Studio M2 Max 32GB.
+  ═══════════════════════════════════════════════════════════════════
+
+  This section captures the concrete decisions made for tonight's fire
+  + the reasoning for each. Every decision here can be revisited for
+  Mk 3 / Sakura / future runs — the reasoning trail is what makes
+  those revisits productive.
+
+  ───────────────────────────────────────────────────────────
+  DECISION 1 — Full-parameter CPT, NOT LoRA
+  ───────────────────────────────────────────────────────────
+    Config: fine_tune_type: full → 748.765M / 1,543.714M trainable
+      (48.5% of the model — output embedding weight-tied so not 100%)
+
+    WHY:
+      · Physics-3.1 (arXiv:2309.14316) demonstrated that knowledge
+        injection requires full-weight updates. LoRA is low-rank —
+        can't reshape enough weights for real attachment.
+      · Ovadia (arXiv:2312.05934) confirmed unsupervised fine-tuning
+        can't inject facts without full-model plasticity.
+      · Our earlier Mk 1 SFT was LoRA r=128 — that's task-adaptation,
+        NOT knowledge injection. Different mechanism.
+      · The whole point of Mk 2 CPT is to test whether attaching
+        Motoi's noun-world into the base model works. If we do it
+        via LoRA we're testing something else entirely.
+
+    COUNTERARGUMENT:
+      · Full CPT is slower + more expensive + higher OOM risk.
+      · But it fits in 32GB with bf16 + fp32 Adam. Confirmed.
+      · Peak mem observed: ~9-13GB during training.
+
+  ───────────────────────────────────────────────────────────
+  DECISION 2 — bf16 weights + fp32 Adam optimizer states
+  ───────────────────────────────────────────────────────────
+    See: memory/reference_bf16_vs_8bit_adam_cpt_config_2026_07_21.md
+
+    WHY:
+      · bf16: 2× memory savings on weights + activations, native on
+        M-series Apple silicon, stable (same exponent range as fp32).
+      · fp32 Adam: bulletproof, no quantization noise, no debugging
+        headaches. 8-bit Adam would save memory but adds instability.
+      · 32GB is enough headroom for this combination — no need to
+        squeeze memory harder.
+
+    ROOM TO CHANGE IN FUTURE:
+      · If we go to 7B or 14B base, revisit — may need 8-bit Adam
+        or full LoRA fallback to fit in 32GB.
+      · Cloud training (H100 80GB) would not need any quantization.
+
+  ───────────────────────────────────────────────────────────
+  DECISION 3 — Learning rate 1e-5 with cosine decay
+  ───────────────────────────────────────────────────────────
+    Config: learning_rate: 1.0e-5
+            lr_schedule: cosine_decay, warmup 971, peak 1e-5, min 1e-6
+
+    WHY:
+      · CPT is knowledge-injection into pretrained weights.
+        Too-high LR causes catastrophic forgetting of base-model
+        capabilities.
+      · SFT can handle 1e-4 (Mk 1 used that) because SFT is task-
+        adaptation on stable knowledge substrate.
+      · CPT wants gentle updates — 1e-5 is the conservative baseline.
+      · Qwen team recommends 5e-5 to 1e-4 for their continued-
+        pretraining runs — we're on the conservative end.
+      · 5% warmup (971 of 19,413 steps) protects against early
+        gradient spikes from Adam moment estimates warming up.
+      · Cosine decay to 1e-6 lets the final steps consolidate.
+
+    ROOM TO CHANGE:
+      · If Mk 2 val loss barely moves, try Mk 2.5 at 3e-5 or 5e-5
+        for stronger attachment.
+      · If val loss diverges or explodes, halve to 5e-6.
+
+  ───────────────────────────────────────────────────────────
+  DECISION 4 — 1 epoch (19,413 iters at effective batch 4)
+  ───────────────────────────────────────────────────────────
+    Config: iters: 19413 (77,650 train docs / effective batch 4)
+            batch_size: 1, grad_accumulation_steps: 4
+
+    WHY:
+      · Physics-3.1's 9.7% → 96.6% result was achieved with 1 epoch
+        of augmented data.
+      · Mk 1 SFT LIMO doctrine finding: '3 epochs overfits at 1.5B'.
+        Same applies to CPT.
+      · Val eval every 500 steps — we'll see if 1 epoch is enough
+        or if we're leaving learning on the table.
+      · Small effective batch (4) = more gradient updates per token.
+        Fine for 1.5B; larger models could use bigger batches.
+
+    ROOM TO CHANGE:
+      · If Mk 2 shows underfit (val loss still descending sharply
+        at end of run), consider a Mk 2 second-epoch continuation
+        via forge-fire-cpt.sh --resume-from.
+
+  ───────────────────────────────────────────────────────────
+  DECISION 5 — save_every 2500 (not 500)
+  ───────────────────────────────────────────────────────────
+    Config: save_every: 2500 → ~8 checkpoints × ~3GB = ~24GB total
+
+    WHY:
+      · Full CPT saves ALL trainable parameters per checkpoint.
+        For 1.5B in bf16, that's ~3GB per checkpoint.
+      · save_every: 500 (SFT default) × 19,413 iters = 40 checkpoints
+        × 3GB = 120GB. Prohibitive.
+      · save_every: 2500 = 8 checkpoints × 3GB = 24GB. Manageable.
+      · Still enough insurance against crash (max 2500 iters of
+        lost work = ~10 min re-train at current rate).
+
+  ───────────────────────────────────────────────────────────
+  DECISION 6 — Sequence length 1024
+  ───────────────────────────────────────────────────────────
+    Config: max_seq_length: 1024
+
+    WHY:
+      · Our CPT docs are chunked to fit in 1024 tokens during
+        interleave. Longest sentence observed in warnings: 1213
+        (occasionally truncated — acceptable for a small % of docs).
+      · Activation memory scales with seq × batch. 1024 keeps
+        activations tight for full-parameter training.
+      · Qwen team recommends progressive long-context scaling
+        (4k → 8k → 32k). Our Motoi model doesn't need long-context
+        capability at Mk 2. Later, maybe.
+
+  ───────────────────────────────────────────────────────────
+  DECISION 7 — Sequential architecture (7B classifier NOT loaded
+  concurrent with training)
+  ───────────────────────────────────────────────────────────
+    Discipline: Phase A (7B classifier for variant tagging) runs to
+    completion + Python process exits → RAM released → Phase B
+    (1.5B for training) loads fresh.
+
+    WHY:
+      · 32GB M2 Max cannot hold 7B (5GB) + full CPT training state
+        (18-22GB) + activations without OOM risk.
+      · Sequential phases are simple to reason about, easy to debug,
+        and cheap in wall time (classifier ~30 min for Tier 1, then
+        training).
+      · Also: 7B classifier is OPTIONAL for template-only paraphrase
+        (Path A). Only becomes NECESSARY when Lacan operations
+        introduce quality-loss (Path B). Mk 2 is Path A → skipped.
+  """
+
+  :section-scaling-and-cost-analysis-2026-07-21
+  """
+  ═══════════════════════════════════════════════════════════════════
+  SCALING + COST ANALYSIS — why local 1.5B, and how this extends.
+  ═══════════════════════════════════════════════════════════════════
+
+  This section covers the compute-alternatives we considered and why
+  we chose local M2 Max training for Mk 2. Preserved so future runs
+  can revisit the choice with full context.
+
+  ───────────────────────────────────────────────────────────
+  WHY 1.5B (Qwen2.5-Coder-1.5B-Instruct)
+  ───────────────────────────────────────────────────────────
+    · Proving ground. If Mk 2 doctrine (CPT-first, tiered graphs,
+      MeCo, Qwen native tokens, FIM) works at 1.5B, it works at any
+      scale. If it doesn't work at 1.5B, we don't burn 70B compute
+      to fail the same way.
+    · Fits comfortably in 32GB with full-parameter training.
+    · 4-8 hour wall time (real feedback cycle).
+    · Physics-3.3 (arXiv:2404.05405) capacity: 1.5B ≈ 3 Gbit.
+      Motoi's total facts <10 Mbit. Huge headroom — we're not
+      capacity-limited, we're data-quality-limited.
+    · Qwen2.5-Coder-1.5B has strong code-adjacent priors — matches
+      Motoi's code-first identity.
+
+    LIMITATIONS ACCEPTED:
+      · Safety-crisis / safety-emergency template reproduction:
+        Mk 1 showed 0% at 1.5B. Doctrine: deterministic intercept
+        layer post-Weave handles this, not more model training.
+        (Superficial Safety Alignment Hypothesis arXiv:2410.10862.)
+      · Compositional reasoning across many concepts: 1.5B blurs.
+        Needs 7B+ for that. Motoi's use case is single-verb-focused
+        reasoning, which 1.5B handles.
+
+  ───────────────────────────────────────────────────────────
+  COMPUTE OPTIONS + COSTS COMPARED (July 2026 pricing)
+  ───────────────────────────────────────────────────────────
+
+    OPTION A — Local Mac Studio M2 Max 32GB (CHOSEN)
+      · Wall time: 4-8h for 1.5B full CPT, 19,413 iters, 5M tokens
+      · Compute cost: $0/hr (already owned)
+      · Time cost: overnight — Alfred is asleep, no attention burn
+      · Debugging: local logs, /cpt page, /runs page all live
+      · Iteration speed: instant (no queue, no cold-start)
+      · Constraint: thermal throttling after 4-6h (throughput -20-30%)
+      · Constraint: no concurrent LLM inference (memory bounded)
+
+    OPTION B — Runpod H100 80GB (community-cloud, on-demand)
+      · Cost: $1.99/hr community · $2.69/hr sxm
+      · 1.5B full CPT: ~1-2h on H100 (much faster than M2 Max)
+      · Total: $4-6 for this run
+      · Would enable 7B or 14B base model within same 32GB budget
+      · Trade: ANTHROPIC_API_KEY-style secret management for HF hub
+        access, need to sync data up + adapter back, cold-start
+        latency
+      · Best for: SFT after CPT (larger data, more iters, faster
+        turnaround worth it)
+
+    OPTION C — Lambda Labs A100 40GB (managed cloud)
+      · Cost: $1.10/hr (A100 40GB) · $2.00/hr (A100 80GB)
+      · 1.5B full CPT: ~2-3h (slower than H100)
+      · Total: $3-6 per run
+      · UI-friendly, easy to spin up
+      · Similar trade-offs to Runpod
+
+    OPTION D — HuggingFace Inference Endpoints
+      · Not for training — inference only
+      · Useful IF we want to serve Motoi Mk 2 publicly for evals
+      · Cost: per-request; irrelevant to CPT compute decision
+
+    OPTION E — Own metal (buy H100 or M3 Ultra Mac Pro)
+      · $$$ commitment, long-term amortization play
+      · Considered "later" once Mk N generation cadence stabilizes
+
+  ───────────────────────────────────────────────────────────
+  WHY LOCAL FOR TONIGHT
+  ───────────────────────────────────────────────────────────
+    · Mk 2 is a PROVING RUN. Value is in learning what attaches,
+      not fastest wall time.
+    · No API cost, no vendor lock-in, no secret management.
+    · Alfred is asleep during training — wall time doesn't matter.
+    · Every run stays reproducible via same M2 Max thermal profile.
+    · Debug loop tight: logs local, adapter local, resume local.
+
+  ───────────────────────────────────────────────────────────
+  WHEN TO GO CLOUD
+  ───────────────────────────────────────────────────────────
+    · If we go to 7B or 14B base model: cloud fits, M2 Max doesn't.
+    · If we're iterating SFT quickly (Mk 2.1, Mk 2.2, Mk 2.3): cloud
+      wall time = 1-2h vs 4-6h local, matters for iteration cadence.
+    · If Sakura moves to production training: cloud makes sense at
+      commercial cadence.
+    · Cost tolerance per Alfred (~$900/major run) covers many cloud
+      experiments at Mk 2 scale.
+
+  ───────────────────────────────────────────────────────────
+  SCALING PATH FORWARD
+  ───────────────────────────────────────────────────────────
+    · Mk 2 (this run): 1.5B local, doctrine proving ground
+    · Mk 2.1: same 1.5B local, add Lacan operations + fluency gate
+      IF Mk 2 measurement shows Tier 1 attachment thin
+    · Mk 3 (potential): 7B or 14B base, cloud training, same doctrine
+    · Sakura (parallel track): different base + business substrate,
+      commercial-scale training, cloud + own-metal mix
+
+    The doctrine (CPT-first, tiered noun-graphs, MeCo, Qwen native
+    tokens, FIM, 5-templates + 5-reverses, deterministic pipeline)
+    is scale-independent. What CHANGES with scale is compute cost,
+    wall time, and memory budget — not the DATA SHAPE we feed.
+  """
+
+  :section-cpt-mk2-run-record-2026-07-21
+  """
+  ═══════════════════════════════════════════════════════════════════
+  MK 2 CPT RUN RECORD — for future reference + Sakura port.
+  ═══════════════════════════════════════════════════════════════════
+
+  Fired: 2026-07-21T09:02:53Z
+  PID: 81884
+  Log: ~/.forge/runs/motoi-mk2-cpt/train.log
+  Adapter output: ~/.forge/runs/motoi-mk2-cpt/adapter/
+  Config: ~/.forge/projects/motoi-mk2-cpt/mlx-cpt-config.yaml
+
+  DATA:
+    · Stream: ~/code/motoi-scheme/training-data/cpt-mk2/cpt-stream.jsonl
+    · Train: 84,550 docs · 4.75M tokens
+    · Valid: 4,450 docs · 247k tokens
+    · 7 data types (A-G) with Qwen native wrapping + FIM code snippets
+
+  EARLY SIGNS (first 50 iters):
+    · Iter 1 val loss: 3.202
+    · Iter 50 train loss: 5.072 (still in warmup — LR only at 1.13e-7)
+    · Throughput: ~560 tokens/sec, ~4.4 iters/sec
+    · Peak mem: 9.096 GB (under 32GB budget with lots of headroom)
+    · Projected wall time: ~1h 10min (much faster than 8-12h estimate;
+      thermal derating may still slow it 20-30% in back half)
+
+  DOCTRINE STACK ACTIVE THIS RUN:
+    · memory/project_cpt_is_over_nouns_2026_07_20
+    · memory/project_four_axis_graph_consolidation_2026_07_20
+    · memory/project_signifier_signified_and_dialogue_2026_07_20
+    · memory/project_cpt_shapes_catalog_2026_07_20
+    · memory/reference_bf16_vs_8bit_adam_cpt_config_2026_07_21
+    · memory/reference_qwen_native_cpt_tokens_2026_07_21
+    · memory/project_lacan_paraphrase_kit_2026_07_21 (deferred to 2.1)
+    · memory/project_vanilla_1_5b_classifier_layer_2026_07_21 (deferred)
+
+  POST-RUN CHECKLIST:
+    [ ] Verify final val loss + train loss curves
+    [ ] Extract final adapter to ~/.forge/runs/motoi-mk2-cpt/_archive/
+    [ ] Baseline eval on 284-prompt harness
+    [ ] Compare per-category vs Mk 1 numbers
+    [ ] Decide SFT config for Mk 2 SFT (LoRA r=128 recommended)
+    [ ] Write MOTOI-MK2-CPT-REPORT if numbers move measurably
+  """
+)
