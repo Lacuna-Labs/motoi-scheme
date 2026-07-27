@@ -42,18 +42,25 @@ import { installAnimation } from '../lib/graphics/animation.js'
 // media tier
 import { registerMedia, getMediaState } from '../lib/media/media.js'
 
-// game tier — CORE parts only
-import { installGame, makeGameState } from '../lib/game/game.js'
-import { installGameInstances } from '../lib/game/game-instances.js'
-import { installScene } from '../lib/game/scene.js'
+// game tier — makeGameState is the shared frame-state constructor consumed
+// by animation, game-theory (game-extras), require, and core-toplevel.
+// The Curator game-object client verbs (installGame/installScene/installEntity/
+// installWorld/installCamera/installMotion/installPart/installGroup/
+// installPrefab/installGameInstances) were ripped 2026-07-25 — they were
+// dead stubs whose real bodies live in Curator's browser host. Archived to
+// scratch/attic. See CLAUDE.md "Not a place to put dialect verbs."
+import { makeGameState } from '../lib/game/game.js'
 
 // ai tier
 import { installAi } from '../lib/ai/ai.js'
+import { installWorldKnowledge } from '../lib/ai/world-knowledge.js'
 
 // system tier — CORE parts (system, time-verbs). NOT eng or ops (module).
 import { installSystem } from '../lib/system/system.js'
 import { installTime } from '../lib/system/time-verbs.js'
 import { installStack } from '../lib/system/stack.js'
+import { installIntrospection } from '../lib/system/introspection.js'
+import { installVerbStats } from '../lib/system/verb-stats.js'
 
 // ── Wave 1-5 (2026-07-16 completion) ────────────────────────────────
 import { installConst } from '../lib/math/const.js'
@@ -61,6 +68,12 @@ import { installMathBasic } from '../lib/math/basic.js'
 import { installMathPedagogy } from '../lib/math/pedagogy.js'
 import { installGeom } from '../lib/graphics/geom.js'
 import { installVec } from '../lib/graphics/vec.js'
+// curve.js + geom-extended.js — the 74 verbs wired 2026-07-22
+// (curve/* differential-geometry + geom/* extensions).  Marked lazy in
+// the manifest, but installCore is the actually-called path, so wire
+// them here too so `bin/motoi run` sees them.
+import { installCurve } from '../lib/graphics/curve.js'
+import { installGeomExtended } from '../lib/graphics/geom-extended.js'
 // ── Matrix (2026-07-19 Wave 2) ──────────────────────────────────────
 // 13 verbs — matrix/make, matrix/rows, matrix/cols, matrix/ref,
 // matrix/row, matrix/col, matrix/transpose, matrix/identity,
@@ -73,16 +86,84 @@ import { installFramebufferVerbs } from '../lib/graphics/framebuffer-verbs.js'
 import { installScheduler } from '../lib/game/scheduler.js'
 import { installMisc } from '../lib/game/misc.js'
 import { installAnimationBudget } from '../lib/graphics/animation-budget.js'
-import { installEntity } from '../lib/game/entity.js'
-import { installWorld } from '../lib/game/world.js'
+import { installGameExtras } from '../lib/game/game-extras.js'
 import { installGrid } from '../lib/game/grid.js'
-import { installCamera } from '../lib/game/camera.js'
-import { installMotion } from '../lib/game/motion.js'
-import { installPart } from '../lib/game/part.js'
+// world — the REAL retained-mode game engine, rebuilt 2026-07-25 to replace
+// the ripped Curator game-object client stubs. Headless + deterministic;
+// the TUI Game composer drives it live. Powers the Book of Arcade Games.
+import { installWorld } from '../lib/game/world.js'
 import { installSteering } from '../lib/ai/steering.js'
-import { installAudioVerbs } from '../lib/audio/audio-verbs.js'
+import { installCoreToplevel } from '../lib/system/core-toplevel.js'
 import { installArtifact } from '../lib/system/artifact.js'
-import { installCortexIO } from '../lib/ai/cortex-io.js'
+import { installCortex } from '../lib/ai/cortex.js'
+import { installExact } from '../lib/math/exact.js'
+import { installChem } from '../lib/system/chem.js'
+import { installNumIntegrate } from '../lib/math/num-integrate.js'
+import { installDomainVerbs } from '../lib/system/domain-verbs.js'
+import { installRequire } from '../lib/system/require-verb.js'
+
+// ── Advanced math + ops (2026-07-22) ────────────────────────────────
+// calc/* (30) — numerical calculus (derivatives, Simpson integration,
+//   Newton, tangent-line, gradient/hessian/laplacian/curl/divergence,
+//   arc-length, revolutions, Taylor). Reference: 11-calc.slat.
+// nt/*   (29) — number theory (Miller–Rabin primality, factorization,
+//   totient, CRT, mod-inverse). Reference: 44-nt.slat.
+// complex/* (18) — complex arithmetic (Symbol.for('motoi:complex') tag,
+//   arithmetic +/-/*//, ->polar/from-polar, exp/pow, arg/modulus).
+//   Reference: 17-complex.slat.
+// ops/*  (35) — operations research (already in lib/system/ops.js —
+//   installed here so CLI/REPL see verbs without an explicit require).
+//   Reference: 47-ops.slat.
+// Wired 2026-07-22 to close the documented-but-unwired audit gap.
+import { installCalc } from '../lib/math/calc.js'
+import { installNumberTheory } from '../lib/math/nt.js'
+import { installComplex } from '../lib/math/complex.js'
+import { installOps } from '../lib/system/ops.js'
+
+// ── Topology + advanced algebra + symbolic + linalg (2026-07-22) ────
+// topo/*     (49 verbs in base/topo.js) — persistent homology, betti,
+//   bottleneck, Vietoris-Rips, knot invariants. Reference: 67-topo.slat.
+// alg/*-groups (20 verbs) — group constructors and structural queries
+//   that extend base/alg.js (cyclic, dihedral, is-abelian?, center,
+//   conjugacy-classes, cosets, element-order, direct-product, etc.).
+//   Reference: 03-alg.slat.
+// sym/*      (20 verbs) — symbolic algebra (expression trees, expand,
+//   derivative, substitute, evaluate, solve-linear, solve-quadratic).
+//   Reference: 61-sym.slat.
+// linalg/*   (21 verbs) — linear algebra (solve, rank, inverse,
+//   eigenvalues via QR iteration, gram-schmidt, null-space, SVD).
+//   Reference: 38-linalg.slat.
+import { installTopo } from '../lib/base/topo.js'
+import { installAlgGroups } from '../lib/math/alg-groups.js'
+import { installSym } from '../lib/math/sym.js'
+import { installLinalg } from '../lib/math/linalg.js'
+
+// ── Applied math (2026-07-22, completion sweep) ─────────────────────
+// phys/*  (19) — kinematics, forces, energy, quantities, Lagrangians,
+//   rlc-damping, nbody. Reference: 50-phys.slat.
+// solve/* (13) — algebra solvers: linear, quadratic, completing-square,
+//   distance, midpoint, interest, percent-change, pythagorean-triple?,
+//   slope-intercept, system-2x2, unit-circle, vertex. Reference: 57-solve.slat.
+// comb/*  (13) — combinatorics: factorial, nPr, nCr, Bell, Catalan,
+//   Stirling2, partitions, pascal. Reference: 15-comb.slat.
+// seq/*   (12) — sequences and series: arithmetic, geometric, Fibonacci,
+//   Lucas, recurrence, sigma, product, nth-term. Reference: 56-seq.slat.
+// stat/*  (18) — descriptive statistics: mean/median/mode/sd/variance,
+//   quartile/iqr, histogram, z-score. Reference: 59-stat.slat.
+// plot/*  (14) — plot descriptors (returns {:kind :series :axes}
+//   records; a small SVG renderer for line/bar/scatter). Reference:
+//   51-plot.slat.
+import { installPhys } from '../lib/math/phys.js'
+import { installSolve } from '../lib/math/solve.js'
+import { installComb } from '../lib/math/comb.js'
+import { installSeq } from '../lib/math/seq.js'
+import { installStat } from '../lib/math/stat.js'
+import { installPlot } from '../lib/graphics/plot.js'
+
+// Manifest-based loader — see core/verb-manifest.js.
+// Enables lazy loading: installers marked mode='lazy' register thunks that
+// call the real install() on first use. Eager entries load like normal.
+import { EAGER as _EAGER, LAZY as _LAZY } from './verb-manifest.js'
 
 // ── Composer (2026-07-17) ───────────────────────────────────────────
 // 15 composer/* verbs — UI widgets that translate to Scheme forms.
@@ -165,6 +246,23 @@ import { installPairProgramming } from '../lib/system/pair-programming.js'
 // this file is the runtime hinge so pairs teaching the verb can execute.
 import { installHackerMode } from '../lib/system/hacker-mode.js'
 
+// ── Wired 2026-07-22 (unwired-verb lane) ────────────────────────────
+// Fully-implemented lib files that hadn't yet been bound in installCore.
+// eng.js and juggle.js exist since Pass-3 Wave 1; synth.js is new today.
+// See engineering/HOW-TO-REGISTER-A-VERB.md.
+import { installEng } from '../lib/system/eng.js'
+import { installJuggle } from '../lib/game/juggle.js'
+import { installSynth } from '../lib/audio/synth.js'
+import { installAudioDsp } from '../lib/audio/dsp.js'
+import { installComposer as installGameComposer } from '../lib/game/composer.js'
+
+// ── Standard-library parts surface (2026-07-24) ─────────────────────
+// 5 verbs — std-parts, lib-info, lib-verbs, lib-validate, lib-validate-all.
+// Exposes core/parts-registry.js (R7RS-small + adopted SRFIs) and the
+// 5-point conformance gate to Motoi programs. The CLI counterpart is
+// `motoi lib …`; both share src/lib-register.js. See CLAUDE.md stdlib lock.
+import { installLibTools } from '../lib/system/lib-tools.js'
+
 import { CORE_VERBS, coreCoverage } from './core-verbs.js'
 
 /**
@@ -212,18 +310,23 @@ export function installCore (env, opts = {}) {
   // media tier — CORE (owns tone/note/circle)
   runInstaller('core/media/media',       () => registerMedia(env, fuel))
 
-  // game tier — CORE (game loop primitives; NOT juggle, prefab, game-theory)
+  // game tier — shared frame-state (consumed by animation, game-theory,
+  // require, core-toplevel). The Curator game-object client verbs were
+  // ripped 2026-07-25 (dead stubs → Curator's browser host).
   const game = makeGameState()
-  runInstaller('core/game/game',         () => installGame(env, game))
   runInstaller('core/graphics/animation', () => installAnimation(env, {
     getMedia: getMediaState,
     game,
   }))
-  runInstaller('core/game/game-instances', () => installGameInstances(env))
-  runInstaller('core/game/scene',        () => installScene(env, game))
+  runInstaller('core/math/exact',        () => installExact(env))
+  runInstaller('core/system/chem',       () => installChem(env))
+  runInstaller('core/math/num-integrate', () => installNumIntegrate(env, fuel))
+  runInstaller('core/system/domain-verbs', () => installDomainVerbs(env))
+  runInstaller('core/system/require',    () => installRequire(env, { env, fuel, game }))
 
   // ai tier — CORE (steering + BT basics; NOT flow-fields / pathfinding)
   runInstaller('core/ai/ai',             () => installAi(env))
+  runInstaller('core/ai/world-knowledge', () => installWorldKnowledge(env))
 
   // system tier — CORE (system/health + registry + time; NOT eng or ops)
   runInstaller('core/system/system',     () => installSystem(env))
@@ -232,6 +335,16 @@ export function installCore (env, opts = {}) {
   // Attaches push/pop hooks in interp.js; the hooks are additive no-ops
   // when the module isn't installed. Marcus, TUI wave (2026-07-19).
   runInstaller('core/system/stack',      () => installStack(env, fuel))
+  // Introspection surface — Scheme-callable (help / describe / arity-of
+  // / type-of / doc-of / source-of / all-verbs). The 7 JS functions in
+  // src/introspect.js existed since day one but were never registered
+  // as Motoi verbs. Book of Introspection teaches this interface.
+  // Wired 2026-07-22.
+  runInstaller('core/system/introspection', () => installIntrospection(env))
+  // Persistent per-verb call counter + stats.slat (task #749). Hooks into
+  // interp.js applyStep via setCountHook; flushes to ~/.motoi/stats.slat
+  // on process exit; reloads on start so counts accumulate across sessions.
+  runInstaller('core/system/verb-stats', () => installVerbStats(env))
 
   // ── Wave 1-5 CORE completion (2026-07-16) ─────────────────────────
   runInstaller('core/math/const',        () => installConst(env, fuel))
@@ -239,7 +352,26 @@ export function installCore (env, opts = {}) {
   runInstaller('core/math/pedagogy',     () => installMathPedagogy(env, fuel))
   runInstaller('core/graphics/geom',     () => installGeom(env, fuel))
   runInstaller('core/graphics/vec',      () => installVec(env, fuel))
+  runInstaller('core/graphics/curve',    () => installCurve(env, { fuel }))
+  runInstaller('core/graphics/geom-extended', () => installGeomExtended(env, { fuel }))
   runInstaller('core/math/matrix',       () => installMatrix(env, fuel))
+  // ── Advanced math + ops (2026-07-22) ────────────────────────────
+  runInstaller('core/math/calc',         () => installCalc(env, { fuel }))
+  runInstaller('core/math/nt',           () => installNumberTheory(env, { fuel }))
+  runInstaller('core/math/complex',      () => installComplex(env, { fuel }))
+  runInstaller('core/system/ops',        () => installOps(env, { fuel }))
+  // Topology, advanced algebra, symbolic, linalg (2026-07-22)
+  runInstaller('core/base/topo',         () => installTopo(env, fuel))
+  runInstaller('core/math/alg-groups',   () => installAlgGroups(env, { fuel }))
+  runInstaller('core/math/sym',          () => installSym(env, { fuel }))
+  runInstaller('core/math/linalg',       () => installLinalg(env, { fuel }))
+  // Applied math (2026-07-22 completion sweep)
+  runInstaller('core/math/phys',         () => installPhys(env, fuel))
+  runInstaller('core/math/solve',        () => installSolve(env, fuel))
+  runInstaller('core/math/comb',         () => installComb(env, fuel))
+  runInstaller('core/math/seq',          () => installSeq(env, fuel))
+  runInstaller('core/math/stat',         () => installStat(env, fuel))
+  runInstaller('core/graphics/plot',     () => installPlot(env, fuel))
   runInstaller('core/audio/tick',        () => installTick(env, fuel))
   // framebuffer-verbs relies on fb/text being defined; it's installed by
   // installText above so we run this AFTER.
@@ -247,19 +379,25 @@ export function installCore (env, opts = {}) {
   runInstaller('core/graphics/animation-budget', () => installAnimationBudget(env, fuel))
   runInstaller('core/game/scheduler',    () => installScheduler(env, fuel))
   runInstaller('core/game/misc',         () => installMisc(env, fuel))
-  // Wave 2 — entity/world/grid/camera share the game state constructed above.
-  runInstaller('core/game/entity',       () => installEntity(env, game))
-  runInstaller('core/game/world',        () => installWorld(env, game, fuel))
+  // game-extras — the 21 combinatorial-game-theory verbs (nim, mex,
+  // grundy, surreals, tic-tac-toe, wythoff). Native math, dialect-neutral.
+  // Eager wrap around game-theory.js so `motoi run` finds them.
+  runInstaller('core/game/game-extras',  () => installGameExtras(env, { game, fuel }))
+  // grid — Conway cellular-automata (grid-neighbors/grid-step/grid-live-count).
+  // NOTE: the grid/flower-* dialect verbs still ride along here; split them
+  // out during the reference rewrite (task #372).
   runInstaller('core/game/grid',         () => installGrid(env, fuel))
-  runInstaller('core/game/camera',       () => installCamera(env, fuel))
-  // Wave 3 — motion + part
-  runInstaller('core/game/motion',       () => installMotion(env, game, fuel))
-  runInstaller('core/game/part',         () => installPart(env, fuel))
-  // Wave 5 — steering, audio (CORE-only, no DSP), artifact, cortex-io
+  runInstaller('core/game/world',        () => installWorld(env, fuel))
+  // steering — flocking/seek (dialect-neutral vector AI); artifact, cortex-io.
+  // The Curator game-object client verbs (entity/world/camera/motion/part/
+  // audio-*) were ripped 2026-07-25 — dead stubs whose bodies live in Curator.
   runInstaller('core/ai/steering',       () => installSteering(env, fuel))
-  runInstaller('core/audio/audio-verbs', () => installAudioVerbs(env, fuel))
+  runInstaller('core/system/core-toplevel', () => installCoreToplevel(env, { fuel, game }))
   runInstaller('core/system/artifact',   () => installArtifact(env, fuel))
-  runInstaller('core/ai/cortex-io',      () => installCortexIO(env, fuel))
+  // Unified Cortex (world knowledge + episodic memory, one slatl schema).
+  // Supersedes the legacy KV cortex-io and ai.js's in-memory stubs — installs
+  // last so its bindings win. See lib/ai/cortex.js.
+  runInstaller('core/ai/cortex',         () => installCortex(env))
   runInstaller('core/composer/composer', () => installComposer(env, fuel))
   // Composer v1.1 extensions load AFTER installComposer so they see
   // the extension-registry tables composer.js exports.
@@ -288,6 +426,17 @@ export function installCore (env, opts = {}) {
   runInstaller('core/system/pair-programming', () => installPairProgramming(env, fuel))
   runInstaller('core/system/hacker-mode',     () => installHackerMode(env))
 
+  // ── Wired 2026-07-22 (unwired-verb lane) ──────────────────────────
+  // eng/*, juggle/*, synth/* verbs land here so cold `motoi eval` binds
+  // them without a (require ...). Order-independent — no cross-deps.
+  runInstaller('core/system/eng',             () => installEng(env))
+  runInstaller('core/game/juggle',            () => installJuggle(env))
+  runInstaller('core/audio/synth',            () => installSynth(env, fuel))
+  runInstaller('core/audio/dsp',              () => installAudioDsp(env, fuel))
+  runInstaller('core/game/composer',          () => installGameComposer(env, fuel))
+  // Standard-library parts surface — std-parts / lib-info / lib-validate.
+  runInstaller('core/system/lib-tools',       () => installLibTools(env, { fuel }))
+
   const total = modules.reduce((s, m) => s + m.verbs, 0)
   const failed = modules.filter((m) => !m.ok)
   const coverage = coreCoverage(env)
@@ -305,6 +454,71 @@ export function makeCoreEnv (opts = {}) {
   const summary = installCore(env, { fuel })
   env.__coreSummary = summary
   return env
+}
+
+/**
+ * installCoreLazy(env, opts) — manifest-driven loader with eager+lazy modes.
+ *
+ * Eager entries run immediately.
+ * Lazy entries register thunks per verb name; the thunk calls install()
+ * on first use (replacing the thunk in env) and re-dispatches.
+ *
+ * Everything is IMPORTED statically at boot (see verb-manifest.js) so the
+ * runtime stays sync — the only deferral is the install() call.
+ *
+ * Named "lazy" not because import is lazy but because binding-population is.
+ * Cold boot cost with all-eager ~= today's installCore. All-lazy adds a few
+ * ms per first-touched cluster.
+ */
+export function installCoreLazy (env, opts = {}) {
+  const fuel = opts.fuel ?? { n: 1_000_000 }
+  const game = makeGameState()
+  const ctx = { env, fuel, game, opts }
+
+  const eagerLoaded = []
+  const lazyRegistered = []
+
+  // Eager pass — run install() now.
+  for (const entry of _EAGER) {
+    try {
+      entry.install(env, ctx)
+      eagerLoaded.push(entry.name)
+    } catch (e) {
+      console.warn(`[core/lazy] eager install of ${entry.name} failed: ${e.message}`)
+    }
+  }
+
+  // Lazy pass — register thunks per named verb.
+  const _installedLazy = new Set()
+  for (const entry of _LAZY) {
+    if (!Array.isArray(entry.verbs) || entry.verbs.length === 0) continue
+    const trigger = () => {
+      if (_installedLazy.has(entry.name)) return
+      _installedLazy.add(entry.name)
+      try {
+        entry.install(env, ctx)
+      } catch (e) {
+        console.warn(`[core/lazy] lazy install of ${entry.name} failed: ${e.message}`)
+      }
+    }
+    for (const verbName of entry.verbs) {
+      const thunk = (...args) => {
+        trigger()
+        const real = env.get(verbName)
+        if (typeof real !== 'function' || real === thunk) {
+          throw new Error(`lazy load of ${verbName} did not register the verb`)
+        }
+        return real(...args)
+      }
+      Object.defineProperty(thunk, '__verbName', { value: verbName })
+      Object.defineProperty(thunk, '__lazy', { value: true })
+      Object.defineProperty(thunk, '__lazyFrom', { value: entry.name })
+      env.define(verbName, thunk, { perm: 'lazy' })
+      lazyRegistered.push(verbName)
+    }
+  }
+
+  return { eager: eagerLoaded, lazy: lazyRegistered, game }
 }
 
 export { CORE_VERBS, coreCoverage, isCore } from './core-verbs.js'

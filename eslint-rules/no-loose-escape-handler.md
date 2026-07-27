@@ -3,7 +3,7 @@
 Enforce that Escape-key handlers route through `(artifact/close id)`.
 
 **Ported from** sakura-scheme (ARTIFACT-2026-07-10 §19, T-09, 2026-07-10)
-**Motoi base rule.** Downstream dialects (Sakura, Curator, Lacuna) inherit.
+**Motoi base rule.** Downstream dialects (Curator, Lacuna, and others) inherit.
 
 ## Rationale
 

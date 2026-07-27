@@ -179,6 +179,10 @@ test('motoi/highlight! + motoi/highlights — track selections', () => {
 test('motoi/log-exchange! + motoi/session-log — round-trip', () => {
   cleanSharedAndFile()
   const env = makeCoreEnv({ fuel: { n: 500000 } })
+  // makeCoreEnv's pair-programming installer emits install-time entries
+  // (pair-set-mode / explain-selection) into the shared session log. Reset
+  // again AFTER env construction so we measure only our explicit exchanges.
+  cleanSharedAndFile()
   evalSrc('(motoi/log-exchange! (quote in) "(+ 1 2)")', env)
   evalSrc('(motoi/log-exchange! (quote out) "3")', env)
   const { out } = evalSrc('(motoi/session-log 10)', env)

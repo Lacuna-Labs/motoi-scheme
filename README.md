@@ -2,7 +2,7 @@
 
 **基** — foundation. A tiny Scheme with interesting tools.
 
-Motoi is a small, valid R7RS-small Scheme you can hold in your head. It runs at the terminal, in the browser, or embedded in whatever you're building. It ships with a fantasy console (`motoi`) with tabs for editing, running, drawing, and making beats; a bare REPL (`motoi-scheme`); books that teach the language through runnable examples; math and physics verbs; a sound engine; a small AI companion called Motoi Copilot that reads the same reference you do; and two shipped themes (Sakura and Hacker) with a user-theme slot.
+Motoi is a small, valid R7RS-small Scheme you can hold in your head. It runs at the terminal, in the browser, or embedded in whatever you're building. It ships with a fantasy console (`motoi`) with tabs for editing, running, drawing, and making beats; a bare REPL (`motoi-scheme`); books that teach the language through runnable examples; math and physics verbs; a sound engine; a small AI companion called Motoi Copilot that reads the same reference you do; and two shipped themes (Blossom and Hacker) with a user-theme slot.
 
 ```scheme
 (display "hello") (newline)
@@ -313,10 +313,10 @@ Motoi Copilot is trained on the reference manual you're reading. When it answers
 
 ## Themes
 
-Motoi ships with two themes. Sakura (default) is soft blossom pink; Hacker is 80s phosphor green over black. Switch with `--theme` or `--hacker`:
+Motoi ships with two themes. Blossom (default) is soft blossom pink; Hacker is 80s phosphor green over black. Switch with `--theme` or `--hacker`:
 
 ```bash
-motoi tui                        # Sakura — soft, warm
+motoi tui                        # Blossom — soft, warm
 motoi tui --theme hacker         # phosphor green terminal
 motoi tui --hacker               # same
 motoi repl --theme hacker        # REPL wears the theme too
@@ -372,7 +372,7 @@ motoi-scheme/
 ├── src/                      reader, interpreter, macros, base library, REPL, CLI, paths
 ├── lib/                      libraries: ai, audio, graphics, media, security, system, book, composer, brand
 ├── tui/                      terminal UI — palette, screen, session, composer-tab, tui
-├── themes/                   shipped themes (sakura, hacker); user themes at ~/motoi/themes/
+├── themes/                   shipped themes (blossom, hacker); user themes at ~/motoi/themes/
 ├── core/                     runtime bootstrap
 ├── adapters/                 host adapters (terminal, browser)
 ├── carts/                    example programs (cart-maker-1 through cart-maker-6, hello.scm)

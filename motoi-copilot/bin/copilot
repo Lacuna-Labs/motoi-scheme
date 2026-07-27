@@ -1,0 +1,108 @@
+#!/usr/bin/env node
+// motoi-copilot CLI — drive the copilot from the terminal.
+//
+// Subcommands:
+//   suggest <file> <offset>     Print a verified suggestion at a cursor offset.
+//   gate '<middle>' '<prefix>' '<suffix>'
+//                               Run one candidate through the 3 gates; print verdict.
+//   web [--port N]              Serve the web GUI surface.
+//   tui                         Print the TUI banner + a demo suggestion (host wires keys).
+//   verbs                       Print how many resolvable names the oracle knows.
+//   selftest                    Run the module smoke test.
+//
+// No vendor identity is printed anywhere; all output is de-branded.
+
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+
+const __dir = dirname(fileURLToPath(import.meta.url))
+const ROOT = join(__dir, '..')
+
+async function main(argv) {
+  const [cmd, ...args] = argv
+  const mod = await import(join(ROOT, 'index.js'))
+
+  if (!cmd || cmd === 'help' || cmd === '--help') {
+    process.stdout.write(HELP)
+    return 0
+  }
+
+  if (cmd === 'verbs') {
+    const oracle = new mod.RegistryOracle()
+    process.stdout.write(`the copilot resolves ${oracle.verbs.size} verbs + ${mod.SPECIAL_FORMS.size} special forms + ${mod.SYNTAX_KEYWORDS.size} syntax keywords\n`)
+    return 0
+  }
+
+  if (cmd === 'gate') {
+    const [middle, prefix = '', suffix = ''] = args
+    if (middle === undefined) { process.stderr.write("usage: copilot gate '<middle>' '<prefix>' '<suffix>'\n"); return 1 }
+    const ctx = new mod.GateContext()
+    const r = mod.runGates(middle, { prefix, suffix }, ctx)
+    if (r.offerable) {
+      process.stdout.write(`OFFERABLE  ✓ verified\n  program: ${r.program}\n  ran → ${JSON.stringify(r.run.value ?? null)}  (${r.run.ms}ms)\n`)
+    } else {
+      process.stdout.write(`REJECTED at ${r.failedGate}: ${r.reason}\n`)
+      if (r.unresolved) process.stdout.write(`  unresolved: ${r.unresolved.join(', ')}\n`)
+    }
+    return r.offerable ? 0 : 2
+  }
+
+  if (cmd === 'suggest') {
+    const [file, offStr] = args
+    if (!file) { process.stderr.write('usage: copilot suggest <file> <offset>\n'); return 1 }
+    const text = readFileSync(file, 'utf8')
+    const offset = offStr !== undefined ? parseInt(offStr, 10) : text.length
+    const cp = new mod.Copilot()
+    const sug = await cp.suggest({ text, offset, file })
+    if (sug.offer === null) {
+      process.stdout.write('· (the copilot chose to say nothing here)\n')
+    } else {
+      process.stdout.write(`${sug.mode}: ${sug.offer}   [${sug.confidence}]\n`)
+      if (sug.alternatives.length) process.stdout.write(`  alternatives: ${sug.alternatives.slice(0, 3).join('  |  ')}\n`)
+    }
+    process.stdout.write(`  pool ${sug.poolSize} → ${sug.offerableCount} passed gates (${sug.ms}ms)\n`)
+    return 0
+  }
+
+  if (cmd === 'web') {
+    let port = 8787
+    const i = args.indexOf('--port')
+    if (i >= 0 && args[i + 1]) port = parseInt(args[i + 1], 10) || port
+    const web = new mod.WebSurface({ port })
+    await web.listen()
+    process.stdout.write(`motoi copilot web surface → http://localhost:${port}\n`)
+    return new Promise(() => {}) // run until killed
+  }
+
+  if (cmd === 'tui') {
+    const tui = new mod.TuiSurface()
+    tui.banner()
+    const sug = await tui.ghost({ text: '(displ', offset: 6 })
+    return 0
+  }
+
+  if (cmd === 'selftest') {
+    await import(join(ROOT, 'test', 'smoke.mjs'))
+    return 0
+  }
+
+  process.stderr.write(`unknown command: ${cmd}\n${HELP}`)
+  return 1
+}
+
+const HELP = `motoi-copilot — the copilot that can't invent a function that doesn't exist
+
+usage: motoi-copilot <command> [args]
+
+  suggest <file> <offset>   verified suggestion at a cursor offset
+  gate '<middle>' '<prefix>' '<suffix>'   run one candidate through the 3 gates
+  web [--port N]            serve the web GUI (default :8787)
+  tui                       TUI banner + demo suggestion
+  verbs                     how many names the resolve-oracle knows
+  selftest                  run the module smoke test
+`
+
+main(process.argv.slice(2))
+  .then((code) => process.exit(typeof code === 'number' ? code : 0))
+  .catch((err) => { process.stderr.write(`copilot: ${err.stack || err.message}\n`); process.exit(1) })

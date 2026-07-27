@@ -1,0 +1,765 @@
+;;; 18b-cpu.slat — Motoi Scheme Reference · Chapter 18b · library cpu
+;;;
+;;; 12 verbs in this library. Read chapter 00-intro.slat first.
+;;;
+;;; cpu is the small, honest 8-bit teaching machine that makes the Book of
+;;; Code's CPU chapter real: 256 bytes of memory, registers A/B/PC/SP/FLAGS,
+;;; and 19 opcodes that fit on one page. The reference IS the machine — if the
+;;; opcode table does not encode a mnemonic, the mnemonic does not exist. State
+;;; is process-local: every new console session boots a fresh CPU.
+;;;
+;;; ─── THE ROW RULES (summary — full doctrine in 00-intro.slat) ───
+;;;
+;;; Every verb has 5 rows; each row does ONE job. Stay in lane.
+;;;   Row 1 (HOW · Composition) · Row 2 (WHEN · Audit) · Row 3 (WHERE ELSE · Dim)
+;;;   Row 4 (WHY · Proof) · Row 5 (WITH WHAT ELSE · Emergence)
+;;; Every row carries :eng · :math · :cs. Every code block RUNS through ./bin/motoi.
+
+(dialect :applies ("motoi") :note "Library cpu — 12 verbs. The 8-bit teaching machine.")
+
+(chapter :number "18b" :library "cpu" :verb-count 12 :training-eligible #t
+  :read-order-hint "read after 18-const.slat, before 19-cortex.slat"
+  :prose
+"# cpu — the small honest 8-bit machine
+
+Motoi ships a real CPU you can poke from the console. It is deliberately tiny:
+256 bytes of memory, two general registers (A and B), a program counter (PC), a
+stack pointer (SP) that starts at 255 and grows down, a FLAGS bitfield (Z zero,
+N negative, C carry, H halt), and nineteen opcodes. The whole instruction set
+fits on one printed page, and every opcode the Book of Code names can be run
+here for real.
+
+The design frame is Speak & Spell: small, tangible, deterministic. 256 bytes is
+a number an eleven-year-old can hold in their head; 8-bit words match the adder
+chapters that come before; the fetch-decode-execute loop IS `cpu/run!`, not
+scaffolding around it.
+
+## The loop
+
+A CPU does one thing forever: fetch the byte at PC, decode it into an opcode,
+execute it, advance PC (unless the instruction jumped), repeat until HALT. You
+can drive that loop one instruction at a time with `cpu/step!`, or let it run to
+completion with `cpu/run!` (capped at 10,000 instructions so a program with no
+HALT can't hang the console).
+
+## State is yours to hold
+
+Every console session gets its own CPU. `cpu/boot!` wipes it to zero.
+`cpu/state` hands you an alist of every register plus the first bytes of memory,
+so you can save it and reason about it. There is no hidden global — the machine
+is process-local, and persistence is your job (save the alist, restore it later).
+
+## The opcode table is the whole truth
+
+`cpu/opcodes` returns the entire instruction set as data. That is not
+documentation of behaviour; it is the behaviour. Assemble programs with
+`cpu/assemble` (symbolic `(LOAD 5)` form), load them with `cpu/load-program!`,
+and read them back with `cpu/disassemble`. `cpu/display` draws the fixed-width
+register-and-memory dump the IDE shows.
+
+## The short version
+
+- `cpu/boot!` resets; `cpu/load-program!` loads bytes; `cpu/run!` / `cpu/step!`
+  drive the loop; `cpu/halted?` asks if it stopped.
+- `cpu/state` / `cpu/read-mem` / `cpu/write-mem!` inspect and poke.
+- `cpu/assemble` / `cpu/disassemble` / `cpu/opcodes` / `cpu/display` are the
+  authoring and viewing tools.
+- Everything is deterministic and process-local. Boot fresh, and it always
+  starts the same way.")
+
+;; ═══ 12 verbs in library cpu ═══
+
+(verb
+  :name "cpu/boot!" :std "Motoi"
+  :library "cpu"
+  :kind "state-change"
+  :signature "(cpu/boot!) -> state-alist"
+  :summary "Reset every register and all 256 bytes of memory to zero; return the fresh state as an alist."
+  :explanation "cpu/boot! is power-on reset. It replaces the session's CPU with a brand-new machine: A=0, B=0, PC=0, SP=255, FLAGS=0, and 256 zeroed bytes of memory. It returns the fresh state as an alist so you can confirm the reset in one call. Because state is process-local, booting affects only your session's machine. Call it before loading a new program so no stale bytes or flags linger from the last run."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(display (cpu/boot!))" :note "Power on. Every register reads zero, SP reads 255, memory is all zeros.")
+    (:dialect "motoi" :tier "intermediate" :code "(cpu/write-mem! 10 99)\n(cpu/boot!)\n(display (cpu/read-mem 10))" :note "Poke a byte, then boot: the byte is gone. Boot is a full wipe, not a soft reset.")
+    (:dialect "motoi" :tier "expert" :code "(define (fresh-a) (cadr (assoc ':A (cpu/boot!))))\n(display (fresh-a))" :note "Read a register straight out of the boot alist; A is always 0 on a fresh machine.")
+  )
+  :caveats ("Boot discards the current program AND its output — save cpu/state first if you need it." "SP resets to 255 (0xFF), not 0: the stack grows downward from the top of memory." "FLAGS resets to 0, so any halt/zero/carry state from a prior run is cleared." "State is process-local; booting your machine does not touch another session's machine.")
+  :drawbacks ("There is no partial reset: you cannot zero memory but keep registers, or vice versa." "No undo: once booted, the previous state is gone unless you saved the alist." "Returns a 16-byte memory window in the alist, not all 256 bytes — use cpu/state with a larger N to see more.")
+  :usecases ("Start-of-program hygiene: boot before every cpu/load-program! so no stale bytes leak in." "Test isolation: boot between test cases so each starts from a known machine." "Teaching reset: give a learner a clean slate after a confusing run." "Confirm a known-good starting state before stepping through a trace by hand.")
+  :related ("cpu/load-program!" "cpu/state" "cpu/run!" "cpu/step!" "cpu/halted?")
+  :learn (:concept "Power-on reset: returning a stateful machine to a known, deterministic starting configuration." :prerequisites ("(core)/assoc" "(core)/cdr" "cpu/state") :progression "Boot the machine, then cpu/load-program! a program, then cpu/run! it, then cpu/state to read the result.")
+  :row-2-audit (
+    (:eng-program "(define s (cpu/boot!))\n(and (= (cadr (assoc ':A s)) 0) (= (cadr (assoc ':SP s)) 255))"
+     :math-program "(:honest-null \"cpu/boot! is a reset to a fixed constant state; there is no algebraic law beyond idempotence-of-constant. See :cs-program for the determinism witness.\")"
+     :cs-program "(define a (cpu/boot!))\n(define b (cpu/boot!))\n(equal? a b)"
+     :problem "A program ran and left FLAGS.H set and stray bytes in memory. The next load inherits the mess and behaves differently than a clean run."
+     :explanation "eng: assert the known reset values (A=0, SP=255). math: honest-null — reset to a constant is not algebra. cs: two boots return identical state — determinism."
+     :meta "Boot is the guarantee that 'clean start' means the same thing every time. Skip it and old state contaminates the next run.")
+    (:eng "Assert reset invariants before trusting a run; boot is the audit checkpoint."
+     :math "Reset maps any state to one fixed point — the zero machine."
+     :cs "Idempotent power-on reset — same slot as a factory reset or fresh VM."))
+  :row-3-dimension (
+    (:setup "A power-on reset: force a stateful machine back to one fixed, known starting configuration, discarding whatever came before."
+     :rungs ((:domain "cpu (register machine)" :code "(cpu/boot!)")
+             (:domain "counter reset to zero" :code "(define (reset) 0)\n(reset)")
+             (:domain "identity of a monoid" :code "(define zero-state 0)\nzero-state"))
+     :explanation "In Motoi, cpu/boot! forces the machine to its zero state. A counter's reset forces it to 0. A monoid's identity is the element that behaves like the fresh start. All three name the one configuration from which everything begins."
+     :meta "The shape transfers wherever a stateful thing has a canonical 'from scratch' point.")
+    (:eng "The reset value is the reference every later state is measured against."
+     :math "Boot picks out the fixed point of the reset map."
+     :cs "Canonical initial state — the identity element of the run."))
+  :row-4-proof (
+    (:eng-program "(define s (cpu/boot!))\n(and (= (cadr (assoc ':A s)) 0) (= (cadr (assoc ':B s)) 0) (= (cadr (assoc ':PC s)) 0) (= (cadr (assoc ':SP s)) 255) (= (cadr (assoc ':FLAGS s)) 0))"
+     :math-program "(:honest-null \"The boot state is a constant tuple; its correctness is a schema equality, not an algebraic identity. See :eng-program for the field-by-field witness.\")"
+     :cs-program "(begin (cpu/write-mem! 5 200) (cpu/boot!) (= (cpu/read-mem 5) 0))"
+     :claim "cpu/boot! yields exactly A=0, B=0, PC=0, SP=255, FLAGS=0, and every memory byte 0."
+     :invariant "∀ prior state s: boot!() = ⟨A0 B0 PC0 SP255 FLAGS0 mem0…⟩"
+     :meta "Falsified by any non-zero register (except SP=255) or any non-zero byte after boot.")
+    (:eng "Field-by-field assertion on the returned alist."
+     :math "Boot is a constant function into a single tuple."
+     :cs "Memory-clear witness: a poked byte reads zero after boot."))
+  :row-5-emergence (
+    (:eng-composition "(define (clean-load prog)\n  (cpu/boot!)\n  (cpu/load-program! prog))\n(clean-load (list (list 'LOAD 5) (list 'HALT)))"
+     :math-composition "(:honest-null \"boot-then-load is sequential state assignment, not algebraic composition; the emergent shape is a lifecycle, not a law. See :cs-composition for the run harness.\")"
+     :cs-composition "(define (run-fresh prog)\n  (cpu/boot!)\n  (cpu/load-program! prog)\n  (cpu/run!)\n  (cpu/state))\n(run-fresh (list (list 'LOAD 5) (list 'MOV 'B) (list 'LOAD 3) (list 'ADD) (list 'HALT)))"
+     :base "cpu/boot! resets to the zero machine."
+     :emergent "boot → load → run → read forms the RUN-HARNESS family — the setup/exercise/teardown loop every test runner and REPL-eval uses."
+     :meta "Family: run harness — same slot as a test fixture's setUp or a container's fresh boot before each job.")
+    (:eng "Wrap boot+load+run+read as one harness so every run starts clean."
+     :math "Reset composes as the left identity of the run sequence."
+     :cs "Setup phase of a fixture — deterministic start before exercise."))
+)
+(verb
+  :name "cpu/load-program!" :std "Motoi"
+  :library "cpu"
+  :kind "state-change"
+  :signature "(cpu/load-program! program) -> byte-count"
+  :summary "Write a program into memory starting at address 0, reset PC and FLAGS, and return the number of bytes loaded."
+  :explanation "cpu/load-program! puts code into the machine. It accepts three shapes: a symbolic instruction list like ((LOAD 5) (ADD) (HALT)), which it auto-assembles; a flat list of raw opcode bytes; or a mix. It writes the bytes from address 0 up, sets PC back to 0 so the program will run from the start, clears FLAGS, and returns how many bytes it wrote. Anything past the program stays zero (which decodes as NOP-adjacent territory). A program over 256 bytes is rejected — the whole machine is only 256 bytes."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(cpu/boot!)\n(display (cpu/load-program! (list (list 'LOAD 5) (list 'HALT))))" :note "Load 'LOAD 5; HALT'. Returns 3: two bytes for LOAD 5, one for HALT.")
+    (:dialect "motoi" :tier "intermediate" :code "(cpu/boot!)\n(cpu/load-program! (list 2 7 255))\n(display (cpu/read-mem 1))" :note "Load raw bytes 02 07 FF (LOAD 7; HALT). Byte at address 1 is the operand 7.")
+    (:dialect "motoi" :tier "expert" :code "(cpu/boot!)\n(define add-prog (list (list 'LOAD 5) (list 'MOV 'B) (list 'LOAD 3) (list 'ADD) (list 'HALT)))\n(display (cpu/load-program! add-prog))" :note "A full add program: 5 into A, copy to B, 3 into A, ADD. Returns 8 bytes.")
+  )
+  :caveats ("PC is reset to 0 and FLAGS to 0, but registers A/B/SP are NOT touched — boot first for a truly clean slate." "Nested lists trigger auto-assembly; a flat number list is taken as literal bytes — don't mix intent by accident." "A program longer than 256 bytes raises an error; the machine cannot hold it." "Bytes past the program are left as-is (zero after a boot), which the CPU may execute if PC ever reaches them.")
+  :drawbacks ("Always loads at address 0; you cannot load a routine at an arbitrary offset with this verb." "No relocation or linking: symbolic labels are not resolved here (the base assembler is label-free)." "Silently overwrites whatever was at addresses 0..n-1 without warning.")
+  :usecases ("Load a freshly-authored program before running it." "Poke raw bytes to study how the assembler encodes an instruction." "Reload a corrected program during a debug loop without rebooting registers." "Set up a fixed byte pattern in low memory for a step-through lesson.")
+  :related ("cpu/assemble" "cpu/boot!" "cpu/run!" "cpu/step!" "cpu/read-mem" "cpu/disassemble")
+  :learn (:concept "Loading: placing executable bytes into memory and pointing the program counter at the entry point." :prerequisites ("cpu/boot!" "cpu/assemble" "(core)/list") :progression "Boot, load-program!, then run! or step! to execute; disassemble to read back what you loaded.")
+  :row-2-audit (
+    (:eng-program "(cpu/boot!)\n(= (cpu/load-program! (list (list 'LOAD 5) (list 'HALT))) 3)"
+     :math-program "(:honest-null \"Load is a memory write plus a PC/FLAGS reset; the byte count is |assemble(program)|, a length, not an algebraic law. See :cs-program for the round-trip witness.\")"
+     :cs-program "(cpu/boot!)\n(cpu/load-program! (list 2 7 255))\n(and (= (cpu/read-mem 0) 2) (= (cpu/read-mem 1) 7) (= (cpu/read-mem 2) 255))"
+     :problem "A program ran with the wrong result. Was the bug in the code, or did the wrong bytes get loaded? Without inspecting memory you can't tell."
+     :explanation "eng: assert the returned byte count matches the expected size. math: honest-null — a load is a write, not algebra. cs: read the loaded bytes back and confirm they match the source."
+     :meta "The byte count and a read-back are your two audit hooks: they tell you the load did exactly what you asked.")
+    (:eng "Check the byte count against the expected program size before running."
+     :math "The count is the length of the assembled byte stream."
+     :cs "Load is a write; verify by reading the bytes back — a round-trip check."))
+  :row-3-dimension (
+    (:setup "Loading: copy a sequence of bytes into a store at a known offset and set the read head to the start, ready to consume them."
+     :rungs ((:domain "cpu (program into memory)" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))")
+             (:domain "buffer filled from a list" :code "(define (fill xs) (list->vector xs))\n(fill (list 2 5 255))")
+             (:domain "prefix written to a tape" :code "(define (write-prefix xs) (length xs))\n(write-prefix (list 2 5 255))"))
+     :explanation "In Motoi, load-program! writes bytes into memory and rewinds PC. Filling a vector from a list writes elements into a store. Writing a prefix onto a tape places symbols and leaves the head at the start. All three place a sequence and position a reader at its head."
+     :meta "The shape transfers wherever you stage data and then point something at its beginning.")
+    (:eng "The load offset and reset head define where execution will begin."
+     :math "Load embeds a finite byte sequence into the memory array at offset 0."
+     :cs "Same slot as memcpy-into-buffer plus a seek-to-start."))
+  :row-4-proof (
+    (:eng-program "(cpu/boot!)\n(define n (cpu/load-program! (list (list 'LOAD 5) (list 'MOV 'B) (list 'LOAD 3) (list 'ADD) (list 'HALT))))\n(= n 8)"
+     :math-program "(:honest-null \"That the loaded bytes equal assemble(program) is a round-trip identity on byte sequences; it is verified by comparison, shown in :cs-program, not by an algebraic law.\")"
+     :cs-program "(cpu/boot!)\n(define prog (list (list 'LOAD 5) (list 'HALT)))\n(cpu/load-program! prog)\n(equal? (list (cpu/read-mem 0) (cpu/read-mem 1) (cpu/read-mem 2)) (cpu/assemble prog))"
+     :claim "cpu/load-program! writes exactly (cpu/assemble program) into memory from address 0 and returns its length."
+     :invariant "∀ program p: mem[0..n) = assemble(p) ∧ return = n ∧ PC = 0"
+     :meta "Falsified if a loaded byte differs from the assembled byte, or the count differs from the assembled length.")
+    (:eng "Assert the byte count equals the known program size."
+     :math "Load is an injection of assemble(p) into the memory array."
+     :cs "Round-trip: read-mem of the loaded region equals assemble(program)."))
+  :row-5-emergence (
+    (:eng-composition "(define (assemble-and-load prog)\n  (cpu/boot!)\n  (cpu/load-program! prog)\n  (cpu/disassemble (cpu/assemble prog)))\n(assemble-and-load (list (list 'LOAD 5) (list 'HALT)))"
+     :math-composition "(:honest-null \"assemble→load→disassemble is a build/deploy/inspect pipeline over byte sequences, not an algebraic composition. See :cs-composition for the run pipeline.\")"
+     :cs-composition "(define (build-run prog)\n  (cpu/boot!)\n  (cpu/load-program! prog)\n  (cpu/run!)\n  (cadr (assoc ':A (cpu/state))))\n(build-run (list (list 'LOAD 5) (list 'MOV 'B) (list 'LOAD 3) (list 'ADD) (list 'HALT)))"
+     :base "cpu/load-program! stages code into memory."
+     :emergent "assemble → load → run → read is the BUILD-DEPLOY-RUN family — the compile/flash/execute cycle of every embedded toolchain."
+     :meta "Family: build-deploy-run — same slot as gcc → objcopy → flash → reset on a microcontroller.")
+    (:eng "Chain assemble/load/run/read as the console's flash-and-go cycle."
+     :math "Load is the deploy step between build (assemble) and execute (run)."
+     :cs "Compile-flash-execute — the embedded developer's inner loop."))
+)
+
+(verb
+  :name "cpu/run!" :std "Motoi"
+  :library "cpu"
+  :kind "state-change"
+  :signature "(cpu/run! [max-instructions]) -> instructions-executed"
+  :summary "Run the fetch-decode-execute loop until HALT or the instruction cap; return how many instructions ran."
+  :explanation "cpu/run! IS the loop. It fetches the byte at PC, decodes it, executes it, advances PC, and repeats until the machine hits HALT or the cap is reached. It returns the number of instructions executed. The default cap is 10,000 so a program that forgets to HALT (say, a bare JMP back to itself) can't hang the console forever — it stops and you can inspect why. Pass a smaller cap to run just a few steps in bulk. run! is deterministic: the same loaded program always runs the same number of instructions."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(display (cpu/run!))" :note "Run to HALT. Returns 2: LOAD executed, then HALT.")
+    (:dialect "motoi" :tier "intermediate" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'JMP 0)))\n(display (cpu/run! 50))" :note "An infinite JMP loop. Cap it at 50: run! returns 50 and stops, no hang.")
+    (:dialect "motoi" :tier "expert" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'MOV 'B) (list 'LOAD 3) (list 'ADD) (list 'HALT)))\n(cpu/run!)\n(display (cadr (assoc ':A (cpu/state))))" :note "Run an add program, then read A: 5 + 3 = 8.")
+  )
+  :caveats ("The default 10,000-instruction cap means a non-halting program returns 10000, not an error — check cpu/halted? to tell 'finished' from 'capped'." "run! does not boot first; it runs from the current PC, so a prior partial run continues where it left off." "The cap counts instructions, not cycles or bytes." "Once HALTed, further run! calls execute zero instructions and return 0.")
+  :drawbacks ("No breakpoints: run! goes to HALT or the cap with no way to stop at a specific address (use cpu/step! for that)." "No per-instruction trace from run! itself; if you need the trace, drive cpu/step! in a loop." "The cap is a blunt safety net, not a time budget — a tight loop still burns the full count.")
+  :usecases ("Execute a finished program and read the result." "Bulk-advance past a known-good preamble before stepping the interesting part." "Bound a possibly-non-terminating program with an explicit cap for safety." "Measure a program's instruction count as a rough cost signal.")
+  :related ("cpu/step!" "cpu/halted?" "cpu/load-program!" "cpu/state" "cpu/boot!")
+  :learn (:concept "The execution loop: repeatedly fetch, decode, and execute until a stop condition, bounded to guarantee termination." :prerequisites ("cpu/load-program!" "cpu/halted?" "cpu/state") :progression "Load a program, run! it, check cpu/halted?, then read cpu/state — or drop to cpu/step! when you need to watch each step.")
+  :row-2-audit (
+    (:eng-program "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(= (cpu/run!) 2)"
+     :math-program "(:honest-null \"Instruction count is the length of the executed trace up to HALT or the cap; it is a count, not an algebraic law. See :cs-program for the termination witness.\")"
+     :cs-program "(cpu/boot!)\n(cpu/load-program! (list (list 'JMP 0)))\n(<= (cpu/run! 20) 20)"
+     :problem "A program is running. Did it finish, or is it stuck in a loop? A bare instruction count doesn't say which — and a runaway loop could freeze the console."
+     :explanation "eng: assert the exact count for a known program. math: honest-null — a trace length is a count, not algebra. cs: a capped run of an infinite loop returns at-most-cap — termination is guaranteed."
+     :meta "The cap is the audit: it converts 'might hang forever' into 'runs at most N and reports back'. Pair the count with cpu/halted? to know why it stopped.")
+    (:eng "Assert the instruction count for a known program; the cap is your hang guard."
+     :math "The count is the length of the execution trace to the stop condition."
+     :cs "Bounded execution — the cap guarantees the loop terminates."))
+  :row-3-dimension (
+    (:setup "A bounded run loop: repeat a step until a stop flag is set or a maximum iteration count is reached, then report how many steps ran."
+     :rungs ((:domain "cpu (fetch-decode-execute)" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 1) (list 'HALT)))\n(cpu/run!)")
+             (:domain "capped named-let loop" :code "(let loop ((n 0)) (if (>= n 5) n (loop (+ n 1))))")
+             (:domain "bounded fixed-point iteration" :code "(let loop ((x 0) (k 0)) (if (or (= x 1) (>= k 10)) k (loop 1 (+ k 1))))"))
+     :explanation "In Motoi, cpu/run! iterates the machine until HALT or the cap. A capped named-let loops until its counter hits the bound. A bounded fixed-point iteration runs until it converges or hits a max. All three are 'iterate until a condition, but never more than N times.'"
+     :meta "The shape transfers to any loop that must make progress but is guarded against never stopping.")
+    (:eng "The cap is the operational safety bound every real control loop carries."
+     :math "run! computes a bounded orbit of the machine's transition function."
+     :cs "Same slot as a while-loop with a max-iterations guard."))
+  :row-4-proof (
+    (:eng-program "(cpu/boot!)\n(cpu/load-program! (list (list 'JMP 0)))\n(<= (cpu/run! 100) 100)"
+     :math-program "(:honest-null \"That run! executes at most the cap is a termination bound on an iteration count, checked by comparison (see :eng-program), not an algebraic identity.\")"
+     :cs-program "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(cpu/run!)\n(cpu/halted?)"
+     :claim "cpu/run! executes at most max-instructions (default 10,000) and stops at HALT if reached; it never runs unbounded."
+     :invariant "∀ program, cap c: run!(c) ≤ c ∧ (halted? ⇒ trace ended at HALT)"
+     :meta "Falsified if run! returns more than the cap, or a program that reaches HALT is not marked halted.")
+    (:eng "Assert the return is capped for a non-halting program."
+     :math "run! computes a bounded orbit — length ≤ cap by construction."
+     :cs "A halting program leaves cpu/halted? true — the stop witness."))
+  :row-5-emergence (
+    (:eng-composition "(define (run-and-report prog)\n  (cpu/boot!)\n  (cpu/load-program! prog)\n  (list (cons 'instrs (cpu/run!)) (cons 'halted (cpu/halted?))))\n(run-and-report (list (list 'LOAD 5) (list 'HALT)))"
+     :math-composition "(:honest-null \"run-then-check is sequence-then-observe, a control-flow composition, not an algebraic one. See :cs-composition for the full driver.\")"
+     :cs-composition "(define (add-two a b)\n  (cpu/boot!)\n  (cpu/load-program! (list (list 'LOAD a) (list 'MOV 'B) (list 'LOAD b) (list 'ADD) (list 'HALT)))\n  (cpu/run!)\n  (cadr (assoc ':A (cpu/state))))\n(add-two 5 3)"
+     :base "cpu/run! drives the loop to completion."
+     :emergent "load → run → check-halted → read-state is the EXECUTE-AND-OBSERVE family — the run/assert cycle of every interpreter test and CI job."
+     :meta "Family: execute-and-observe — same slot as 'run the binary, check the exit code, read stdout'.")
+    (:eng "Wrap run+halted+state so a run always reports both outcome and result."
+     :math "run! is the iterate step; the observers project the final state."
+     :cs "Execute-and-observe — run, check status, read output.")))
+(verb
+  :name "cpu/step!" :std "Motoi"
+  :library "cpu"
+  :kind "state-change"
+  :signature "(cpu/step!) -> mnemonic-symbol | #f"
+  :summary "Execute exactly one instruction at PC; return the mnemonic run as a symbol, or #f if the machine is halted."
+  :explanation "cpu/step! is single-step debugging. It fetches the one byte at PC, decodes it, executes it, advances PC (unless the instruction jumped), and returns the mnemonic that ran as a Scheme symbol — so (eq? m 'ADD) reads naturally. If the machine is already halted it does nothing and returns #f, so you can step past HALT safely. Drive it in a loop and you have written cpu/run! by hand, but with the chance to inspect every register between instructions. This is how you watch the loop, not just its result."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(display (cpu/step!))" :note "Step once. The first instruction is LOAD, so it returns the symbol LOAD.")
+    (:dialect "motoi" :tier "intermediate" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'HALT)))\n(cpu/step!)\n(display (cpu/step!))" :note "Step past HALT: the second step returns #f — stepping a halted machine is a safe no-op.")
+    (:dialect "motoi" :tier "expert" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'MOV 'B) (list 'HALT)))\n(cpu/step!)\n(cpu/step!)\n(display (cadr (assoc ':B (cpu/state))))" :note "Step twice (LOAD then MOV) and read B: A's 5 has been copied into B.")
+  )
+  :caveats ("A halted machine returns #f and does nothing — always check for #f before assuming an instruction ran." "step! advances PC by the instruction size UNLESS the instruction jumped (JMP/JZ/JNZ/CALL/RET), which is exactly how the real loop behaves." "It returns a symbol, not a string: compare with eq? and a quoted mnemonic." "step! does not boot; it runs from wherever PC currently points.")
+  :drawbacks ("One instruction per call is slow for long programs — use cpu/run! when you don't need the intermediate states." "No reverse step: you cannot undo an instruction; re-run from a boot to get back." "The returned mnemonic tells you what ran, not its operand — read memory or state for the full picture.")
+  :usecases ("Watch registers change one instruction at a time while teaching fetch-decode-execute." "Debug a program by stepping to the instruction just before a suspected fault." "Build a custom trace by collecting each step's mnemonic in a loop." "Verify a jump landed where you expected by stepping across it and reading PC.")
+  :related ("cpu/run!" "cpu/halted?" "cpu/state" "cpu/display" "cpu/load-program!")
+  :learn (:concept "Single-stepping: advancing a machine by exactly one transition so every intermediate state is observable." :prerequisites ("cpu/load-program!" "cpu/state" "(core)/eq?") :progression "Step! one instruction, read cpu/state, repeat; graduate to cpu/run! once you trust the program.")
+  :row-2-audit (
+    (:eng-program "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(eq? (cpu/step!) 'LOAD)"
+     :math-program "(:honest-null \"step! applies the transition function once; which mnemonic it returns is a decode lookup, not an algebraic law. See :cs-program for the halt-guard witness.\")"
+     :cs-program "(cpu/boot!)\n(cpu/load-program! (list (list 'HALT)))\n(cpu/step!)\n(eq? (cpu/step!) #f)"
+     :problem "A program produced a wrong register value. run! only shows the end state — you can't see which instruction corrupted it."
+     :explanation "eng: assert the first stepped mnemonic is LOAD. math: honest-null — a decode is a lookup, not algebra. cs: stepping a halted machine returns #f — the halt guard holds."
+     :meta "step! turns an opaque run into an inspectable trace: check the mnemonic AND the state after each step to pinpoint the exact instruction that misbehaved.")
+    (:eng "Assert each stepped mnemonic against the expected instruction stream."
+     :math "step! is one application of the machine's transition function."
+     :cs "Single-step with a halt guard — the debugger's basic move."))
+  :row-3-dimension (
+    (:setup "One transition: advance a state machine by exactly one move and hand back a label for the move that was made, so a caller can trace the path."
+     :rungs ((:domain "cpu (one instruction)" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'NOP) (list 'HALT)))\n(cpu/step!)")
+             (:domain "one fold step" :code "(define (step-sum acc x) (+ acc x))\n(step-sum 0 5)")
+             (:domain "one transition of an automaton" :code "(define (delta state input) (if (eq? state 'q0) 'q1 'q0))\n(delta 'q0 1)"))
+     :explanation "In Motoi, cpu/step! runs one instruction and names it. One fold step consumes one element and returns the new accumulator. One automaton transition consumes one input and returns the next state. All three advance a state by exactly one move."
+     :meta "The shape transfers to any incremental process you want to observe move-by-move.")
+    (:eng "Each step is an auditable unit — the finest grain of a run's log."
+     :math "step! is a single application of the state-transition function δ."
+     :cs "Same slot as a debugger's 'step over one instruction'."))
+  :row-4-proof (
+    (:eng-program "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(cpu/step!)\n(= (cadr (assoc ':PC (cpu/state))) 2)"
+     :math-program "(:honest-null \"That PC advances by the instruction size is a decode-and-advance rule, shown by reading PC in :eng-program, not an algebraic identity.\")"
+     :cs-program "(cpu/boot!)\n(cpu/load-program! (list (list 'HALT)))\n(cpu/step!)\n(eq? (cpu/step!) #f)"
+     :claim "cpu/step! executes one instruction and advances PC by its size (unless it jumped); a halted machine steps to #f with no state change."
+     :invariant "not-halted ⇒ PC' = PC + size(instr) ∨ instr jumped;  halted ⇒ step!() = #f"
+     :meta "Falsified if a non-jump instruction leaves PC unchanged, or a halted step alters state.")
+    (:eng "After LOAD (2 bytes) PC reads 2 — the advance is exact."
+     :math "step! advances PC by instruction size or by the jump target."
+     :cs "The halt guard: a second step of a HALTed machine returns #f."))
+  :row-5-emergence (
+    (:eng-composition "(define (trace-run)\n  (let loop ((acc '()))\n    (let ((m (cpu/step!)))\n      (if m (loop (cons m acc)) (reverse acc)))))\n(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'MOV 'B) (list 'HALT)))\n(trace-run)"
+     :math-composition "(:honest-null \"Stepping to a fixpoint (halt) and collecting labels is an unfold over the transition function; the emergent trace is a list, not an algebraic law. See :cs-composition.\")"
+     :cs-composition "(define (count-steps)\n  (let loop ((n 0))\n    (if (cpu/step!) (loop (+ n 1)) n)))\n(cpu/boot!)\n(cpu/load-program! (list (list 'NOP) (list 'NOP) (list 'HALT)))\n(count-steps)"
+     :base "cpu/step! advances one instruction and names it."
+     :emergent "step! in a loop-until-#f is the TRACE family — building the full execution log run! hides, exactly how a single-step debugger records history."
+     :meta "Family: trace collection — same slot as a step-recorder or an instruction-level profiler.")
+    (:eng "Loop step! to build the trace run! omits — the audit log of a run."
+     :math "Iterating step! to halt is an unfold producing the run's trace."
+     :cs "Step-loop = the debugger's record-every-instruction mode.")))
+
+(verb
+  :name "cpu/halted?" :std "Motoi"
+  :library "cpu"
+  :kind "rd"
+  :signature "(cpu/halted?) -> boolean"
+  :summary "Return #t if the machine has hit HALT (FLAGS.H set), #f otherwise."
+  :explanation "cpu/halted? asks one question: has the CPU stopped? It reads the H bit of FLAGS, which HALT sets and which nothing else touches. It is the difference between 'the program finished' and 'the program is still runnable' — and, paired with cpu/run!'s instruction count, the difference between 'ran to completion' and 'hit the cap while still looping'. It is read-only: asking never changes the machine. A fresh boot is not halted; only executing HALT sets the flag."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(cpu/boot!)\n(display (cpu/halted?))" :note "A freshly booted machine has not run anything, so it is not halted: #f.")
+    (:dialect "motoi" :tier "intermediate" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'HALT)))\n(cpu/run!)\n(display (cpu/halted?))" :note "Run a program whose only instruction is HALT: now it's halted, #t.")
+    (:dialect "motoi" :tier "expert" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'JMP 0)))\n(cpu/run! 10)\n(display (cpu/halted?))" :note "A capped run of an infinite loop: it stopped at the cap, not at HALT, so halted? is #f.")
+  )
+  :caveats ("Read-only: cpu/halted? never advances or changes the machine." "It reflects only the H flag — a program stopped by the run! cap (no HALT executed) reads #f." "A fresh boot is not halted; the flag is set exclusively by executing HALT." "It says nothing about WHERE the machine halted; read cpu/state's PC for that.")
+  :drawbacks ("Boolean only: it can't tell you at which address the HALT was, or how many instructions preceded it." "It cannot distinguish a clean HALT from a program that will never reach HALT until you also inspect the run! count." "No history: it reports the current flag, not whether the machine was ever halted and re-booted.")
+  :usecases ("Decide whether a run finished cleanly or hit the instruction cap." "Guard a cpu/step! loop: keep stepping while (not (cpu/halted?))." "Assert in a test that a program actually terminated." "Branch console output on whether the machine stopped on purpose.")
+  :related ("cpu/run!" "cpu/step!" "cpu/state" "cpu/boot!")
+  :learn (:concept "Termination sensing: reading a single flag that distinguishes a stopped machine from a runnable one." :prerequisites ("cpu/run!" "cpu/boot!" "(core)/not") :progression "Run or step a program, ask cpu/halted?, and branch on the answer — the basis of a safe step-until-done loop.")
+  :row-2-audit (
+    (:eng-program "(cpu/boot!)\n(cpu/load-program! (list (list 'HALT)))\n(cpu/run!)\n(eq? (cpu/halted?) #t)"
+     :math-program "(:honest-null \"halted? reads one flag bit; it is a projection of state, not an algebraic law. See :cs-program for the fresh-boot witness.\")"
+     :cs-program "(cpu/boot!)\n(eq? (cpu/halted?) #f)"
+     :problem "A run! returned exactly 10,000. Did the program finish on instruction 10,000, or is it an infinite loop that just hit the cap? The count alone is ambiguous."
+     :explanation "eng: after running a HALT program, halted? is #t. math: honest-null — a flag read is a projection, not algebra. cs: a fresh boot is not halted."
+     :meta "halted? disambiguates the count: run!=cap AND halted?=#f means the program is still looping. That distinction is the whole reason the flag is separate from the counter.")
+    (:eng "Pair halted? with the run! count to separate 'finished' from 'capped'."
+     :math "halted? projects the H bit — a decidable predicate on state."
+     :cs "Termination sense — the exit-status of the machine."))
+  :row-3-dimension (
+    (:setup "A done-flag: a single boolean read that says whether a process has reached its terminal state, so a loop knows to stop and a caller knows the result is final."
+     :rungs ((:domain "cpu (H flag)" :code "(cpu/boot!)\n(cpu/halted?)")
+             (:domain "loop guard predicate" :code "(define (done? n) (>= n 3))\n(done? 3)")
+             (:domain "terminal state of an automaton" :code "(define (accepting? state) (eq? state 'q-final))\n(accepting? 'q-final)"))
+     :explanation "In Motoi, cpu/halted? tests the terminal flag. A loop guard tests whether the counter reached its bound. An automaton's accepting test asks if the current state is terminal. All three answer 'are we done?' with one boolean."
+     :meta "The shape transfers to any process with a distinguished 'finished' condition.")
+    (:eng "The done-flag gates whether downstream code trusts the result as final."
+     :math "halted? is the characteristic function of the terminal-state set."
+     :cs "Same slot as thread.isAlive() negated or a future's isDone()."))
+  :row-4-proof (
+    (:eng-program "(cpu/boot!)\n(define before (cpu/halted?))\n(cpu/load-program! (list (list 'HALT)))\n(cpu/run!)\n(and (eq? before #f) (eq? (cpu/halted?) #t))"
+     :math-program "(:honest-null \"That halted? flips only after HALT executes is a state-flag semantics, checked by before/after reads in :eng-program, not an algebraic identity.\")"
+     :cs-program "(cpu/boot!)\n(cpu/load-program! (list (list 'JMP 0)))\n(cpu/run! 5)\n(eq? (cpu/halted?) #f)"
+     :claim "cpu/halted? is #f on a fresh boot and after a capped non-HALT run, and #t exactly when HALT has executed."
+     :invariant "halted?() = #t ⟺ FLAGS.H set ⟺ a HALT instruction has run since the last boot"
+     :meta "Falsified if a fresh boot reads #t, or a program that reached HALT reads #f, or a capped loop reads #t.")
+    (:eng "Before HALT #f, after HALT #t — the flag flips exactly once."
+     :math "halted? is the characteristic function of {states : H set}."
+     :cs "A capped infinite loop stays #f — no false 'done'."))
+  :row-5-emergence (
+    (:eng-composition "(define (step-until-done)\n  (if (cpu/halted?) 'done (begin (cpu/step!) (step-until-done))))\n(cpu/boot!)\n(cpu/load-program! (list (list 'NOP) (list 'HALT)))\n(step-until-done)"
+     :math-composition "(:honest-null \"step-until-halted is an unfold guarded by a terminal predicate; the emergent shape is a bounded loop, not an algebraic law. See :cs-composition.\")"
+     :cs-composition "(define (outcome)\n  (cpu/run!)\n  (if (cpu/halted?) 'halted 'capped))\n(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 1) (list 'HALT)))\n(outcome)"
+     :base "cpu/halted? senses the terminal flag."
+     :emergent "halted? as a loop guard is the RUN-UNTIL-DONE family — the poll-a-condition-then-act loop of schedulers, event loops, and retry drivers."
+     :meta "Family: run-until-done — same slot as while(!done) poll() or a completion-latch await.")
+    (:eng "Use halted? as the guard of a step loop — the safe run-to-completion."
+     :math "halted? is the terminal predicate of the run's unfold."
+     :cs "Run-until-done — poll the done-flag, act, repeat.")))
+(verb
+  :name "cpu/state" :std "Motoi"
+  :library "cpu"
+  :kind "rd"
+  :signature "(cpu/state [mem-bytes]) -> state-alist"
+  :summary "Return every register plus the first N bytes of memory as an alist (N defaults to 16)."
+  :explanation "cpu/state is the machine's self-report. It hands back an alist with A, B, PC, SP, FLAGS, a halted? boolean, the instruction count, and the first N bytes of memory (default 16, the top row of the display). It is read-only — the authoritative snapshot you save, compare, or pattern-match against. Ask for more bytes by passing a larger N. This is the verb you reach for when you want a program's result: run the machine, then read the register you care about out of the state alist."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(cpu/boot!)\n(display (cpu/state))" :note "The fresh machine: A/B/PC 0, SP 255, FLAGS 0, not halted, 16 zero bytes.")
+    (:dialect "motoi" :tier "intermediate" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'MOV 'B) (list 'LOAD 3) (list 'ADD) (list 'HALT)))\n(cpu/run!)\n(display (cadr (assoc ':A (cpu/state))))" :note "Run an add program and pull A out of the state: 5 + 3 = 8.")
+    (:dialect "motoi" :tier "expert" :code "(cpu/boot!)\n(cpu/write-mem! 20 42)\n(display (length (cadr (assoc ':mem (cpu/state 32)))))" :note "Ask for 32 bytes of memory: the :mem field is now 32 long, enough to include address 20.")
+  )
+  :caveats ("Read-only: cpu/state never changes the machine." "The :mem field is only the first N bytes (default 16) — pass a larger N to see higher addresses." "Register values are 8-bit (0..255); SP starts at 255 and grows down." "The alist keys are keyword symbols (:A, :B, :PC, :SP, :FLAGS, :halted?, :instrs, :mem) — dereference with assoc.")
+  :drawbacks ("Not the full 256 bytes by default — a large N is needed to snapshot all of memory." "It is a copy, not a live view: a saved state does not track later changes." "FLAGS is returned as a raw integer bitfield; you decode Z/N/C/H yourself (or use cpu/display for the readable form).")
+  :usecases ("Read a program's result out of a register after cpu/run!." "Save a snapshot before a risky step so you can compare afterward." "Assert register values in a test." "Feed the memory window into your own disassembly or hex-dump.")
+  :related ("cpu/display" "cpu/read-mem" "cpu/boot!" "cpu/run!" "cpu/halted?")
+  :learn (:concept "State snapshot: a read-only, structured copy of a machine's registers and memory for inspection and comparison." :prerequisites ("(core)/assoc" "(core)/cdr" "cpu/run!") :progression "Run a program, cpu/state to snapshot, assoc out the field you need; use cpu/display for the human-readable version.")
+  :row-2-audit (
+    (:eng-program "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 8) (list 'HALT)))\n(cpu/run!)\n(= (cadr (assoc ':A (cpu/state))) 8)"
+     :math-program "(:honest-null \"cpu/state projects the machine into an alist; reading a field is a lookup, not an algebraic law. See :cs-program for the schema-shape witness.\")"
+     :cs-program "(cpu/boot!)\n(define keys (map car (cpu/state)))\n(and (memq ':A keys) (memq ':PC keys) (memq ':mem keys))"
+     :problem "A run finished but the answer is 'somewhere in the machine'. Which register holds it, and how do you get it out reliably across runs?"
+     :explanation "eng: assoc ':A out of the state after a LOAD 8 — the result is exactly 8. math: honest-null — a projection is a lookup. cs: the alist always carries the documented keys."
+     :meta "cpu/state is the stable contract for reading results: the keys don't move, so (cadr (assoc ':A (cpu/state))) is the reliable way to fetch a register, run after run.")
+    (:eng "Read the answer register by keyword — a stable result contract."
+     :math "state projects the machine onto a fixed-schema record."
+     :cs "The alist schema is the machine's public read API."))
+  :row-3-dimension (
+    (:setup "A structured snapshot: copy every field of a live thing into a labelled record so a caller can read any part by name without touching the original."
+     :rungs ((:domain "cpu (registers + memory)" :code "(cpu/boot!)\n(cpu/state)")
+             (:domain "record as an alist" :code "(define r (list (cons ':x 1) (cons ':y 2)))\n(cadr (assoc ':y r))")
+             (:domain "tuple projection" :code "(define (snd p) (cadr p))\n(snd (list 10 20 30))"))
+     :explanation "In Motoi, cpu/state copies the machine into a labelled alist. A record-as-alist labels each field for by-name access. A tuple projection pulls one component out by position. All three expose a compound value's parts for reading."
+     :meta "The shape transfers wherever you want named, read-only access to the pieces of a bigger value.")
+    (:eng "The snapshot is the artefact you log, diff, and attach to a bug report."
+     :math "state is a projection into a labelled product type."
+     :cs "Same slot as a struct dump or a to-dict of an object."))
+  :row-4-proof (
+    (:eng-program "(cpu/boot!)\n(define s (cpu/state))\n(and (assoc ':A s) (assoc ':B s) (assoc ':PC s) (assoc ':SP s) (assoc ':FLAGS s) (assoc ':halted? s) (assoc ':instrs s) (assoc ':mem s) #t)"
+     :math-program "(:honest-null \"That state carries a fixed set of keys is a schema constraint, witnessed by the assoc checks in :eng-program, not an algebraic identity.\")"
+     :cs-program "(cpu/boot!)\n(= (length (cadr (assoc ':mem (cpu/state 24)))) 24)"
+     :claim "cpu/state returns an alist containing :A :B :PC :SP :FLAGS :halted? :instrs :mem, where :mem holds the first N (default 16) bytes."
+     :invariant "state(n) has all 8 documented keys ∧ |mem field| = n (default 16)"
+     :meta "Falsified by a missing key, or a :mem field whose length differs from the requested N.")
+    (:eng "All eight documented keys are present — the schema holds."
+     :math "state is a total map into the fixed record schema."
+     :cs "The :mem length equals the requested N — the window is honored."))
+  :row-5-emergence (
+    (:eng-composition "(define (regs)\n  (let ((s (cpu/state)))\n    (list (cons 'A (cadr (assoc ':A s))) (cons 'B (cadr (assoc ':B s))) (cons 'PC (cadr (assoc ':PC s))))))\n(cpu/boot!)\n(regs)"
+     :math-composition "(:honest-null \"Selecting a sub-record of registers is a projection composition, not an algebraic one. See :cs-composition for the diff harness.\")"
+     :cs-composition "(define (changed? before after key)\n  (not (equal? (cdr (assoc key before)) (cdr (assoc key after)))))\n(cpu/boot!)\n(define b (cpu/state))\n(cpu/load-program! (list (list 'LOAD 9) (list 'HALT)))\n(cpu/run!)\n(changed? b (cpu/state) ':A)"
+     :base "cpu/state snapshots the machine into an alist."
+     :emergent "snapshot → select → diff is the STATE-DIFF family — the before/after comparison every debugger, migration test, and reconciler runs."
+     :meta "Family: state diff — same slot as diffing two struct dumps or two DB rows to spot what a step changed.")
+    (:eng "Snapshot before and after, diff a key, and you have a change detector."
+     :math "state enables field-wise equality between two machine snapshots."
+     :cs "State-diff — before/after struct comparison for regression checks.")))
+
+(verb
+  :name "cpu/read-mem" :std "Motoi"
+  :library "cpu"
+  :kind "rd"
+  :signature "(cpu/read-mem addr) -> byte"
+  :summary "Return the single byte (0..255) at memory address addr; the address wraps into 0..255."
+  :explanation "cpu/read-mem peeks one byte of memory. Address is masked to 0..255 (the machine has 256 bytes, so any address wraps into range), and the value comes back as an 8-bit integer 0..255. It is read-only: peeking never changes memory. Use it to inspect the bytes a program loaded, the data it wrote with STORE, or the stack the CPU pushed — one address at a time. It is the byte-level companion to cpu/state's memory window."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(display (cpu/read-mem 1))" :note "Address 1 holds the operand of LOAD: the byte reads 5.")
+    (:dialect "motoi" :tier "intermediate" :code "(cpu/boot!)\n(cpu/write-mem! 200 77)\n(display (cpu/read-mem 200))" :note "Poke 77 at address 200, then read it straight back: 77.")
+    (:dialect "motoi" :tier "expert" :code "(cpu/boot!)\n(cpu/write-mem! 3 250)\n(display (cpu/read-mem 259))" :note "Address 259 wraps to 259 mod 256 = 3, so it reads the byte we wrote there: 250.")
+  )
+  :caveats ("Address is masked to 0..255: reading 256 reads address 0, 259 reads 3, and so on — no out-of-range error." "Returns an 8-bit value 0..255; there are no negative bytes here." "Read-only: cpu/read-mem never alters memory." "It reads one byte; a two-byte instruction is two reads.")
+  :drawbacks ("One byte per call — dumping a region means a loop or cpu/state with a big N." "No typed reads: a 16-bit value is two byte reads you combine yourself." "Gives you the byte, not its meaning — pair with cpu/disassemble to see it as an instruction.")
+  :usecases ("Confirm a program's operand bytes loaded correctly." "Inspect data a STORE instruction wrote to memory." "Walk the stack region to see pushed values." "Verify a wrapped address resolves where you expect during a lesson on the 256-byte space.")
+  :related ("cpu/write-mem!" "cpu/state" "cpu/disassemble" "cpu/load-program!")
+  :learn (:concept "Byte-addressable read: fetching a single cell from a fixed-size, wrap-around memory by address." :prerequisites ("cpu/write-mem!" "cpu/load-program!" "(core)/display") :progression "read-mem one byte, then loop it or use cpu/state's window for a region, then cpu/disassemble to interpret the bytes.")
+  :row-2-audit (
+    (:eng-program "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(= (cpu/read-mem 1) 5)"
+     :math-program "(:honest-null \"read-mem indexes the memory array; the value is a lookup mem[addr mod 256], not an algebraic law. See :cs-program for the wrap witness.\")"
+     :cs-program "(cpu/boot!)\n(cpu/write-mem! 5 100)\n(= (cpu/read-mem 261) 100)"
+     :problem "A program misbehaves and you suspect the wrong operand loaded. run! only shows the final registers — you need to see the actual bytes in memory."
+     :explanation "eng: the operand byte at address 1 reads exactly 5. math: honest-null — a memory read is an indexed lookup. cs: address 261 wraps to 5 and reads the byte written there."
+     :meta "read-mem is the byte-level audit hook: when a program's behaviour is wrong, read the memory it loaded or wrote to confirm the bytes match your intent before blaming the logic.")
+    (:eng "Read the loaded operand byte to confirm the program matches intent."
+     :math "read-mem = mem[addr mod 256], an array index."
+     :cs "Byte peek with wrap — same slot as a debugger's memory inspector."))
+  :row-3-dimension (
+    (:setup "Indexed read from a fixed-size store: hand an address, get the cell's value, with the address folded into range so no read ever falls off the end."
+     :rungs ((:domain "cpu (256-byte memory)" :code "(cpu/boot!)\n(cpu/write-mem! 7 42)\n(cpu/read-mem 7)")
+             (:domain "vector-ref" :code "(define v (vector 10 20 30))\n(vector-ref v 1)")
+             (:domain "modular index into a ring" :code "(define ring (vector 'a 'b 'c))\n(vector-ref ring (modulo 5 3))"))
+     :explanation "In Motoi, cpu/read-mem indexes the 256-byte memory with a wrapping address. vector-ref indexes a vector by position. A modular index into a ring folds an out-of-range index back in. All three are 'give me the value at this position.'"
+     :meta "The shape transfers to any addressable store, especially a ring buffer where the index wraps.")
+    (:eng "The read address is the coordinate every memory audit is expressed in."
+     :math "read-mem is evaluation of the memory function at a point mod 256."
+     :cs "Same slot as arr[i] with a bounds-fold."))
+  :row-4-proof (
+    (:eng-program "(cpu/boot!)\n(cpu/write-mem! 42 200)\n(= (cpu/read-mem 42) 200)"
+     :math-program "(:honest-null \"read-after-write returning the written byte is a memory-cell law, witnessed in :eng-program, not a closed-form algebraic identity.\")"
+     :cs-program "(cpu/boot!)\n(cpu/write-mem! 3 99)\n(= (cpu/read-mem 3) (cpu/read-mem 259))"
+     :claim "cpu/read-mem returns the byte at (addr mod 256); immediately after write-mem! at A it returns that written value."
+     :invariant "read-mem(a) = mem[a mod 256];  read-mem(a) after write-mem!(a,v) = v"
+     :meta "Falsified if a read after a write returns a different byte, or two addresses congruent mod 256 read differently.")
+    (:eng "Read after write returns the written byte — the cell holds it."
+     :math "read-mem evaluates the memory map at addr mod 256."
+     :cs "Congruent addresses (3 and 259) read the same cell — wrap confirmed."))
+  :row-5-emergence (
+    (:eng-composition "(define (dump-region start len)\n  (let loop ((i 0) (acc '()))\n    (if (>= i len) (reverse acc)\n        (loop (+ i 1) (cons (cpu/read-mem (+ start i)) acc)))))\n(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(dump-region 0 3)"
+     :math-composition "(:honest-null \"A region dump is a map of read-mem over an address range, a fold over indices, not an algebraic composition. See :cs-composition for a checksum use.\")"
+     :cs-composition "(define (checksum start len)\n  (let loop ((i 0) (sum 0))\n    (if (>= i len) sum\n        (loop (+ i 1) (modulo (+ sum (cpu/read-mem (+ start i))) 256)))))\n(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(checksum 0 3)"
+     :base "cpu/read-mem peeks one byte."
+     :emergent "read-mem over a range is the HEX-DUMP family — the region-read that hexdump, od, and every memory viewer are built from; sum it and you have a checksum."
+     :meta "Family: region read — same slot as hexdump -C or computing a rolling checksum over a buffer.")
+    (:eng "Loop read-mem over a range to dump or checksum a memory region."
+     :math "A dump is map(read-mem) over an index interval."
+     :cs "Hex-dump / checksum — the canonical region-read patterns.")))
+
+(verb
+  :name "cpu/write-mem!" :std "Motoi"
+  :library "cpu"
+  :kind "state-change"
+  :signature "(cpu/write-mem! addr val) -> val"
+  :summary "Poke one byte val (masked to 0..255) into memory at addr (masked to 0..255); return the written byte."
+  :explanation "cpu/write-mem! is the direct memory poke. Both the address and the value are masked to 0..255, so writing 300 at address 400 writes 44 at address 144, and it returns the byte actually written. It bypasses the CPU's own STORE instruction — this is you reaching into memory by hand, the way a monitor program or a hardware debugger would. Use it to set up data before a run, patch a byte mid-debug, or hand-place a program without the assembler."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(cpu/boot!)\n(display (cpu/write-mem! 100 42))" :note "Write 42 at address 100. The verb returns the byte it wrote: 42.")
+    (:dialect "motoi" :tier "intermediate" :code "(cpu/boot!)\n(cpu/write-mem! 50 200)\n(display (cpu/read-mem 50))" :note "Poke then peek: address 50 now holds 200.")
+    (:dialect "motoi" :tier "expert" :code "(cpu/boot!)\n(display (cpu/write-mem! 400 300))" :note "Both masked: value 300 becomes 44 (300 mod 256) at address 144 (400 mod 256). Returns 44.")
+  )
+  :caveats ("Both address and value are masked to 0..255 — large numbers wrap silently, no error." "Returns the WRITTEN (masked) byte, which may differ from the argument you passed if it was over 255." "It bypasses STORE and the flags — it does not set Z/N/C the way an arithmetic result would." "State-changing: unlike read-mem, this mutates the machine.")
+  :drawbacks ("One byte per call: staging a multi-byte block is a loop or cpu/load-program!." "No bounds error on overflow — a bug that computes a bad address writes somewhere valid-but-wrong instead of failing loudly." "Hand-poking program bytes skips the assembler's encoding checks; a typo becomes an invalid opcode at run time.")
+  :usecases ("Seed input data in memory before running a program that reads it." "Patch a single byte during a debug session without reassembling." "Hand-place a tiny program to teach the raw opcode encoding." "Corrupt a byte on purpose to demonstrate an invalid-opcode fault.")
+  :related ("cpu/read-mem" "cpu/load-program!" "cpu/state" "cpu/boot!")
+  :learn (:concept "Byte-addressable write: setting a single cell of a fixed-size, wrap-around memory, returning the stored value." :prerequisites ("cpu/read-mem" "cpu/boot!" "(core)/display") :progression "write-mem! a byte, read-mem to confirm, then run a program that consumes the data you staged.")
+  :row-2-audit (
+    (:eng-program "(cpu/boot!)\n(cpu/write-mem! 10 5)\n(= (cpu/read-mem 10) 5)"
+     :math-program "(:honest-null \"write-mem! assigns mem[addr mod 256] := val mod 256; the returned byte is the masked value, an assignment, not an algebraic law. See :cs-program for the mask witness.\")"
+     :cs-program "(cpu/boot!)\n(= (cpu/write-mem! 0 260) 4)"
+     :problem "A program reads data from memory, but you set it up with a value over 255. Did the poke store what you meant, or a wrapped byte you didn't expect?"
+     :explanation "eng: write then read the same address — the byte round-trips. math: honest-null — a write is an assignment. cs: writing 260 returns 4 (260 mod 256), exposing the mask."
+     :meta "The returned byte IS the audit: compare it to your intended value. If write-mem! returns something other than what you passed, the mask fired and you staged the wrong data — catch it here, not at run time.")
+    (:eng "Write then read-back to confirm the byte you staged is the byte stored."
+     :math "write-mem! sets mem[a mod 256] := v mod 256."
+     :cs "Byte poke with mask — the return value exposes any overflow."))
+  :row-3-dimension (
+    (:setup "Indexed write to a fixed-size store: place a value at an address, folding both address and value into range, and hand back what was actually stored."
+     :rungs ((:domain "cpu (256-byte memory)" :code "(cpu/boot!)\n(cpu/write-mem! 7 42)")
+             (:domain "vector-set!" :code "(define v (make-vector 3 0))\n(vector-set! v 1 42)\n(vector-ref v 1)")
+             (:domain "modular store into a ring" :code "(define ring (make-vector 3 0))\n(vector-set! ring (modulo 4 3) 9)\n(vector-ref ring 1)"))
+     :explanation "In Motoi, cpu/write-mem! stores a byte at a wrapping address. vector-set! stores an element at a position. A modular store into a ring folds the index back in range. All three place a value at a coordinate in a fixed store."
+     :meta "The shape transfers to any mutable addressable store — arrays, ring buffers, memory-mapped registers.")
+    (:eng "The write address and returned byte are the log entry for a memory change."
+     :math "write-mem! updates the memory function at one point mod 256."
+     :cs "Same slot as arr[i] = v with a bounds-and-value fold."))
+  :row-4-proof (
+    (:eng-program "(cpu/boot!)\n(cpu/write-mem! 42 200)\n(= (cpu/read-mem 42) 200)"
+     :math-program "(:honest-null \"write-then-read returning the written byte is the fundamental store law, witnessed in :eng-program, not a closed-form algebraic identity.\")"
+     :cs-program "(cpu/boot!)\n(and (= (cpu/write-mem! 400 300) 44) (= (cpu/read-mem 144) 44))"
+     :claim "cpu/write-mem! sets mem[addr mod 256] to (val mod 256), returns that byte, and a subsequent read-mem of the same address returns it."
+     :invariant "write-mem!(a,v) = v mod 256 = read-mem(a) afterward, with a taken mod 256"
+     :meta "Falsified if the return differs from val mod 256, or a following read of the same address differs from the write.")
+    (:eng "Write 200, read 200 — the store law holds at the byte level."
+     :math "write-mem! is a point update of the memory map mod 256."
+     :cs "Masked address+value: write(400,300)=44 lands at address 144."))
+  :row-5-emergence (
+    (:eng-composition "(define (poke-block start bytes)\n  (let loop ((i 0) (bs bytes))\n    (if (null? bs) i\n        (begin (cpu/write-mem! (+ start i) (car bs)) (loop (+ i 1) (cdr bs))))))\n(cpu/boot!)\n(poke-block 0 (list 2 5 255))"
+     :math-composition "(:honest-null \"Poking a block is a fold of write-mem! over a byte list, a sequential store, not an algebraic composition. See :cs-composition for the hand-load-and-run pattern.\")"
+     :cs-composition "(define (hand-load-run bytes)\n  (cpu/boot!)\n  (let loop ((i 0) (bs bytes))\n    (if (not (null? bs))\n        (begin (cpu/write-mem! i (car bs)) (loop (+ i 1) (cdr bs)))))\n  (cpu/run!)\n  (cadr (assoc ':A (cpu/state))))\n(hand-load-run (list 2 9 255))"
+     :base "cpu/write-mem! pokes one byte."
+     :emergent "write-mem! over a byte list is the BLOCK-WRITE family — the memcpy/blit that stages a buffer; loop it from 0 and you have hand-loaded a program without the assembler."
+     :meta "Family: block write — same slot as memcpy into a device buffer or blitting a sprite row into VRAM.")
+    (:eng "Loop write-mem! to stage a block — a hand-rolled memcpy/load."
+     :math "A block write is a fold of point-updates over an index range."
+     :cs "Block write / blit — the buffer-staging primitive.")))
+(verb
+  :name "cpu/assemble" :std "Motoi"
+  :library "cpu"
+  :kind "pure"
+  :signature "(cpu/assemble program) -> byte-list"
+  :summary "Turn a list of symbolic instructions (or raw bytes) into a flat list of opcode bytes ready to load."
+  :explanation "cpu/assemble is the one-pass assembler. Feed it a list of instructions in symbolic form — ((LOAD 5) (MOV B) (ADD) (HALT)) — and it emits the flat byte list the machine executes: the opcode byte for each mnemonic followed by its operand byte where the instruction takes one. Register names (A, B) in MOV resolve to their codes. Raw numbers pass through as literal bytes, so you can mix hand-encoded bytes with symbolic instructions. It is pure: same program in, same bytes out, no machine state touched. It has no labels — the base assembler is deliberately label-free so a learner can walk the byte stream by hand and match the opcode table."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(display (cpu/assemble (list (list 'LOAD 7) (list 'HALT))))" :note "LOAD 7 is 02 07; HALT is FF. Result: (2 7 255).")
+    (:dialect "motoi" :tier "intermediate" :code "(display (cpu/assemble (list (list 'LOAD 5) (list 'MOV 'B) (list 'ADD))))" :note "MOV B resolves the register name to its code. Result: (2 5 5 1 6).")
+    (:dialect "motoi" :tier "expert" :code "(display (cpu/assemble (list (list 'NOP) 42 (list 'HALT))))" :note "A raw byte 42 passes through between two instructions. Result: (1 42 255).")
+  )
+  :caveats ("One-pass and label-free: symbolic jump targets are not supported — JMP takes a numeric address." "Each instruction must be a list whose head is a known mnemonic; an unknown mnemonic raises an error." "A two-byte instruction missing its operand raises an error." "Raw numbers are taken as literal bytes and masked to 0..255 — no encoding check is applied to them.")
+  :drawbacks ("No labels or symbolic addresses means you compute jump targets by counting bytes yourself." "No macros or pseudo-ops: what you write is what you get." "Pure byte output — it does not load; pair with cpu/load-program! (which will auto-assemble too).")
+  :usecases ("Author a program symbolically and inspect the exact bytes it produces." "Teach the opcode encoding by comparing source instructions to their byte output." "Pre-assemble a program to store or transmit as bytes." "Mix hand-encoded bytes with symbolic instructions for low-level experiments.")
+  :related ("cpu/disassemble" "cpu/load-program!" "cpu/opcodes" "cpu/read-mem")
+  :learn (:concept "Assembly: translating symbolic mnemonics into the numeric machine code the CPU executes." :prerequisites ("cpu/opcodes" "(core)/list" "(core)/quote") :progression "assemble a program to see its bytes, load-program! to run it, disassemble to read bytes back — the encode/decode round trip.")
+  :row-2-audit (
+    (:eng-program "(equal? (cpu/assemble (list (list 'LOAD 7) (list 'HALT))) (list 2 7 255))"
+     :math-program "(:honest-null \"assemble maps mnemonics to their opcode bytes via a fixed table; it is a translation, not an algebraic law. See :cs-program for the size witness.\")"
+     :cs-program "(= (length (cpu/assemble (list (list 'LOAD 5) (list 'MOV 'B) (list 'ADD) (list 'HALT)))) 6)"
+     :problem "You want a specific program but aren't sure your mnemonics encode to the bytes you intend. Loading the wrong bytes wastes a debug cycle."
+     :explanation "eng: LOAD 7; HALT assembles to exactly (2 7 255). math: honest-null — assembly is a table translation. cs: the byte count matches the sum of instruction sizes (2+2+1+1=6)."
+     :meta "assemble is the pre-flight check: inspect the bytes before you load them, so an encoding surprise is caught at author time instead of at run time.")
+    (:eng "Compare assembled bytes to the expected encoding before loading."
+     :math "assemble is a table-driven translation from mnemonics to bytes."
+     :cs "Byte count = sum of instruction sizes — a structural check."))
+  :row-3-dimension (
+    (:setup "Translation to machine form: map each symbolic unit to its encoded representation and concatenate, producing a flat stream a lower layer can consume."
+     :rungs ((:domain "cpu (mnemonics to bytes)" :code "(cpu/assemble (list (list 'LOAD 5) (list 'HALT)))")
+             (:domain "symbol list to codes" :code "(map (lambda (s) (if (eq? s 'a) 1 0)) (list 'a 'b 'a))")
+             (:domain "encoding a word to bytes" :code "(map char->integer (string->list \"Hi\"))"))
+     :explanation "In Motoi, cpu/assemble encodes mnemonics into opcode bytes. Mapping symbols to codes encodes a symbolic alphabet. Encoding a word to bytes maps characters to their integer codes. All three translate a symbolic sequence into its numeric encoding."
+     :meta "The shape transfers to any encoder that turns human-readable tokens into a machine-readable stream.")
+    (:eng "The assembled stream is the artefact the loader and the CPU trust."
+     :math "assemble is a homomorphism from instruction lists to byte lists."
+     :cs "Same slot as a compiler's code-gen or a serializer."))
+  :row-4-proof (
+    (:eng-program "(equal? (cpu/assemble (list (list 'LOAD 5) (list 'MOV 'B) (list 'LOAD 3) (list 'ADD) (list 'HALT))) (list 2 5 5 1 2 3 6 255))"
+     :math-program "(:honest-null \"That assemble then disassemble round-trips is a structural inverse relation, witnessed in :cs-program, not a closed-form algebraic identity.\")"
+     :cs-program "(define prog (list (list 'LOAD 7) (list 'HALT)))\n(define bytes (cpu/assemble prog))\n(define back (cpu/disassemble bytes))\n(and (string=? (symbol->string (cadr (assoc ':mnemonic (car back)))) \"LOAD\") (= (cadr (assoc ':operand (car back))) 7))"
+     :claim "cpu/assemble produces the exact opcode bytes of the instruction table, and cpu/disassemble recovers the mnemonics and operands from them."
+     :invariant "disassemble(assemble(p)) recovers the mnemonic+operand of every instruction in p"
+     :meta "Falsified if an assembled program's bytes differ from the table encoding, or a round trip loses a mnemonic or operand.")
+    (:eng "The full add program assembles to the exact known byte sequence."
+     :math "assemble and disassemble are structural inverses on well-formed programs."
+     :cs "Round-trip: disassemble recovers LOAD and its operand 7."))
+  :row-5-emergence (
+    (:eng-composition "(define (encode-then-decode prog)\n  (cpu/disassemble (cpu/assemble prog)))\n(encode-then-decode (list (list 'LOAD 5) (list 'HALT)))"
+     :math-composition "(:honest-null \"assemble→disassemble is an encode/decode round trip, an inverse-pair composition, not an algebraic law. See :cs-composition for the assemble-and-run pipeline.\")"
+     :cs-composition "(define (assemble-run prog)\n  (cpu/boot!)\n  (cpu/load-program! (cpu/assemble prog))\n  (cpu/run!)\n  (cadr (assoc ':A (cpu/state))))\n(assemble-run (list (list 'LOAD 6) (list 'MOV 'B) (list 'LOAD 4) (list 'ADD) (list 'HALT)))"
+     :base "cpu/assemble encodes mnemonics to bytes."
+     :emergent "assemble → load → run is the COMPILE-AND-EXECUTE family — the toolchain step where source becomes machine code that then runs, and assemble/disassemble form the encode/decode inverse pair."
+     :meta "Family: compile-and-execute — same slot as compile-to-bytecode then interpret, or assemble-to-hex then flash.")
+    (:eng "Chain assemble into load+run — source becomes a running program."
+     :math "assemble is the forward half of an encode/decode inverse pair."
+     :cs "Compile-and-execute — the assembler feeds the loader.")))
+
+(verb
+  :name "cpu/disassemble" :std "Motoi"
+  :library "cpu"
+  :kind "pure"
+  :signature "(cpu/disassemble bytes [start [length]]) -> list-of-records"
+  :summary "Decode a byte list into a list of ((:pc N) (:mnemonic M) [(:operand N)]) records; optional start and length window it."
+  :explanation "cpu/disassemble reads bytes back as instructions. Given a list of bytes, it walks them and returns one record per instruction: the program-counter offset (:pc), the mnemonic as a symbol (:mnemonic), and, for two-byte instructions, the operand (:operand). An unknown opcode decodes to the mnemonic ??? so a corrupt or mis-aligned stream still produces a readable result instead of an error. Optional start and length let you disassemble just a window of a larger buffer. It is pure — it reads the bytes you hand it and never touches machine memory."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(display (cpu/disassemble (list 2 7 255)))" :note "Decode LOAD 7; HALT. Two records: LOAD with operand 7 at pc 0, HALT at pc 2.")
+    (:dialect "motoi" :tier "intermediate" :code "(define d (cpu/disassemble (list 2 7 255)))\n(display (cadr (assoc ':mnemonic (car d))))" :note "Pull the first instruction's mnemonic out of the record: it prints as LOAD. To COMPARE it, use (symbol->string m) against a string — it is a Sym object, not eq?-comparable to 'LOAD.")
+    (:dialect "motoi" :tier "expert" :code "(display (cpu/disassemble (list 1 99 255) 1 1))" :note "Window from index 1, length 1: decodes just byte 99, which is not an opcode, so mnemonic ???.")
+  )
+  :caveats ("An unknown opcode byte decodes to the mnemonic ??? rather than raising — check for it when reading arbitrary bytes." "The :mnemonic value prints as a symbol but is a Sym object that is NOT eq?/equal? to a reader-quoted symbol — compare it via (symbol->string m) against a string like \"LOAD\"." "Disassembly is alignment-sensitive: starting mid-instruction produces garbage records, exactly as on real hardware." "The :operand field is present only for two-byte instructions; single-byte records omit it." "start and length window the byte list, not the machine's memory — it reads the list you pass.")
+  :drawbacks ("No symbol resolution: jump targets show as raw numbers, not labels (the assembler is label-free too)." "It cannot tell code bytes from data bytes — it decodes whatever it is given as instructions." "Records are alists you dereference by keyword; there is no pretty-printed listing (use cpu/display for a formatted view of live memory).")
+  :usecases ("Read back the bytes cpu/assemble produced to confirm the encoding." "Inspect a region of loaded memory as instructions during debugging." "Teach decoding by showing how a byte stream becomes mnemonics." "Detect misalignment: a wrong start offset produces visibly wrong records.")
+  :related ("cpu/assemble" "cpu/read-mem" "cpu/opcodes" "cpu/display")
+  :learn (:concept "Disassembly: decoding a byte stream back into the symbolic instructions it represents, respecting instruction boundaries." :prerequisites ("cpu/assemble" "(core)/assoc" "(core)/car") :progression "assemble a program, disassemble its bytes to recover the instructions, and compare — the encode/decode loop.")
+  :row-2-audit (
+    (:eng-program "(define d (cpu/disassemble (list 2 7 255)))\n(and (string=? (symbol->string (cadr (assoc ':mnemonic (car d)))) \"LOAD\") (= (cadr (assoc ':operand (car d))) 7))"
+     :math-program "(:honest-null \"disassemble walks bytes by instruction size and looks up mnemonics; it is a decode, not an algebraic law. See :cs-program for the unknown-opcode witness.\")"
+     :cs-program "(define d (cpu/disassemble (list 99)))\n(string=? (symbol->string (cadr (assoc ':mnemonic (car d)))) \"???\")"
+     :problem "A region of memory produces wrong behaviour. Is it code you can read, or garbage bytes? Reading raw hex won't tell you where instructions begin."
+     :explanation "eng: (2 7 255) decodes to LOAD 7 then HALT — the mnemonic and operand recover. math: honest-null — decoding is a table walk. cs: an unknown byte decodes to ??? rather than crashing."
+     :meta "disassemble is the read-back audit for code: it recovers the mnemonics from bytes so you can confirm memory holds the program you meant, and flags unknown bytes as ??? instead of hiding them.")
+    (:eng "Decode bytes back to mnemonics to confirm memory holds the intended code."
+     :math "disassemble is a size-aware decode over the byte stream."
+     :cs "Unknown opcodes surface as ??? — no silent failure."))
+  :row-3-dimension (
+    (:setup "Structured decode of a stream: walk a flat sequence, group it into variable-length units by a size rule, and label each unit — turning bytes into meaning."
+     :rungs ((:domain "cpu (bytes to instructions)" :code "(cpu/disassemble (list 2 7 255))")
+             (:domain "tokenizing a number list" :code "(define (pairs xs) (if (or (null? xs) (null? (cdr xs))) '() (cons (list (car xs) (cadr xs)) (pairs (cddr xs)))))\n(pairs (list 1 2 3 4))")
+             (:domain "parsing a tagged record stream" :code "(define (tag-len xs) (length xs))\n(tag-len (list 'op 7))"))
+     :explanation "In Motoi, cpu/disassemble groups bytes into instructions by opcode size. Tokenizing a number list groups a flat list into fixed-size chunks. Parsing a tagged stream reads length-prefixed records. All three impose structure on a flat sequence by a size rule."
+     :meta "The shape transfers to any decoder that segments a flat stream into meaningful, variable-length records.")
+    (:eng "The decoded records are what a memory viewer or debugger presents."
+     :math "disassemble is the left inverse of assemble on aligned streams."
+     :cs "Same slot as a wire-format parser reading length-prefixed frames."))
+  :row-4-proof (
+    (:eng-program "(define prog (list (list 'LOAD 5) (list 'MOV 'B) (list 'HALT)))\n(define back (cpu/disassemble (cpu/assemble prog)))\n(and (= (length back) 3) (string=? (symbol->string (cadr (assoc ':mnemonic (car back)))) \"LOAD\"))"
+     :math-program "(:honest-null \"disassemble(assemble(p)) recovering p is a left-inverse relation, witnessed in :eng-program, not a closed-form algebraic identity.\")"
+     :cs-program "(define d (cpu/disassemble (list 2 9 255)))\n(and (= (cadr (assoc ':pc (car d))) 0) (= (cadr (assoc ':pc (cadr d))) 2))"
+     :claim "cpu/disassemble segments bytes by opcode size, one record per instruction, with :pc offsets that advance by each instruction's size."
+     :invariant "disassemble(assemble(p)) has one record per instruction of p, pc[i+1] = pc[i] + size(instr[i])"
+     :meta "Falsified if the record count differs from the instruction count, or a :pc offset skips or overlaps.")
+    (:eng "A 3-instruction program disassembles to 3 records — one per instruction."
+     :math "disassemble is a left inverse of assemble on aligned byte streams."
+     :cs "pc offsets advance by instruction size: 0 then 2 for LOAD then HALT."))
+  :row-5-emergence (
+    (:eng-composition "(define (listing bytes)\n  (map (lambda (r) (cadr (assoc ':mnemonic r))) (cpu/disassemble bytes)))\n(listing (cpu/assemble (list (list 'LOAD 5) (list 'ADD) (list 'HALT))))"
+     :math-composition "(:honest-null \"Projecting mnemonics from a disassembly is a map over decoded records, not an algebraic composition. See :cs-composition for the read-live-memory pipeline.\")"
+     :cs-composition "(define (peek-code len)\n  (let loop ((i 0) (acc '()))\n    (if (>= i len) (cpu/disassemble (reverse acc))\n        (loop (+ i 1) (cons (cpu/read-mem i) acc)))))\n(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(peek-code 3)"
+     :base "cpu/disassemble decodes bytes into instruction records."
+     :emergent "read-mem region → disassemble → project is the DISASSEMBLER-VIEW family — the pipeline a debugger runs to show live memory as a source listing."
+     :meta "Family: disassembler view — same slot as objdump -d or a debugger's code pane over live memory.")
+    (:eng "Read memory, disassemble it, project mnemonics — a live code listing."
+     :math "disassemble composed with read-mem yields a source view of memory."
+     :cs "Disassembler view — the debugger's memory-as-code pane.")))
+
+(verb
+  :name "cpu/opcodes" :std "Motoi"
+  :library "cpu"
+  :kind "rd"
+  :signature "(cpu/opcodes) -> list-of-records"
+  :summary "Return the entire instruction set as data: one ((:code N) (:mnemonic M) (:size N)) record per opcode."
+  :explanation "cpu/opcodes hands you the machine's instruction set as a list of records — for every opcode, its numeric code, its mnemonic symbol, and its size in bytes (1 or 2). This is the single source of truth: the same table the assembler, disassembler, and CPU loop all consult. Because it is data, you can search it, count it, or drive your own tooling from it. It is read-only and constant across the session — the instruction set does not change while the machine runs. This is how the reference stays honest: if a mnemonic is not in this list, it does not exist."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(display (length (cpu/opcodes)))" :note "How many instructions does the machine know? The table length: 19.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (find-op name)\n  (let loop ((ops (cpu/opcodes)))\n    (cond ((null? ops) #f)\n          ((string=? (symbol->string (cadr (assoc ':mnemonic (car ops)))) name) (car ops))\n          (else (loop (cdr ops))))))\n(display (cadr (assoc ':size (find-op \"LOAD\"))))" :note "Look up LOAD in the table and read its size: 2 bytes (opcode + operand). NOTE: compare the mnemonic via symbol->string — the table's mnemonics are Sym objects, not eq?-comparable to reader-quoted symbols.")
+    (:dialect "motoi" :tier "expert" :code "(define (two-byte-ops)\n  (let loop ((ops (cpu/opcodes)) (acc 0))\n    (if (null? ops) acc\n        (loop (cdr ops) (if (= (cadr (assoc ':size (car ops))) 2) (+ acc 1) acc)))))\n(display (two-byte-ops))" :note "Count how many instructions take an operand: the two-byte opcodes.")
+  )
+  :caveats ("Read-only and constant: the table does not change during a session." "Each record has exactly :code, :mnemonic, and :size — no execution semantics are in the table (those live in the CPU loop)." "The mnemonic prints as a symbol but is a Sym object that is NOT eq?/equal? to a reader-quoted symbol — compare it via (symbol->string m) against a string like \"LOAD\"." "Order of records follows the internal table order, not numeric or alphabetical — sort it yourself if you need an order.")
+  :drawbacks ("It lists what each opcode IS (code/mnemonic/size), not what it DOES — the effect is documented in prose, not this table." "No operand-type info: it tells you an instruction is two bytes, not whether the operand is an address, immediate, or register." "You build any lookup index (by mnemonic, by code) yourself from the list.")
+  :usecases ("Count or enumerate the instruction set for a help panel or lesson." "Build a mnemonic-to-code or code-to-mnemonic lookup for your own tooling." "Validate that a mnemonic exists before assembling." "Drive an IDE opcode-reference display from the live table.")
+  :related ("cpu/assemble" "cpu/disassemble" "cpu/display")
+  :learn (:concept "Instruction-set introspection: reading the machine's opcode table as data to drive tooling and validation." :prerequisites ("(core)/assoc" "(core)/eq?" "(core)/length") :progression "List cpu/opcodes to see the set, build a lookup from it, then use cpu/assemble knowing exactly which mnemonics are legal.")
+  :row-2-audit (
+    (:eng-program "(= (length (cpu/opcodes)) 19)"
+     :math-program "(:honest-null \"cpu/opcodes returns the instruction table as records; its length is a count of the fixed set, not an algebraic law. See :cs-program for the schema witness.\")"
+     :cs-program "(define op (car (cpu/opcodes)))\n(and (assoc ':code op) (assoc ':mnemonic op) (assoc ':size op) #t)"
+     :problem "You are about to assemble a program with a mnemonic you're unsure of. Guessing wastes a cycle; you want to know the legal instruction set for certain."
+     :explanation "eng: the table has 19 opcodes. math: honest-null — a table length is a count. cs: every record carries :code, :mnemonic, and :size."
+     :meta "cpu/opcodes is the authority you audit against: check a mnemonic is in the table before assembling, so an illegal instruction is caught by a lookup rather than an assembler error.")
+    (:eng "Validate a mnemonic against the live table before assembling."
+     :math "The table is a finite set; its length counts the instruction set."
+     :cs "Every record follows the :code/:mnemonic/:size schema."))
+  :row-3-dimension (
+    (:setup "Self-describing catalog: expose the fixed set of things a system understands as inspectable data, so callers can enumerate, count, and validate against it."
+     :rungs ((:domain "cpu (opcode table)" :code "(cpu/opcodes)")
+             (:domain "an association list of options" :code "(define opts (list (cons 'a 1) (cons 'b 2)))\n(length opts)")
+             (:domain "an enum's member list" :code "(define colors (list 'red 'green 'blue))\n(memq 'green colors)"))
+     :explanation "In Motoi, cpu/opcodes is the catalog of legal instructions. An options alist is the catalog of legal settings. An enum's member list is the catalog of legal values. All three publish a fixed vocabulary as data you can check membership in."
+     :meta "The shape transfers to any system that exposes its own capabilities as an inspectable list.")
+    (:eng "The catalog is what a help panel and a validator both read from."
+     :math "The opcode table is a finite indexed family of records."
+     :cs "Same slot as reflection over an enum or a command registry."))
+  :row-4-proof (
+    (:eng-program "(define codes (map (lambda (op) (cadr (assoc ':code op))) (cpu/opcodes)))\n(define (all-distinct? xs) (let loop ((xs xs) (seen '())) (cond ((null? xs) #t) ((memv (car xs) seen) #f) (else (loop (cdr xs) (cons (car xs) seen))))))\n(all-distinct? codes)"
+     :math-program "(:honest-null \"That every opcode code is unique is a table-integrity constraint, witnessed by the distinctness check in :eng-program, not an algebraic identity.\")"
+     :cs-program "(define sizes (map (lambda (op) (cadr (assoc ':size op))) (cpu/opcodes)))\n(let loop ((xs sizes)) (cond ((null? xs) #t) ((or (= (car xs) 1) (= (car xs) 2)) (loop (cdr xs))) (else #f)))"
+     :claim "cpu/opcodes returns records with distinct :code values, each :size is 1 or 2, and it is the same table the assembler and disassembler use."
+     :invariant "codes pairwise distinct ∧ ∀ op: size(op) ∈ {1,2} ∧ table = assembler's table"
+     :meta "Falsified by two records sharing a :code, or a :size outside {1,2}.")
+    (:eng "Every opcode code is distinct — no two mnemonics collide."
+     :math "The table is an injective map from codes to mnemonics."
+     :cs "Every :size is 1 or 2 — the variable-length encoding is honored."))
+  :row-5-emergence (
+    (:eng-composition "(define (mnemonic-index)\n  (map (lambda (op) (cons (symbol->string (cadr (assoc ':mnemonic op))) (cadr (assoc ':code op)))) (cpu/opcodes)))\n(cdr (assoc \"HALT\" (mnemonic-index)))"
+     :math-composition "(:honest-null \"Building a mnemonic→code index is a map-then-assoc over the table, a projection, not an algebraic composition. See :cs-composition for the validate-and-assemble pipeline.\")"
+     :cs-composition "(define (legal? name)\n  (let loop ((ops (cpu/opcodes)))\n    (cond ((null? ops) #f)\n          ((string=? (symbol->string (cadr (assoc ':mnemonic (car ops)))) name) #t)\n          (else (loop (cdr ops))))))\n(if (legal? \"ADD\") (cpu/assemble (list (list 'ADD))) 'illegal)"
+     :base "cpu/opcodes publishes the instruction table as data."
+     :emergent "opcodes → build-index → validate → assemble is the REFLECTION-DRIVEN-TOOLING family — building a lookup or validator from a system's own self-description, exactly how a linter reads a schema."
+     :meta "Family: reflection-driven tooling — same slot as generating a parser or validator from a published grammar.")
+    (:eng "Build a mnemonic index and a legality check from the live table."
+     :math "The table drives an injective index used to validate input."
+     :cs "Reflection-driven tooling — validator built from self-description.")))
+
+(verb
+  :name "cpu/display" :std "Motoi"
+  :library "cpu"
+  :kind "rd"
+  :signature "(cpu/display) -> string"
+  :summary "Return the fixed-width ASCII dump of the machine: registers, a 16x16 memory grid, and the next instruction."
+  :explanation "cpu/display draws the machine in one glance, Speak & Spell style. It returns a plain string with three regions: a register line (A, B, PC, SP, FLAGS decoded as Z/N/C/H, plus the instruction count); a 16-by-16 hex grid of all 256 memory bytes with PC marked '>' and SP marked '<'; and a NEXT line showing the disassembled instruction about to execute (or HALTED). It is read-only — it renders the current state without changing it. The IDE reuses this exact string in its terminal panel; from the console you can display it to watch the whole machine as you step."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(cpu/boot!)\n(display (cpu/display))" :note "The fresh machine, rendered: all registers zero (SP FF), memory all 00, NEXT is the byte at PC 0.")
+    (:dialect "motoi" :tier "intermediate" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(display (string? (cpu/display)))" :note "cpu/display returns a string you can print, log, or embed: #t.")
+    (:dialect "motoi" :tier "expert" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'HALT)))\n(cpu/run!)\n(define txt (cpu/display))\n(define (has-substr? s sub) (let ((n (string-length s)) (m (string-length sub))) (let loop ((i 0)) (cond ((> (+ i m) n) #f) ((string=? (substring s i (+ i m)) sub) #t) (else (loop (+ i 1)))))))\n(display (has-substr? txt \"HALTED\"))" :note "After running a HALT program, the NEXT region reads HALTED — the dump reports the stop.")
+  )
+  :caveats ("Read-only: rendering never changes the machine." "It shows all 256 bytes as a fixed grid, unlike cpu/state whose :mem window defaults to 16." "FLAGS is shown decoded as Z/N/C/H characters, not as the raw integer (cpu/state gives the integer)." "Colour is not baked in — the string is plain text; the terminal look is applied by CSS in the IDE.")
+  :drawbacks ("For programmatic use you want cpu/state's alist, not this human-facing string." "The layout is fixed at 16x16; you cannot re-window it or show a sub-region." "Parsing values back out of the string is fragile — read them from cpu/state instead.")
+  :usecases ("Watch the whole machine while single-stepping in the console." "Embed the live dump in a REPL or IDE terminal panel." "Teach with a Speak & Spell-style at-a-glance view of registers and memory." "Log a formatted snapshot for a bug report a human will read.")
+  :related ("cpu/state" "cpu/step!" "cpu/disassemble" "cpu/opcodes")
+  :learn (:concept "Rendering state: turning a machine's registers and memory into a fixed-width human-readable view for at-a-glance inspection." :prerequisites ("cpu/state" "(core)/display" "cpu/step!") :progression "Boot, display to see the machine, step! and display again to watch it change; drop to cpu/state when you need the values as data.")
+  :row-2-audit (
+    (:eng-program "(cpu/boot!)\n(string? (cpu/display))"
+     :math-program "(:honest-null \"cpu/display renders state to a formatted string; it is a projection to text, not an algebraic law. See :cs-program for the HALTED-marker witness.\")"
+     :cs-program "(cpu/boot!)\n(cpu/load-program! (list (list 'HALT)))\n(cpu/run!)\n(define txt (cpu/display))\n(define (has? s sub) (let ((n (string-length s)) (m (string-length sub))) (let loop ((i 0)) (cond ((> (+ i m) n) #f) ((string=? (substring s i (+ i m)) sub) #t) (else (loop (+ i 1)))))))\n(has? txt \"HALTED\")"
+     :problem "Stepping through a program, you need to see every register and the next instruction at once — reading them one assoc at a time from cpu/state is slow and easy to misread."
+     :explanation "eng: cpu/display returns a string. math: honest-null — rendering is projection to text. cs: after a HALT the dump contains the marker HALTED."
+     :meta "cpu/display is the at-a-glance audit: one string shows registers, all of memory, and the next instruction, so a human can spot a wrong value or a halted machine without querying fields individually.")
+    (:eng "One rendered string surfaces every register and the next instruction."
+     :math "display is a projection of state onto a text layout."
+     :cs "The HALTED marker in the dump reports the stop — a visible status."))
+  :row-3-dimension (
+    (:setup "Human-readable rendering: turn an internal state into a fixed layout of text so a person can absorb the whole thing in one look."
+     :rungs ((:domain "cpu (register + memory dump)" :code "(cpu/boot!)\n(string? (cpu/display))")
+             (:domain "formatting a record to a string" :code "(define (show p) (string-append \"x=\" (number->string (car p))))\n(show (list 5 6))")
+             (:domain "pretty-printing a value" :code "(number->string 255 16)"))
+     :explanation "In Motoi, cpu/display renders the machine as a fixed-width dump. Formatting a record builds a readable string from its fields. Pretty-printing a value turns it into human form (here, hex). All three project internal state into text a person reads."
+     :meta "The shape transfers to any view layer that renders state for human eyes rather than machine consumption."
+     )
+    (:eng "The rendered dump is the artefact a human scans during debugging."
+     :math "display is a projection into a text presentation of the state."
+     :cs "Same slot as a __repr__ or a to-string for a debugger view."))
+  :row-4-proof (
+    (:eng-program "(cpu/boot!)\n(let ((s (cpu/display))) (and (string? s) (> (string-length s) 0)))"
+     :math-program "(:honest-null \"That the dump is a non-empty formatted string reflecting live state is a rendering property, witnessed in :eng-program, not an algebraic identity.\")"
+     :cs-program "(cpu/boot!)\n(cpu/load-program! (list (list 'HALT)))\n(cpu/run!)\n(define txt (cpu/display))\n(define (has? s sub) (let ((n (string-length s)) (m (string-length sub))) (let loop ((i 0)) (cond ((> (+ i m) n) #f) ((string=? (substring s i (+ i m)) sub) #t) (else (loop (+ i 1)))))))\n(has? txt \"HALTED\")"
+     :claim "cpu/display returns a non-empty string that reflects the current machine, including a HALTED marker once the machine has halted."
+     :invariant "display() is a non-empty string ∧ halted ⇒ 'HALTED' appears in it"
+     :meta "Falsified by an empty string, or a halted machine whose dump lacks the HALTED marker.")
+    (:eng "The dump is a non-empty string on any machine state."
+     :math "display is a total projection of state into text."
+     :cs "A halted machine's dump contains HALTED — the render tracks state."))
+  :row-5-emergence (
+    (:eng-composition "(define (step-and-show)\n  (cpu/step!)\n  (cpu/display))\n(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(string? (step-and-show))"
+     :math-composition "(:honest-null \"step-then-render interleaves a transition and a projection; the emergent shape is an animation loop, not an algebraic law. See :cs-composition.\")"
+     :cs-composition "(define (frames n)\n  (cpu/boot!)\n  (cpu/load-program! (list (list 'LOAD 5) (list 'MOV 'B) (list 'HALT)))\n  (let loop ((i 0) (acc '()))\n    (if (>= i n) (reverse acc)\n        (begin (cpu/step!) (loop (+ i 1) (cons (string? (cpu/display)) acc))))))\n(frames 2)"
+     :base "cpu/display renders the current machine as text."
+     :emergent "step! → display in a loop is the DEBUGGER-ANIMATION family — the step-and-redraw cycle a single-step debugger or a teaching visualizer runs frame by frame."
+     :meta "Family: step-and-redraw — same slot as a debugger UI refreshing its panels after each instruction.")
+    (:eng "Loop step!+display to animate the machine one instruction per frame."
+     :math "display composes with step! as the view half of a stepped loop."
+     :cs "Step-and-redraw — the single-step debugger's render cycle.")))

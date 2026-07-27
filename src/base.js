@@ -7,6 +7,8 @@
 
 import { Env, apply, Closure } from './interp.js'
 import { Sym } from './reader.js'
+import { makeRational, isRational, liftRational } from '../lib/math/exact.js'
+import { SchemeVector, isVec } from '../lib/base/r7rs-types.js'
 import { registerVerbMeta } from './verbRegistry.js'
 import { installSlatVerbs } from './slat-verbs.js'
 import { installR7RSCompletions } from './r7rs-completions.js'
@@ -36,22 +38,55 @@ export function makeBaseEnv(fuel) {
   // defaults the perm so we don't repeat it at every line.
   const def = (n, f, perm = 'read', extra = {}) => e.define(n, f, { perm, ...extra })
 
-  def('+', (...a) => a.reduce((x, y) => x + y, 0))
-  def('-', (...a) => (a.length === 1 ? -a[0] : a.reduce((x, y) => x - y)))
-  def('*', (...a) => a.reduce((x, y) => x * y, 1))
-  def('/', (...a) => (a.length === 1 ? 1 / a[0] : a.reduce((x, y) => x / y)))
+  // ── R7RS number tower (exact rationals) ───────────────────────────
+  // Rationals are the {n,d} objects from lib/math/exact.js. The core
+  // numeric verbs stay on plain JS numbers unless an operand IS a
+  // rational object — then they switch to the exact path. Exactness
+  // contagion: any inexact (non-integer float) operand collapses the
+  // whole expression back to float. `(/ 1 2)` stays 0.5; only rational
+  // literals like `1/2` trigger the exact path, so no regression.
+  const _ZERO = makeRational(0n, 1n)
+  const _ONE = makeRational(1n, 1n)
+  const _hasRat = (a) => a.some(isRational)
+  const _inexact = (x) => typeof x === 'number' && !Number.isInteger(x)
+  const _anyInexact = (a) => a.some(_inexact)
+  const _toFloat = (x) => isRational(x) ? Number(x.n) / Number(x.d) : x
+  const _ratAdd = (a, b) => makeRational(a.n * b.d + b.n * a.d, a.d * b.d)
+  const _ratSub = (a, b) => makeRational(a.n * b.d - b.n * a.d, a.d * b.d)
+  const _ratMul = (a, b) => makeRational(a.n * b.n, a.d * b.d)
+  const _ratDiv = (a, b) => makeRational(a.n * b.d, a.d * b.n)
+  const _ratCmp = (a, b) => { const l = a.n * b.d, r = b.n * a.d; return l < r ? -1 : l > r ? 1 : 0 }
+  // Fold a variadic op with rational operands present. `ratOp` is the
+  // exact combiner; `fltOp` the JS-number combiner used when inexact.
+  const _numFold = (a, ratOp, fltOp, ratId) => {
+    if (_anyInexact(a)) {
+      const f = a.map(_toFloat)
+      return f.length === 1 ? fltOp(ratId === _ONE ? 1 : 0, f[0]) : f.reduce(fltOp)
+    }
+    const r = a.map(liftRational)
+    return r.length === 1 ? ratOp(ratId, r[0]) : r.reduce(ratOp)
+  }
+  // Compare two numbers where at least one is rational.
+  const _numCmp = (x, y) => (_inexact(x) || _inexact(y))
+    ? Math.sign(_toFloat(x) - _toFloat(y))
+    : _ratCmp(liftRational(x), liftRational(y))
+
+  def('+', (...a) => _hasRat(a) ? _numFold(a, _ratAdd, (x, y) => x + y, _ZERO) : a.reduce((x, y) => x + y, 0))
+  def('-', (...a) => _hasRat(a) ? _numFold(a, _ratSub, (x, y) => x - y, _ZERO) : (a.length === 1 ? -a[0] : a.reduce((x, y) => x - y)))
+  def('*', (...a) => _hasRat(a) ? _numFold(a, _ratMul, (x, y) => x * y, _ONE) : a.reduce((x, y) => x * y, 1))
+  def('/', (...a) => _hasRat(a) ? _numFold(a, _ratDiv, (x, y) => x / y, _ONE) : (a.length === 1 ? 1 / a[0] : a.reduce((x, y) => x / y)))
   def('modulo', (x, y) => ((x % y) + y) % y)
   def('quotient', (x, y) => Math.trunc(x / y))   // integer division — standard Scheme
   def('remainder', (x, y) => x - Math.trunc(x / y) * y)
   def('max', (...a) => Math.max(...a))
   def('min', (...a) => Math.min(...a))
-  def('abs', (x) => Math.abs(x))
+  def('abs', (x) => isRational(x) ? (x.n < 0n ? makeRational(-x.n, x.d) : x) : Math.abs(x))
 
-  def('=', (a, b) => a === b)
-  def('<', (a, b) => a < b)
-  def('>', (a, b) => a > b)
-  def('<=', (a, b) => a <= b)
-  def('>=', (a, b) => a >= b)
+  def('=', (a, b) => (isRational(a) || isRational(b)) ? _numCmp(a, b) === 0 : a === b)
+  def('<', (a, b) => (isRational(a) || isRational(b)) ? _numCmp(a, b) < 0 : a < b)
+  def('>', (a, b) => (isRational(a) || isRational(b)) ? _numCmp(a, b) > 0 : a > b)
+  def('<=', (a, b) => (isRational(a) || isRational(b)) ? _numCmp(a, b) <= 0 : a <= b)
+  def('>=', (a, b) => (isRational(a) || isRational(b)) ? _numCmp(a, b) >= 0 : a >= b)
   def('not', (a) => a === false)
 
   def('list', (...a) => a)
@@ -110,7 +145,17 @@ export function makeBaseEnv(fuel) {
     return out
   })
   def('filter', (fn, lst) => lst.filter((x) => apply(fn, [x], fuelBox) !== false))
-  def('reduce', (fn, init, lst) => lst.reduce((acc, x) => apply(fn, [acc, x], fuelBox), init))
+  // SRFI-1 `reduce`: (reduce f ridentity list). For a NON-empty list the
+  // ridentity is IGNORED and the fold is (fold f (car list) (cdr list)) with
+  // f called element-first, (f elem acc). Conformed 2026-07-25 (was acc-first
+  // + seed-consuming, an R6RS fold-left shape — see broken-examples/
+  // reduce-arg-order.slatl). Provenance: SRFI-1 §Fold/Reduce.
+  def('reduce', (fn, ridentity, lst) => {
+    if (!lst || lst.length === 0) return ridentity
+    let acc = lst[0]
+    for (let i = 1; i < lst.length; i++) acc = apply(fn, [lst[i], acc], fuelBox)
+    return acc
+  })
   // (apply fn args) — invoke `fn` with the list `args` as the argument
   // list. Same fuel budget as a direct call.
   def('apply', (fn, args) => apply(fn, Array.isArray(args) ? args : [args], fuelBox))
@@ -141,6 +186,12 @@ export function makeBaseEnv(fuel) {
       for (let i = 0; i < a.length; i++) if (!_eqQ(a[i], b[i])) return false
       return true
     }
+    // R7RS §6.8: two vectors are `equal?` when same length + element-wise equal.
+    if (isVec(a) && isVec(b)) {
+      if (a.items.length !== b.items.length) return false
+      for (let i = 0; i < a.items.length; i++) if (!_eqQ(a.items[i], b.items[i])) return false
+      return true
+    }
     return false
   }
   def('=?', _eqQ)
@@ -148,6 +199,7 @@ export function makeBaseEnv(fuel) {
   // operators coming from Racket/Chez/Chicken aren't surprised.
   def('equal?', _eqQ)
   def('eq?', _eqQ)
+  def('eqv?', _eqQ)
 
   // (inspect x) — walk any value and return a flat, readable string
   // suitable for `(text ...)` or `(display)`. The runtime
@@ -204,11 +256,38 @@ export function makeBaseEnv(fuel) {
     if (v === true) return '#t'
     if (v === false) return '#f'
     if (typeof v === 'string') return v
+    if (typeof v === 'bigint') return String(v)
+    if (typeof v === 'number') {
+      if (v === Infinity) return '+inf.0'
+      if (v === -Infinity) return '-inf.0'
+      if (Number.isNaN(v)) return '+nan.0'
+      return String(v)
+    }
     if (Array.isArray(v)) return '(' + v.map(_displayFormat).join(' ') + ')'
     if (typeof v === 'function') return '<fn>'
     if (v instanceof Closure) return '<fn>'
     if (v && typeof v === 'object' && 'name' in v && typeof v.name === 'string'
         && Object.keys(v).length === 1) return v.name
+    // Exact rationals (lib/math/exact.js) — carry the shared tag.
+    const RAT_TAG = Symbol.for('motoi:rational')
+    if (v && typeof v === 'object' && v[RAT_TAG] === true) {
+      return v.d === 1n ? String(v.n) : `${v.n}/${v.d}`
+    }
+    // Complex numbers (lib/math/complex.js) — carry the shared tag.
+    const CPX_TAG = Symbol.for('motoi:complex')
+    if (v && typeof v === 'object' && v[CPX_TAG] === true) {
+      const { re, im } = v
+      if (im === 0) return String(re)
+      if (re === 0) return im === 1 ? 'i' : im === -1 ? '-i' : `${im}i`
+      const sign = im >= 0 ? '+' : '-'
+      const ai = Math.abs(im)
+      const imPart = ai === 1 ? 'i' : `${ai}i`
+      return `${re}${sign}${imPart}`
+    }
+    // Promise objects (from delay/make-promise) — show shape not JS repr.
+    if (v && typeof v === 'object' && v.__promise__ === true) {
+      return v.forced ? _displayFormat(v.value) : '<promise>'
+    }
     return String(v)
   }
   def('display', (v) => { process.stdout.write(_displayFormat(v)); return undefined })
@@ -218,24 +297,41 @@ export function makeBaseEnv(fuel) {
   // author reaches for first; we already have map/filter/reduce/append/
   // reverse/first/last/nth; add the remainder so a cart authored in
   // any other Scheme runs here without a port).
-  def('any', (pred, lst) => {
-    if (!Array.isArray(lst)) return false
-    for (const x of lst) if (apply(pred, [x], fuelBox) !== false) return true
+  // SRFI-1: any/every/count take one or more parallel lists, stopping at the
+  // shortest. any returns the first true value; every returns the last true
+  // value (or #t when all lists are empty); both short-circuit.
+  def('any', (pred, ...lists) => {
+    if (lists.length === 0 || lists.some((l) => !Array.isArray(l))) return false
+    const n = Math.min(...lists.map((l) => l.length))
+    for (let i = 0; i < n; i++) {
+      const r = apply(pred, lists.map((l) => l[i]), fuelBox)
+      if (r !== false) return r
+    }
     return false
   })
-  def('every', (pred, lst) => {
-    if (!Array.isArray(lst)) return true
-    for (const x of lst) if (apply(pred, [x], fuelBox) === false) return false
-    return true
+  def('every', (pred, ...lists) => {
+    if (lists.length === 0 || lists.some((l) => !Array.isArray(l))) return true
+    const n = Math.min(...lists.map((l) => l.length))
+    let last = true
+    for (let i = 0; i < n; i++) {
+      last = apply(pred, lists.map((l) => l[i]), fuelBox)
+      if (last === false) return false
+    }
+    return last
   })
-  def('count', (pred, lst) => {
-    if (!Array.isArray(lst)) return 0
-    let n = 0
-    for (const x of lst) if (apply(pred, [x], fuelBox) !== false) n++
-    return n
+  def('count', (pred, ...lists) => {
+    if (lists.length === 0 || lists.some((l) => !Array.isArray(l))) return 0
+    const n = Math.min(...lists.map((l) => l.length))
+    let c = 0
+    for (let i = 0; i < n; i++) {
+      if (apply(pred, lists.map((l) => l[i]), fuelBox) !== false) c++
+    }
+    return c
   })
   def('take', (lst, n) => Array.isArray(lst) ? lst.slice(0, Math.max(0, n|0)) : [])
   def('drop', (lst, n) => Array.isArray(lst) ? lst.slice(Math.max(0, n|0)) : [])
+  // list-head is the R7RS name for take's prefix operation (SRFI-1 `take`).
+  def('list-head', (lst, n) => Array.isArray(lst) ? lst.slice(0, Math.max(0, n|0)) : [])
   def('zip', (a, b) => {
     if (!Array.isArray(a) || !Array.isArray(b)) return []
     const n = Math.min(a.length, b.length)
@@ -272,7 +368,16 @@ export function makeBaseEnv(fuel) {
   // R7RS §6.2.6 spells it `ceiling`. We keep `ceil` as the short-form
   // alias the cart authors learned first; both point to the same impl.
   def('ceiling', (x) => Math.ceil(x))
-  def('round', (x) => Math.round(x))
+  // R7RS §6.2.6: `round` returns the closest integer, rounding to EVEN
+  // when x is halfway between two integers (banker's rounding).
+  // JS Math.round is half-up (2.5=>3), which diverges — so we roll our own.
+  def('round', (x) => {
+    const f = Math.floor(x)
+    const diff = x - f
+    if (diff < 0.5) return f
+    if (diff > 0.5) return f + 1
+    return (f % 2 === 0) ? f : f + 1   // exactly halfway: pick the even one
+  })
   def('round2', (x) => Math.round(x * 100) / 100)   // money-friendly
   def('sign', (x) => Math.sign(x))
   def('clamp', (x, lo, hi) => Math.min(hi, Math.max(lo, x)))
@@ -335,12 +440,12 @@ export function makeBaseEnv(fuel) {
   // We keep the smart definitions in force here. Both `eq?` and `equal?`
   // remain structural per Motoi's `=?` doctrine (PICO-8-style DWIM
   // equality — Dr. Imani's beginner-friendliness research pass).
-  def('zero?', (x) => x === 0)
-  def('positive?', (x) => x > 0)
-  def('negative?', (x) => x < 0)
+  def('zero?', (x) => isRational(x) ? x.n === 0n : x === 0)
+  def('positive?', (x) => isRational(x) ? x.n > 0n : x > 0)
+  def('negative?', (x) => isRational(x) ? x.n < 0n : x < 0)
   def('even?', (x) => x % 2 === 0)
   def('odd?', (x) => Math.abs(x % 2) === 1)
-  def('number?', (x) => typeof x === 'number')
+  def('number?', (x) => typeof x === 'number' || isRational(x))
   def('string?', (x) => typeof x === 'string')
   def('boolean?', (x) => x === true || x === false)
   def('string-append', (...a) => a.map(String).join(''))
@@ -348,7 +453,7 @@ export function makeBaseEnv(fuel) {
   def('string-ref', (s, i) => String(s).charAt(i))   // → single-char string
   def('string-eq?', (a, b) => String(a) === String(b))
   def('string=?', (a, b) => String(a) === String(b))
-  def('vector-ref', (v, i) => (Array.isArray(v) ? v[i] : null))
+  def('vector-ref', (v, i) => (isVec(v) ? v.items[i] : Array.isArray(v) ? v[i] : null))
   def('substring', (s, a, b = undefined) => String(s).substring(a, b))
   def('number->string', (n, radix) => {
     // Standard Scheme: (number->string n [radix]). Default radix 10.
@@ -684,7 +789,7 @@ export function makeBaseEnv(fuel) {
 // Shape: [name, arity, doc, exampleCode, namespace?]. arity is a scalar
 // number or a `[min, max]` pair (variadic → [min, Infinity]). Every
 // entry ships one example (novice tier) at minimum — the beginner
-// reading Sakura Book Chapter 1 sees a runnable form under `,help X`.
+// reading the Motoi Scheme Book Chapter 1 sees a runnable form under `,help X`.
 function registerBaseMetadata() {
   const BASE_META = [
     // arithmetic
@@ -723,6 +828,7 @@ function registerBaseMetadata() {
     ['not',      1, 'Logical negation of #f/#t.','(not #f) => #t',      'logic'],
     ['=?',       2, 'Smart equality — numbers/strings by value, lists deep, symbols by name.', "(=? '(1 2) '(1 2)) => #t", 'compare'],
     ['eq?',      2, 'Reference / structural equality.',    '(eq? 3 3) => #t',   'compare'],
+    ['eqv?',     2, 'Equivalence (numbers/chars by value); collapses to =? in Motoi.', '(eqv? 3 3) => #t', 'compare'],
     ['equal?',   2, 'Structural equality (deep, list-aware).', "(equal? '(1 2) '(1 2)) => #t", 'compare'],
 
     // predicates
@@ -896,6 +1002,11 @@ function rectOverlapsAny(x, y, w, h, px, py, pw, ph, n) {
 
 function deepEqual(a, b) {
   if (a === b) return true
+  // Symbols/keywords compare by name — two `Sym` instances with the same
+  // name are `equal?` even when they are distinct objects (e.g. one from the
+  // reader, one built in JS via `new Sym`). Without this, assoc/member/equal?
+  // silently miss symbol keys.
+  if (a instanceof Sym && b instanceof Sym) return a.name === b.name
   if (Array.isArray(a) && Array.isArray(b)) {
     return a.length === b.length && a.every((x, i) => deepEqual(x, b[i]))
   }

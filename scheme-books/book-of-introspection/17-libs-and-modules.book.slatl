@@ -1,0 +1,172 @@
+(chapter
+  :book "Book of Introspection"
+  :chapter-number 17
+  :title "Libs and modules — introspecting the loader"
+  :audience "programmer-learning-motoi"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :wave-status "seeded 2026-07-22"
+  :provenance
+    (:authored-at "2026-07-22"
+     :authored-by "book-of-introspection-author"
+     :sources ("core/verb-manifest.js" "lib/system/require-verb.js" "engineering/EAGER-VS-LAZY.md"))
+  :prose
+"# Chapter 17 — Libs and modules: introspecting the loader
+
+The registry (Chapter 11) told you every verb that exists right now. This chapter goes one level up: WHERE do those verbs come from? Which library shipped `chem/molar-mass`? Which libraries has your session actually installed vs. which are just available? How do you force a lazy library to load NOW so it doesn't stutter your next tick?
+
+Introspection at the loader level is what makes the difference between a language that has libraries and a language that KNOWS ABOUT its libraries. Motoi knows.
+
+## 17.1 Three verbs
+
+Motoi installs three loader-introspection verbs at boot. All three are pure — they don't mutate anything; they just report.
+
+```scheme
+(require lib-name-symbol)  ; install a lazy library RIGHT NOW
+(loaded-libs)              ; every library that has actually installed so far
+(available-libs)           ; every library the manifest knows about
+```
+
+That's the whole surface. Together they let you see what's loaded, what's available but unloaded, and force a load when you need one.
+
+## 17.2 available-libs — what could load
+
+At boot Motoi reads its manifest — the list of every library file the runtime knows about — and remembers each one's name. Some install immediately (eager), some wait for their first call (lazy). Either way, `available-libs` returns the full list:
+
+```scheme
+(available-libs)
+;; => (ai/ai ai/steering audio/tick base/alg base/assert
+;;     book/reader book/tutor game/entity game/game
+;;     ... 55 or so libs ...)
+```
+
+This is your map of the language. Every symbol in the list is a library that Motoi's manifest promises to load — either it already has, or it will as soon as you touch one of its verbs.
+
+## 17.3 loaded-libs — what has actually loaded
+
+`loaded-libs` reports a subset — only the libraries that have actually run their install function this session.
+
+```scheme
+(loaded-libs)
+;; => ()   ; a fresh session hasn't triggered any lazy libs yet
+```
+
+Now touch a lazy verb:
+
+```scheme
+(assert/check-with positive? 5 \"must be positive\")   ; installs base/assert on first call
+(loaded-libs)
+;; => (base/assert)
+```
+
+The library was in `available-libs` from boot. The first call to `assert/check-with` triggered its install. Now it's in `loaded-libs` too.
+
+Eager libraries — the ones that install at boot regardless — don't appear in `loaded-libs`. They're just always there; `loaded-libs` is specifically the lazy audit trail.
+
+## 17.4 require — install a library on purpose
+
+Sometimes you don't want to wait for the first-call surprise. You know your game loop will use `matrix/*` and `num-integrate/*` — you want those installed BEFORE the tick starts, not on frame 47 when a physics bug fires them for the first time.
+
+`require` installs a lazy library synchronously:
+
+```scheme
+(require 'matrix)          ; install lib/math/matrix.js right now, block until done
+;; => ok
+```
+
+Return values:
+
+- `'ok` — the library was in the manifest and its installer ran (or it was already installed and this call was a no-op).
+- `'unknown` — no library in the manifest matched that name.
+
+`require` matches by name — `'assert` finds `base/assert`, `'matrix` finds `math/matrix`, `'game-theory` finds `game/game-theory`. If two libraries share a trailing name (shouldn't happen in a healthy manifest), the first match wins.
+
+## 17.5 The idiom — warm up in setup, run in the loop
+
+Games and animations want zero surprises in the tick. Force loads at setup:
+
+```scheme
+(define (setup)
+  (require 'matrix)
+  (require 'num-integrate)
+  ;; ... any other lazy libs the tick loop will touch
+  'ready)
+
+(define (tick dt)
+  ;; No first-touch stalls here — everything's already installed.
+  ...)
+
+(setup)
+;; ... start the tick loop ...
+```
+
+Scratchpads and REPL sessions don't need this discipline. Reach for what you want; let the first-call install fire; move on.
+
+## 17.6 What the numbers look like
+
+A representative Motoi boot on a modern machine:
+
+- `installCoreLazy` boot (eager + lazy manifest): ~0.4 ms
+- First call to a lazy verb (installs the lib): ~0.4 ms
+- Subsequent calls to that verb: sub-microsecond dispatch
+
+If your program is a game loop hitting 60 fps (16 ms per frame budget), a 0.4 ms first-touch on frame 47 is a 2.5% budget spike for one frame. Usually invisible. Sometimes visible. For guaranteed silky, force the loads at setup.
+
+## 17.7 Why not always eager?
+
+Because expressiveness matters. If Motoi forced every one of its 900+ verbs to install at boot, cold startup would be 10× slower and every REPL session would pay for libraries it never touches. Lazy loading means the runtime charges you only for what you use.
+
+But you can override that on a per-library basis — every library file declares its own `LAZY` flag. Change it, save, run. If you're shipping a game, flip everything the game touches to eager. If you're writing a notebook, leave things lazy.
+
+See `docs/EAGER-VS-LAZY.md` (or the engineering doctrine chapter) for the full framing.
+
+## 17.8 A loader-introspection pattern
+
+Here's a small script that reports what your session has loaded so far and how much of the manifest is still cold:
+
+```scheme
+(define (loader-report)
+  (let* ((all (available-libs))
+         (loaded (loaded-libs))
+         (loaded-count (length loaded))
+         (all-count (length all)))
+    (list
+      :available all-count
+      :loaded loaded-count
+      :cold (- all-count loaded-count))))
+
+(loader-report)
+;; => (:available 55 :loaded 3 :cold 52)
+```
+
+Useful in a debug HUD, a REPL diagnostic verb, or the tail of a test run to prove the test only touched what it claimed to touch.
+
+## 17.9 The whole introspection ladder
+
+The introspection surface stacks:
+
+- Chapter 3: `describe`, `type-of` — one value at a time
+- Chapter 4: `doc-of`, `source-of` — one verb's metadata
+- Chapter 5: `all-verbs`, environments — one env at a time
+- Chapter 11: `snapshot-registry` — every verb, one map
+- **Chapter 17 (this): `available-libs`, `loaded-libs`, `require` — every library, plus lazy control**
+
+Each layer looks at a bigger unit of the runtime. The last one — libraries — is the outermost layer before you're looking at the file system itself.
+
+## Applies to Motoi
+
+A sister dialect is a variant of Motoi. It inherits the loader and these three verbs. If you're reading a sister dialect's Book of Introspection and see the same chapter, the semantics are identical — the manifest content will differ (its libraries are different), but the introspection API is the same."
+
+  :verbs (
+    (:name "require"
+     :signature "(require lib-name) -> ok | unknown"
+     :example "(require 'matrix)")
+    (:name "loaded-libs"
+     :signature "(loaded-libs) -> list"
+     :example "(loaded-libs) ; => (base/assert)")
+    (:name "available-libs"
+     :signature "(available-libs) -> list"
+     :example "(available-libs) ; => (ai/ai audio/tick ...)"))
+  :epilogue null)

@@ -223,11 +223,26 @@ function collectTemplateBinders(tpl, patVars, out = new Set()) {
   return out
 }
 
+// Look up a pattern-var binding through the ellipsis-layered binds chain.
+// Ellipsis iterations layer scopes with Object.create(binds), so a
+// non-ellipsis var (e.g. `dur` in `(f x dur) ...`) lives on a prototype,
+// not as an own property. Walk the chain but stop before Object.prototype
+// so we never match built-ins like `toString`.
+function findBind(binds, name) {
+  let o = binds
+  while (o && o !== Object.prototype) {
+    if (Object.prototype.hasOwnProperty.call(o, name)) return { found: true, value: o[name] }
+    o = Object.getPrototypeOf(o)
+  }
+  return { found: false, value: undefined }
+}
+
 function instantiate(tpl, binds, rename, fuel) {
   if (--fuel.n < 0) throw new Error('macro fuel exhausted')
   if (tpl instanceof Sym) {
-    if (Object.prototype.hasOwnProperty.call(binds, tpl.name)) {
-      const b = binds[tpl.name]
+    const hit = findBind(binds, tpl.name)
+    if (hit.found) {
+      const b = hit.value
       // An ellipsis var used outside an ellipsis context — splice its items
       // verbatim is wrong; surface a clear error instead of silent nonsense.
       if (b && b.__ellipsis) throw new Error(`macro: pattern var '${tpl.name}' used without (...)`)

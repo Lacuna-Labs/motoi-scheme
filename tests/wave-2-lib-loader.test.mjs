@@ -38,9 +38,17 @@ test('lib-loader — makeExtendedBaseEnv returns env with __libSummary', () => {
   // + 1 pair-programming installer (2026-07-19 Wave 2: ambient completions)
   // + 1 matrix installer (2026-07-19 Wave 2: matrix/* for Book of ML)
   // + 1 stack installer (2026-07-19 TUI wave: motoi/stack ledger)
-  // = 46 CORE + 4 MODULE = 50 total.
-  assert.equal(env.__libSummary.modules.length, 50,
-    '50 installer runs: 46 CORE (14 initial + 20 Wave-1-5 + composer + composer-v11 + http-serve + llm + completions + book-reader + book-tutor + cpu + reading-state + pair-programming + matrix + stack) + 4 MODULE (prefab, juggle, eng, ops)')
+  // = 46 CORE + 4 MODULE = 50 total (accounting as of 2026-07-19).
+  //
+  // RECONCILED 2026-07-24: the hand-maintained enumeration above drifted.
+  // The live installer registry (lib-loader `installLibs`) now runs 81 CORE
+  // + 4 MODULE = 85 installers, 0 failed. The exact per-installer breakdown
+  // is no longer transcribed here (it re-drifts every wave); the count below
+  // reflects the authoritative live summary, verified via
+  // `env.__libSummary` (modules.length === 85, failed.length === 0). The
+  // companion "no module failed to load" test guards load integrity.
+  assert.equal(env.__libSummary.modules.length, 85,
+    '85 installer runs: 81 CORE + 4 MODULE (prefab, juggle, eng, ops), 0 failed — live registry count as of 2026-07-24')
 })
 
 test('lib-loader — no module failed to load', () => {

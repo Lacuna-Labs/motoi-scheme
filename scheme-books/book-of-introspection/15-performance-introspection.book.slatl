@@ -82,21 +82,136 @@ For per-expression memory:
 
 Memory introspection is useful for spotting allocation hot-spots. A verb that allocates ten megabytes when you expected kilobytes is a candidate for rewriting.
 
-## Sections 15.4 through 15.16 — pending Wave 4 authoring
+## 15.4 The persistent per-verb call counter
 
-- 15.4 The fuel model in detail
-- 15.5 Per-verb fuel cost
-- 15.6 Micro-benchmarking patterns
-- 15.7 Memory allocation shapes
-- 15.8 GC impact and how to minimize
-- 15.9 Trace + time — timing every call
-- 15.10 Comparing implementations
-- 15.11 Fuel budgets in production
-- 15.12 Cortex + performance — persistent benchmarks
-- 15.13 Performance regressions
-- 15.14 The runtime's performance model
-- 15.15 Cross-runtime consistency
-- 15.16 Closing — measure before optimize
+Every time the runtime dispatches a primitive, a counter for that verb is incremented. The counters live in memory during the session and flush to a SLAT file on process exit — `~/.motoi/stats.slat` by default, overridable via the `MOTOI_STATS_PATH` environment variable. On the next startup, the previous counts are loaded back in. Counts accumulate across every session Motoi has ever run.
+
+The counter is a 64-bit BigInt. That matters. A 64-bit unsigned integer holds a maximum of about 1.8 × 10¹⁹ — nineteen quintillion. Even if a hot verb ran a million times a second for a hundred years, the counter would sit at 3.15 × 10¹⁵ — still five orders of magnitude below the ceiling. The counter never overflows in practice.
+
+The write side is exit-only. There is no per-call disk write. The hot path pays one Map.get / Map.set for the increment and nothing else. On SIGINT and SIGTERM the flush is caught and the file is written before the process dies, so a clean Ctrl-C from the REPL preserves the day's counts. Only a hard kill (SIGKILL, panic, machine crash) loses the delta between the last flush and the crash.
+
+## 15.5 Reading the counter — the stats/* verb family
+
+The counter is exposed through five verbs. All read; only one writes.
+
+```scheme
+(stats/verb-calls)            ;; top-25 by call count, as an alist
+(stats/verb-calls 5)          ;; top-5 only
+(stats/verb-calls-of 'car)    ;; the count for one verb, as an integer
+(stats/summary)               ;; verbs-tracked, total-calls, sessions,
+                              ;;   session-uptime-ms, stats-slat path
+(stats/flush!)                ;; force a write now (usually unnecessary)
+(stats/path)                  ;; where the SLAT lives
+```
+
+Return shapes are chosen to compose cleanly with the rest of the language. `stats/verb-calls` returns an alist so you can `map`, `filter`, `for-each` over it. `stats/verb-calls-of` returns a plain integer so you can use it in arithmetic (thresholds, rates, ratios). If a count ever exceeds JavaScript's `Number.MAX_SAFE_INTEGER` (about 9 × 10¹⁵), `stats/verb-calls-of` returns the count as a string instead — you keep precision but you have to opt in to BigInt arithmetic yourself.
+
+A worked read:
+
+```scheme
+;; What are the ten hottest verbs?
+(map car (stats/verb-calls 10))
+
+;; Is my new verb actually being used?
+(if (> (stats/verb-calls-of 'my-new-verb) 0)
+    'used
+    'idle)
+
+;; A rough calls-per-ms rate for the current session:
+(let* ((s (stats/summary))
+       (uptime (cdr (assoc :session-uptime-ms s)))
+       (total  (cdr (assoc :total-calls s))))
+  (/ total (max uptime 1)))
+```
+
+Three lines of Motoi, real data.
+
+## 15.6 What the counters teach the LLM
+
+Motoi is a small model. Motoi memorizes patterns; Motoi does not memorize facts reliably. That distinction is the entire reason the counter lives on disk and not in the model's weights.
+
+A model trained to `(stats/verb-calls-of 'car)` and asked `"how many times has car been called?"` cannot answer 4,231. The number is not in the weights. It is in the file. What the model DOES know, from training, is that the pattern *ask a stats verb, get a number back, reason about the number* is a first-class skill. So the model composes: it emits `(stats/verb-calls-of 'car)`, the runtime returns 4,231, and the model reasons about 4,231 as if the number had always been available — because for the model's purposes, it always was.
+
+This is the difference between memorization and retrieval. A large model can afford to memorize numbers (they get baked into weights, they stale, they lie). A small model cannot afford that; a small model has to LOOK. The counter is designed so that looking is one verb call away.
+
+There's a second thing the counter teaches the model. Frequency data is a self-shape. When the model sees that `car` was called 4,231 times and `flower/wilt` was called 3 times, the model learns which verbs are the language's LOAD-BEARING verbs and which are the language's SPECIALTY verbs. That knowledge does end up in the weights — because it's a pattern, not a fact. The model that reads its own frequency table becomes better at composing in the language's real idioms, because the real idioms are the ones the counter says are used.
+
+## 15.7 What the counters teach the person
+
+If you are the one writing Motoi programs, the counter is a mirror. It tells you which verbs you actually use, not which verbs you think you use. Most people are surprised. Most people find they use `car`, `cdr`, `map`, and `filter` an order of magnitude more than they use anything else. That's fine. That's what a language is — a very small set of verbs used constantly, and a very long tail of verbs used rarely.
+
+It also tells you about your own habits. If you find yourself calling `apply` eight times more than the median Motoi programmer, that's a fact about your style. Maybe you rely on higher-order dispatch. Maybe you should. Maybe you shouldn't. The counter doesn't judge; it reports. The interpretation is yours.
+
+And it tells you where to spend documentation effort. If a verb is called ten thousand times in your carts and has no docstring, that's a gap you can close. If a verb is documented in three examples and never called, either the docs are wrong (missing the natural use) or the verb is superfluous (rip it out).
+
+## 15.8 Why the counter matters more for a small model than a large one
+
+A large model has the luxury of storing frequency data in its weights. When you ask GPT-something "which JavaScript array method is used most often in real-world code?", the answer comes out of a distribution learned from billions of examples. The model doesn't need to look at your particular codebase.
+
+Motoi cannot do that. Motoi's training corpus is small — a few thousand carts, a book of examples, a reference manual. Motoi cannot rely on a global prior. Motoi must rely on YOUR local prior — the shape of YOUR programs. The counter is the mechanism that turns "your programs" into a distribution the model can read.
+
+This is the "make the LLM smarter by reading" doctrine. Motoi does not retrain to learn what you use most. Motoi READS the counter. The counter is a live census. Every session updates it. Every question the model answers about verb frequency is answered against the live census, not the frozen training snapshot.
+
+The result: a model that stays accurate about your habits without ever being retrained on them. Weights ≠ facts. The counter is where the facts live.
+
+## 15.9 The counter's failure modes and honest limits
+
+The counter is not perfect. Three limits worth naming.
+
+First: only primitive dispatches are counted. A `(define (foo x) ...)` that expands to primitive calls counts the primitives, not the `foo` closure invocation itself. If you want closure-level counts, you can write your own instrumentation, but the built-in counter is primitive-only. The reason is honesty — closures are user-defined; primitives are the language's own vocabulary; the counter is meant to measure the language, not your programs on top of it.
+
+Second: the counter is per-machine, not per-user or per-Motoi-instance. If you run Motoi in Docker, each container has its own stats.slat unless you mount it. If two REPLs run at the same time, the last one to exit wins (its counts overwrite; the earlier one's session-delta is lost). The write is not lock-mediated because Motoi is designed for one-primary-user at a time.
+
+Third: the counter cannot distinguish "call from a healthy program" from "call from a broken program that crashed halfway through." Every primitive dispatch counts, including the ones that led up to an unbound-symbol error. That's a bug-shape reveal, not a feature — if a verb shows up in the top-25 unexpectedly, check whether you have a program that's throwing every session and inflating the count. The counter is a mirror; sometimes the mirror shows a mess.
+
+Those three limits are the honest picture. The counter is a good tool. It is not an oracle.
+
+## 15.10 Composing with the rest of the introspection surface
+
+The counter starts to earn its keep when you compose it with the other introspection verbs. Two examples.
+
+**Doc-coverage weighted by call count.** Which UNDOCUMENTED verbs are actually being called?
+
+```scheme
+(define (undocumented-hot n)
+  (let* ((all (all-verbs))
+         (with-counts (map (lambda (v)
+                             (list v (stats/verb-calls-of v)))
+                           all))
+         (sorted (sort with-counts
+                       (lambda (a b) (> (cadr a) (cadr b))))))
+    (filter (lambda (row)
+              (and (> (cadr row) 100)   ;; called at least 100 times
+                   (null? (doc-of (car row))))) ;; no doc
+            (take sorted n))))
+
+(undocumented-hot 500)
+;; => the top-N by frequency, keep only the ones with no doc.
+;;    that's exactly where documentation effort should go first.
+```
+
+**Namespace usage report.** Which library namespaces do YOUR programs actually reach for?
+
+```scheme
+(define (namespace-usage)
+  (let ((totals (make-hash-table)))
+    (for-each (lambda (v)
+                (let ((ns (or (namespace-of-name v) 'base)))
+                  (hash-table-update!
+                    totals ns
+                    (lambda (n) (+ n (stats/verb-calls-of v)))
+                    (lambda () 0))))
+              (all-verbs))
+    totals))
+
+(namespace-usage)
+;; => hash: audio 4322 · geom 891 · game 2011 · base 91442 · ...
+;;    the shape of your actual usage.
+```
+
+Neither report is baked into the language. Both are ten lines of Motoi that compose the introspection primitives with the counter. That's the whole point.
+
+## 15.11 Fuel model in detail — the classical performance triad
 
 ## 15.17 A worked example
 

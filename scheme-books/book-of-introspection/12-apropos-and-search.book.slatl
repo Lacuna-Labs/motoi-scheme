@@ -67,21 +67,203 @@ Search doc strings (not just names) for a keyword:
 
 Doc-search finds verbs whose name does not include the concept but whose behavior does. Chapter 11's grep-docs was the same pattern.
 
-## Sections 12.4 through 12.16 — pending Wave 3 authoring
+## 12.4 find-by-arity — search by shape
 
-- 12.4 find-by-arity
-- 12.5 find-by-contract shape
-- 12.6 find-by-perm
-- 12.7 find-by-source-file
-- 12.8 The did-you-mean predicate (LLM-augmented, Chapter 13)
-- 12.9 Combining searches
-- 12.10 Ranked search results
-- 12.11 Search at the REPL
-- 12.12 Custom search predicates
-- 12.13 Search across dialects (Motoi vs Sakura)
-- 12.14 Search and Cortex — searching past usage
-- 12.15 Search as a training signal
-- 12.16 Closing — search as a shape query
+The registry knows every verb's arity. Combine `all-verbs` and `arity-of` and you have a shape-search.
+
+```scheme
+(define (find-by-arity n)
+  (filter (lambda (v)
+            (let ((a (arity-of v)))
+              (and (number? a) (= a n))))
+          (all-verbs)))
+
+(find-by-arity 2)
+;; => every fixed-arity-2 verb — the binary-operator set.
+```
+
+When you're writing a higher-order helper that expects a two-arg function, `(find-by-arity 2)` tells you every verb that qualifies.
+
+## 12.5 find-by-contract shape
+
+Contracts are strings. Substring search is enough:
+
+```scheme
+(define (find-by-contract fragment)
+  (filter (lambda (v)
+            (let ((c (type-of v)))
+              (and c (string-contains c fragment))))
+          (all-verbs)))
+
+(find-by-contract "-> boolean")   ;; the predicate set
+(find-by-contract "list")         ;; the list-processing set
+```
+
+Text-level shape search — not typed, but useful.
+
+## 12.6 find-by-perm — the audit set
+
+Every verb carries a `:perm` field. Filter by it:
+
+```scheme
+(define (find-by-perm p)
+  (filter (lambda (v)
+            (equal? (cdr (assoc :perm (help v))) p))
+          (all-verbs)))
+
+(find-by-perm 'state-change)
+;; => every verb that writes state. Audit target.
+```
+
+A cart that calls only `'read` verbs is inherently safe. A cart that reaches for `'state-change` verbs needs closer scrutiny. This search names the audit set.
+
+## 12.7 find-by-source-file
+
+Provenance search:
+
+```scheme
+(define (verbs-from file)
+  (filter (lambda (v)
+            (let ((s (source-of v)))
+              (and s (string-contains s file))))
+          (all-verbs)))
+
+(verbs-from "audio.js")
+```
+
+This is how the book generator finds which chapter to describe each verb in. It's how the IDE tooltip finds where to jump. It's how deprecation sweeps find affected verbs.
+
+## 12.8 did-you-mean — the small-model reflex
+
+When a user or the model types a name that doesn't exist, the runtime tries to guess. The mechanism is edit-distance search across `(all-verbs)`, ranked by closeness.
+
+```scheme
+(define (did-you-mean name)
+  (let* ((n (string-length name))
+         (candidates (filter (lambda (v)
+                               (let ((d (levenshtein name v)))
+                                 (< d (max 2 (quotient n 3)))))
+                             (all-verbs))))
+    (sort candidates
+          (lambda (a b)
+            (< (levenshtein name a)
+               (levenshtein name b))))))
+
+(did-you-mean "csr")
+;; => ("cdr" ...) — closest edits first.
+```
+
+Chapter 13 extends this with a model-augmented version — when edit distance runs out, the model can suggest semantically similar verbs. The base version is pure and fast.
+
+## 12.9 Combining searches — the composition dividend
+
+Each search returns a list. Lists compose:
+
+```scheme
+;; Every binary state-changing verb whose impl is in the audio module.
+(intersection (find-by-arity 2)
+              (find-by-perm 'state-change)
+              (verbs-from "audio.js"))
+```
+
+Highly specific query. Emerges from three primitive searches. Neither the primitives nor the composition were added — both were already there.
+
+## 12.10 Ranked search results
+
+Two common rankings.
+
+**By call frequency** — hot verbs first.
+
+```scheme
+(define (search-ranked query)
+  (sort (apropos query)
+        (lambda (a b) (> (stats/verb-calls-of a)
+                         (stats/verb-calls-of b)))))
+```
+
+**By doc completeness** — documented first.
+
+```scheme
+(define (search-documented-first query)
+  (sort (apropos query)
+        (lambda (a b) (and (doc-of a) (not (doc-of b))))))
+```
+
+Both compose the stats counter with the search. Both are three lines. Both would be full features in other languages; here they're compositions.
+
+## 12.11 Search at the REPL — the meta-command
+
+At the REPL, `,apropos` is the shortcut:
+
+```
+> ,apropos map
+map · filter-map · for-each · map-indexed · flat-map ...
+```
+
+The command calls the underlying `apropos` verb but formats the result for interactive reading — one verb per line, docstring snippet on the right if space allows. Namespace patterns work too:
+
+```
+> ,apropos audio/
+audio/play · audio/halt · audio/tempo · audio/bar-clock ...
+```
+
+## 12.12 Custom search predicates — the general shape
+
+Every search is one shape:
+
+```
+(filter <predicate> (all-verbs))
+```
+
+The predicate is what changes. That's why the language doesn't ship a hundred `find-by-X` verbs — you write the predicate you need.
+
+Example: find every verb whose docstring mentions "cortex".
+
+```scheme
+(filter (lambda (v)
+          (let ((d (doc-of v)))
+            (and d (string-contains d "cortex"))))
+        (all-verbs))
+```
+
+Twelve tokens including whitespace. That's the payoff of composable primitives.
+
+## 12.13 Search across dialects — Motoi vs the sister dialect
+
+Motoi Scheme is Motoi's downstream variant. Its verb set overlaps significantly but not completely.
+
+```scheme
+(define (in-both? v)
+  (and (help v)                      ;; in Motoi
+       (sakura/verb-exists? v)))     ;; in the sister dialect
+```
+
+When the registries drift, the discrepancy is a computable value, not a verbal mystery.
+
+## 12.14 Search + Cortex — personalized vocabulary
+
+Cortex holds every recorded event. One thing worth searching: which verbs has this user actually called?
+
+```scheme
+(define (verbs-user-has-called)
+  (let ((events (cortex/recall 'verb-call-events)))
+    (remove-duplicates
+      (map (lambda (e) (cdr (assoc :verb e))) events))))
+```
+
+That's a personalized vocabulary — the subset of the language THIS person uses. The doc-priority tool from chapter 11 gets sharper when weighted by personal usage.
+
+## 12.15 Search as a training signal
+
+Every `apropos` call is a labeled example. The query is the intent; the returned verbs are the candidates; the one the user actually calls next is the ground-truth label. Record those triples in Cortex and you eventually train a better `apropos` — one that ranks by observed selection, not just string match.
+
+## 12.16 Search as a shape query — closing
+
+Search in Motoi is not a special mechanism. It's the composition of `all-verbs` with a predicate. Every search you can imagine is just a different predicate over the same list.
+
+That means when you're writing a new tool that needs to find verbs by some criterion, you're not extending the language — you're choosing which alist field to filter on. `arity-of`, `type-of`, `perm-of`, `source-of`, `doc-of`, `stats/verb-calls-of` — six axes, and you can filter by any of them, or by any combination.
+
+The language exposes its own shape. You compose queries against that shape. No new primitive was ever required. This is what "the language answers questions about itself" actually means in practice.
 
 ## 12.17 The reflex
 
@@ -257,12 +439,12 @@ Print this list on `motoi audit` and any cart's use of any of these verbs will s
 
 ## 12.29 Deep-seed — searching across dialects
 
-Motoi Scheme is the base. Sakura dialect and Lacuna dialect add their own verbs. If both are loaded, search across both:
+Motoi Scheme is the base. The sister dialect and the Lacuna dialect add their own verbs. If both are loaded, search across both:
 
 ```scheme
 (apropos \"card\")
 ;; base: nothing
-;; sakura loaded: (card/open card/close ...)
+;; motoi loaded: (card/open card/close ...)
 ;; lacuna loaded: nothing (lacuna has no card verbs)
 ```
 

@@ -2,8 +2,8 @@
  * no-loose-escape-handler.cjs — ESLint rule.
  *
  * Ported from sakura-scheme (ARTIFACT-2026-07-10 §19, T-09) into
- * Motoi Scheme's base lint set. Consumers of Motoi (Sakura, Curator,
- * Lacuna) inherit the rule; downstream dialects may override severity.
+ * Motoi Scheme's base lint set. Consumers of Motoi (Curator, Lacuna,
+ * and other dialects) inherit the rule; downstream dialects may override severity.
  *
  * Doctrine:
  *   Every keydown listener that inspects `Escape` and closes the

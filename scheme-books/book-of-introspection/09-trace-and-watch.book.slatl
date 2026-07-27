@@ -78,20 +78,217 @@ The watch line refreshes on every prompt. You see how the value evolves as you m
 
 Watch is useful for state debugging. Set up watches on the pieces of state you care about, then mutate. Every mutation shows you the new state without you having to re-type the query.
 
-## Sections 9.5 through 9.16 — pending Wave 3 authoring
+## 9.5 Trace vs. counter — two dimensions of the same substrate
 
-- 9.5 The trace log record shape
-- 9.6 Filtering and aggregating trace logs
-- 9.7 Watch list management
-- 9.8 Trace + Cortex — persistent traces
-- 9.9 Trace + LLM — narrating a trace
-- 9.10 Performance of tracing
-- 9.11 Tracing composed verbs
-- 9.12 Trace as a training signal
-- 9.13 Watch expressions with side effects (warning)
-- 9.14 Sampling traces — recording only some calls
-- 9.15 Trace introspection at the REPL
-- 9.16 Closing — time as a queryable dimension
+Trace and the persistent counter (chapter 15) are the two lenses on the same underlying signal — how the runtime is dispatching verbs over time. They differ in resolution and cost.
+
+The counter is coarse. It says: `car` has been called 4,231 times in the lifetime of this Motoi installation. It doesn't say WHEN. It doesn't say from which program. It doesn't say with which arguments. But it says it CHEAPLY — one BigInt increment per call, one file write on process exit.
+
+Trace is fine. It says: `car` was called at 14:32:07.812 with argument `(1 2 3)` and returned `1` in 0.02ms; then called again at 14:32:07.813 with `(4 5)` and returned `4`; then... it says everything. Every call, every timestamp, every argument shape. That precision costs — a log record per call is orders of magnitude more expensive than a counter increment.
+
+Use the counter to know WHAT is happening a lot. Use trace to know WHEN and HOW something specific happened. Neither replaces the other; both together give you the observability triangle Cortex has been asking for.
+
+## 9.6 The trace record shape
+
+Each trace record is a small alist:
+
+```
+(:t 1721654321812   ;; timestamp — ms since epoch
+ :verb 'car          ;; the verb dispatched
+ :args (1 2 3)       ;; args as a list
+ :result 1           ;; return value
+ :ms 0.02            ;; wall time for this dispatch
+ :fuel-delta 1)      ;; fuel consumed by this dispatch
+```
+
+Six fields. Every field is optional except `:t` and `:verb`. The trace surface is designed so you can filter, aggregate, and reason about the records with the ordinary list-verb kit — `map`, `filter`, `for-each`, `sort`.
+
+That shape choice is deliberate. If the trace record were an opaque object, you'd need new verbs just to read it. Because it's an alist, you use `assoc` and you already know how.
+
+## 9.7 Aggregation patterns for trace logs
+
+A raw trace is often too noisy to read directly. The interesting shapes come from aggregation. Three patterns worth naming.
+
+**Per-verb count** — how many times each verb appeared in this trace.
+
+```scheme
+(define (verb-counts records)
+  (let ((h (make-hash-table)))
+    (for-each (lambda (r)
+                (let ((v (cdr (assoc :verb r))))
+                  (hash-table-update! h v
+                    (lambda (n) (+ n 1))
+                    (lambda () 0))))
+              records)
+    h))
+```
+
+**Total time per verb** — where is the wall time going.
+
+```scheme
+(define (time-per-verb records)
+  (let ((h (make-hash-table)))
+    (for-each (lambda (r)
+                (let ((v (cdr (assoc :verb r)))
+                      (t (cdr (assoc :ms r))))
+                  (hash-table-update! h v
+                    (lambda (acc) (+ acc t))
+                    (lambda () 0))))
+              records)
+    h))
+```
+
+**Slowest single dispatch** — the outlier.
+
+```scheme
+(define (slowest records)
+  (let loop ((rs records) (best #f))
+    (cond
+      ((null? rs) best)
+      ((or (not best)
+           (> (cdr (assoc :ms (car rs)))
+              (cdr (assoc :ms best))))
+       (loop (cdr rs) (car rs)))
+      (else (loop (cdr rs) best)))))
+```
+
+These three patterns handle 80% of trace analysis. Each is six lines.
+
+## 9.8 Trace + Cortex — persistent traces
+
+Trace records are in-memory by default. When the session ends, they're gone. Sometimes you want persistence — a record of every trace across days, for regression analysis or long-running diagnostics.
+
+The mechanism is `cortex/record`:
+
+```scheme
+(for-each (lambda (r) (cortex/record 'trace r)) (get-trace 'my-verb))
+```
+
+Now the trace lives in Cortex. Later, from any session:
+
+```scheme
+(cortex/recall 'trace)
+;; => every trace record ever recorded, in order.
+```
+
+That's how a small model gets memory of past behavior without retraining. The trace flows into Cortex; Cortex flows into the model's prompt. The model reasons over the persisted trace at inference time — retrieval, not memorization.
+
+## 9.9 Trace + LLM — narrating a trace
+
+The model is good at turning a table of numbers into a paragraph. When a trace has a hundred records, giving them all to the model costs tokens; giving them AS A NARRATIVE costs many fewer. The Motoi pattern for this is trace-narration.
+
+```scheme
+(define (narrate-trace records)
+  (motoi/ask
+    "narrate this trace for an operator"
+    (list :records records
+          :focus 'user-facing)))
+```
+
+The verb `motoi/ask` invokes the local model with a task instruction and structured data. The model returns prose: *"At 14:32, the program called `card/open` three times in rapid succession. Each returned a valid card. There were no errors."*
+
+Prose is smaller than the table. It's also more useful for a human reading a summary.
+
+## 9.10 Performance cost of tracing
+
+Trace is expensive. Every recorded call adds a record to a growing list. On a workload that dispatches ten million verbs, ten million records is a big list.
+
+Three practical mitigations.
+
+**Sampling.** Record every N-th call instead of every call.
+
+```scheme
+(,trace 'my-verb :sample 1000)
+;; => record every 1000th dispatch. Suitable when the count is high
+;;    and the individual records aren't important — you just want
+;;    the distribution shape.
+```
+
+**Filtering at capture.** Don't record if a predicate is false.
+
+```scheme
+(,trace 'my-verb :when (lambda (args) (> (car args) 100)))
+;; => only record calls where the first arg exceeds 100.
+```
+
+**Time-boxed capture.** Auto-untrace after N seconds.
+
+```scheme
+(,trace 'my-verb :duration-ms 5000)
+;; => automatically untrace after 5 seconds.
+```
+
+All three reduce cost. Combined, they let you trace hot paths without drowning the runtime.
+
+## 9.11 Tracing composed verbs — the transparency question
+
+When you trace a verb, you record its dispatches. But that verb may internally call other verbs. Do those get recorded?
+
+Answer: only if THEY are also traced. Trace does not cascade. `(,trace 'card/open)` records `card/open` dispatches but not the `write-file` calls inside `card/open`. That's a deliberate design choice — cascading trace would blow up the record count and make aggregation opaque.
+
+If you want the full sub-call tree, trace each verb in the tree explicitly:
+
+```scheme
+(for-each (lambda (v) (,trace v))
+          '(card/open write-file cache/set audio/play))
+```
+
+Now every dispatch of any of those four is recorded, and you can reconstruct the composition after the fact.
+
+## 9.12 Trace as a training signal
+
+Every trace record is a labeled training example, if you look at it right. The verb is the "instruction". The args are the "input". The result is the "output". The `:ms` and `:fuel-delta` are performance labels.
+
+The 1001 broken carts corpus (see cart-repair-index in chapter 8) is built exactly this way. Every broken cart was traced during its failed run. The trace records — the last N dispatches before the error — become training examples for the diagnose-error tool. The model learns which verb sequences precede which error classes.
+
+That's how a small model gets better at debugging without ever being told what a bug is. The traces are the corpus. The corpus is the teacher.
+
+## 9.13 Watch expressions and side effects — a warning
+
+`,watch` re-evaluates its expression on every REPL prompt. Every. Prompt. That includes prompts you don't explicitly enter — the REPL redraws after certain commands.
+
+If the watched expression has side effects — writes to disk, plays a sound, mutates cortex, sends a network request — those side effects fire multiple times per second. That's fast enough to look "usual" and slow enough to be catastrophic.
+
+Rule: watch expressions must be PURE. Query only. If you find yourself watching `(cortex/write 'k 'v)`, stop. The pattern you want is:
+
+```scheme
+(,watch (cortex/recall 'k))
+;; => reads on every redraw. Safe.
+```
+
+Not:
+
+```scheme
+(,watch (begin (do-work) (cortex/recall 'k)))
+;; => runs do-work on every redraw. Not safe.
+```
+
+Side effects belong in explicit dispatches, not in watched expressions.
+
+## 9.14 Sampling — trading precision for cost
+
+Full trace is expensive on hot paths. Sampling records every N-th call. The count stays honest (each recorded call represents N actual calls, so aggregations scale by N), but the wall-time cost drops by a factor of N.
+
+Use sampling when you're profiling a production run and every call matters. Don't sample when you're debugging a specific bug — the miss might be the interesting one.
+
+## 9.15 Trace introspection at the REPL
+
+At the REPL, three commands manage traces without writing programs.
+
+```
+,trace card/open        ;; start tracing card/open
+,trace                  ;; list all currently traced verbs
+,untrace card/open      ;; stop tracing card/open
+,untrace                ;; stop tracing everything
+```
+
+These are meta-commands (leading comma). They call the underlying trace primitives but with REPL-friendly output — a printed confirmation instead of a return value.
+
+## 9.16 Time as a queryable dimension
+
+The whole point of this chapter is that TIME is not a special axis — it's just another dimension the language exposes for query. The counter tells you cumulative shape; trace tells you moment-by-moment shape. Both are values your programs can walk.
+
+That's the unusual thing about Motoi versus most Scheme implementations. Most Schemes give you `time` and `trace` as REPL toys. Motoi gives you the same interfaces but also gives you the values behind them — the counter as an alist, the trace as a list of records — so you can compose observability the same way you compose everything else. The runtime does not hide time from you.
 
 ## 9.17 A worked example
 

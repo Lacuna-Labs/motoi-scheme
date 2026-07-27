@@ -1,8 +1,7 @@
 ;; ch06-feel-deadzones-and-ease.book.slatl
 ;; Book of Arcade Games — Chapter 6: Feel — Deadzones and Ease
 
-(dialect :applies ("motoi" "sakura"))
-
+(dialect :applies ("motoi") :note "Applies to Motoi. Per-record :dialect overrides where a record is specific to one surface.")
 (chapter
   :book                "Book of Arcade Games"
   :chapter-number      6
@@ -14,7 +13,7 @@
   :author-lane         "arcade-games-engineer-lane-2026-07-16"
   :training-eligible   #t
   :confidentiality     "public"
-  :voice               "sakura-teaching + game-design"
+  :voice               "motoi-teaching + game-design"
   :book-version        "1.0.0"
   :prose
 "You have a game. Physics is honest, collisions register, the ship
@@ -31,8 +30,11 @@ Sound cued a half-frame before the visual so the ear leads the eye.
 This chapter is 90% code that will look almost identical to earlier
 chapters — you'll see the ship-with-thrust from chapter 3 twice, side
 by side, before and after tuning. The lesson is that FEEL is code. It
-is not vibes. It is `tick/ease`, `motion/with-feel`, `world/camera-shake!`
-tuned to the right coefficients. Every microsecond has a shape.
+is not vibes. It is `tick/ease` and a handful of coefficients that ramp,
+decay, and lag. Every microsecond has a shape. We run both ships
+headless for twenty frames of the SAME held input and read the numbers
+back — the raw ship's motion and the polished ship's motion diverge on
+paper before you ever feel them.
 
 We do a before-and-after study on one game so the kid can SEE the
 difference. Then we build a knob-tuning workbench that lets you
@@ -45,39 +47,38 @@ adjust ten parameters live and feel the change.
 Chapter 3's ship, unpolished.
 
 ```scheme
-;; Ship + thrust, no polish. Play for 30 seconds. Note how it FEELS.
-(define ship-angle 0)
-(define (raw-ship)
-  (world/reset!)
-  (let ((ship (world/spawn 'ship 160 120)))
-    (entity/shape! ship 'triangle 12)
-    (entity/drag! ship 0.01)
-    (on-frame
-     (lambda ()
-       (when (input/down? 'left)  (set! ship-angle (- ship-angle 0.10)))
-       (when (input/down? 'right) (set! ship-angle (+ ship-angle 0.10)))
-       (when (input/down? 'a)
-         (let ((vx (car (entity/vel ship)))
-               (vy (cadr (entity/vel ship))))
-           (entity/set-vel! ship
-                            (+ vx (* 0.20 (geom/cos ship-angle)))
-                            (+ vy (* 0.20 (geom/sin ship-angle))))))
-       (world/step)
-       (world/camera-follow! ship 1 0 0)   ;; instant follow — 1.0 factor
-       (paint-clear)
-       (paint-cell 'ship (entity/x ship) (entity/y ship) 12 12)))))
+;; A ship is (pos vel angle). RAW controls: rotation snaps by 0.10 per
+;; frame while turning; thrust adds 0.20*(cos,sin) per frame while firing.
+;; drag scales velocity by 0.99 each frame.
+(define (ship pos vel angle) (list pos vel angle))
+(define (sh-pos s) (car s))
+(define (sh-vel s) (cadr s))
+(define (sh-ang s) (caddr s))
+(define (heading a) (vec/make (geom/cos a) (geom/sin a)))
 
-(big-bang raw-ship)
+;; One raw frame: turn right, thrust, integrate.
+(define (raw-frame s)
+  (let* ((a (+ (sh-ang s) 0.10))
+         (v (vec/scale (vec/add (sh-vel s) (vec/scale (heading a) 0.20)) 0.99))
+         (p (vec/add (sh-pos s) v)))
+    (ship p v a)))
+
+;; Run 20 frames of held right+thrust; report (final-angle final-speed).
+(define (raw-ship)
+  (let loop ((f 0) (s (ship (vec/make 160 120) (vec/make 0 0) 0)))
+    (if (>= f 20)
+        (list (sh-ang s) (vec/norm (sh-vel s)))
+        (loop (+ f 1) (raw-frame s)))))
+
+(raw-ship)
+;; => (2.0000000000000004 3.036347910049358)
 ```
 
-Play this. Rotate the ship — it feels snappy but slightly wrong.
-Thrust — the camera glued to the ship makes the WORLD look like it
-moves, not the ship. Fine for a static shooter; nauseating in a space
-game where the ship is the thing.
-
-The rotation is instant. The thrust is instant. The camera is instant.
-Everything is instant. That is what earlier chapters teach for
-clarity. But instant is not what the human hand wants.
+Play this and the rotation is instant — it snaps a clean 0.10 radians
+every frame, reaching exactly 2.0 after 20. Thrust is instant too — the
+full 0.20 push lands on frame one. That is what earlier chapters teach
+for clarity. But instant is not what the human hand wants: the angle
+climbs linearly and the speed piles up with no ramp.
 
 ---
 
@@ -86,56 +87,34 @@ clarity. But instant is not what the human hand wants.
 Same game, tuned.
 
 ```scheme
-;; Same ship, with camera lag, rotation ease, thrust ease, screen shake.
-(define ship-angle 0)
-(define rot-vel 0)      ;; rotation velocity — accumulates over frames
-(define thrust-charge 0) ;; how long 'a' has been held
-
+;; Same ship, POLISHED. Rotation eases in via a rot-vel that ramps
+;; (accel 0.01, cap 0.08). Thrust CHARGES up (0.08/frame, cap 1.0) and
+;; tick/ease shapes the charge into an S-curve push. We carry
+;; (ship rot-vel thrust-charge) through the loop instead of set!.
 (define (polished-ship)
-  (world/reset!)
-  (let ((ship (world/spawn 'ship 160 120)))
-    (entity/shape! ship 'triangle 12)
-    (entity/drag! ship 0.01)
-    (on-frame
-     (lambda ()
-       ;; Rotation with ease — velocity ramps up over 8 frames.
-       (cond
-         ((input/down? 'left)
-          (set! rot-vel (max -0.08 (- rot-vel 0.01))))
-         ((input/down? 'right)
-          (set! rot-vel (min  0.08 (+ rot-vel 0.01))))
-         (else
-          ;; No input — decay rotation velocity.
-          (set! rot-vel (* rot-vel 0.85))))
-       (set! ship-angle (+ ship-angle rot-vel))
-       ;; Thrust with charge — hold 'a' longer for more thrust.
-       (if (input/down? 'a)
-           (set! thrust-charge (min 1.0 (+ thrust-charge 0.08)))
-           (set! thrust-charge (* thrust-charge 0.90)))
-       (when (> thrust-charge 0.02)
-         (let ((vx (car (entity/vel ship)))
-               (vy (cadr (entity/vel ship)))
-               (thrust (* 0.20 (tick/ease thrust-charge))))
-           (entity/set-vel! ship
-                            (+ vx (* thrust (geom/cos ship-angle)))
-                            (+ vy (* thrust (geom/sin ship-angle))))))
-       (world/step)
-       ;; Camera with lag — factor 0.08 = smooth follow, deadzone 40x30.
-       (world/camera-follow! ship 0.08 40 30)
-       (paint-clear)
-       (paint-cell 'ship (entity/x ship) (entity/y ship) 12 12)))))
+  (let loop ((f 0) (s (ship (vec/make 160 120) (vec/make 0 0) 0))
+                   (rv 0) (tc 0))
+    (if (>= f 20)
+        (list (sh-ang s) (vec/norm (sh-vel s)))
+        (let* ((rv2 (min 0.08 (+ rv 0.01)))          ;; hold right: ramp
+               (ang (+ (sh-ang s) rv2))
+               (tc2 (min 1.0 (+ tc 0.08)))            ;; hold thrust: charge
+               (thr (* 0.20 (tick/ease tc2)))
+               (v   (vec/scale (vec/add (sh-vel s)
+                                        (vec/scale (heading ang) thr)) 0.99))
+               (p   (vec/add (sh-pos s) v)))
+          (loop (+ f 1) (ship p v ang) rv2 tc2)))))
 
-(big-bang polished-ship)
+(polished-ship)
+;; => (1.32 2.473657809540062)
 ```
 
-Play THIS one. Rotate — the ship eases into rotation, holds a
-constant spin while held, coasts to a stop when released. Thrust — the
-first tap gives a small nudge; hold gives a full push. Camera — the
-ship can wander within a 40×30 rect at screen center before the camera
-begins to move; then the camera catches up smoothly.
-
-Same physics. Same verbs. Different coefficients. Radically different
-feel.
+Same twenty frames of the same held input — but the numbers differ.
+The angle reaches 1.32 instead of 2.0 because rotation velocity RAMPS
+from 0 up to its 0.08 cap instead of snapping. The speed is 2.47
+instead of 3.04 because thrust EASES in through `tick/ease` instead of
+slamming to full on frame one. Same physics. Same primitives. Different
+coefficients. Radically different feel.
 
 `tick/ease x` is a smoothstep — takes a linear 0-to-1 and returns an
 S-curve 0-to-1 that starts slow, accelerates through the middle, eases
@@ -158,8 +137,9 @@ Independent of acceleration! Fast decel = precise. Slow decel = drifty.
 Space games tune decel low.
 
 **3. Apex hang.** For jumping games: how long does the player spend
-at the top of the arc? `entity/gravity-scale! player 0.7` while
-`vy < 0.5` for a hangtime effect. See chapter 7.
+at the top of the arc? Scale gravity down to 0.7x while `vy` is near
+zero for a hangtime effect — just multiply the gravity vec by 0.7 in
+that window. See chapter 7.
 
 **4. Coyote time.** After walking off a ledge, how many frames can the
 player still jump? Typically 4-8 frames. See chapter 7 and Appendix F.
@@ -168,16 +148,18 @@ player still jump? Typically 4-8 frames. See chapter 7 and Appendix F.
 buffer the press so it fires on landing. Typically 6-10 frame buffer.
 
 **6. Screen shake.** How much does the screen shake on impact? Scale
-with impact velocity. `(world/camera-shake! (* impact-vel 0.3) 0.85)`.
-Decay factor 0.85 = 3-4 frame shake; 0.98 = 10+ frames.
+with impact velocity: keep a shake number, add `(* impact-vel 0.3)` on
+a hit, multiply it by a decay each frame. Decay factor 0.85 = 3-4 frame
+shake; 0.98 = 10+ frames. Section 6.6 computes exactly this.
 
-**7. Sound pitch.** On impact, `(audio/play 'hit)` at pitch scaled by
-impact velocity gives a satisfying variety. Even without pitch control,
-alternating between two sounds ('hit1', 'hit2') on successive impacts
-reduces monotony.
+**7. Sound pitch.** On impact, a hit sound at a pitch scaled by impact
+velocity gives satisfying variety. Even without pitch control,
+alternating between two sounds on successive impacts reduces monotony.
+(Audio is a consumer-repo concern; here we track the number that would
+drive it.)
 
 **8. Sound volume.** Softer sounds for background events, louder for
-critical. Use `audio/master-volume` to duck all audio during dialogue.
+critical. A master-volume multiplier ducks all audio during dialogue.
 
 ---
 
@@ -186,115 +168,66 @@ critical. Use `audio/master-volume` to duck all audio during dialogue.
 Wire the knobs to buttons so you can tune live.
 
 ```scheme
-;; A ship you can retune while it flies.
-;; 'a' fire; up/down adjust selected knob; left/right change knob.
-(define ship-angle 0)
-(define rot-vel 0)
-(define knob-index 0)
-(define knobs (vector 0.01   ; 0: rot-accel
-                      0.08   ; 1: rot-max
-                      0.85   ; 2: rot-decay
-                      0.20   ; 3: thrust-per-frame
-                      0.90   ; 4: thrust-decay
-                      0.08   ; 5: camera-lag
-                      40     ; 6: camera-dead-x
-                      30))   ; 7: camera-dead-y
-(define knob-names '#(\"rot-acc\" \"rot-max\" \"rot-dec\"
-                     \"thr\" \"thr-dec\"
-                     \"cam-lag\" \"dead-x\" \"dead-y\"))
-(define thrust-charge 0)
+;; A workbench is a KNOB VECTOR fed to the same rotation math. Index 0
+;; is rot-acc, 1 is rot-max, 2 is rot-dec. To 'tune' is to change a knob
+;; and re-run; the final angle after a fixed hold is the feel summary.
+(define (run-with-knobs knobs frames)
+  (let ((rot-acc (vector-ref knobs 0))
+        (rot-max (vector-ref knobs 1)))
+    (let loop ((f 0) (ang 0) (rv 0))
+      (if (>= f frames)
+          ang
+          (let ((rv2 (min rot-max (+ rv rot-acc))))
+            (loop (+ f 1) (+ ang rv2) rv2))))))
 
-(define (tuning-bench)
-  (world/reset!)
-  (let ((ship (world/spawn 'ship 160 120)))
-    (entity/shape! ship 'triangle 12)
-    (entity/drag! ship 0.01)
-    (on-frame
-     (lambda ()
-       ;; Knob switching.
-       (when (input/pressed? 'left)
-         (set! knob-index (max 0 (- knob-index 1))))
-       (when (input/pressed? 'right)
-         (set! knob-index (min 7 (+ knob-index 1))))
-       ;; Knob adjustment.
-       (when (input/down? 'up)
-         (vector-set! knobs knob-index
-                      (+ (vector-ref knobs knob-index)
-                         (if (< knob-index 5) 0.001 0.5))))
-       (when (input/down? 'down)
-         (vector-set! knobs knob-index
-                      (- (vector-ref knobs knob-index)
-                         (if (< knob-index 5) 0.001 0.5))))
-       ;; Rotation using knobs.
-       (let ((rot-acc (vector-ref knobs 0))
-             (rot-max (vector-ref knobs 1))
-             (rot-dec (vector-ref knobs 2))
-             (thr     (vector-ref knobs 3))
-             (thr-dec (vector-ref knobs 4))
-             (cam-lag (vector-ref knobs 5))
-             (dead-x  (vector-ref knobs 6))
-             (dead-y  (vector-ref knobs 7)))
-         ;; Rotation.
-         (cond
-           ((input/down? 'a) (set! rot-vel (min rot-max (+ rot-vel rot-acc))))
-           ((input/down? 'b) (set! rot-vel (max (- rot-max) (- rot-vel rot-acc))))
-           (else (set! rot-vel (* rot-vel rot-dec))))
-         (set! ship-angle (+ ship-angle rot-vel))
-         ;; Thrust.
-         (set! thrust-charge (* thrust-charge thr-dec))
-         ;; (no explicit thrust button in this bench — you're tuning rot)
-         (world/step)
-         (world/camera-follow! ship cam-lag dead-x dead-y)
-         (paint-clear)
-         (paint-cell 'ship (entity/x ship) (entity/y ship) 12 12)
-         (paint-text (string-append (vector-ref knob-names knob-index)
-                                    \": \"
-                                    (number->string (vector-ref knobs knob-index)))
-                     10 220))))))
+;; Stately knobs (tiny accel) vs twitchy knobs (big accel), same hold.
+(define stately (vector 0.001 0.08 0.85))
+(define twitchy (vector 0.050 0.08 0.85))
 
-(big-bang tuning-bench)
+(list (run-with-knobs stately 30) (run-with-knobs twitchy 30))
+;; => (0.46500000000000036 2.370000000000001)
 ```
 
-The kid selects a knob with left/right, adjusts with up/down, and
-watches the ship's behavior change in real time. Turning `rot-acc`
-from 0.001 to 0.05 goes from stately to instant. Turning `rot-dec`
-from 0.85 to 0.99 makes the ship spin down slowly after release. The
-knob values that FEEL right are the ones the kid keeps.
+Change one knob, re-run, read the number: `rot-acc` at 0.001 barely
+turns the ship in 30 frames (angle 0.465), while 0.05 whips it around
+(angle 2.37). On a live cabinet the kid would nudge that value with a
+button and feel the change; here we re-run and read it. The knob values
+that FEEL right are the ones the kid keeps.
 
 This is how real game designers tune. Get the game running end-to-end,
 then spend a week on knobs.
 
 ---
 
-## 6.5 motion/with-feel and motion/with-pace
+## 6.5 Wobble and pace, computed by hand
 
-The runtime exposes two feel-shaping primitives worth knowing.
+Two feel-shaping ideas are worth building from primitives.
 
-`motion/with-feel target amount` adds micro-jitter to a motion so it
-feels alive instead of robotic. Applied to a character's sprite: a
-tiny wobble on step, breath-cycle-scale variation.
+A WOBBLE adds micro-jitter to a motion so it feels alive instead of
+robotic. Applied to a character's sprite: a tiny breath-cycle offset on
+the DRAWN position, leaving the physics position untouched.
 
-`motion/with-pace target curve` reshapes the timing of a motion
-without changing endpoints. A ball can travel from A to B in the same
-duration but with an ease-in, ease-out, or linear pace.
+A PACE reshapes the timing of a motion without changing its endpoints.
+A ball can travel from A to B in the same duration but with an ease-in,
+ease-out, or linear pace — that is `tick/ease` applied to the fraction
+of the way there.
 
 ```scheme
-;; A ship whose sprite wobbles subtly during coast.
+;; A wobble is a tiny sinusoidal offset added to the DRAWN position, not
+;; the physics position. The ship coasts; each frame we offset its y by
+;; 0.5*sin(frame*0.5). The path stays straight; the sprite breathes.
+;; Report the drawn y at frames 0..3.
+(define (draw-y frame) (* 0.5 (geom/sin (* frame 0.5))))
 (define (feel-wobble)
-  (world/reset!)
-  (let ((ship (world/spawn 'ship 160 120)))
-    (entity/shape! ship 'triangle 12)
-    (entity/set-vel! ship 1 0)
-    (motion/with-feel ship 0.5)   ;; 0.5-unit wobble
-    (on-frame
-     (lambda ()
-       (world/step)
-       (paint-clear)
-       (paint-cell 'ship (entity/x ship) (entity/y ship) 12 12)))))
+  (map (lambda (f) (+ 120 (draw-y f))) (iota 4)))
+
+(feel-wobble)
+;; => (120 120.2397127693021 120.42073549240395 120.49874749330203)
 ```
 
-Subtle. The kid may not consciously see it. But turn it off and the
-motion feels sterile. That is the wobble's whole job.
+Subtle. The kid may not consciously see the fractions of a pixel. But
+turn the offset off and the motion feels sterile. That is the wobble's
+whole job.
 
 ---
 
@@ -304,34 +237,50 @@ Not all impacts deserve the same shake. A tap-collision should not
 rattle the screen; a boss-hit should. Scale shake by impact velocity.
 
 ```scheme
-;; On any collision, shake proportional to impact speed.
-(define (impact-scaled-shake)
-  (world/reset!)
-  (world/gravity! 0 0.3)
-  (world/floor! 240)
-  (let ((ball (world/spawn 'ball 160 20)))
-    (entity/bounce! ball 0.85)
-    (entity/shape! ball 'circle 6))
-  (on-frame
-   (lambda ()
-     (world/step)
-     ;; Check ball's downward velocity when it touches the floor.
-     (world/each 'ball
-                 (lambda (b)
-                   (when (and (>= (entity/y b) 234)
-                              (> (cadr (entity/vel b)) 1.0))
-                     (world/camera-shake! (* (cadr (entity/vel b)) 0.5)
-                                          0.85))))
-     (paint-clear)
-     (world/each 'ball
-                 (lambda (b) (paint-cell 'ball (entity/x b) (entity/y b) 6 6))))))
+;; A bouncing ball; on each floor-hit we add impact-scaled shake to a
+;; shake budget that decays 0.85 per frame. The renderer would read that
+;; budget to jitter the view; here we just record it. Report (frame
+;; shake) at each bounce over ~160 frames.
+(define (body pos vel) (list pos vel))
+(define (b-pos b) (car b))
+(define (b-vel b) (cadr b))
+(define (round-2 x) (/ (round (* x 100)) 100))
+(define g (vec/make 0 0.3))
+(define floor-y 240)
 
-(big-bang impact-scaled-shake)
+;; Step returns (next-body impact-speed). impact-speed is the downward
+;; velocity at the moment of contact, 0 on a non-bounce frame.
+(define (bounce-step b)
+  (let* ((v (vec/add (b-vel b) g))
+         (p (vec/add (b-pos b) v)))
+    (if (> (cadr p) floor-y)
+        (list (body (vec/make (car p) floor-y)
+                    (vec/make (car v) (* -0.85 (cadr v))))
+              (cadr v))
+        (list (body p v) 0))))
+
+(define (impact-scaled-shake)
+  (let loop ((f 0) (b (body (vec/make 160 20) (vec/make 0 0)))
+                   (shake 0) (peaks '()))
+    (if (>= f 160)
+        (reverse peaks)
+        (let* ((r      (bounce-step b))
+               (nb     (car r))
+               (impact (cadr r))
+               (sh1    (* shake 0.85))                      ;; decay
+               (sh2    (if (> impact 1.0) (+ sh1 (* impact 0.5)) sh1)))
+          (loop (+ f 1) nb sh2
+                (if (> impact 1.0)
+                    (cons (list f (round-2 sh2)) peaks)
+                    peaks))))))
+
+(impact-scaled-shake)
+;; => ((37 5.7) (101 4.76) (154 3.91))
 ```
 
-The first bounce shakes hard. Subsequent bounces shake less because
-velocity has decayed. The screen tells the kid, without words, that
-the ball is losing energy.
+The first bounce shakes hard (5.7). Subsequent bounces shake less
+(4.76, then 3.91) because velocity has decayed. The screen tells the
+kid, without words, that the ball is losing energy.
 
 ---
 
@@ -397,18 +346,17 @@ in a post-release patch. Perfection is the enemy of shipping.
 
 1. Take chapter 2's paddle game. Add rotation-ease-style acceleration
    to paddle movement. Does the game feel better?
-2. Add `world/camera-shake!` to the brick game — small shake on brick
-   hit, big shake on paddle catch. Where does it feel right?
-3. Wire buttons to display 'input echo' — the last 30 frames of button
-   state as a scrolling bar. Now you can SEE your own inputs and
-   debug feel.
-4. Record your play with `world/tape-record!`. Replay it with feel-off
-   and feel-on. Note which feels 'more like a game.'
-5. Tune the tuning workbench: change knob-adjust rate so precision
-   knobs (rot-acc, thr) adjust by 0.001 and coarse knobs (dead-x)
-   adjust by 1.
-6. Add sound: `(audio/play 'thrust)` while 'a' is held. Volume scales
-   with `thrust-charge`.
+2. Add a shake budget to the brick game — small addition on brick hit,
+   big on paddle catch. Track it as a number like section 6.6. Where
+   does the magnitude feel right?
+3. Keep the last 30 frames of button state in a list and print it as an
+   'input echo' bar. Now you can SEE your own inputs and debug feel.
+4. Record a list of your inputs, then replay the same list with feel-off
+   and feel-on coefficients. Note which run 'feels more like a game.'
+5. Tune the workbench: change the knob-adjust step so precision knobs
+   (rot-acc, thr) move by 0.001 and coarse knobs (dead-x) move by 1.
+6. Track a `thrust-charge`-scaled volume number while 'a' is held — the
+   value a sound engine in the consumer repo would read.
 
 ---
 
@@ -424,33 +372,22 @@ where a kid learns that feel is code by tuning ONE specific action
 across ten specific frames.")
 
 (code-block :chapter 6 :lang "scheme" :source
-"(define ship-angle 0)
-(define rot-vel 0)
-(define thrust-charge 0)
+"(define (ship pos vel angle) (list pos vel angle))
+(define (sh-pos s) (car s))
+(define (sh-vel s) (cadr s))
+(define (sh-ang s) (caddr s))
+(define (heading a) (vec/make (geom/cos a) (geom/sin a)))
 (define (feel-anchor)
-  (world/reset!)
-  (let ((ship (world/spawn 'ship 160 120)))
-    (entity/shape! ship 'triangle 12)
-    (entity/drag! ship 0.01)
-    (on-frame
-     (lambda ()
-       (cond
-         ((input/down? 'left)  (set! rot-vel (max -0.08 (- rot-vel 0.01))))
-         ((input/down? 'right) (set! rot-vel (min  0.08 (+ rot-vel 0.01))))
-         (else (set! rot-vel (* rot-vel 0.85))))
-       (set! ship-angle (+ ship-angle rot-vel))
-       (if (input/down? 'a)
-           (set! thrust-charge (min 1.0 (+ thrust-charge 0.08)))
-           (set! thrust-charge (* thrust-charge 0.90)))
-       (when (> thrust-charge 0.02)
-         (let ((vx (car (entity/vel ship)))
-               (vy (cadr (entity/vel ship)))
-               (thrust (* 0.20 (tick/ease thrust-charge))))
-           (entity/set-vel! ship
-                            (+ vx (* thrust (geom/cos ship-angle)))
-                            (+ vy (* thrust (geom/sin ship-angle))))))
-       (world/step)
-       (world/camera-follow! ship 0.08 40 30)
-       (paint-clear)
-       (paint-cell 'ship (entity/x ship) (entity/y ship) 12 12)))))
-(big-bang feel-anchor)")
+  (let loop ((f 0) (s (ship (vec/make 160 120) (vec/make 0 0) 0))
+                   (rv 0) (tc 0))
+    (if (>= f 20)
+        (list (sh-ang s) (vec/norm (sh-vel s)))
+        (let* ((rv2 (min 0.08 (+ rv 0.01)))
+               (ang (+ (sh-ang s) rv2))
+               (tc2 (min 1.0 (+ tc 0.08)))
+               (thr (* 0.20 (tick/ease tc2)))
+               (v   (vec/scale (vec/add (sh-vel s)
+                                        (vec/scale (heading ang) thr)) 0.99))
+               (p   (vec/add (sh-pos s) v)))
+          (loop (+ f 1) (ship p v ang) rv2 tc2)))))
+(feel-anchor)")

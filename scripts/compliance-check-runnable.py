@@ -121,7 +121,9 @@ for fname in sorted(os.listdir(REF_DIR)):
                 continue
 
             # extract candidate code fields
-            for field in ['program', 'composition', 'code']:
+            for field in ['program', 'composition', 'code',
+                          'eng-program', 'math-program', 'cs-program',
+                          'eng-composition', 'math-composition', 'cs-composition']:
                 for m in re.finditer(rf':{field}\s+"((?:[^"\\]|\\.)*)"', row_body):
                     total += 1
                     code = unescape(m.group(1))

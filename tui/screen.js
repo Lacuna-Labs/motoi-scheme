@@ -148,10 +148,10 @@ export class Screen {
 
   // Encode a color spec. Two shapes are honored:
   //   1) a palette tier name ('pink', 'mint', 'cedar', …) — resolves
-  //      through the palette module (SAKURA truecolor / SAKURA_256).
+  //      through the palette module (BLOSSOM truecolor / BLOSSOM_256).
   //   2) a raw RGB triple 'rgb:R,G,B' — used by the canvas panel to
   //      display the framebuffer's own 16-color palette (PICO-8-ish)
-  //      without smashing it into the Sakura tier list.
+  //      without smashing it into the blossom tier list.
   _colorSeq(spec, isBg) {
     if (typeof spec === 'string' && spec.length > 4 && spec.charCodeAt(0) === 114 /* r */
         && spec.startsWith('rgb:')) {

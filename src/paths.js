@@ -12,12 +12,25 @@ import { join } from 'node:path'
 import { existsSync, mkdirSync, renameSync, readdirSync, statSync } from 'node:fs'
 
 export function motoiInstallDir() { return join(homedir(), '.motoi') }
-export function motoiUserDir()    { return join(homedir(), 'motoi') }
+// User-data root. MOTOI_HOME lets tests + sandboxes redirect the whole user
+// tree (carts, cortex, copilot home) to a temp dir so nothing touches the real
+// ~/motoi/. Unset in normal use → ~/motoi/.
+export function motoiUserDir()    { return process.env.MOTOI_HOME || join(homedir(), 'motoi') }
 
 export function userCartsDir()      { return join(motoiUserDir(), 'carts') }
 export function userSavesDir()      { return join(motoiUserDir(), 'saves') }
 export function userArtifactsDir()  { return join(motoiUserDir(), 'artifacts') }
 export function userCortexPath()    { return join(motoiUserDir(), 'cortex.slat') }
+
+// The copilot home: ONE folder that holds the single Cortex file AND the
+// downloaded LLM weights. Everything the copilot reads lives in here.
+export function copilotDir()        { return join(motoiUserDir(), 'copilot') }
+export function copilotModelDir()   { return join(copilotDir(), 'model') }
+
+// The one and only Cortex store (world-knowledge merge + episodic memory +
+// graph edges, one extensible record schema), inside the copilot home. The
+// legacy KV cortex.slat above is retired — cortex.js is the single cortex.
+export function userCortexSlatlPath() { return join(copilotDir(), 'cortex.slatl') }
 export function userReadingPath()   { return join(motoiUserDir(), 'reading-state.slat') }
 
 export function ensureDir(dir) {

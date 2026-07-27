@@ -1,8 +1,7 @@
 ;; ch03-ship-and-thrust.book.slatl
 ;; Book of Arcade Games — Chapter 3: Ship and Thrust
 
-(dialect :applies ("motoi" "sakura"))
-
+(dialect :applies ("motoi") :note "Applies to Motoi. Per-record :dialect overrides where a record is specific to one surface.")
 (chapter
   :book                "Book of Arcade Games"
   :chapter-number      3
@@ -14,7 +13,7 @@
   :author-lane         "arcade-games-engineer-lane-2026-07-16"
   :training-eligible   #t
   :confidentiality     "public"
-  :voice               "sakura-teaching + game-design"
+  :voice               "motoi-teaching + game-design"
   :book-version        "1.0.0"
   :draws-from-preserved (:book "book-of-games-preserved" :ch 3 :ch 5 :ch 6)
   :prose
@@ -44,39 +43,37 @@ Before thrust, rotation. Left and right rotate; the ship faces where
 its heading angle points.
 
 ```scheme
-;; A triangular ship you can rotate with left/right.
-(define ship-angle 0)   ;; radians, 0 = pointing right
-(define (rotating-ship)
-  (world/reset!)
-  (let ((ship (world/spawn 'ship 160 120)))
-    (entity/shape! ship 'triangle 12)
-    (on-frame
-     (lambda ()
-       (when (input/down? 'left)  (set! ship-angle (- ship-angle 0.08)))
-       (when (input/down? 'right) (set! ship-angle (+ ship-angle 0.08)))
-       (entity/pose! ship 'angle ship-angle)
-       (paint-clear)
-       (paint-cell 'ship (entity/x ship) (entity/y ship) 12 12)
-       ;; Draw a heading arrow so we can SEE which way the ship faces.
-       (paint-arrow (entity/x ship) (entity/y ship)
-                    (+ (entity/x ship) (* 30 (geom/cos ship-angle)))
-                    (+ (entity/y ship) (* 30 (geom/sin ship-angle)))))))
-(big-bang rotating-ship)
+;; A ship is (pos vel angle): position and velocity are vecs, angle is
+;; radians (0 = pointing right).
+(define (ship pos vel angle) (list pos vel angle))
+(define (ship-pos s) (car s))
+(define (ship-vel s) (cadr s))
+(define (ship-angle s) (caddr s))
+
+;; The heading vector: an angle decomposed into (cos, sin).
+(define (heading a) (vec/make (geom/cos a) (geom/sin a)))
+
+;; Rotate the ship by d radians (left = negative, right = positive).
+(define (rotate s d) (ship (ship-pos s) (ship-vel s) (+ (ship-angle s) d)))
+
+;; Hold 'left for 5 frames from angle 0: 5 × -0.08 = -0.4 radians.
+(define s0 (ship (vec/make 160 120) (vec/make 0 0) 0))
+(ship-angle (fold (lambda (i s) (rotate s -0.08)) s0 (iota 5)))
+;; => -0.4
 ```
 
-`ship-angle` is a global variable holding radians. Zero points right;
-pi/2 points down; pi points left; 3pi/2 points up. `geom/cos` and
-`geom/sin` decompose the angle into x- and y-components of a unit
-vector. That decomposition IS the vector math this chapter teaches.
+The angle holds radians. Zero points right; pi/2 points down; pi points
+left; 3pi/2 points up. `geom/cos` and `geom/sin` decompose the angle into
+x- and y-components of a unit vector — that decomposition, packaged as
+`heading`, IS the vector math this chapter teaches.
 
-`entity/pose! ship 'angle ship-angle` tells the sprite to rotate with
-the heading — if we had a proper spaceship sprite, its nose would
-follow the arrow.
+`fold` threads the ship through the input script, one `rotate` per frame;
+the accumulator is the ship.
 
-Try holding 'left' for two seconds. The ship spins a full turn every
-seven seconds at 0.08 radians per frame. That is 60 * 0.08 = 4.8
-radians per second. A full rotation is 2*pi = 6.28 radians. So 6.28 /
-4.8 = 1.3 seconds per rotation. Do the arithmetic; feel the number.
+Hold 'left' for two seconds and the ship spins a full turn. At 0.08
+radians per frame that is 60 × 0.08 = 4.8 radians per second. A full
+rotation is 2×pi = 6.28 radians. So 6.28 / 4.8 = 1.3 seconds per
+rotation. Do the arithmetic; feel the number.
 
 ---
 
@@ -85,60 +82,47 @@ radians per second. A full rotation is 2*pi = 6.28 radians. So 6.28 /
 Now the ship can push itself in the direction it is facing.
 
 ```scheme
-;; Rotate and thrust. Ship drifts forever in space.
-(define ship-angle 0)
-(define (thrusting-ship)
-  (world/reset!)
-  (let ((ship (world/spawn 'ship 160 120)))
-    (entity/shape! ship 'triangle 12)
-    (entity/drag! ship 0)             ;; NO drag — space
-    (on-frame
-     (lambda ()
-       (when (input/down? 'left)  (set! ship-angle (- ship-angle 0.08)))
-       (when (input/down? 'right) (set! ship-angle (+ ship-angle 0.08)))
-       (when (input/down? 'a)
-         ;; Add thrust in the direction of ship-angle.
-         (let ((vx (car (entity/vel ship)))
-               (vy (cadr (entity/vel ship)))
-               (thrust 0.15))
-           (entity/set-vel! ship
-                            (+ vx (* thrust (geom/cos ship-angle)))
-                            (+ vy (* thrust (geom/sin ship-angle))))))
-       (entity/pose! ship 'angle ship-angle)
-       (world/step)
-       (paint-clear)
-       (paint-cell 'ship (entity/x ship) (entity/y ship) 12 12)
-       (paint-arrow (entity/x ship) (entity/y ship)
-                    (+ (entity/x ship) (* 20 (geom/cos ship-angle)))
-                    (+ (entity/y ship) (* 20 (geom/sin ship-angle))))))))
+;; Thrust: add an impulse in the facing direction. NO drag — this is
+;; space, so velocity persists forever.
+(define (thrust s amount)
+  (ship (ship-pos s)
+        (vec/add (ship-vel s) (vec/scale (heading (ship-angle s)) amount))
+        (ship-angle s)))
 
-(big-bang thrusting-ship)
+;; Drift: position += velocity (no friction).
+(define (drift s)
+  (ship (vec/add (ship-pos s) (ship-vel s)) (ship-vel s) (ship-angle s)))
+
+;; Face right (angle 0), thrust once, then coast three frames.
+(define s1 (drift (drift (drift (thrust s0 0.15)))))
+(list (ship-vel s1) (ship-pos s1))
+;; => ((0.15 0) (160.45000000000002 120))
 ```
 
-Read section 3.2 carefully. The velocity update is the important line:
+Read the thrust line carefully. The velocity update is the important
+part:
 
 ```
-(entity/set-vel! ship
-                 (+ vx (* thrust (geom/cos ship-angle)))
-                 (+ vy (* thrust (geom/sin ship-angle))))
+(vec/add (ship-vel s) (vec/scale (heading (ship-angle s)) amount))
 ```
 
-We take the current velocity `(vx vy)`. We take the heading vector
-`(cos ang, sin ang)`. We scale the heading by `thrust`. We add. That
-is vector addition. The new velocity is the old velocity PLUS an
-impulse in the facing direction.
+We take the current velocity. We take the heading vector `(cos ang, sin
+ang)`. We scale the heading by `amount`. We add. That is vector addition.
+The new velocity is the old velocity PLUS an impulse in the facing
+direction.
 
 This is why the ship drifts. Once you have accumulated `(vx=2, vy=-1)`
-by thrusting up-and-to-the-right, releasing 'a' does not zero those
-components. The ship coasts. To stop, you rotate 180 degrees and
-thrust the same amount BACKWARD to cancel the velocity. Kids figure
-this out in about ninety seconds and are proud of themselves.
+by thrusting up-and-to-the-right, stopping thrust does not zero those
+components. The ship coasts. To stop, you rotate 180 degrees and thrust
+the same amount BACKWARD to cancel the velocity. Kids figure this out in
+about ninety seconds and are proud of themselves.
 
-`entity/drag! ship 0` disables the runtime's default drag. In space
-there is nothing to push against; velocity persists. Set drag to 0.02
-and try again — the ship slowly slows down without input. That
-'friction' is a lie the game tells for playability. Real Space War
-kept drag at zero, and pilots hated it, and loved it.
+`drift` adds no drag: in space there is nothing to push against, so
+velocity persists. To add a poor-man's friction, scale the velocity down
+a hair each frame — e.g. `(vec/scale (ship-vel s) 0.98)` inside `drift` —
+and the ship slowly slows without input. That 'friction' is a lie the
+game tells for playability. Real Space War kept drag at zero, and pilots
+hated it, and loved it.
 
 ---
 
@@ -149,96 +133,61 @@ screen: one for HEADING (where the ship faces), one for VELOCITY
 (where the ship is moving).
 
 ```scheme
-;; Show both arrows so the kid sees the difference.
-(define ship-angle 0)
-(define (two-arrows)
-  (world/reset!)
-  (let ((ship (world/spawn 'ship 160 120)))
-    (entity/shape! ship 'triangle 12)
-    (entity/drag! ship 0)
-    (on-frame
-     (lambda ()
-       (when (input/down? 'left)  (set! ship-angle (- ship-angle 0.08)))
-       (when (input/down? 'right) (set! ship-angle (+ ship-angle 0.08)))
-       (when (input/down? 'a)
-         (let ((vx (car (entity/vel ship)))
-               (vy (cadr (entity/vel ship))))
-           (entity/set-vel! ship
-                            (+ vx (* 0.15 (geom/cos ship-angle)))
-                            (+ vy (* 0.15 (geom/sin ship-angle))))))
-       (world/step)
-       (paint-clear)
-       (paint-cell 'ship (entity/x ship) (entity/y ship) 12 12)
-       ;; RED arrow — heading.
-       (paint-arrow (entity/x ship) (entity/y ship)
-                    (+ (entity/x ship) (* 30 (geom/cos ship-angle)))
-                    (+ (entity/y ship) (* 30 (geom/sin ship-angle))))
-       ;; BLUE arrow — velocity.
-       (let ((vx (car (entity/vel ship)))
-             (vy (cadr (entity/vel ship))))
-         (paint-arrow (entity/x ship) (entity/y ship)
-                      (+ (entity/x ship) (* 15 vx))
-                      (+ (entity/y ship) (* 15 vy))))))))
+;; Two arrows from one origin: the heading tip (where the ship faces) and
+;; the velocity tip (where it moves). Return both so we can see they
+;; differ. Here: thrust right once, then rotate 90° left without thrusting.
+(define (arrow-tips s hlen vlen)
+  (let ((p (ship-pos s)))
+    (list (vec/add p (vec/scale (heading (ship-angle s)) hlen))  ;; heading
+          (vec/add p (vec/scale (ship-vel s) vlen)))))           ;; velocity
 
-(big-bang two-arrows)
+;; Thrust right, coast, then turn to face straight up (angle -pi/2).
+(define s-turned (rotate (thrust s0 0.15) -1.5707963267948966))
+(arrow-tips s-turned 30 15)
+;; => ((160 90) (162.25 120))
 ```
 
-Two arrows, one origin. Rotate the ship — the red arrow (heading)
-swings around; the blue arrow (velocity) stays put. Thrust — the blue
-arrow starts to grow in the heading direction. Rotate 180 and thrust
-again — the blue arrow shrinks toward zero, then flips and grows in
-the OTHER direction. The kid can literally see the vector algebra.
+Two arrows, one origin. Rotate the ship — the heading arrow swings
+around; the velocity arrow stays put. In the result, the heading tip is
+straight up at `(160 90)` while the velocity tip still points right at
+`(162.25 120)` — the ship faces one way and drifts another. Thrust and
+the velocity arrow grows in the heading direction; rotate 180 and thrust
+again and it shrinks toward zero, then flips. The kid can literally see
+the vector algebra.
 
-Appendix D (Heading vs Velocity — the Two-Arrow Diagram) formalizes
-this into a poster you can tape to the wall.
+Appendix D (Heading vs Velocity — the Two-Arrow Diagram) formalizes this
+into a poster you can tape to the wall.
 
 ---
 
 ## 3.4 Wrap-around
 
 A ship that drifts off-screen is a lost ship. Classic arcade wraps the
-world: fly off the right edge, appear on the left. The Motoi reference
-does not yet expose a `world/wrap!` verb (see the design's gap-1 note),
-so we roll it ourselves.
+world: fly off the right edge, appear on the left. Motoi has no
+`world/wrap!` verb, so we roll it ourselves — it is only arithmetic on
+the coordinates.
 
 ```scheme
 ;; Toroidal world: off-screen on the right = on-screen on the left.
-(define ship-angle 0)
-(define (wrapping-ship)
-  (world/reset!)
-  (let ((ship (world/spawn 'ship 160 120)))
-    (entity/shape! ship 'triangle 12)
-    (entity/drag! ship 0)
-    (on-frame
-     (lambda ()
-       (when (input/down? 'left)  (set! ship-angle (- ship-angle 0.08)))
-       (when (input/down? 'right) (set! ship-angle (+ ship-angle 0.08)))
-       (when (input/down? 'a)
-         (let ((vx (car (entity/vel ship)))
-               (vy (cadr (entity/vel ship))))
-           (entity/set-vel! ship
-                            (+ vx (* 0.15 (geom/cos ship-angle)))
-                            (+ vy (* 0.15 (geom/sin ship-angle))))))
-       (world/step)
-       ;; Wrap horizontally at 0 / 320, vertically at 0 / 240.
-       (let ((x (entity/x ship)) (y (entity/y ship)))
-         (when (< x 0)   (entity/set-pos! ship (+ x 320) y))
-         (when (> x 320) (entity/set-pos! ship (- x 320) y))
-         (when (< y 0)   (entity/set-pos! ship x (+ y 240)))
-         (when (> y 240) (entity/set-pos! ship x (- y 240))))
-       (paint-clear)
-       (paint-cell 'ship (entity/x ship) (entity/y ship) 12 12)))))
+;; Wrap x at 0 / 320 and y at 0 / 240, leaving velocity untouched.
+(define (wrap s)
+  (let* ((p (ship-pos s)) (x (car p)) (y (cadr p))
+         (x2 (cond ((< x 0) (+ x 320)) ((> x 320) (- x 320)) (else x)))
+         (y2 (cond ((< y 0) (+ y 240)) ((> y 240) (- y 240)) (else y))))
+    (ship (vec/make x2 y2) (ship-vel s) (ship-angle s))))
 
-(big-bang wrapping-ship)
+;; A ship that drifted off the bottom-right reappears at the top-left.
+(ship-pos (wrap (ship (vec/make 330 250) (vec/make 2 1) 0)))
+;; => (10 10)
 ```
 
-Four `when` clauses. Each checks one edge; if the ship crossed it, we
-add or subtract the screen dimension. That is toroidal topology in
-four lines. Every Asteroids-family game does this.
+Two `cond`s, one per axis. Each checks both edges; if the ship crossed
+one, we add or subtract the screen dimension. That is toroidal topology
+in a handful of comparisons. Every Asteroids-family game does this.
 
-Nice property: the wrap is invisible to the physics. `entity/vel`
-stays what it was; only position moves. So the ship's momentum
-carries continuously across the wrap.
+Nice property: the wrap is invisible to the physics. The velocity stays
+what it was — only position moves — so the ship's momentum carries
+continuously across the wrap.
 
 ---
 
@@ -248,49 +197,38 @@ Now the fun part. Put a big body in the middle. Turn on gravitational
 attraction.
 
 ```scheme
-;; Ship + moon. Moon pulls ship. Ship orbits (if you thrust right).
-(define ship-angle 0)
-(define (ship-and-moon)
-  (world/reset!)
-  (let ((moon (world/spawn 'moon 160 120))
-        (ship (world/spawn 'ship 240 120)))
-    (entity/shape! moon 'circle 20)
-    (entity/shape! ship 'triangle 10)
-    (entity/mass! moon 100)
-    (entity/mass! ship 1)
-    (entity/drag! ship 0)
-    ;; Give the ship an initial tangential kick.
-    (entity/set-vel! ship 0 -2.2)
-    ;; Turn on radial attraction from the moon.
-    (world/attract! ship (entity/x moon) (entity/y moon) 0.15)
-    (on-frame
-     (lambda ()
-       (when (input/down? 'left)  (set! ship-angle (- ship-angle 0.08)))
-       (when (input/down? 'right) (set! ship-angle (+ ship-angle 0.08)))
-       (when (input/down? 'a)
-         (let ((vx (car (entity/vel ship)))
-               (vy (cadr (entity/vel ship))))
-           (entity/set-vel! ship
-                            (+ vx (* 0.12 (geom/cos ship-angle)))
-                            (+ vy (* 0.12 (geom/sin ship-angle))))))
-       (world/step)
-       (paint-clear)
-       (paint-cell 'moon (entity/x moon) (entity/y moon) 40 40)
-       (paint-cell 'ship (entity/x ship) (entity/y ship) 10 10)))))
+;; Attraction toward the moon: each frame, add a pull along the vector
+;; from the ship to the moon, with the given strength. `vec/sub` gives
+;; the direction, `vec/norm` its length; dividing folds in a 1/distance
+;; falloff so nearer means stronger.
+(define (attract s moon strength)
+  (let* ((dir (vec/sub moon (ship-pos s)))
+         (mag (vec/norm dir)))
+    (if (= mag 0)
+        s
+        (ship (ship-pos s)
+              (vec/add (ship-vel s) (vec/scale dir (/ strength mag)))
+              (ship-angle s)))))
 
-(big-bang ship-and-moon)
+;; Ship at (240 120), moon at (160 120), kicked straight up (vy -2.2).
+;; One frame of attract + drift curves it toward the moon.
+(define moon (vec/make 160 120))
+(define orbiting (drift (attract (ship (vec/make 240 120)
+                                       (vec/make 0 -2.2) 0)
+                                 moon 0.15)))
+(ship-pos orbiting)
+;; => (239.85 117.8)
 ```
 
-`world/attract! ship (entity/x moon) (entity/y moon) 0.15` says
-'every frame, add a force toward the moon's position on ship, with
-strength 0.15.' The strength number is not proper Newtonian G, but
-it's inverse-square-like enough that orbits behave.
+`attract` says: every frame, add a pull toward the moon's position, with
+strength 0.15. The number is not proper Newtonian G, but dividing by
+distance is falloff-like enough that orbits behave.
 
-The initial `entity/set-vel! ship 0 -2.2` kicks the ship straight up
-(y negative = up). With the moon pulling right (moon is to the left
-of the ship's start position, moon at 160, ship at 240), the ship
-curves left as it climbs, and if you tuned the tangential speed right
-it enters a stable ellipse.
+The initial velocity `(vec/make 0 -2.2)` kicks the ship straight up (y
+negative = up). With the moon pulling left (moon at 160, ship at 240),
+the ship curves left as it climbs — you can see it in the result, x
+dropping from 240 to 239.85 while it moves up. Tune the tangential speed
+right and it enters a stable ellipse.
 
 Try different initial y-velocities: 1.0 falls in; 2.2 orbits; 5.0
 escapes. That is the elementary calculation of orbital energy — total
@@ -306,24 +244,23 @@ change orbit.
 
 ## 3.6 The four patterns in a space game
 
-**Composition.** The ship is composed: shape, mass, drag, initial
-velocity, attract-target. The moon is composed similarly with heavier
-mass. Chapters 4-5 will compose bullets, enemies, health.
+**Composition.** The ship is composed: position, velocity, angle — and
+`attract`, `thrust`, `drift`, `wrap` are the small functions that act on
+those parts. The moon is just a target point. Chapters 4-5 will compose
+bullets, enemies, health.
 
-**Orchestration.** The frame loop orchestrates: poll heading input,
-poll thrust input, integrate physics via `world/step`, wrap position,
-draw. Note that wrap happens AFTER step; if we wrapped before step,
-the ship would sometimes teleport mid-frame and physics could get
-confused.
+**Orchestration.** The frame loop orchestrates: rotate on heading input,
+thrust on thrust input, `attract`, `drift`, then `wrap`. Note that wrap
+happens AFTER drift; if we wrapped before moving, the ship would
+sometimes teleport mid-frame and momentum could look wrong.
 
-**In-routing.** Three buttons route to three handlers: left rotates,
-right rotates, 'a' thrusts. Later ('b' fires) adds a fourth. Each
-handler is small; each mutates one aspect of world state.
+**In-routing.** Three inputs route to three functions: left rotates,
+right rotates, 'a' thrusts. Later ('b' fires) adds a fourth. Each is a
+small pure function returning a new ship.
 
-**Routing.** The `world/attract!` call is routing set up at spawn
-time: 'every frame from now on, route a force from the moon to the
-ship.' The runtime remembers the attraction and re-applies it. If we
-had many moons and many ships, we would call attract for each pair.
+**Routing.** `attract` is the force router: each frame it routes a pull
+from the moon into the ship's velocity. If we had many moons and many
+ships, we would `fold` `attract` over every moon for each ship.
 
 ---
 
@@ -342,26 +279,26 @@ planets that represent the item's category. Physics-first branding.
 
 ## 3.8 Pitfalls
 
-**The ship spins but does not move.** You forgot `entity/set-vel!` or
-you passed the wrong arguments. Check that `(entity/vel ship)` is a
-list `(vx vy)` and you are `car` and `cadr`-ing it correctly.
+**The ship spins but does not move.** Your `thrust` did not feed the new
+velocity back into the ship. Check that `ship-vel` is a vec `(vx vy)` and
+that `thrust` returns a ship built with the updated velocity.
 
-**The ship stops as soon as you release 'a'.** `entity/drag!` is
-non-zero. Space has no drag. Set it to 0 unless you want a poor-man's
-Newton's-first-law violation.
+**The ship stops as soon as you release 'a'.** Your `drift` scales the
+velocity down. Space has no drag. Leave velocity untouched unless you
+want a poor-man's Newton's-first-law violation.
 
 **The orbit spirals in.** Your initial tangential velocity is too low
-— the ship falls into the moon. Increase `entity/set-vel! ship 0
--2.5` and try again.
+— the ship falls into the moon. Increase the kick to `(vec/make 0 -2.5)`
+and try again.
 
 **The orbit spirals out.** Initial velocity too high — escape
 trajectory. Decrease.
 
 **Rotation is jerky.** `0.08` radians per frame is a fine baseline;
 below 0.04 feels slow, above 0.15 is spinny. Consider using
-`tick/ease` to ramp rotation speed in the frames after button press,
-so the ship 'settles into' its rotation rate. Chapter 6 (Feel) shows
-exactly this.
+`(easing/apply 'ease-out t)` to ramp rotation speed in the frames after
+button press, so the ship 'settles into' its rotation rate. Chapter 6
+(Feel) shows exactly this.
 
 **Coordinate confusion.** In screen space, y grows DOWN. `geom/sin
 angle` returns positive values for angles in the second and third
@@ -373,62 +310,55 @@ flipped from math-y.
 
 ## 3.9 Try this yourself
 
-1. Add a second moon. Give the ship both attractions:
-   `(world/attract! ship moon2-x moon2-y 0.10)`. Watch the ship
-   figure-eight between them (three-body problem, in the small).
-2. Add `world/wind! 0.05 0` — a solar wind. The ship drifts sideways
-   without input. Does that ruin the game or make it more
-   interesting?
-3. Give the ship `entity/max-speed! ship 5` — cap the drift. Space
-   with a speed limit is not-space, but it plays gently.
-4. Replace the moon's `world/attract!` with `world/repel!` at the
-   same strength — the moon becomes a shield generator. Fly around
-   it; try to get close.
-5. Add a fire button ('b'): each press spawns a small bullet with
-   velocity = ship-velocity + heading * bullet-speed. Chapter 4
-   covers this in depth.
-6. Make the ship 'wrap' with fade-in on the new edge — spawn a ghost
-   at the old position that fades over 15 frames.
+1. Add a second moon. Call `attract` for both moons each frame (fold
+   over a list of moons). Watch the ship figure-eight between them
+   (three-body problem, in the small).
+2. Add a constant solar wind by folding `(vec/make 0.05 0)` into the
+   velocity in `drift`. The ship drifts sideways without input. Does that
+   ruin the game or make it more interesting?
+3. Cap the drift: clamp the velocity's `vec/norm` to 5 inside `drift`.
+   Space with a speed limit is not-space, but it plays gently.
+4. Flip the sign of `strength` in `attract` — the moon becomes a shield
+   generator that repels. Fly around it; try to get close.
+5. Add a fire input: each press appends a bullet whose velocity =
+   ship-velocity + heading × bullet-speed. Chapter 4 covers this in
+   depth.
+6. Make the wrap fade in on the new edge — record a ghost at the old
+   position that fades over 15 frames.
 
 ---
 
 ## 3.10 What we built
 
 A ship. A heading. A thrust. A drift. A wrap. A moon. Vector
-decomposition into cos-and-sin components. `world/attract!` as arcade
-gravity. Two-arrow visualization of heading versus velocity.
+decomposition into cos-and-sin components. `attract` as arcade gravity.
+Two-arrow visualization of heading versus velocity.
 
 Next chapter: the ship stops moving, it stays put, but it FIRES. We
 build cannons and projectiles. `phys/kinematics` finally earns its
 name.")
 
 (code-block :chapter 3 :lang "scheme" :source
-"(define ship-angle 0)
-(define (ship-and-thrust-anchor)
-  (world/reset!)
-  (let ((ship (world/spawn 'ship 160 120)))
-    (entity/shape! ship 'triangle 12)
-    (entity/drag! ship 0)
-    (on-frame
-     (lambda ()
-       (when (input/down? 'left)  (set! ship-angle (- ship-angle 0.08)))
-       (when (input/down? 'right) (set! ship-angle (+ ship-angle 0.08)))
-       (when (input/down? 'a)
-         (let ((vx (car (entity/vel ship)))
-               (vy (cadr (entity/vel ship))))
-           (entity/set-vel! ship
-                            (+ vx (* 0.15 (geom/cos ship-angle)))
-                            (+ vy (* 0.15 (geom/sin ship-angle))))))
-       (entity/pose! ship 'angle ship-angle)
-       (world/step)
-       (let ((x (entity/x ship)) (y (entity/y ship)))
-         (when (< x 0)   (entity/set-pos! ship (+ x 320) y))
-         (when (> x 320) (entity/set-pos! ship (- x 320) y))
-         (when (< y 0)   (entity/set-pos! ship x (+ y 240)))
-         (when (> y 240) (entity/set-pos! ship x (- y 240))))
-       (paint-clear)
-       (paint-cell 'ship (entity/x ship) (entity/y ship) 12 12)
-       (paint-arrow (entity/x ship) (entity/y ship)
-                    (+ (entity/x ship) (* 20 (geom/cos ship-angle)))
-                    (+ (entity/y ship) (* 20 (geom/sin ship-angle))))))))
-(big-bang ship-and-thrust-anchor)")
+"(define (ship pos vel angle) (list pos vel angle))
+(define (ship-pos s) (car s))
+(define (ship-vel s) (cadr s))
+(define (ship-angle s) (caddr s))
+(define (heading a) (vec/make (geom/cos a) (geom/sin a)))
+(define (rotate s d) (ship (ship-pos s) (ship-vel s) (+ (ship-angle s) d)))
+(define (thrust s amount)
+  (ship (ship-pos s)
+        (vec/add (ship-vel s) (vec/scale (heading (ship-angle s)) amount))
+        (ship-angle s)))
+(define (drift s)
+  (ship (vec/add (ship-pos s) (ship-vel s)) (ship-vel s) (ship-angle s)))
+(define (wrap s)
+  (let* ((p (ship-pos s)) (x (car p)) (y (cadr p))
+         (x2 (cond ((< x 0) (+ x 320)) ((> x 320) (- x 320)) (else x)))
+         (y2 (cond ((< y 0) (+ y 240)) ((> y 240) (- y 240)) (else y))))
+    (ship (vec/make x2 y2) (ship-vel s) (ship-angle s))))
+(define (ship-and-thrust-anchor frames)
+  (let loop ((s (ship (vec/make 160 120) (vec/make 0 0) 0)) (n frames))
+    (if (= n 0)
+        (ship-pos s)
+        (loop (wrap (drift (thrust s 0.15))) (- n 1)))))
+(ship-and-thrust-anchor 30)")

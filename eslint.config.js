@@ -5,7 +5,7 @@
  *   1. Default rules for src/ + bindings/js.
  *   2. Custom motoi rules from ./eslint-rules/ scoped to files that
  *      participate in the artifact substrate. no-loose-escape-handler
- *      is warn-first — downstream dialects (Sakura, Curator, Lacuna)
+ *      is warn-first — downstream dialects (Curator, Lacuna, and others)
  *      raise severity per-directory as their surfaces migrate.
  */
 import { createRequire } from "module";

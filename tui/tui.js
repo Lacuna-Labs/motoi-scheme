@@ -1,7 +1,7 @@
 // tui/tui.js — Motoi Scheme Terminal IDE.
 //
 // Provenance: 2026-07-19 (Marcus, TUI wave). Alfred: "Can I have the
-// same thing on the TUI also? And!! Use Sakura's color palette. So
+// same thing on the TUI also? And!! Use the blossom color palette. So
 // it's all soft colors. Use it for our colors."
 //
 // Layout (4 regions):
@@ -21,14 +21,14 @@
 //   * CPU panel toggle (F4).
 //   * Motoi meta-awareness (F2 explain selection, ambient completions).
 //
-// Sakura palette (cream · pink · lilac · magic).
+// Blossom palette (cream · pink · lilac · magic).
 // Zero external deps — plain ANSI + node:process + node:tty.
 
 import { Screen, ATTR } from './screen.js'
 import { InputReader } from './input.js'
 import { Session } from './session.js'
 import { activeTheme } from './themes.js'
-import { SAKURA } from './palette.js'
+import { BLOSSOM } from './palette.js'
 import {
   initComposerState,
   handleComposerKey,
@@ -150,14 +150,14 @@ async function maybeShowSplash(opts) {
 
   // Resolve splash colors from the active theme. Every splash element
   // (tree, leaves, trunk, title, hint, blossom) has a role; the theme
-  // decides which RGB paints it. Under Sakura → pink/mint/cedar; under
+  // decides which RGB paints it. Under Blossom → pink/mint/cedar; under
   // Hacker → phosphor greens.
   const theme = opts.theme || activeTheme(opts)
   const rgbFor = (role) => {
-    // Chase role → color name → RGB. Fall back to SAKURA[name].
+    // Chase role → color name → RGB. Fall back to BLOSSOM[name].
     let name = theme.roles[role] || role
     if (theme.colors && theme.colors[name]) return theme.colors[name]
-    return SAKURA[name] || SAKURA.fg
+    return BLOSSOM[name] || BLOSSOM.fg
   }
   const fg = (rgb) => ansi('38;2;' + rgb[0] + ';' + rgb[1] + ';' + rgb[2] + 'm')
   const trunkRgb  = rgbFor('splashTrunk')
@@ -270,10 +270,10 @@ export async function startTui(opts = {}) {
     _resolveExit: null,
   })
 
-  // Resolve the active theme (opts.theme > MOTOI_THEME > opts.hacker > sakura).
+  // Resolve the active theme (opts.theme > MOTOI_THEME > opts.hacker > blossom).
   // Panel code paints role names ('pink', 'pearl', 'cedar', …) which
   // Screen resolves through the theme + palette module. If the theme
-  // load fails, activeTheme returns the Sakura fallback shape.
+  // load fails, activeTheme returns the Blossom fallback shape.
   let theme
   try { theme = activeTheme(opts) } catch { theme = null }
   state.theme = theme
@@ -1601,7 +1601,7 @@ function paintSettingsBuffer(scr, x, y, w, h) {
     '  ' + (state.pairMode === 'user-drives'  ? '[x]' : '[ ]') + ' user-drives    (ambient completions after 3s pause)',
     '  ' + (state.pairMode === 'motoi-drives' ? '[x]' : '[ ]') + ' motoi-drives   (narrated turn-taking)',
     '',
-    '## Palette — Sakura Cherry Tree',
+    '## Palette — Blossom (cherry tree)',
     '  pink  — blossoms · mint  — leaves · cedar — trunk & earth',
     '  cream / pearl — warm baseline · deep-cedar ink',
     '  Detect: ' + state.screen.mode,
@@ -1873,7 +1873,7 @@ function paintBraille(scr, fb, offX, offY, cols, rows) {
 // Screen.putCell speaks palette-tier names ('pink', …), not raw RGB.
 // For the canvas we need pixel-accurate palette faithfulness — the
 // fb defines its own 16-color palette (PICO-8-inspired) that isn't
-// on the SAKURA tier list. We escape hatch by writing directly into
+// on the BLOSSOM tier list. We escape hatch by writing directly into
 // the back buffer with the encoded ANSI as the fg/bg field. Screen's
 // diff-flush treats any two cells with different fg strings as
 // different, so cache hits still work.
@@ -2234,7 +2234,7 @@ const HELP_TEXT = `# Motoi Scheme TUI — help
   In user-drives, Motoi offers ambient completions after
   ~3s of typing pause. Press Tab to accept.
 
-## Palette — Sakura Cherry Tree
+## Palette — Blossom (cherry tree)
   pink   — blossoms          (top stripe, focus rings, prompt)
   mint   — leaves            (comments, tree headers, status ribbon)
   cedar  — trunk + earth     (parens, panel frames, active tab ink)

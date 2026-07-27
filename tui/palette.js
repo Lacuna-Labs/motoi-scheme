@@ -1,7 +1,7 @@
-// tui/palette.js — Sakura Cherry Tree palette for Motoi's TUI.
+// tui/palette.js — Blossom (cherry-tree) palette for Motoi's TUI.
 //
-// Doctrine (Alfred, 2026-07-19): "Use Sakura's color palette. So it's
-// all soft colors. Use it for our colors."
+// Doctrine (Alfred, 2026-07-19): all soft colors — a warm, low-contrast
+// palette used everywhere the TUI paints.
 //
 // The web IDE reads --motoi-cream / --motoi-pink / --motoi-mint /
 // --motoi-cedar / --motoi-pearl from site/ide-assets/ide.css. This
@@ -9,7 +9,7 @@
 // truecolor (24-bit) with a 256-color fallback for older terminals
 // and a plain-text degrade for NO_COLOR / TERM=dumb / non-TTY.
 //
-// The metaphor: Sakura's cherry tree. Pink (blossoms), mint (leaves),
+// The metaphor: a cherry tree. Pink (blossoms), mint (leaves),
 // cedar (trunk + earth), cream + pearl (warm baseline + iridescent
 // off-white for panels). Every hue is soft. Nothing here is neon.
 //
@@ -22,13 +22,13 @@ export const BOLD  = ESC + '1m'
 export const DIM   = ESC + '2m'
 export const REV   = ESC + '7m'
 
-// ── Sakura Cherry Tree RGB tiers (mirror of ide.css) ─────────────────
-export const SAKURA = {
+// ── Blossom (cherry-tree) RGB tiers (mirror of ide.css) ──────────────
+export const BLOSSOM = {
   // Base cream + variant
   cream:      [245, 236, 217],  // #f5ecd9 — Motoi's warm baseline
   creamDark:  [191, 180, 151],  // #bfb497
-  // Blossoms — Motoi's pink family (softer than Sakura's blossom slot)
-  pink:       [244, 160, 181],  // #f4a0b5 — Sakura pink (canonical)
+  // Blossoms — Motoi's pink family
+  pink:       [244, 160, 181],  // #f4a0b5 — blossom pink (canonical)
   pinkDark:   [168,  84, 108],  // #a8546c
   // Leaves
   mint:       [159, 227, 197],  // #9fe3c5 — soft mint
@@ -51,21 +51,21 @@ export const SAKURA = {
   bgPanel:    [251, 245, 233],  // = pearl-light
   // The old "lilac"/"magic" identifiers from the previous palette
   // draft are aliased to mint/cedar respectively so old panel code
-  // paints Sakura colors even without a search-and-replace pass.
+  // paints blossom colors even without a search-and-replace pass.
   lilac:      [159, 227, 197],  // = mint
   lilacDark:  [ 61, 157, 107],  // = mint-dark
   magic:      [163, 113,  82],  // = cedar
   magicDark:  [107,  74,  52],  // = cedar-dark
 
-  // ── Sakura's 16 blossom-named colors (2026-07-20) ─────────────────
-  // Alfred: "Motoi is Sakura's dad. Aesthetically continuous." These
-  // are the exact RGBs Sakura's fantasy console renders with, exposed
-  // by name so any theme or user snippet can address them directly.
-  // See sakura-scheme/src/lib/graphics/named-colors.js for provenance.
+  // ── The 16 blossom-named colors (2026-07-20) ─────────────────────
+  // Aesthetically continuous with the downstream fantasy console.
+  // These are the exact RGBs it renders with, exposed by name so any
+  // theme or user snippet can address them directly.
+  // Provenance: the graphics named-colors table in the console runtime.
   black:      [ 20,  18,  22],  //  0 ink, slight warm bias
   white:      [252, 248, 244],  //  1 off-white, paper feel
   cherry:     [216,  32,  84],  //  2 signature deep pink
-  petal:      [255, 183, 197],  //  3 soft pink — Sakura's primary
+  petal:      [255, 183, 197],  //  3 soft pink — the primary
   'tea-rose': [246, 194, 194],  //  4 warmer pink toward mauve
   gold:       [232, 176,  70],  //  6 luxurious yellow
   amber:      [206, 138,  57],  //  7 warm dark yellow
@@ -78,7 +78,7 @@ export const SAKURA = {
   coral:      [239, 121,  93],  // 14 warm accent
   terracotta: [180,  93,  57],  // 15 earthy warm
 
-  // Ink is the Sakura-canonical name for the "fg" text color.
+  // Ink is the canonical name for the "fg" text color.
   ink:        [ 58,  36,  24],  // = fg
 }
 
@@ -87,7 +87,7 @@ export const SAKURA = {
 // terminal on Alfred's machines (macOS Terminal, iTerm2, kitty,
 // wezterm, alacritty) will pick truecolor; these are the fallback for
 // tmux without passthrough and CI machines with TERM=xterm-256color.
-export const SAKURA_256 = {
+export const BLOSSOM_256 = {
   cream:        230,  // ~#ffffd7 — light warm cream
   creamDark:    187,  // warm khaki
   pink:         218,  // ~#ffafd7 — soft pink
@@ -110,7 +110,7 @@ export const SAKURA_256 = {
   lilacDark:     78,
   magic:        137,
   magicDark:     94,
-  // Sakura blossom names — 256-color spot-picks against xterm chart.
+  // Blossom color names — 256-color spot-picks against xterm chart.
   black:         16,
   white:        231,
   cherry:       161,  // ~#d70087
@@ -181,7 +181,7 @@ function bg256(n)  { return ESC + '48;5;' + n + 'm' }
  *      the tier is interpreted as a role and rewritten to the color
  *      name it points at.
  *   2. theme.colors[colorName] — the theme's own color palette.
- *   3. SAKURA[colorName] — Motoi's built-in colors (legacy fallback).
+ *   3. BLOSSOM[colorName] — Motoi's built-in colors (legacy fallback).
  *
  * This gives the Screen paint layer a single-string API (fg('pink'),
  * bg('pearlLight')) while letting themes remap those names to any
@@ -200,28 +200,28 @@ export function makePalette(mode = detectColor(), opts = {}) {
   const theme = opts.theme || null
   const truecolor = mode === 'truecolor'
 
-  // Resolve a tier name to an RGB triple through the theme + SAKURA.
+  // Resolve a tier name to an RGB triple through the theme + BLOSSOM.
   const rgbFor = (tier) => {
     // If theme has a role by this name, chase to its color name.
     let name = tier
     if (theme && theme.roles && theme.roles[name]) name = theme.roles[name]
     // Prefer theme.colors — themes can override "pink" to mean green.
     if (theme && theme.colors && theme.colors[name]) return theme.colors[name]
-    // Fall back to SAKURA built-ins.
-    if (SAKURA[name]) return SAKURA[name]
+    // Fall back to BLOSSOM built-ins.
+    if (BLOSSOM[name]) return BLOSSOM[name]
     // Last-ditch: the ink/fg default so the paint isn't invisible.
-    return SAKURA.fg
+    return BLOSSOM.fg
   }
 
   // 256-color fallback path: theme overrides go through rgbToXterm256;
-  // built-in tiers stick with their spot-picked SAKURA_256 slot.
+  // built-in tiers stick with their spot-picked BLOSSOM_256 slot.
   const slotFor = (tier) => {
     let name = tier
     if (theme && theme.roles && theme.roles[name]) name = theme.roles[name]
     if (theme && theme.colors && theme.colors[name]) return rgbToXterm256(theme.colors[name])
-    if (SAKURA_256[name] != null) return SAKURA_256[name]
-    if (SAKURA[name]) return rgbToXterm256(SAKURA[name])
-    return SAKURA_256.fg
+    if (BLOSSOM_256[name] != null) return BLOSSOM_256[name]
+    if (BLOSSOM[name]) return rgbToXterm256(BLOSSOM[name])
+    return BLOSSOM_256.fg
   }
 
   const tierFg = (tier) => (truecolor ? fg24(rgbFor(tier)) : fg256(slotFor(tier)))

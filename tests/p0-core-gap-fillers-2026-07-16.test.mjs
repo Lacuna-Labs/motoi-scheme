@@ -125,12 +125,14 @@ test('entity/ref — unknown id returns NaN symbol (no throw)', () => {
   assert.ok(v !== undefined)
 })
 
-test('entity/set! — safe on missing entity (returns value)', () => {
+test('entity/set! — safe on missing entity (no-op signal)', () => {
   const env = fresh()
   const set = get(env, 'entity/set!')
   const v = set(sym('ghost'), sym('hp'), 5)
-  // Should not throw; returns the value.
-  assert.equal(v, 5)
+  // Unknown entity → does not throw, stores nothing, returns undefined.
+  // House convention: unknown-entity ops return a falsy no-op signal
+  // (cf. `entity/tag! — false on unknown entity`), NOT the input value.
+  assert.equal(v, undefined)
 })
 
 test('entity/tag! — false on unknown entity', () => {

@@ -5,7 +5,7 @@
 // with meta-command dispatch — and reserves slots for tab-complete,
 // inline signature help, live docstring popup, structural editing,
 // rich display, `,ask <persona>`, live reload, and notebook mode. Those
-// arrive in follow-up sprints. Downstream dialects (e.g. Sakura) fill
+// arrive in follow-up sprints. Downstream dialects fill
 // in the persona name via their own REPL layer.
 //
 // The meta-command dispatch table is authoritative: every meta-command
@@ -13,7 +13,7 @@
 // is one source of truth.
 
 import { parse, sym } from './reader.js'
-import { evaluate, Env } from './interp.js'
+import { evaluate, Env, noteError } from './interp.js'
 import { makeBaseEnv } from './base.js'
 import { expandProgram } from './macro.js'
 import { help, describe, typeOf, arityOf, docOf, sourceOf, allVerbs } from './introspect.js'
@@ -76,7 +76,7 @@ function resolveThemeColors(theme) {
   return {
     // The blossom-glyph replacement (splash tree top).
     blossomRgb: rgbFor('splashBlossom') || rgbFor('primary') || MOTOI_PINK,
-    // Prompt marker color (❀ under Sakura; > under Hacker).
+    // Prompt marker color (❀ under Blossom; > under Hacker).
     promptRgb:  rgbFor('prompt') || rgbFor('primaryDark') || MOTOI_PINK,
     // Title text on splash.
     titleRgb:   rgbFor('splashTitle') || rgbFor('primaryDark') || MOTOI_PINK,
@@ -179,7 +179,7 @@ export function renderSplash({ color = 'auto', version = VERSION, width = 42, pl
   const tree = loadLogoAscii()
   const treeLines = tree.split('\n')
 
-  // Layout, matching the Sakura lockup: tree on the left, four lines of
+  // Layout, matching the blossom lockup: tree on the left, four lines of
   // brand text on the right, hint on the tree's ground row.
   //
   //   ❀ ❀ ·          Motoi Scheme  v0.75.0-beta
@@ -586,7 +586,12 @@ function evalOne(src, ctx) {
   const { forms: expanded } = expandProgram(forms, { fuel: { n: ctx.fuel } })
   const fuel = { n: ctx.fuel }
   let result
-  for (const f of expanded) result = evaluate(f, ctx.env, fuel)
+  try {
+    for (const f of expanded) result = evaluate(f, ctx.env, fuel)
+  } catch (err) {
+    // Record the escaped error in the self-census, then re-raise unchanged.
+    throw noteError(err)
+  }
   // Stash last-used fuel counter so the caller (startRepl) can render
   // fuel/budget in hacker mode without another round-trip through evaluate.
   ctx.__lastFuelRemaining = fuel.n
@@ -696,7 +701,7 @@ function styles(mode, theme) {
   }
 }
 
-// The interactive prompt. Under Sakura: `❀ motoi> ` on first line;
+// The interactive prompt. Under Blossom: `❀ motoi> ` on first line;
 // two-space indent with `...>` on continuation lines. Under Hacker:
 // `> motoi> ` — bright phosphor `>` in place of the blossom, no flower.
 // One accent glyph per submission keeps the visual load light.

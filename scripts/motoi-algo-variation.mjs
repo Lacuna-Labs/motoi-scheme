@@ -3,7 +3,7 @@
 // persona dialogue pairs. Node ES module (no Python, no LLM).
 //
 // Forked 2026-07-17 from ~/code/forge/tools/lacuna-algo-variation-loop.py
-// (Sakura-scoped SLAT varier). This one targets Motoi's JSONL dialogue
+// (downstream-dialect-scoped SLAT varier). This one targets Motoi's JSONL dialogue
 // format and stays deterministic -- thesaurus + prefix rotation +
 // punctuation micro-variation only. No paraphraser LLM = no voice
 // contamination in weights.

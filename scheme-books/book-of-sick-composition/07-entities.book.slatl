@@ -1,7 +1,7 @@
 (chapter
   :book "Book of Sick Composition"
   :chapter-number 7
-  :title "Entities on the Field — world/spawn, entity/*, and the physics you get free"
+  :title "Entities as Data — plain values, functional updates, and the list toolbox"
   :audience "kid-and-adult operators"
   :dialect "motoi"
   :voice "motoi-copilot"
@@ -9,206 +9,197 @@
   :confidentiality "public"
   :provenance
     (:authored-at "2026-07-18"
-     :sources ((:reference "MOTOI-SCHEME-REFERENCE.slat" :verbs (world/spawn world/step world/each world/render world/count world/nearest world/gravity! entity/pos entity/set-pos! entity/vel entity/set-vel! entity/move! entity/despawn! entity/collisions entity/tag! entity/alive? entity/bounce! sprite))
+     :sources ((:reference "scheme/reference" :verbs (vec/make vec/add vec/sub map filter remove find fold assq iota))
                (:book "book-of-composition" :chapter 6 :section "sprite-grid")
                (:book "book-of-motion" :chapter 9 :section "forces")))
   :prose
-"# Chapter 7 — Entities on the Field
+"# Chapter 7 — Entities as Data
 
-In Chapter 6 you carried the ball's position and velocity by hand and wrote the physics — bounce off the walls, advance by velocity — as normal code. That works for one ball. It falls apart at ten balls, and it is a nightmare at a hundred. Motoi's entity system exists for that reason. You describe what an entity is; the world takes care of moving it, colliding it, and drawing it.
+In Chapter 6 you carried one body — a `(pos vel)` pair — through the loop. That works for one ball, and with `map` it already works for a hundred. This chapter sharpens the idea: a game object is just a *value*, and a world is just a *list of values*. You do not need a special entity system. You need the list toolbox from Chapter 2 and the functional-update habit from Chapter 6.
 
-Every entity has an id. Every verb that touches an entity takes that id. `world/spawn` gives you an id; `entity/pos` reads position from an id; `entity/move!` nudges the entity at an id. Once you understand id-passing, the whole system is small.
+The payoff: every operation a game needs — spawn, move, tag, find the nearest, detect collisions, remove the dead — is a plain list operation you already know. `map` to move everyone. `filter` to select. `remove` to despawn. `find` to look one up. `fold` to reduce the whole world to a single answer.
 
-## Why the entity system exists
+## Why entities-as-data works
 
-Games have many things happening at once. A player, a dozen enemies, projectiles from both sides, particles, pickups, background scenery — all moving, all colliding, all drawing. If you carry each in the state as a bare list, the state balloons and every tick has to touch every field.
+Games have many things happening at once. A player, a dozen enemies, projectiles from both sides, pickups, background scenery — all moving, all colliding, all drawing. The temptation is to reach for a heavyweight object system with hidden mutable slots. Resist it. In Motoi the honest model is: an entity is a value, a world is a list, and a tick is a function from world to world.
 
-The entity system splits the state into two: a slot the world owns (each entity's position, velocity, shape, tags) and a slot you own (game-level things: score, lives, current wave). The world's slot is updated by `world/step`. Your slot is updated by your game logic. Rendering is one call: `world/render` paints every entity at once.
+Because entities are values and updates return new values, nothing is hidden. You can print the whole world at any frame, save it, diff two frames, or replay from a snapshot. That is the same round-trip doctrine again — the state is the whole story, and the story is plain data.
 
-This is a version of the composition doctrine again — separate what the runtime is good at from what the operator is good at, and give each a clean handle to the other.
+## Problem 1 — An entity is a labelled bag of fields
 
-## Problem 1 — Spawn one entity, render it
-
-Three lines.
+The simplest useful entity carries a kind, a position, a velocity, and some hit points. Model it as a small association list — a list of `(key value)` pairs — with two helpers to read and write fields.
 
 ```
-(define player (world/spawn 'player 160 120))
-(world/render)
-;; => a default-shape entity at (160, 120) on the current surface
+(define (make-entity kind x y vx vy)
+  (list (list 'kind kind)
+        (list 'pos  (vec/make x y))
+        (list 'vel  (vec/make vx vy))
+        (list 'hp   3)))
+
+(define (e-get ent key) (cadr (assq key ent)))
+
+(define (e-set ent key val)
+  (map (lambda (pair) (if (eq? (car pair) key) (list key val) pair))
+       ent))
+
+(define player (make-entity 'player 160 120 0 0))
+
+(e-get player 'pos)
+;; => (160 120)
 ```
 
-`world/spawn` takes a kind symbol, an x, and a y; it returns an id. That id is a number Motoi assigns; you never construct it yourself. From now on, when you want to talk about the player, you pass `player`.
-
-`world/render` walks the world once and paints every alive entity at its current position. No `begin-frame` / `end-frame` needed — `world/render` handles the framing itself. This is the simplest possible drawing.
-
-## Problem 2 — Spawn ten entities in a row, step the world, watch them move
-
-Every entity has a velocity too. Give a row of entities the same rightward velocity and step:
+`e-get` uses `assq` to find the `(key value)` pair by its key, then `cadr` to pull the value out. `e-set` walks the fields with `map` and rebuilds the one that matches — returning a *new* entity, leaving the old one untouched.
 
 ```
+(e-get (e-set player 'hp 2) 'hp)
+;; => 2
+```
+
+That is the whole data model. A kind, a position, a velocity, hit points — and any field you want to add later is one more `(key value)` pair. Note that Motoi's `cons` builds list cells, not dotted pairs, so we store each field as a two-element list `(key value)` and read it with `cadr`.
+
+## Problem 2 — A world is a list of entities; move everyone with one map
+
+Spawn a row of entities, then advance every one of them in a single `map`.
+
+```
+(define (e-step e)
+  (e-set e 'pos (vec/add (e-get e 'pos) (e-get e 'vel))))
+
 (define (spawn-row count y vx)
-  (let loop ((i 0) (ids '()))
-    (if (= i count)
-        (reverse ids)
-        (let ((id (world/spawn 'boid (* i 30) y)))
-          (entity/set-vel! id vx 0)
-          (loop (+ i 1) (cons id ids))))))
+  (map (lambda (i) (make-entity 'boid (* i 30) y vx 0))
+       (iota count)))
 
-(define swarm (spawn-row 10 100 2))
+(define world (spawn-row 5 100 2))
 
-(big-bang 0
-  (on-tick (lambda (frame)
-             (world/step)
-             (+ frame 1)))
-  (to-draw (lambda (_)
-             (begin-frame 'main)
-             (paint-rect (list 0 0) (list 320 240) 'shadow-veil)
-             (world/render)
-             (end-frame 'main)))
-  (stop-when (lambda (frame) (= frame 120))))
+(map (lambda (e) (e-get e 'pos)) (map e-step world))
+;; => ((2 100) (32 100) (62 100) (92 100) (122 100))
 ```
 
-Read the pattern. `spawn-row` creates ten entities and gives each a rightward velocity of `2` pixels per tick. It returns the list of ids in case you want to reference them later.
+Read the pattern. `spawn-row` builds the world with `iota` (which returns `(0 1 2 ...)`) and `map`. `e-step` advances one entity by adding its velocity to its position. To advance the *whole* world, you `map e-step` over it. One call moves everyone.
 
-The big-bang loop calls `world/step` every tick — that advances every entity's position by its velocity and does collision, gravity, and friction if you have set them up. Then we render.
+If you had done this by hand you would write a loop over the entities updating each one. `map` bundles that into a single expression — and because `e-step` returns a fresh entity, the old world still exists for comparison.
 
-Ten entities, one `world/step` per frame. If you had done this by hand for ten, you would have a `for-each` over the ids updating each one. `world/step` bundles that into one call and adds physics you did not write.
+## Problem 3 — Select and remove: tags, filters, and despawning the dead
 
-## Problem 3 — Gravity, bouncing off the floor
-
-Turn on gravity. Give an entity a bounce coefficient. Watch it fall and bounce.
+Tagging is just a field. Selecting a kind is `filter`. Despawning is `remove`. No special verbs.
 
 ```
-(world/gravity! 0 300)              ;; downward acceleration, pixels per second squared
+(define world
+  (list (make-entity 'enemy  20 60 0 1)
+        (make-entity 'enemy  60 60 0 1)
+        (make-entity 'bullet 40 200 0 -5)))
 
-(define ball (world/spawn 'ball 160 20))
-(entity/bounce! ball 0.8)           ;; loses 20% of speed per bounce
-(entity/sprite! ball (sprite 'rose)) ;; give it a visible sprite
+;; how many enemies?
+(length (filter (lambda (e) (eq? (e-get e 'kind) 'enemy)) world))
+;; => 2
 
-(world/floor! 220)                  ;; a floor at y=220
-
-(big-bang 0
-  (on-tick (lambda (frame)
-             (world/step)
-             (+ frame 1)))
-  (to-draw (lambda (_)
-             (begin-frame 'main)
-             (paint-rect (list 0 0) (list 320 240) 'shadow-veil)
-             (paint-rect (list 0 220) (list 320 20) 'earth-brown)
-             (world/render)
-             (end-frame 'main))))
+;; find the first bullet
+(find (lambda (e) (eq? (e-get e 'kind) 'bullet)) world)
+;; => ((kind bullet) (pos (40 200)) (vel (0 -5)) (hp 3))
 ```
 
-Three world-level configuration verbs did the work. `world/gravity!` sets the constant acceleration applied to every entity that has mass. `world/floor!` places a horizontal surface at a given y. `entity/bounce!` sets the entity's coefficient of restitution — `1.0` is a perfect bounce, `0.0` is a dead thud, `0.8` is a lively ball that slowly loses energy.
-
-You wrote zero physics code. The ball falls at 300 pixels/sec², hits the floor at y=220, bounces at 80% velocity, falls again, bounces again, and asymptotes to a rest on the floor. All from three configuration verbs and one `world/step` per tick.
-
-## Problem 4 (pro) — A flock of thirty boids that seek the mouse
-
-`world/each` iterates every alive entity. Combined with an AI verb like `ai/seek`, you can steer a whole flock at a moving target.
+`filter` keeps every entity that passes the test; `find` returns the first one that does (or `#f` if none). To despawn, `remove` drops every entity that matches — for example, everything out of hit points:
 
 ```
-(define (spawn-flock count)
-  (let loop ((i 0))
-    (if (= i count)
-        'done
-        (let ((id (world/spawn 'boid
-                               (random-int 0 320)
-                               (random-int 0 240))))
-          (entity/set-vel! id (random-range -1 1) (random-range -1 1))
-          (entity/max-speed! id 3)
-          (loop (+ i 1))))))
+(define (alive? e) (> (e-get e 'hp) 0))
 
-(spawn-flock 30)
-
-(define (steer-toward tx ty)
-  (world/each
-    (lambda (id)
-      (let* ((pos (entity/pos id))
-             (dx  (- tx (list-ref pos 0)))
-             (dy  (- ty (list-ref pos 1)))
-             (mag (sqrt (+ (* dx dx) (* dy dy)))))
-        (if (> mag 0)
-            (entity/accel! id (/ dx mag) (/ dy mag))
-            'noop)))))
-
-(big-bang (list 160 120)  ;; state is the target (x y)
-  (on-tick (lambda (target)
-             (let ((tx (list-ref target 0))
-                   (ty (list-ref target 1)))
-               (steer-toward tx ty)
-               (world/step)
-               target)))
-  (on-key (lambda (target event)
-            (let ((k (list-ref event 1)))
-              (cond ((eq? k 'left)  (list (- (list-ref target 0) 5) (list-ref target 1)))
-                    ((eq? k 'right) (list (+ (list-ref target 0) 5) (list-ref target 1)))
-                    ((eq? k 'up)    (list (list-ref target 0) (- (list-ref target 1) 5)))
-                    ((eq? k 'down)  (list (list-ref target 0) (+ (list-ref target 1) 5)))
-                    (else target)))))
-  (to-draw (lambda (target)
-             (begin-frame 'main)
-             (paint-rect (list 0 0) (list 320 240) 'shadow-veil)
-             (world/render)
-             (paint-emoji '🌸 target size: 12)
-             (end-frame 'main))))
+(length (remove (lambda (e) (not (alive? e))) world))
+;; => 3
 ```
 
-Read the shape. State is the target position (a two-element list). `steer-toward` walks every entity and applies an acceleration toward the target. `entity/max-speed!` caps each entity so they do not shoot past. Arrow keys move the target flower; the flock follows.
+Every one of these — count enemies, find a bullet, drop the dead — is a one-line list operation. The entity system you might have expected is just SRFI-1 wearing a costume.
 
-Two things landed. First: `world/each` is your Big Loop over entities. It replaces every `for-each` you would otherwise write on the id list. Second: `entity/accel!` accepts a direction vector; the physics integrator turns it into velocity, then position. You do not integrate anything by hand.
+## Problem 4 (pro) — Nearest entity and collisions, with a distance helper
 
-Thirty entities, one `world/step`, arrow-key steering, all in about 40 lines. That is the entity system paying rent.
-
-## Capstone — Collision damage: a projectile removes an enemy on contact
-
-`entity/collisions` returns the list of ids the given entity is currently touching. Use that for damage.
+Two questions every game asks: *what is closest to this point?* and *what is touching what?* Both fall out of one `dist` helper plus `fold` and `filter`.
 
 ```
-(define (spawn-enemies count)
-  (let loop ((i 0))
-    (if (= i count)
-        'done
-        (begin
-          (let ((e (world/spawn 'enemy (+ 20 (* i 40)) 60)))
-            (entity/tag! e 'enemy)
-            (entity/set-vel! e 0 1)
-            (entity/hp! e 3))
-          (loop (+ i 1))))))
+(define (dist a b)
+  (let ((d (vec/sub a b)))
+    (sqrt (+ (* (car d) (car d)) (* (cadr d) (cadr d))))))
 
-(spawn-enemies 5)
-
-(define (spawn-bullet from-x)
-  (let ((b (world/spawn 'bullet from-x 200)))
-    (entity/tag! b 'bullet)
-    (entity/set-vel! b 0 -5)
-    b))
-
-(define (resolve-collisions)
-  (world/each
-    (lambda (id)
-      (if (entity/kind id 'bullet)
-          (for-each
-            (lambda (other)
-              (when (entity/kind other 'enemy)
-                (entity/hp! other (- (entity/hp other) 1))
-                (entity/despawn! id)
-                (when (<= (entity/hp other) 0)
-                  (entity/despawn! other))))
-            (entity/collisions id))
-          'not-a-bullet))))
-
-(define (advance state)
-  (resolve-collisions)
-  (world/step)
-  (+ state 1))
+(dist (vec/make 0 0) (vec/make 3 4))
+;; => 5
 ```
 
-Every frame, we look at each entity; if it is a bullet, we check what it is colliding with; for each enemy in that list, subtract one hp; despawn the bullet; if the enemy is out of hp, despawn it too.
+Now the nearest entity to a target point: `fold` walks the world carrying the best-so-far, and keeps whichever is closer.
 
-You saw three new verbs: `entity/tag!` marks an entity with a symbol you invented (`'bullet`, `'enemy`); `entity/kind` reads the kind; `entity/hp!` is a getter-setter for the entity's hit points (Motoi treats hp as a first-class field on every entity that opts in). None of this is game-specific: bullets, enemies, hp, and damage are ingredients in most action games; the entity system provides them so you can lay out gameplay without inventing a data model.
+```
+(define (nearest world target)
+  (fold (lambda (e best)
+          (if (< (dist (e-get e 'pos) target)
+                 (dist (e-get best 'pos) target))
+              e best))
+        (car world)
+        (cdr world)))
+
+(define swarm
+  (list (make-entity 'boid 10 10 0 0)
+        (make-entity 'boid 3  4  0 0)
+        (make-entity 'boid 99 99 0 0)))
+
+(e-get (nearest swarm (vec/make 0 0)) 'pos)
+;; => (3 4)
+```
+
+And collisions with a target: `filter` the entities whose position is within a radius.
+
+```
+(define (touching world target radius)
+  (filter (lambda (e) (< (dist (e-get e 'pos) target) radius))
+          world))
+
+(map (lambda (e) (e-get e 'pos)) (touching swarm (vec/make 0 0) 20))
+;; => ((10 10) (3 4))
+```
+
+`fold` reduces the whole world to one answer — the nearest. `filter` selects the subset — everything in range. Neither needed a physics engine or an entity manager. Just data and the list toolbox.
+
+## Capstone — One tick: move, resolve collisions, despawn — as a world-to-world function
+
+Put it together. A tick is a pure function from world to world: move everyone, subtract hit points where a bullet touches an enemy, then drop the dead. We keep it small by composing the operations you already built.
+
+```
+(define (damage-on-contact world)
+  (map
+    (lambda (e)
+      (if (eq? (e-get e 'kind) 'enemy)
+          (let ((hit? (find (lambda (b)
+                              (and (eq? (e-get b 'kind) 'bullet)
+                                   (< (dist (e-get b 'pos) (e-get e 'pos)) 8)))
+                            world)))
+            (if hit? (e-set e 'hp (- (e-get e 'hp) 1)) e))
+          e))
+    world))
+
+(define (tick world)
+  (remove (lambda (e) (<= (e-get e 'hp) 0))
+          (damage-on-contact (map e-step world))))
+
+(define battle
+  (list (make-entity 'enemy  40 60 0 1)
+        (make-entity 'bullet 40 62 0 0)))
+
+(length (tick battle))
+;; => 2   (bullet + a still-alive enemy; enemy took one point of damage)
+```
+
+Read the whole thing. `damage-on-contact` walks the world; for each enemy it asks whether any bullet is within 8 pixels; if so, it subtracts a hit point. `tick` chains three world-to-world steps — move (`map e-step`), damage, then despawn (`remove`) — into one function.
+
+None of this is game-specific plumbing. Bullets, enemies, hp, and damage are ingredients in most action games; here they are ordinary fields on ordinary values, updated by ordinary list operations. That is entities-as-data paying rent.
+
+<!-- needs-alfred: This chapter originally used world/spawn, world/step,
+     world/each, world/render, world/gravity!, world/floor!, entity/pos,
+     entity/set-vel!, entity/bounce!, entity/tag!, entity/hp!,
+     entity/collisions, entity/despawn!, ai/seek and sprite — an imperative
+     entity system that is entirely unbound in current Motoi. This rewrite
+     teaches the same capabilities (spawn, move-all, tag, select, nearest,
+     collide, despawn) as functional operations over entities-as-data using
+     SRFI-1 (map/filter/remove/find/fold) and vec math. If an entity system is
+     re-wired, the imperative examples can be restored alongside this data
+     model as a second way to do it. -->
 
 ## What's next
 
-Chapter 8 leaves the visual world and enters the sonic one. `note/strike`, `synth/chord`, `synth/play` — how Motoi's audio system takes you from a single note to a full arrangement. Sound is a whole other kind of composition and Motoi treats it with the same round-trip respect graphics get.
+Chapter 8 leaves the visual world and enters the sonic one. A note is a number — a frequency — and a sample is a value you compute with `math/sin`. Sound is a whole other kind of composition, and Motoi treats it with the same data-first respect the world got: a melody is a list, a beat is a schedule, and everything is a value you can read.
 ")

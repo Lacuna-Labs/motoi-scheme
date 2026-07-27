@@ -70,20 +70,192 @@ Every cortex verb, in one call. Same for `card/`, `composer/`, `paint-`, etc.
 
 Filter by any metadata field. The registry is data; every field is queryable.
 
-## Sections 11.5 through 11.16 — pending Wave 3 authoring
+## 11.5 The seven basic introspection verbs
 
-- 11.5 The namespace map
-- 11.6 Perm distribution
-- 11.7 Tier distribution
-- 11.8 Since distribution — verbs by release
-- 11.9 Auditing a runtime
-- 11.10 The registry and the reference manual
-- 11.11 The registry and the LLM training corpus
-- 11.12 Custom queries — building small tools
-- 11.13 The registry as documentation source
-- 11.14 Enumerating aliases and deprecations
-- 11.15 The registry validation step
-- 11.16 Closing — the registry as the language surface
+The registry is a JavaScript object. `snapshot-registry` returns it verbatim. That's honest but ugly. Real programs don't want the whole object — they want ONE fact about ONE verb. For that we have seven small verbs, all callable from any Motoi program.
+
+```scheme
+(help 'car)          ;; the whole metadata alist for `car`
+(describe 'car)      ;; a one-paragraph string, ready to display
+(arity-of 'car)      ;; the arity — integer or (min max) pair
+(type-of 'car)       ;; the contract string, or null
+(doc-of 'car)        ;; the docstring alone
+(source-of 'car)     ;; where the impl lives — path:line
+(all-verbs)          ;; every bound name in the env chain
+```
+
+Each verb reads from the registry (or, in the case of `all-verbs`, from the env chain — which is a superset). Every one is designed to compose. If you want a specific field, use the sharp accessor; if you want the whole picture, use `help` and pull with `assoc`.
+
+`help` returns an alist because alists compose. You can `assoc :doc (help 'car)` for the doc, `assoc :arity (help 'car)` for the arity, `assoc :source (help 'car)` for the source. Anything the registry knows, `help` exposes.
+
+`describe` returns a string because strings display. When you're in the REPL and you want to read about a verb, `(display (describe 'car))` prints one line and you move on. No walking, no unpacking.
+
+`all-verbs` returns a plain list of names because lists compose. `(map help (all-verbs))` gets the metadata for every verb. `(filter doc-of (all-verbs))` gets every verb that has a docstring. `(length (all-verbs))` tells you how many bindings the env has.
+
+None of these seven verbs mutate anything. All are `perm: 'read`. Safe to call from anywhere, safe to compose freely, safe to expose to the model.
+
+## 11.6 Data vs prose — help versus describe
+
+The distinction between `help` and `describe` matters more than it looks.
+
+`help` returns DATA. You get an alist. You reason about it programmatically. Missing verb? You get `null`. That's a value your code can check.
+
+`describe` returns PROSE. You get a string. You show it to a human. Missing verb? You get the string `"unknown verb: <name>"`. That's a value your user can read.
+
+The rule: use `help` when you're composing; use `describe` when you're displaying. If you find yourself doing `(display (assoc :doc (help 'car)))` you should have used `(display (describe 'car))` — the second is what describe is for.
+
+## 11.7 Sharp accessors — arity-of, type-of, doc-of, source-of
+
+Four verbs each return ONE field. They exist because `help + assoc` works but reads verbose. `(arity-of 'car)` is shorter and cheaper than `(cdr (assoc :arity (help 'car)))`. Both do the same thing. Use the sharp version when you know which field you want.
+
+The sharp accessors are also more forgiving. `(arity-of 'nonexistent-verb)` returns `null` — a value. `(cdr (assoc :arity (help 'nonexistent-verb)))` would try to walk a null alist and crash. Sharp verbs are safer.
+
+Practical rule: when you're writing a defensive program, reach for the sharp accessor. When you're doing exploratory work at the REPL, reach for `help` and walk the alist by eye.
+
+## 11.8 all-verbs and the env-vs-registry distinction
+
+`all-verbs` is subtly different from every other introspection verb in this chapter. Every other verb reads the REGISTRY — a curated map of {name → metadata} kept by `verbRegistry.js`. The registry is the language's dictionary.
+
+`all-verbs` reads the ENV. The env is the language's runtime binding stack — every name that's currently in scope, including user-defined values, defines, and locals if you call it from inside a `let`. On a fresh Motoi startup, `(all-verbs)` returns ~1,100 names — every primitive Motoi ships. But if you do `(define my-val 42)` and then `(all-verbs)`, `my-val` is in the list too.
+
+That's on purpose. The env is what's REALLY available; the registry is what's DOCUMENTED. In practice they overlap heavily but they are not the same set. When you're auditing a runtime, `all-verbs` tells you what's in scope. When you're building docs, `snapshot-registry` tells you what's documented.
+
+## 11.9 A worked example — the vocabulary shape report
+
+Combine the seven verbs and you can produce a real report about the shape of a Motoi runtime. Every namespace, every verb, every doc-coverage percentage — from inside the language.
+
+```scheme
+(define (vocabulary-shape)
+  (let* ((all (all-verbs))
+         (namespaced (filter (lambda (v)
+                               (and (string? v)
+                                    (string-index v #\/)))
+                             all))
+         (by-ns (make-hash-table)))
+    (for-each
+     (lambda (v)
+       (let ((ns (substring v 0 (string-index v #\/))))
+         (hash-table-update!
+           by-ns ns
+           (lambda (n) (+ n 1))
+           (lambda () 0))))
+     namespaced)
+    (list
+      (list :total-names        (length all))
+      (list :namespaced-verbs   (length namespaced))
+      (list :bare-primitives    (- (length all) (length namespaced)))
+      (list :distinct-namespaces (hash-table-size by-ns))
+      (list :by-namespace       by-ns))))
+
+(vocabulary-shape)
+;; => a live report of the vocabulary shape, as of THIS runtime.
+```
+
+That's a language-health metric that requires no external tool. Every field is computed by walking `(all-verbs)` and reasoning about the shape of each name. The introspection primitives are enough.
+
+## 11.10 The registry and the LLM training corpus
+
+A small model can afford ONE consistent source of truth about the language. That source is the registry. Every training example — every reference entry, every book chapter, every generated example — is DERIVED from the registry. When the registry says a verb's arity is 2, the training data says the same. When the registry says a verb's source is `lib/game/motion.js:214`, the training data says the same.
+
+That consistency is invisible until it's broken. The moment two sources disagree — the registry says the arity is 2 but the reference says the arity is 3 — the model learns the inconsistency and starts guessing. Small model inconsistency is where hallucination lives.
+
+So the discipline is: the registry is canonical, the reference is generated, the book is generated, the training data is generated. If the reference is wrong, fix the registry, not the reference. If the book is wrong, fix the registry, then regenerate the book. One truth propagates.
+
+The verbs in this chapter are the readers of that single truth. When the model asks "what does car take?" it reaches for `arity-of`, which reaches for the registry. If a REPL user asks the same question, the REPL runs the same verb. The model and the user get the SAME answer because they read from the SAME place. That is the point.
+
+## 11.11 Custom queries — building small tools
+
+The seven verbs are enough to build any query you can imagine. Below are three worked patterns that come up in real audit work.
+
+**Every verb from a specific author cohort.**
+
+```scheme
+(define (verbs-since version)
+  (filter (lambda (v)
+            (let ((m (help v)))
+              (and m
+                   (equal? (cdr (assoc :since m)) version))))
+          (all-verbs)))
+
+(verbs-since "motoi-scheme@0.75")
+```
+
+**Every verb documented but never wired to a source.**
+
+```scheme
+(define (documented-but-orphaned)
+  (filter (lambda (v)
+            (and (doc-of v)         ;; has a doc
+                 (null? (source-of v)))) ;; no source
+          (all-verbs)))
+```
+
+**A verbose "landing page" for a namespace.**
+
+```scheme
+(define (namespace-page ns-prefix)
+  (for-each
+    (lambda (v)
+      (display (describe v))
+      (newline)
+      (newline))
+    (filter (lambda (v)
+              (and (string? v)
+                   (>= (string-length v) (string-length ns-prefix))
+                   (equal? (substring v 0 (string-length ns-prefix))
+                           ns-prefix)))
+            (all-verbs))))
+
+(namespace-page "audio/")
+;; prints one paragraph per audio verb, ready to read.
+```
+
+None of these three tools required the language to grow. Each is a short composition of the seven verbs already there.
+
+## 11.12 The registry validation step — before every release
+
+When the language ships a new verb, three things must happen: the impl must be written, the impl must be registered, and the metadata must be complete. The registry validation step catches the third — the metadata gap that turns a new verb into a silent verb.
+
+The check is small and always safe:
+
+```scheme
+(define (validate-registry)
+  (let loop ((verbs (all-verbs)) (issues '()))
+    (cond
+      ((null? verbs) issues)
+      (else
+       (let* ((v (car verbs))
+              (m (help v))
+              (missing (cond
+                         ((null? m) '(:no-metadata))
+                         ((null? (cdr (assoc :doc m))) '(:no-doc))
+                         ((null? (cdr (assoc :source m))) '(:no-source))
+                         (else '()))))
+         (loop (cdr verbs)
+               (if (null? missing)
+                   issues
+                   (cons (list v missing) issues))))))))
+
+(validate-registry)
+;; => a list of (verb-name (issue1 issue2 ...))
+;;    empty means the release is clean.
+```
+
+Run it before a release. Fix every entry. Ship.
+
+## 11.13 The registry as documentation source
+
+The reference manual generator reads the registry. So does the doc site. So does the IDE tooltip. So does the book of introspection you're reading right now.
+
+That's on purpose. When metadata is the single source, the language is self-consistent. Add a new verb → its docstring shows up in the reference the next time we regenerate → the book's introspection chapter mentions it → the LLM training corpus picks it up → the model learns to use it correctly.
+
+The alternative — write docs separately, write reference separately, write training data separately — puts every source at drift risk. The registry-first discipline is the antidote.
+
+## 11.14 A closing observation
+
+You now have seven verbs and a registry, and everything else in this chapter follows from that pair. `snapshot-registry` gets you the whole picture; the seven verbs get you one fact at a time. Compose them and you can build any audit, any report, any doc-generation tool.
+
+The rest of this chapter (deep-seeds 11.22 onward) shows worked examples — reference-manual generators, deprecated-verb enumerators, quality dashboards. Each one is composition. The primitives never grew.
 
 ## 11.17 A worked audit
 

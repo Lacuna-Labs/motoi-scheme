@@ -245,7 +245,7 @@ test('BUG-16 — cortex/write recursively unwraps nested Syms', async () => {
     const write = get(env, 'cortex/write')
     const read = get(env, 'cortex/read')
 
-    // A nested structure with Syms inside — a common Sakura shape.
+    // A nested structure with Syms inside — a common downstream-dialect shape.
     const alist = [[new Sym(':kind'), new Sym('sprite')], [new Sym(':pos'), [1, 2, 3]]]
     write(new Sym(uniqueKey), alist)
     const back = read(new Sym(uniqueKey))

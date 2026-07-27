@@ -425,13 +425,13 @@ export const CORE_VERBS = new Set([
   // ── UTILITY ────────────────────────────────────────────────────
   'base/make-character',
 
-  // ── CONTROL FLOW (added 2026-07-16 from Sakura->Motoi mapping) ─
+  // ── CONTROL FLOW (added 2026-07-16 from the sister-dialect mapping) ─
   'escalate',
 
-  // ── TEXT (added 2026-07-16 from Sakura->Motoi mapping) ─────────
+  // ── TEXT (added 2026-07-16 from the sister-dialect mapping) ────
   'text/rasterize',
 
-  // ── ASSERT (added 2026-07-16 from Sakura->Motoi mapping) ───────
+  // ── ASSERT (added 2026-07-16 from the sister-dialect mapping) ──
   'assert/check-with',
   'assert/invariants',
   'assert/audit-verify',

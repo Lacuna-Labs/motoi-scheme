@@ -48,7 +48,6 @@ import { installCore, makeCoreEnv } from '../core/index.js'
 // core/index.js — importing them again here would be dead weight and
 // invite drift. If you need a CORE installer directly, reach for the
 // re-exports at the bottom of this file or import from '../core/'.
-import { installPrefab } from '../lib/game/prefab.js'
 import { installJuggle } from '../lib/game/juggle.js'
 import { installEng } from '../lib/system/eng.js'
 import { installOps } from '../lib/system/ops.js'
@@ -102,7 +101,6 @@ export function installLibs(env, opts = {}) {
 
   // ── MODULE tier (loaded here for backwards compat; will be on-demand
   //    via (import (motoi ...)) after modules/ split is fully wired).
-  runInstaller('module/game-entity-advanced/prefab', () => installPrefab(env))
   runInstaller('module/game-juggle/juggle',          () => installJuggle(env))
   runInstaller('module/math-advanced/eng',           () => installEng(env))
   runInstaller('module/math-advanced/ops',           () => installOps(env))

@@ -71,5 +71,5 @@ test('cli — --verb-layer with no value exits with a clear error', () => {
 test('cli — unknown command still surfaces "unknown command"', () => {
   const r = run(['definitely-not-a-cmd'])
   assert.strictEqual(r.code, 1)
-  assert.match(r.stderr, /unknown command: definitely-not-a-cmd/)
+  assert.match(r.stderr, /unknown command '?definitely-not-a-cmd'?/)
 })

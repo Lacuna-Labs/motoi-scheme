@@ -13,18 +13,21 @@
 //   motoi slat emit <f>     Convert a JSONL log to slat.
 
 import { parse } from './reader.js'
-import { evaluate } from './interp.js'
+import { SchemeVector } from '../lib/base/r7rs-types.js'
+import { evaluate, noteError } from './interp.js'
 import { makeCoreEnv } from '../core/index.js'
 import { expandProgram } from './macro.js'
 import { help } from './introspect.js'
 import { startRepl, detectColor } from './repl.js'
 import { emitDocs } from './docs-emitter.js'
 import { slatLoads, slatDumps, slatToJsonl, jsonlToSlat } from './slat.js'
+import { registerLib, stdParts, libInfo, validateStandard } from './lib-register.js'
 import { readFile, writeFile } from 'node:fs/promises'
 import { VERSION } from './index.js'
 import { migrateLegacyMotoiData } from './paths.js'
 import { startIdeServer } from './ide-server.js'
 import { startTui } from '../tui/tui.js'
+import startBoot from '../tui/boot-shell.js'
 
 // Brand pink for section headers, matching renderSplash()'s MOTOI_PINK_256.
 const PINK_256 = 218
@@ -58,6 +61,7 @@ function usage({ noColor = false } = {}) {
       row('docs regen [dir]',  `Regenerate reference/ MD from live registry.`),
     ]],
     [header('SURFACES'), [
+      row('console',           `Boot splash → pick IDE / Music / Animation / Game. Bare 'motoi'.`),
       row('ide',               `3-panel browser IDE (default 127.0.0.1:3737).`),
       row('tui',               `4-region in-terminal IDE. Same runtime as ide.`),
     ]],
@@ -72,7 +76,7 @@ function usage({ noColor = false } = {}) {
       row('--verb-layer <p>',  `Load this verb layer instead of auto-detecting.`),
       row('--no-color',        `Disable ANSI colour output.`),
       row('--hacker',          `80s phosphor theme (shorthand for --theme hacker).`),
-      row('--theme <name>',    `Pick a theme (sakura | hacker | user). ~/motoi/themes/.`),
+      row('--theme <name>',    `Pick a theme (blossom | hacker | user). ~/motoi/themes/.`),
       row('--quiet',           `Suppress REPL banner.`),
       row('--json',            `Print eval/run results as JSON instead of s-exp.`),
     ]],
@@ -103,7 +107,30 @@ function format(v) {
   if (v === true) return '#t'
   if (v === false) return '#f'
   if (typeof v === 'string') return JSON.stringify(v)
+  // R7RS §6.9 bytevectors print as #u8(b0 b1 …).
+  if (v instanceof Uint8Array) return '#u8(' + Array.from(v).join(' ') + ')'
+  // R7RS §6.8 vectors print as #(e0 e1 …).
+  if (v instanceof SchemeVector) return '#(' + v.items.map(format).join(' ') + ')'
   if (Array.isArray(v)) return '(' + v.map(format).join(' ') + ')'
+  // Symbol-tagged runtime values (Sym): print by name.
+  if (v && typeof v === 'object' && 'name' in v && typeof v.name === 'string'
+      && Object.keys(v).length === 1) return v.name
+  // Motoi rationals — Symbol.for('motoi:rational').
+  const RAT_TAG = Symbol.for('motoi:rational')
+  if (v && typeof v === 'object' && v[RAT_TAG] === true) {
+    return v.d === 1n ? String(v.n) : `${v.n}/${v.d}`
+  }
+  // Motoi complex — Symbol.for('motoi:complex').
+  const CPX_TAG = Symbol.for('motoi:complex')
+  if (v && typeof v === 'object' && v[CPX_TAG] === true) {
+    const { re, im } = v
+    if (im === 0) return String(re)
+    if (re === 0) return im === 1 ? 'i' : im === -1 ? '-i' : `${im}i`
+    const sign = im >= 0 ? '+' : '-'
+    const ai = Math.abs(im)
+    const imPart = ai === 1 ? 'i' : `${ai}i`
+    return `${re}${sign}${imPart}`
+  }
   return String(v)
 }
 
@@ -113,7 +140,12 @@ function evalSource(src, fuelBudget = 200000) {
   const { forms: expanded } = expandProgram(forms, { fuel: { n: fuelBudget } })
   const fuel = { n: fuelBudget }
   let result
-  for (const f of expanded) result = evaluate(f, env, fuel)
+  try {
+    for (const f of expanded) result = evaluate(f, env, fuel)
+  } catch (err) {
+    // Record the escaped error in the self-census, then re-raise unchanged.
+    throw noteError(err)
+  }
   return result
 }
 
@@ -232,7 +264,7 @@ export async function main(rawArgv = process.argv.slice(2), meta = {}) {
   // REPL. Explicit subcommands always win.
   const invokedAs = String(meta.invokedAs || 'motoi').toLowerCase()
   const isSchemeInvocation = invokedAs.startsWith('motoi-scheme')
-  const defaultCmd = isSchemeInvocation ? 'repl' : 'tui'
+  const defaultCmd = isSchemeInvocation ? 'repl' : 'console'
 
   const cmd = argv[0] || defaultCmd
   if (argv[0] === '--help' || argv[0] === '-h') {
@@ -245,14 +277,31 @@ export async function main(rawArgv = process.argv.slice(2), meta = {}) {
   }
 
   if (cmd === 'repl') {
-    await startRepl({ hacker, quiet, noColor, theme })
+    // Warm the env with CORE so the copilot meta-commands (,ask ,fix ,explain
+    // ,what ,rag) resolve to live copilot/* verbs instead of degrading to
+    // "not registered". A bare makeBaseEnv REPL has no persona surface.
+    const env = makeCoreEnv({ fuel: { n: fuelBudget } })
+    await startRepl({ env, hacker, quiet, noColor, theme })
+    return 0
+  }
+
+  if (cmd === 'console' || cmd === 'boot') {
+    // The kid's front door: cold-boot ceremony → splash → pick a mode
+    // (IDE · Music · Animation · Game), à la PICO-8 / TIC-80. This is what
+    // bare `motoi` runs. `motoi tui` still drops straight into the IDE.
+    try {
+      await startBoot({ fuel: fuelBudget, hacker, quiet, noColor, theme })
+    } catch (e) {
+      process.stderr.write(`error: ${e.message}\n`)
+      return 1
+    }
     return 0
   }
 
   if (cmd === 'tui') {
     // motoi tui [--splash] [--theme <name>] — the terminal-hosted
     // 4-region IDE. Same runtime as motoi ide, painted through the
-    // active theme (Sakura default, Hacker phosphor available).
+    // active theme (Blossom default, Hacker phosphor available).
     // --splash forces the retro boot even after first launch.
     const splash = argv.includes('--splash')
     try {
@@ -362,6 +411,67 @@ export async function main(rawArgv = process.argv.slice(2), meta = {}) {
       return 0
     }
     process.stderr.write('usage: motoi slat <parse|emit> <file>\n')
+    return 1
+  }
+
+  if (cmd === 'lib') {
+    // motoi lib list                 — the standard parts table
+    // motoi lib info <STD>           — one part's metadata + verbs
+    // motoi lib validate [STD]       — run the 5-point gate (all, or one)
+    // motoi lib register <file.js>   — validate + install a candidate part
+    const sub = argv[1]
+
+    if (!sub || sub === 'list') {
+      const parts = stdParts()
+      for (const p of parts) {
+        process.stdout.write(`${p.std.padEnd(12)} ${p.mode.padEnd(6)} ${String(p.count).padStart(3)} verbs   ${p.spec}\n`)
+      }
+      return 0
+    }
+
+    if (sub === 'info') {
+      const info = libInfo(argv[2] || '')
+      if (!info) { process.stderr.write(`motoi lib: unknown part '${argv[2]}'\n`); return 1 }
+      process.stdout.write(`${info.std}\n  spec:  ${info.spec}\n  mode:  ${info.mode}\n  verbs: ${info.count}\n`)
+      process.stdout.write('  ' + info.verbs.join(', ') + '\n')
+      return 0
+    }
+
+    if (sub === 'validate') {
+      const env = makeCoreEnv({ fuel: { n: fuelBudget } })
+      const only = argv[2]
+      const reports = validateStandard(env, { n: fuelBudget })
+        .filter((r) => !only || r.std === only || r.name === only)
+      if (only && reports.length === 0) { process.stderr.write(`motoi lib: unknown part '${only}'\n`); return 1 }
+      let allOk = true
+      for (const r of reports) {
+        process.stdout.write(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}\n`)
+        for (const c of r.checks) {
+          process.stdout.write(`      ${c.pass ? '✓' : '✗'} ${c.id}: ${c.detail}\n`)
+        }
+        allOk = allOk && r.ok
+      }
+      return allOk ? 0 : 1
+    }
+
+    if (sub === 'register') {
+      const file = argv[2]
+      if (!file) { process.stderr.write('usage: motoi lib register <file.js>\n'); return 1 }
+      const env = makeCoreEnv({ fuel: { n: fuelBudget } })
+      const res = await registerLib(file, { env, fuelBox: { n: fuelBudget } })
+      process.stdout.write(`${res.ok ? 'INSTALLED' : 'REJECTED'}  ${res.std || file}\n`)
+      for (const c of res.report.checks) {
+        process.stdout.write(`      ${c.pass ? '✓' : '✗'} ${c.id}: ${c.detail}\n`)
+      }
+      if (!res.ok) {
+        process.stderr.write('motoi lib: part failed the 5-point gate — nothing installed.\n')
+        return 1
+      }
+      process.stdout.write(`installed ${res.record.verbs.length} verbs from ${res.std}.\n`)
+      return 0
+    }
+
+    process.stderr.write('usage: motoi lib <list|info|validate|register> [arg]\n')
     return 1
   }
 

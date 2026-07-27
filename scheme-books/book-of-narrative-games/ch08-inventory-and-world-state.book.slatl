@@ -1,8 +1,7 @@
 ;; ch08-inventory-and-world-state.book.slatl
 ;; Book of Narrative Games — Chapter 8: Inventory and World-State
 
-(dialect :applies ("motoi" "sakura"))
-
+(dialect :applies ("motoi") :note "Applies to Motoi. Per-record :dialect overrides where a record is specific to one surface.")
 (chapter
   :book                "Book of Narrative Games"
   :chapter-number      8
@@ -14,7 +13,7 @@
   :author-lane         "narrative-games-engineer-lane-2026-07-16"
   :training-eligible   #t
   :confidentiality     "public"
-  :voice               "sakura-teaching + narrative-craft"
+  :voice               "motoi-teaching + narrative-craft"
   :book-version        "1.0.0"
   :prose
 "An adventure game is a state machine. The player is in a room. The
@@ -38,37 +37,47 @@ rendering, and always update state after significant actions.
 ## 8.1 Inventory as a list
 
 ```scheme
+(define (say . xs) (for-each display xs) (newline))
+
+;; Items are STRINGS. Cortex serializes the inventory to disk, so a
+;; symbol would come back as a string anyway (see chapter 3). Storing
+;; strings keeps eq?/member honest — we compare with equal?.
+
 ;; Add an item to inventory.
 (define (pick-up item)
   (let ((inv (or (cortex/read 'inventory) '())))
     (cortex/write 'inventory (cons item inv))
-    (paint-text 20 400
-      (string-append \"You picked up \" (item->prose item) \".\"))))
+    (say \"You picked up \" (item->prose item) \".\")))
 
 ;; Drop an item.
 (define (drop item)
   (let ((inv (or (cortex/read 'inventory) '())))
-    (cortex/write 'inventory (filter (lambda (i) (not (eq? i item))) inv))
-    (paint-text 20 400
-      (string-append \"You dropped \" (item->prose item) \".\"))))
+    (cortex/write 'inventory (filter (lambda (i) (not (equal? i item))) inv))
+    (say \"You dropped \" (item->prose item) \".\")))
 
-;; Check if you have something.
+;; Check if you have something. member matches with equal?.
 (define (have? item)
   (member item (or (cortex/read 'inventory) '())))
 
 ;; Item to prose (English article + name).
 (define (item->prose item)
-  (case item
-    ((lantern) \"the lantern\")
-    ((key)     \"a small brass key\")
-    ((rope)    \"a coil of rope\")
-    ((letter)  \"a folded letter\")
-    ((feather) \"a white feather\")
-    (else      (string-append \"a \" (symbol->string item)))))
+  (cond
+    ((equal? item \"lantern\") \"the lantern\")
+    ((equal? item \"key\")     \"a small brass key\")
+    ((equal? item \"rope\")    \"a coil of rope\")
+    ((equal? item \"letter\")  \"a folded letter\")
+    ((equal? item \"feather\") \"a white feather\")
+    (else                    (string-append \"a \" item))))
+
+;; Try it out.
+(cortex/write 'inventory '())
+(pick-up \"lantern\")
+(pick-up \"key\")
+(say \"have lantern? \" (if (have? \"lantern\") \"yes\" \"no\"))
 ```
 
 Four verbs — pick up, drop, have?, item->prose — and you have a
-working inventory. Every scene can consult `(have? 'lantern)` before
+working inventory. Every scene can consult `(have? \"lantern\")` before
 deciding whether to offer the enter-the-cave option.
 
 The `filter` in `drop` returns a new list with all elements except the
@@ -90,20 +99,17 @@ handing over the letter).
 Sometimes handing over an item removes it from inventory.
 
 ```scheme
-;; Give an item to someone.
+;; A compound Cortex key: gift/<npc>/<item>. Built from strings.
+(define (npc-received-key npc item)
+  (string->symbol (string-append \"gift/\" npc \"/\" item)))
+
+;; Give an item to someone: drop it AND record the gift flag forever.
 (define (give item npc)
   (drop item)
   (cortex/write (npc-received-key npc item) #t)
-  (paint-text 20 400
-    (string-append (npc-name npc) \" takes \" (item->prose item)
-                   \" from your hand.\")))
+  (say npc \" takes \" (item->prose item) \" from your hand.\"))
 
-(define (npc-received-key npc item)
-  (string->symbol
-    (string-append \"gift/\" (symbol->string npc)
-                   \"/\" (symbol->string item))))
-
-;; Later, Mira can react:
+;; Later, Mira can react to what she was given:
 (define (mira-check-gift)
   (cond
     ((cortex/read 'gift/mira/letter)
@@ -112,6 +118,11 @@ Sometimes handing over an item removes it from inventory.
      \"MIRA: 'The feather. From the hawk on the ridge?'\")
     (else
      \"MIRA: 'You have empty hands. That is fine too.'\")))
+
+;; Hand Mira the letter, then let her react.
+(cortex/write 'inventory (list \"letter\"))
+(give \"letter\" \"mira\")
+(say (mira-check-gift))
 ```
 
 `give` drops the item from your inventory AND records a Cortex flag
@@ -141,11 +152,14 @@ Beyond inventory, the world has state that is not carried by anyone.
 ;;
 ;; Read them:
 (if (cortex/read 'state/sister-home?)
-    (paint-text 20 40 \"Your sister is in the kitchen, humming.\")
-    (paint-text 20 40 \"The kitchen is empty. She is not back yet.\"))
+    (say \"Your sister is in the kitchen, humming.\")
+    (say \"The kitchen is empty. She is not back yet.\"))
 
-;; Write them:
+;; Write them, then read again:
 (cortex/write 'state/sister-home? #t)
+(if (cortex/read 'state/sister-home?)
+    (say \"Your sister is in the kitchen, humming.\")
+    (say \"The kitchen is empty. She is not back yet.\"))
 ```
 
 Prefer `?`-suffixed boolean keys. They read naturally in code:
@@ -164,23 +178,18 @@ Players want to see what they are carrying. Paint a bar at the bottom
 of the screen showing current inventory.
 
 ```scheme
-;; Paint an inventory bar along the bottom.
-(define (paint-inventory-bar)
-  (let ((inv (or (cortex/read 'inventory) '())))
-    (paint-text 20 550 \"CARRYING:\")
-    (let loop ((items inv) (i 0))
-      (when (not (null? items))
-        (paint-text (+ 110 (* i 80)) 550
-          (item-icon-or-name (car items)))
-        (loop (cdr items) (+ i 1))))))
-
+;; Build the inventory bar text. A graphics host paints it along the
+;; bottom; here we assemble the same string and print it.
 (define (item-icon-or-name item)
-  (case item
-    ((lantern) \"[lantern]\")
-    ((key)     \"[key]\")
-    ((rope)    \"[rope]\")
-    ((letter)  \"[letter]\")
-    (else      (string-append \"[\" (symbol->string item) \"]\"))))
+  (string-append \"[\" item \"]\"))
+
+(define (inventory-bar-text)
+  (let ((inv (or (cortex/read 'inventory) '())))
+    (fold (lambda (item acc) (string-append acc \" \" (item-icon-or-name item)))
+          \"CARRYING:\" inv)))
+
+(cortex/write 'inventory (list \"lantern\" \"key\" \"rope\"))
+(say (inventory-bar-text))
 ```
 
 Call `paint-inventory-bar` at the end of every scene's render pass.
@@ -202,15 +211,16 @@ the scene, redirect or offer a partial version.
 ```scheme
 (define (enter-the-cave)
   (cond
-    ((have? 'lantern)
-     (scene-cave-lit))
+    ((have? \"lantern\")
+     (say \"The lantern throws light down the tunnel. You go in.\"))
     (else
-     (scene/imagine)
-     (surface/paper)
-     (paint-text 20 40 \"The cave is pitch dark. You cannot see three\")
-     (paint-text 20 70 \"feet in front of you.\")
-     (paint-text 20 100 \"You back out. You would need a light.\")
-     (world/after 90 (lambda () (previous-scene))))))
+     (say \"The cave is pitch dark. You cannot see three feet ahead.\")
+     (say \"You back out. You would need a light.\"))))
+
+(cortex/write 'inventory '())
+(enter-the-cave)                          ;; no lantern -> bounce back
+(cortex/write 'inventory (list \"lantern\"))
+(enter-the-cave)                          ;; with lantern -> go in
 ```
 
 The player can enter the cave with a lantern (full scene) or without
@@ -222,12 +232,19 @@ For multi-item gates:
 ```scheme
 (define (enter-the-tower)
   (cond
-    ((and (have? 'key) (have? 'letter))
-     (scene-tower-full))
-    ((have? 'key)
-     (scene-tower-locked-inside))
+    ((and (have? \"key\") (have? \"letter\"))
+     (say \"You unlock the tower and read the letter at the top.\"))
+    ((have? \"key\")
+     (say \"You unlock the tower, but there is nothing to read yet.\"))
     (else
-     (scene-tower-locked-outside))))
+     (say \"The tower door is locked. You need the key.\"))))
+
+(cortex/write 'inventory (list \"key\" \"letter\"))
+(enter-the-tower)                         ;; full scene
+(cortex/write 'inventory (list \"key\"))
+(enter-the-tower)                         ;; partial
+(cortex/write 'inventory '())
+(enter-the-tower)                         ;; locked out
 ```
 
 Three different scenes based on inventory. Each is fully written; each
@@ -241,89 +258,86 @@ Here is a small puzzle-adventure. Five rooms. Seven items to find.
 One exit. The player must assemble a specific combination to leave.
 
 ```scheme
-;; The five rooms.
-(define (kitchen)
-  (scene/imagine)
-  (surface/paper)
-  (paint-text 20 40 \"KITCHEN. A pot on the stove. A window over a garden.\")
-  (paint-text 20 100 (if (have? 'pot) \"\" \"[A] take the pot\"))
-  (paint-text 20 130 \"[B] to the garden   [C] to the hall\")
-  (on-key
-    (lambda (k)
-      (case k
-        ((a) (unless (have? 'pot) (pick-up 'pot)) (kitchen))
-        ((b) (garden))
-        ((c) (hall))))))
+;; Each room renders what it offers, then dispatches on the player's
+;; key to the next room. We drive it with a scripted list of keys so
+;; the whole adventure runs to completion. Items are strings.
+(define (room-take item)
+  (unless (have? item) (pick-up item)))
 
-(define (garden)
-  (scene/imagine)
-  (surface/paper)
-  (paint-text 20 40 \"GARDEN. Tomatoes. A well. A shed.\")
-  (paint-text 20 100 (if (have? 'tomato) \"\" \"[A] pick a tomato\"))
-  (paint-text 20 130 (if (have? 'water)  \"\" \"[B] fill a container from the well\"))
-  (paint-text 20 160 \"[C] enter the shed   [D] back to kitchen\")
-  (on-key
-    (lambda (k)
-      (case k
-        ((a) (unless (have? 'tomato) (pick-up 'tomato)) (garden))
-        ((b) (if (have? 'pot)
-                 (begin (pick-up 'water) (garden))
-                 (begin (paint-text 20 220
-                          \"You have no container.\") (garden))))
-        ((c) (shed))
-        ((d) (kitchen))))))
+(define (kitchen k)
+  (say \"KITCHEN. A pot on the stove. A window over a garden.\")
+  (unless (have? \"pot\") (say \"[A] take the pot\"))
+  (say \"[B] to the garden   [C] to the hall\")
+  (cond ((equal? k \"a\") (room-take \"pot\"))
+        ((equal? k \"b\") 'garden)
+        ((equal? k \"c\") 'hall)))
 
-(define (shed)
-  (scene/imagine)
-  (surface/paper)
-  (paint-text 20 40 \"SHED. A hoe. A coil of rope. Dust.\")
-  (paint-text 20 100 (if (have? 'hoe)  \"\" \"[A] take the hoe\"))
-  (paint-text 20 130 (if (have? 'rope) \"\" \"[B] take the rope\"))
-  (paint-text 20 160 \"[C] back to garden\")
-  (on-key
-    (lambda (k)
-      (case k
-        ((a) (unless (have? 'hoe) (pick-up 'hoe)) (shed))
-        ((b) (unless (have? 'rope) (pick-up 'rope)) (shed))
-        ((c) (garden))))))
+(define (garden k)
+  (say \"GARDEN. Tomatoes. A well. A shed.\")
+  (say \"[A] pick a tomato   [B] fill the pot   [C] shed   [D] kitchen\")
+  (cond ((equal? k \"a\") (room-take \"tomato\"))
+        ((equal? k \"b\") (if (have? \"pot\") (room-take \"water\")
+                            (say \"You have no container.\")))
+        ((equal? k \"c\") 'shed)
+        ((equal? k \"d\") 'kitchen)))
 
-(define (hall)
-  (scene/imagine)
-  (surface/paper)
-  (paint-text 20 40 \"HALL. Stairs up. A door out (locked).\")
-  (paint-text 20 100 (if (have? 'lantern) \"\" \"[A] take the lantern from the hook\"))
-  (paint-text 20 130 \"[B] upstairs   [C] to kitchen\")
-  (paint-text 20 160
-    (if (and (have? 'key) (have? 'lantern) (have? 'rope))
-        \"[D] open the door and leave\"
-        \"\"))
-  (on-key
-    (lambda (k)
-      (case k
-        ((a) (unless (have? 'lantern) (pick-up 'lantern)) (hall))
-        ((b) (upstairs))
-        ((c) (kitchen))
-        ((d) (when (and (have? 'key) (have? 'lantern) (have? 'rope))
-               (leave)))))))
+(define (shed k)
+  (say \"SHED. A hoe. A coil of rope. Dust.\")
+  (say \"[A] take the hoe   [B] take the rope   [C] back to garden\")
+  (cond ((equal? k \"a\") (room-take \"hoe\"))
+        ((equal? k \"b\") (room-take \"rope\"))
+        ((equal? k \"c\") 'garden)))
 
-(define (upstairs)
-  (scene/imagine)
-  (surface/paper)
-  (paint-text 20 40 \"UPSTAIRS. A bedroom. A key on the dresser.\")
-  (paint-text 20 100 (if (have? 'key) \"\" \"[A] take the key\"))
-  (paint-text 20 130 \"[B] back down\")
-  (on-key
-    (lambda (k)
-      (case k
-        ((a) (unless (have? 'key) (pick-up 'key)) (upstairs))
-        ((b) (hall))))))
+(define (upstairs k)
+  (say \"UPSTAIRS. A bedroom. A key on the dresser.\")
+  (say \"[A] take the key   [B] back down\")
+  (cond ((equal? k \"a\") (room-take \"key\"))
+        ((equal? k \"b\") 'hall)))
 
-(define (leave)
-  (scene/imagine)
-  (surface/paper)
-  (paint-text 20 40 \"You unlock the door. Rope tied to the doorframe,\")
-  (paint-text 20 70 \"lantern in one hand, key in the other. You step\")
-  (paint-text 20 100 \"out into the yard. You made it.\"))
+(define (hall k)
+  (say \"HALL. Stairs up. A door out (locked).\")
+  (say \"[A] take the lantern   [B] upstairs   [C] kitchen\")
+  (when (and (have? \"key\") (have? \"lantern\") (have? \"rope\"))
+    (say \"[D] open the door and leave\"))
+  (cond ((equal? k \"a\") (room-take \"lantern\"))
+        ((equal? k \"b\") 'upstairs)
+        ((equal? k \"c\") 'kitchen)
+        ((equal? k \"d\")
+         (when (and (have? \"key\") (have? \"lantern\") (have? \"rope\"))
+           (say \"You unlock the door. Rope, lantern, key. You made it.\")
+           'left))))
+
+;; Drive the adventure: (room key) beats, starting in the kitchen.
+;; rooms maps a name to its function (two-item lists — a procedure in a
+;; pair's tail does not survive this reader, so we use lists + cadr).
+(define rooms (list (list 'kitchen kitchen) (list 'garden garden)
+                    (list 'shed shed) (list 'upstairs upstairs)
+                    (list 'hall hall)))
+(define (run-adventure script)
+  (cortex/write 'inventory '())
+  (let loop ((here 'kitchen) (steps script))
+    (unless (or (null? steps) (eq? here 'left))
+      (let* ((beat (car steps))
+             (room-name (car beat)) (key (cadr beat))
+             (fn (cadr (assq room-name rooms)))
+             (next (fn key)))
+        (loop (if (symbol? next) next here) (cdr steps))))))
+
+;; A winning path: gather rope, lantern, key, then leave.
+(run-adventure
+  (list (list 'kitchen \"c\")   ;; to hall
+        (list 'hall \"a\")      ;; take lantern
+        (list 'hall \"c\")      ;; to kitchen
+        (list 'kitchen \"b\")   ;; to garden
+        (list 'garden \"c\")    ;; to shed
+        (list 'shed \"b\")      ;; take rope
+        (list 'shed \"c\")      ;; to garden
+        (list 'garden \"d\")    ;; to kitchen
+        (list 'kitchen \"c\")   ;; to hall
+        (list 'hall \"b\")      ;; upstairs
+        (list 'upstairs \"a\")  ;; take key
+        (list 'upstairs \"b\")  ;; to hall
+        (list 'hall \"d\")))    ;; leave
 ```
 
 Five rooms, seven items (pot, tomato, water, hoe, rope, lantern, key),
@@ -347,17 +361,22 @@ dream of your sister. But you can only sit in it once. This is
 world-state, not inventory.
 
 ```scheme
-(define (the-chair)
+(define (dream-of-sister)
+  (say \"You dream of your sister, laughing in the doorway.\"))
+
+(define (the-chair k)
   (cond
     ((cortex/read 'state/slept-in-chair?)
-     (paint-text 20 200 \"The chair is empty. You have already slept.\"))
+     (say \"The chair is empty. You have already slept.\"))
+    ((equal? k \"a\")
+     (cortex/write 'state/slept-in-chair? #t)
+     (dream-of-sister))
     (else
-     (paint-text 20 200 \"[A] sit in the chair\")
-     (on-key
-       (lambda (k)
-         (when (eq? k 'a)
-           (cortex/write 'state/slept-in-chair? #t)
-           (dream-of-sister)))))))
+     (say \"[A] sit in the chair\"))))
+
+(cortex/write 'state/slept-in-chair? #f)
+(the-chair \"a\")   ;; first time: the dream plays and the flag is set
+(the-chair \"a\")   ;; second time: the chair remembers, no repeat
 ```
 
 The `state/slept-in-chair?` flag survives forever. The player who
@@ -378,34 +397,32 @@ back or add to cart. State-tracked so returning customers see which
 books they have already read summaries of.
 
 ```scheme
-(define-card 'browse-bookshelf
-  :init
-  (lambda ()
-    (scene/imagine)
-    (surface/paper)
-    (paint-text 20 40 \"A shelf of six books. Which one interests you?\")
+(define books
+  '(\"The Riverside Cook\" \"The Copper Tea\" \"Rustic Tables\"
+    \"A Year in Glass\" \"The Quiet Hours\" \"Night Thoughts\"))
 
-    (let* ((books '(the-riverside-cook the-copper-tea rustic-tables
-                    a-year-in-glass the-quiet-hours night-thoughts))
-           (read-titles (or (cortex/read 'browse/read-jackets) '())))
-      (let loop ((bs books) (i 0))
-        (when (not (null? bs))
-          (paint-text 20 (+ 100 (* i 30))
-            (string-append \"[\" (number->letter (+ i 1)) \"] \"
-                           (book->title (car bs))
-                           (if (member (car bs) read-titles)
-                               \"  (jacket read)\"
-                               \"\")))
-          (loop (cdr bs) (+ i 1))))
+;; Render the shelf, marking jackets the customer has already read.
+(define (show-shelf)
+  (say \"A shelf of six books. Which one interests you?\")
+  (let ((read-titles (or (cortex/read 'browse/read-jackets) '())))
+    (let loop ((bs books) (i 0))
+      (when (not (null? bs))
+        (say \"[\" (+ i 1) \"] \" (car bs)
+             (if (member (car bs) read-titles) \"  (jacket read)\" \"\"))
+        (loop (cdr bs) (+ i 1))))))
 
-      (on-key
-        (lambda (k)
-          (let ((idx (letter->index k)))
-            (when (and (>= idx 0) (< idx 6))
-              (let ((chosen (list-ref books idx)))
-                (cortex/write 'browse/read-jackets
-                  (cons chosen (or (cortex/read 'browse/read-jackets) '())))
-                (show-jacket chosen)))))))))
+;; The customer reads a book's jacket; record it so it stays marked.
+(define (read-jacket i)
+  (let ((chosen (list-ref books i)))
+    (cortex/write 'browse/read-jackets
+      (cons chosen (or (cortex/read 'browse/read-jackets) '())))
+    (say \"You read the jacket of \" chosen \".\")))
+
+(cortex/write 'browse/read-jackets '())
+(show-shelf)
+(read-jacket 0)       ;; read the first book's jacket
+(read-jacket 3)       ;; and the fourth
+(show-shelf)          ;; the shelf now marks those two as read
 ```
 
 Six books. The customer picks one. The card records that she read

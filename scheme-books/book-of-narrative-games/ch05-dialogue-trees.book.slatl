@@ -1,8 +1,7 @@
 ;; ch05-dialogue-trees.book.slatl
 ;; Book of Narrative Games — Chapter 5: Dialogue Trees
 
-(dialect :applies ("motoi" "sakura"))
-
+(dialect :applies ("motoi") :note "Applies to Motoi. Per-record :dialect overrides where a record is specific to one surface.")
 (chapter
   :book                "Book of Narrative Games"
   :chapter-number      5
@@ -14,7 +13,7 @@
   :author-lane         "narrative-games-engineer-lane-2026-07-16"
   :training-eligible   #t
   :confidentiality     "public"
-  :voice               "sakura-teaching + narrative-craft"
+  :voice               "motoi-teaching + narrative-craft"
   :book-version        "1.0.0"
   :prose
 "A dialogue tree is a story tree scaled down to one conversation. Mira
@@ -112,65 +111,66 @@ Reusing the story-tree pattern, one small extension: the NPC's
 reactions.
 
 ```scheme
-(define (play-dialogue tree npc-entity id)
+(define (say . xs) (for-each display xs) (newline))
+
+;; Flat-plist field lookup and node-by-id, same as the story-tree engine.
+(define (node-get node key)
+  (cond ((null? node) #f)
+        ((eq? (car node) key) (cadr node))
+        (else (node-get (cddr node) key))))
+(define (node-lookup tree id)
+  (find (lambda (n) (eq? (node-get n :id) id)) tree))
+(define (number->letter n) (list-ref '(A B C D E F G H) (- n 1)))
+(define (letter->index k)
+  (case k ((a) 0) ((b) 1) ((c) 2) ((d) 3) (else -1)))
+(define (choice-for-key choices k)
+  (let ((i (letter->index k)))
+    (if (and (>= i 0) (< i (length choices))) (list-ref choices i) #f)))
+(define (paint-choices choices)
+  (let loop ((cs choices) (i 0))
+    (when (not (null? cs))
+      (say \"[\" (number->letter (+ i 1)) \"] \" (node-get (car cs) :label))
+      (loop (cdr cs) (+ i 1)))))
+
+(define (play-dialogue tree npc-name id keys)
   (let ((node (node-lookup tree id)))
-    (scene/imagine)
-    (surface/paper)
-
-    ;; Paint the NPC.
-    (paint-character npc-entity 300 180)
-
-    ;; Do the NPC's reaction gestures.
-    (apply-reactions npc-entity (node-get node :npc-reaction))
-
-    ;; Paint the NPC's line.
-    (paint-text 20 40 (string-append (npc-name npc-entity) \": \\\"\"
-                                     (node-get node :npc) \"\\\"\"))
-
-    ;; If there are no replies, the conversation is over.
+    ;; Show the NPC's reaction gestures, then the NPC's line.
+    (apply-reactions npc-name (node-get node :npc-reaction))
+    (say npc-name \": \\\"\" (node-get node :npc) \"\\\"\")
     (let ((replies (node-get node :replies)))
       (if (null? replies)
-          (paint-text 20 400 \"[press any key to end]\")
-          (paint-choices replies 20 400))
+          (begin (say \"[the conversation ends]\") id)
+          (begin
+            (paint-choices replies)
+            (if (null? keys)
+                id
+                (let ((chosen (choice-for-key replies (car keys))))
+                  (if chosen
+                      (play-dialogue tree npc-name (node-get chosen :goto) (cdr keys))
+                      (play-dialogue tree npc-name id (cdr keys))))))))))
 
-      (on-key
-        (lambda (k)
-          (if (null? replies)
-              (end-dialogue)
-              (let ((chosen (choice-for-key replies k)))
-                (if chosen
-                    (play-dialogue tree npc-entity
-                                   (node-get chosen :goto))
-                    (play-dialogue tree npc-entity id)))))))))
-
-(define (apply-reactions entity reactions)
+;; The reaction vocabulary. In a host each case fires a part/* body verb;
+;; here we name the gesture so the block runs and you can read the beats.
+(define (apply-reactions name reactions)
   (for-each
     (lambda (r)
-      (case r
-        ((nod)          (part/nod entity))
-        ((smile)        (part/expression entity 'smile))
-        ((soft-smile)   (part/expression entity 'soft-smile))
-        ((tilt)         (part/tilt entity 10))
-        ((lean-forward) (part/lean entity 8))
-        ((wave-in)      (part/wave entity 'right))
-        ((nod-slow)     (part/nod entity))       ;; runtime uses default speed
-        ((settle-in)    (part/lean entity -4))
-        ((steady)       (part/lean entity 0))
-        ((attentive)    (part/tilt entity 4))
-        (else #f)))
+      (say \"  (\" name \" reacts: \" r \")\"))
     reactions))
+
+;; Run the opening of Mira's chat, replying B then A.
+(play-dialogue chat-with-mira \"MIRA\" 'opening '(b a))
 ```
 
-The engine paints the NPC's body (with breath from the character
-signature we set earlier), applies whatever reaction gestures the
-node calls for, paints the line, and offers the replies. The kid
-picks A/B/C. The engine jumps to the target node and does it again.
+The engine shows the NPC's reaction gestures, then the NPC's line, then
+offers the replies. The kid picks A/B/C. The engine jumps to the target
+node and does it again.
 
-`apply-reactions` is a small vocabulary translator. When the tree
-says `(nod smile)`, that becomes `(part/nod mira)` and `(part/expression
-mira 'smile)`. You can add reactions to the vocabulary by adding cases
-to `apply-reactions`. Twelve to fifteen reactions cover 95% of what
-a scene needs.
+`apply-reactions` is a small vocabulary translator. In a graphics host,
+when the tree says `(nod smile)` that becomes `(part/nod mira)` and
+`(part/expression mira 'smile)` — body-language verbs that live in the
+consumer repo. Here we simply name each gesture so the walk runs at the
+REPL; you add reactions to the vocabulary by adding cases to
+`apply-reactions`. Twelve to fifteen reactions cover 95% of a scene.
 
 ---
 
@@ -180,36 +180,29 @@ When the kid is picking a reply, the currently-highlighted one should
 be visible. `paint-highlight` is designed for this.
 
 ```scheme
-(define (paint-replies-highlighted replies focus x y0)
+;; Portable highlight: the focused reply gets a \"->\" arrow, the rest a gap.
+(define (paint-replies-highlighted replies focus)
   (let loop ((rs replies) (i 0))
     (when (not (null? rs))
       (let ((label (string-append \"[\" (number->letter (+ i 1)) \"] \"
-                                  (node-get (car rs) :label)))
-            (y (+ y0 (* i 25))))
-        (if (= i focus)
-            (paint-highlight x y (+ x 400) (+ y 22)  :color 'soft-yellow)
-            #f)
-        (paint-text x y label))
+                                  (node-get (car rs) :label))))
+        (say (if (= i focus) \"-> \" \"   \") label))
       (loop (cdr rs) (+ i 1)))))
+
+;; Focus the second reply of Mira's opening node.
+(paint-replies-highlighted
+  (node-get (node-lookup chat-with-mira 'opening) :replies)
+  1)
 ```
 
-`paint-highlight` draws a soft-yellow rectangle behind the text at
-the given bounds. The currently-focused reply gets highlighted; the
-others do not. The kid moves the focus with up/down arrows and
-presses ENTER to select. This feels more like a real dialogue system
-than press-A-B-C.
+The focused reply is marked with `->`; the others are indented. The kid
+moves the focus with up/down arrows and presses ENTER to select. This
+feels more like a real dialogue system than press-A-B-C.
 
-Note: at the time of this writing, `paint-highlight` is a
-substrate-required verb — it returns a placeholder error record if the
-consumer has not wired the substrate. Fall back to a `paint-text` with
-a prefix `->` for the focused reply if you need portability:
-
-```scheme
-(paint-text x y
-  (if (= i focus)
-      (string-append \"-> \" label)
-      (string-append \"   \" label)))
-```
+In a graphics host you can go one better and draw a soft-yellow rectangle
+behind the focused reply instead of an arrow — that is a substrate verb
+(`paint-highlight`) the consumer wires. The `->` version above is the
+portable fallback and runs anywhere.
 
 ---
 
@@ -220,40 +213,28 @@ picked a reply within 20 seconds, the NPC should say something. Not
 'HELLO?' — something in character. 'Take your time.' Or a quiet look.
 
 ```scheme
-;; Set a timer at the start of each dialogue node.
-(define hesitation-timer 0)
+;; The check-in that fires at a given elapsed-frame count (60 fps).
+;; In a host this runs each frame via on-frame; here it is a pure function
+;; of \"how many frames has the player hesitated?\" so we can test the beats.
+(define (hesitation-check frames)
+  (cond
+    ((>= frames (* 60 90)) \"MIRA: 'Come find me when you know.' [walks away]\")
+    ((>= frames (* 60 40)) \"MIRA: 'You alright?'\")
+    ((>= frames (* 60 20)) \"MIRA: 'Take your time.'\")
+    (else #f)))    ;; still within the quiet window — say nothing
 
-(define (play-dialogue-with-timeout tree npc-entity id)
-  (let ((node (node-lookup tree id)))
-    ;; ... (paint node as before) ...
-    (set! hesitation-timer 0)
-    (on-frame
-      (lambda ()
-        (set! hesitation-timer (+ hesitation-timer 1))
-        (cond
-          ((= hesitation-timer (* 60 20))
-           (npc-gentle-check npc-entity))    ;; 20 seconds
-          ((= hesitation-timer (* 60 40))
-           (npc-second-check npc-entity))     ;; 40 seconds
-          ((= hesitation-timer (* 60 90))
-           (npc-give-up npc-entity)))))))     ;; 90 seconds — walks away
-
-(define (npc-gentle-check entity)
-  (part/tilt entity 5)
-  (paint-text 20 500 \"MIRA: 'Take your time.'\"))
-
-(define (npc-second-check entity)
-  (part/lean entity -4)
-  (paint-text 20 530 \"MIRA: 'You alright?'\"))
-
-(define (npc-give-up entity)
-  (part/turn entity 'front)
-  (paint-text 20 560 \"MIRA: 'Come find me when you know.' [walks away]\"))
+;; Sample the timeline: 10s (quiet), 25s, 50s, 100s.
+(for-each
+  (lambda (secs)
+    (let ((beat (hesitation-check (* 60 secs))))
+      (say secs \"s: \" (if beat beat \"(quiet)\"))))
+  '(10 25 50 100))
 ```
 
 Three tiers of check-in. Twenty seconds — a soft prompt. Forty seconds
-— a concerned check. Ninety seconds — the NPC leaves. Each with a
-matching body-language beat.
+— a concerned check. Ninety seconds — the NPC leaves. In a host each tier
+also fires a body-language beat (a small tilt, a lean, a turn to front)
+alongside the line.
 
 The 20/40/90 numbers are not universal. A scene where the player is
 supposed to be thinking hard about a big choice should give them 60/120/300.
@@ -288,11 +269,18 @@ handles this beautifully.
        \"MIRA: 'Are you still tired? Let me put a kettle on.'\")
       (else
        \"MIRA: 'Good to see you.'\"))))
+
+;; Last session the player said 'Tired, actually.' Today Mira remembers:
+(cortex/write (dialogue-log-key 'mira) '())
+(log-reply 'mira \"Tired, actually.\")
+(display (mira-recall-something)) (newline)
+;; => MIRA: 'Are you still tired? Let me put a kettle on.'
 ```
 
 Cortex stores every reply keyed by NPC. Mira's next scene reads the
-log and adjusts her opening line. The kid feels seen because the game
-saw her.
+log and adjusts her opening line. The reply labels are strings, so they
+round-trip through Cortex cleanly and `equal?` matches them exactly. The
+kid feels seen because the game saw her.
 
 Do not overuse this either. Mira should probably not open with 'you
 said the following twelve things last time.' She should recall one

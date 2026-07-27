@@ -12,7 +12,7 @@ import { defineConfig } from 'vitepress'
 
 export default defineConfig({
   title: 'Motoi Scheme',
-  description: 'The base Scheme dialect Sakura and Lacuna share.',
+  description: 'The base Scheme dialect its downstream dialects and Lacuna share.',
   cleanUrls: true,
   themeConfig: {
     nav: [

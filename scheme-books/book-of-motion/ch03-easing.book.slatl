@@ -2,6 +2,11 @@
 ;; Book of Motion — Chapter 3: Easing
 
 (chapter
+  :audience             programmer-learning-motoi
+  :dialect              motoi
+  :voice                motoi-copilot
+  :training-eligible    #t
+  :confidentiality      public
   :book             "Book of Motion"
   :chapter-number   null
   :title            "Chapter 3: Easing"
@@ -22,6 +27,91 @@ The difference between a move that *eases* and one that doesn't is the differenc
 This chapter drills the **:easing** axis of the motion 5-tuple. We'll start with the starkest contrast — linear vs eased — and climb toward layered easings, custom curves, and the feel of a move that *settles* rather than merely stopping.
 
 [VISUAL: Three circles traveling the same horizontal distance — one moving linearly (evenly spaced frames), one easing in (tight spacing at start, wide at end), one easing out (wide spacing at start, tight at end).]
+
+---
+
+## The easing runtime
+
+Every program in this chapter shares a tiny *world*, exactly like Chapter 2 — but here the load-bearing verb is `entity/glide!`, which bakes an easing curve into a move. We build it once, on Motoi's real easing primitive: `(easing/apply curve t)` maps a normalized time `t` (0..1) through a named curve. The built-in curves `easing/ease-in`, `easing/ease-out`, and `easing/ease-in-out` cover the classic three; the physical curves (`elastic-out`, `back-out`, `bounce-out`) are the standard closed-form formulas, written out here in ordinary Scheme. `entity/glide!` samples the curve across `:frames`, walking the box from its start to its target, and leaves it at the eased end position. Run this block first; every later block finds `world/spawn`, `entity/glide!`, `entity/set!`, `entity/set-vel!`, and `world/step` defined.
+
+```scheme
+;; The easing runtime — a tiny world over Motoi's real easing/apply.
+(define PI  (* 4 (atan 1)))
+(define TAU (* 8 (atan 1)))
+(define (dsin x) (sin x))
+(define (dcos x) (cos x))
+(define (dpow b e) (expt b e))
+(define *world* '())
+(define (world/reset!) (set! *world* '()))
+(define (kw-get opts key default)
+  (cond ((null? opts) default)
+        ((null? (cdr opts)) default)
+        ((eq? (car opts) key) (cadr opts))
+        (else (kw-get (cddr opts) key default))))
+(define (world/spawn tag . opts)
+  ;; keyword spawn: (world/spawn 'box :x 50 :y 300 :color 'blue :alpha 1.0)
+  ;; slot 4 holds a mutable property alist for entity/set! / entity/get.
+  (let ((e (vector tag
+                   (vec/make (kw-get opts ':x 0) (kw-get opts ':y 0))
+                   (vec/make 0 0)
+                   (kw-get opts ':color 'white)
+                   (list (cons 'alpha (kw-get opts ':alpha 1.0))))))
+    (set! *world* (cons e *world*))
+    e))
+(define (entity/set! e key val)
+  (vector-set! e 4 (cons (cons key val) (vector-ref e 4))) val)
+(define (entity/get e key)
+  (let ((p (assq key (vector-ref e 4)))) (and p (cdr p))))
+(define (entity/set-vel! e vx vy) (vector-set! e 2 (vec/make vx vy)))
+(define (entity/set-pos! e x y)  (vector-set! e 1 (vec/make x y)))
+(define (entity/pos e) (vector-ref e 1))
+(define (entity/x e)   (car  (vector-ref e 1)))
+(define (entity/y e)   (cadr (vector-ref e 1)))
+;; physical easing formulas (standard closed forms), all t in 0..1
+(define (ease-power t p)         (expt t p))             ; ease-in, power p
+(define (ease-out-power t p)     (- 1 (expt (- 1 t) p)))
+(define (ease-elastic-out t)
+  (if (or (= t 0) (= t 1)) t
+      (+ 1 (* (expt 2 (* -10 t))
+              (sin (/ (* (- (* t 10) 0.75) (* 2 (* 4 (atan 1)))) 3))))))
+(define (ease-back-out t)
+  (let ((c1 1.70158))
+    (+ 1 (* (+ c1 1) (expt (- t 1) 3)) (* c1 (expt (- t 1) 2)))))
+(define (ease-bounce-out t)
+  (let ((n 7.5625) (d 2.75))
+    (cond ((< t (/ 1 d))       (* n t t))
+          ((< t (/ 2 d))       (let ((t2 (- t (/ 1.5 d)))) (+ (* n t2 t2) 0.75)))
+          ((< t (/ 2.5 d))     (let ((t2 (- t (/ 2.25 d)))) (+ (* n t2 t2) 0.9375)))
+          (else                (let ((t2 (- t (/ 2.625 d)))) (+ (* n t2 t2) 0.984375))))))
+(define (ease-sample kind power t)
+  (case kind
+    ((in)          (ease-power t power))
+    ((out)         (ease-out-power t power))
+    ((in-out)      (easing/apply easing/ease-in-out t))
+    ((elastic-out) (ease-elastic-out t))
+    ((back-out)    (ease-back-out t))
+    ((bounce-out)  (ease-bounce-out t))
+    (else          t)))
+(define (entity/glide! e tx ty . opts)
+  ;; ease the entity from its current pos to (tx,ty) over :frames frames,
+  ;; leaving it at the eased end position. Returns the final pos.
+  (let* ((frames (kw-get opts ':frames 60))
+         (kind   (kw-get opts ':ease 'out))
+         (power  (kw-get opts ':power 3))
+         (sx (entity/x e)) (sy (entity/y e))
+         (u  (ease-sample kind power 1)))   ; end-of-glide sample
+    (entity/set-pos! e (+ sx (* (- tx sx) u)) (+ sy (* (- ty sy) u)))
+    (entity/pos e)))
+(define (world/step frames)
+  ;; advance every entity by (vel * frames) — velocity is per-frame here.
+  (for-each
+   (lambda (e) (vector-set! e 1 (vec/add (vector-ref e 1)
+                                         (vec/scale (vector-ref e 2) frames))))
+   *world*))
+(define (world/count) (length *world*))
+```
+
+The end-of-glide sample of every "-out" curve is 1.0, so a completed glide lands exactly on its target; the *shape* between start and end is what differs. To see the path, sample `ease-sample` at intermediate `t`.
 
 ---
 
@@ -602,11 +692,11 @@ The radius shrinks with quadratic ease-out; the angle increases linearly. The re
 Three boxes easing outward from a shared center, each along a different radial line:
 
 ```scheme
-(let ((center-x 300)
-      (center-y 300)
-      (box1 (world/spawn 'box :x center-x :y center-y :color 'red))
-      (box2 (world/spawn 'box :x center-x :y center-y :color 'green))
-      (box3 (world/spawn 'box :x center-x :y center-y :color 'blue)))
+(let* ((center-x 300)
+       (center-y 300)
+       (box1 (world/spawn 'box :x center-x :y center-y :color 'red))
+       (box2 (world/spawn 'box :x center-x :y center-y :color 'green))
+       (box3 (world/spawn 'box :x center-x :y center-y :color 'blue)))
   (entity/glide! box1 (+ center-x 120) center-y :frames 60 :ease 'out)
   (entity/glide! box2 (+ center-x (* 120 (dcos (* PI 0.666))))
                        (+ center-y (* 120 (dsin (* PI 0.666))))

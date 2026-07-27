@@ -1,0 +1,223 @@
+;; ═══════════════════════════════════════════════════════════════
+;; MOTOI CORTEX — the cortex.slatl schema + the RAG contract
+;;
+;; Doctrine (Alfred, 2026-07-25): "put the 4 in some slatl schema and
+;; make a Cortex slatl that is universally useful. And teach the LLM to
+;; use it for rag. And allow pruning of memory. Use a schema that it can
+;; use. And one that's extensible and let the LLM use it."
+;;
+;; This is the OPEN cortex. Motoi ships a JS engine over ~/motoi/cortex.slatl
+;; (episodic memory) + the four Jung-axis graphs (world knowledge, read-only).
+;; Curator ships a PROPRIETARY Rust cortex: the same public graphs as a base
+;; layer + private corpora + vector search. The FORMAT and the RETRIEVAL SHAPE
+;; are open and identical; the scale and the private reach are proprietary.
+;;
+;; Authority: this file is the schema of record for cortex.slatl. The runtime
+;; is lib/ai/cortex.js. When code and this spec disagree, fix whichever is
+;; wrong and record the reason — they must agree. Every code block here RUNS
+;; through ./bin/motoi (verified 2026-07-25).
+;; ═══════════════════════════════════════════════════════════════
+
+(dialect :applies ("motoi") :note "Cortex is a Motoi core subsystem. Downstream dialects and Curator consume the same schema through their own engines.")
+
+;; ─── The two-store model ─────────────────────────────────────────
+
+(cortex-spec
+  :area "two-store-model"
+  :summary "One retrieval surface, two backing stores. Memory is written; knowledge is virtual."
+  :rules
+    (("MEMORY TIER — episodic. What Motoi has been told. Line-delimited
+      (cortex-record ...) forms in ~/motoi/cortex.slatl. Written by
+      cortex/remember, cortex/record, cortex/write. Prunable."
+       :cross-ref "lib/ai/cortex.js writeAll")
+     ("KNOWLEDGE TIER — the four Jung-axis graphs (graph-of-sensation,
+      -intuition, -thinking, -feeling). Read-only. VIRTUAL: never written into
+      cortex.slatl. Folding 450 KB of graph nodes into an append-store that
+      rewrites its whole file on every write is 'bad to graph' — so knowledge
+      is read live from the graphs and merged into results as :kind :knowledge."
+       :cross-ref "lib/ai/world-knowledge.js, lib/ai/cortex.js knowledgeSearch/knowledgeLookup")
+     ("ONE SURFACE — cortex/search and cortex/recall answer across BOTH tiers.
+      The model does not choose a store; it asks the cortex, and memory +
+      knowledge come back ranked together, each record tagged with its :kind."
+       :cross-ref "lib/ai/cortex.js cortex/search")))
+
+;; ─── The record schema (extensible) ──────────────────────────────
+
+(cortex-spec
+  :area "record-schema"
+  :summary "One extensible record. Known fields have fixed order; unknown fields round-trip untouched."
+  :rules
+    (("A memory record is (cortex-record :field value :field value ...)."
+       :cross-ref "lib/ai/cortex.js recordToForm")
+     (":kind      — :memory | :fact | :episode | anything. The model may invent kinds."
+       :cross-ref "lib/ai/cortex.js")
+     (":id        — unique handle, auto-assigned (mem-<ts>-<rand>) when omitted."
+       :cross-ref "lib/ai/cortex.js nextId")
+     (":key       — optional exact-recall handle (cortex/read / cortex/recall / cortex/forget)."
+       :cross-ref "lib/ai/cortex.js")
+     (":text      — the searchable body. cortex/search token-matches here first."
+       :cross-ref "lib/ai/cortex.js recordText")
+     (":tags      — optional list of strings."
+       :cross-ref "lib/ai/cortex.js")
+     (":salience  — 0..1 keep-weight for pruning. Default 0.5. Low = scratch, high = keep."
+       :cross-ref "lib/ai/cortex.js cortex/prune")
+     (":ts        — epoch ms, set on write."
+       :cross-ref "lib/ai/cortex.js")
+     (":data      — arbitrary extensible payload, an alist ((:k v) ...). Filterable by cortex/query."
+       :cross-ref "lib/ai/cortex.js cortex/query")
+     (":provenance — which verb wrote the record."
+       :cross-ref "lib/ai/cortex.js")
+     ("EXTENSIBILITY CONTRACT — unknown fields and unknown :kind values store and
+      round-trip untouched. The model may invent fields; the cortex keeps them.
+      Known fields serialize in a fixed order; invented fields trail after."
+       :cross-ref "lib/ai/cortex.js FIELD_ORDER")))
+
+;; A real record as it appears on disk:
+;;   (cortex-record :kind :memory :id "mem-1785005044103-272724"
+;;     :key "high-score" :tags ("game" "arcade") :salience 0.5
+;;     :ts 1785005044103 :data 4200 :provenance "cortex/remember")
+
+;; ─── honest-#f ───────────────────────────────────────────────────
+
+(cortex-spec
+  :area "honest-null"
+  :summary "Absence is #f, not a magic sentinel. Ask honestly; get an honest no."
+  :rules
+    (("cortex/read and cortex/recall return #f when nothing is known. Test with
+      (if v ...) — no nil sentinel, no exception."
+       :cross-ref "lib/ai/cortex.js cortex/read / cortex/recall")
+     ("cortex/search and cortex/query return the empty list () on no match — safe
+      to walk with map/for-each, safe to test with (null? hits)."
+       :cross-ref "lib/ai/cortex.js")
+     ("Honest-#f composes with the honest-null doctrine: Motoi says 'I don't know'
+      by returning #f, and the SFT layer teaches it to SAY so."
+       :cross-ref "memory: honest_null_is_training_signal")))
+
+;; ─── The RAG contract — how the LLM grounds an answer ────────────
+
+(cortex-spec
+  :area "rag-contract"
+  :summary "search → read the :text → compose. The model calls cortex/search to ground."
+  :rules
+    (("STEP 1 — SEARCH. (cortex/search query [k]) returns up to k records (memory +
+      knowledge) ranked by token overlap. This is THE verb the model calls to
+      ground an answer in what it knows. Default k = 8."
+       :cross-ref "lib/ai/cortex.js cortex/search")
+     ("STEP 2 — READ. Each returned record is an alist. Pull :text (the body),
+      :kind (memory vs knowledge), :key/:id (the handle). Knowledge records also
+      carry :axis and :associations from the Jung graph."
+       :cross-ref "lib/ai/cortex.js recordToAlist / knowledgeAlist")
+     ("STEP 3 — COMPOSE. The model reads the :text of the top hits and writes its
+      answer from them. If search returns (), the honest answer is 'I don't know'."
+       :cross-ref "memory: probe_facts_not_words")
+     ("EXACT RECALL — when the model knows the handle, (cortex/recall key) fetches
+      one record directly (memory key/id first, then a knowledge-graph lookup),
+      or #f. Cheaper than search; use it when the key is known."
+       :cross-ref "lib/ai/cortex.js cortex/recall")))
+
+;; The RAG loop, runnable:
+;;   ;; ground an answer about a game concept in the knowledge tier
+;;   (define hits (cortex/search "arcade player score" 3))
+;;   (for-each
+;;     (lambda (rec)
+;;       (let ((kind (cadr (assq ':kind rec)))
+;;             (text (cadr (assq ':text rec))))
+;;         (display kind) (display ": ") (display text) (newline)))
+;;     hits)
+
+;; ─── Pruning — memory hygiene ────────────────────────────────────
+
+(cortex-spec
+  :area "pruning"
+  :summary "Memory is finite and prunable. Knowledge is never touched by prune."
+  :rules
+    (("(cortex/prune) with no args — gentle default: drop memory records with
+      salience < 0.1 (scratch thoughts). Returns the count pruned."
+       :cross-ref "lib/ai/cortex.js cortex/prune")
+     ("(cortex/prune :older-than ms) — drop memory older than (now - ms)."
+       :cross-ref "lib/ai/cortex.js")
+     ("(cortex/prune :min-salience s) — drop memory with salience < s."
+       :cross-ref "lib/ai/cortex.js")
+     ("(cortex/prune :keep n) — after the above filters, keep only the n most recent."
+       :cross-ref "lib/ai/cortex.js")
+     ("PRUNE NEVER TOUCHES KNOWLEDGE — the four graphs are read-only; prune only
+      rewrites the memory tier. Salience is the model's dial: remember important
+      facts at high salience so a later prune spares them."
+       :cross-ref "lib/ai/cortex.js")))
+
+;; ─── The fourteen verbs ──────────────────────────────────────────
+
+(cortex-verb :name "cortex/search"   :sig "(cortex/search query [k]) -> (record ...)"
+  :tier "rag" :perm "read"
+  :summary "Rank up to k records (memory + knowledge) by token overlap. THE grounding verb.")
+(cortex-verb :name "cortex/recall"   :sig "(cortex/recall key) -> record | #f"
+  :tier "rag" :perm "read"
+  :summary "Fetch one record by handle: memory key/id first, then a knowledge lookup. #f if unknown.")
+(cortex-verb :name "cortex/remember" :sig "(cortex/remember key value [:tags (...)] [:salience s]) -> #t"
+  :tier "write" :perm "paint"
+  :summary "Upsert a keyed memory record. value -> :text if a string, else :data. Re-remember replaces.")
+(cortex-verb :name "cortex/record"   :sig "(cortex/record :k v :k v ...) -> #t"
+  :tier "write" :perm "paint"
+  :summary "Append a free-form memory record. kwargs land in :data; :text/:salience/:kind are lifted.")
+(cortex-verb :name "cortex/query"    :sig "(cortex/query :k v ...) -> (record ...)"
+  :tier "read" :perm "read"
+  :summary "Return memory records whose :data matches every given field. () on no match.")
+(cortex-verb :name "cortex/topk"     :sig "(cortex/topk k [:k v ...]) -> (record ...)"
+  :tier "read" :perm "read"
+  :summary "The k most-recent memory records, optionally filtered by :data fields.")
+(cortex-verb :name "cortex/read"     :sig "(cortex/read key) -> value | #f"
+  :tier "kv" :perm "read"
+  :summary "Read the value stored under key (:text or :data). #f when absent.")
+(cortex-verb :name "cortex/write"    :sig "(cortex/write key value) -> #t"
+  :tier "kv" :perm "paint"
+  :summary "KV alias of remember: store value under key. Last-writer-wins.")
+(cortex-verb :name "cortex/forget"   :sig "(cortex/forget key) -> #t | #f"
+  :tier "write" :perm "paint"
+  :summary "Drop the memory record at key/id. #t if one was removed, #f if none.")
+(cortex-verb :name "cortex/prune"    :sig "(cortex/prune [:older-than ms] [:min-salience s] [:keep n]) -> count"
+  :tier "hygiene" :perm "paint"
+  :summary "Prune memory by age / salience / recency. Never touches knowledge. Returns count pruned.")
+(cortex-verb :name "cortex/keys"     :sig "(cortex/keys) -> (key ...)"
+  :tier "read" :perm "read"
+  :summary "List the keys of keyed memory records.")
+(cortex-verb :name "cortex/size"     :sig "(cortex/size) -> integer"
+  :tier "read" :perm "read"
+  :summary "Count of stored memory records. Knowledge is virtual and not counted.")
+(cortex-verb :name "cortex/associate" :sig "(cortex/associate from to label) -> #t"
+  :tier "graph" :perm "paint"
+  :summary "Append a labeled edge from -> to. Makes the memory tier a graph, not just a KV log.")
+(cortex-verb :name "cortex/lookup"   :sig "(cortex/lookup key [label]) -> (target ...) | #f"
+  :tier "graph" :perm "read"
+  :summary "Walk edges out of key, optionally filtered by label. #f when no such edge is known.")
+
+;; ─── Edges (the graph half) ──────────────────────────────────────
+(cortex-schema
+  :area "edges"
+  :summary "The same file holds labeled edges alongside records — one flexible s-expr store."
+  :notes
+    ((";; an edge line, coexisting with (cortex-record ...) lines in the same file:"
+      :example #t)
+     ("(cortex-edge :from \"mem-1\" :to \"mem-2\" :label :selected-over :ts 172...)"
+      :example #t)
+     (":from / :to — record keys or ids the edge connects."
+      :cross-ref "lib/ai/cortex.js formToEdge / edgeToForm")
+     (":label — the relation symbol (e.g. :selected-over, :evidence, :instance-of)."
+      :cross-ref "lib/ai/cortex.js cortex/associate")
+     ("cortex/associate appends an edge; cortex/lookup walks edges by label."
+      :cross-ref "lib/ai/cortex.js cortex/lookup")
+     ("Edges survive compaction (prune/forget/upsert re-emit them untouched)."
+      :cross-ref "lib/ai/cortex.js writeAll")))
+
+;; ─── Append-only ─────────────────────────────────────────────────
+(cortex-schema
+  :area "append-only"
+  :summary "New records and edges are APPENDED (one write, not a whole-file re-serialize)."
+  :notes
+    (("cortex/record and cortex/associate append a single line via appendFileSync."
+      :cross-ref "lib/ai/cortex.js appendForm")
+     ("Whole-file rewrite (writeAll) is reserved for compaction that must drop lines:
+      upsert-by-key (remember/write), forget, and prune. It preserves edges."
+      :cross-ref "lib/ai/cortex.js writeAll")))
+
+;; End of schema. New fields extend the record; new verbs extend the surface.
+;; Keep this file and lib/ai/cortex.js in agreement.

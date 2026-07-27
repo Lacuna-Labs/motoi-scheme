@@ -1,11 +1,11 @@
 // tui/themes.js — Motoi theme loader.
 //
-// Doctrine (Alfred, 2026-07-20): "Motoi is Sakura's dad. Two themes
-// ship: Sakura (default, soft blossom) and Hacker (80s green terminal).
-// People who don't like pink can flip. Users can define their own."
+// Doctrine (Alfred, 2026-07-20): Two themes ship — Blossom (default,
+// soft blossom) and Hacker (80s green terminal). People who don't like
+// pink can flip. Users can define their own.
 //
 // Themes are line-delimited s-expressions (SLAT) — see
-// themes/sakura.slat for the schema. Each theme file declares a set
+// themes/blossom.slat for the schema. Each theme file declares a set
 // of NAMED COLORS (RGB triples) and a set of ROLES (semantic → color
 // name). The TUI paints against roles; roles resolve to colors; colors
 // resolve to RGBs the palette module renders as ANSI.
@@ -31,7 +31,7 @@ const USER_THEMES_DIR    = join(homedir(), 'motoi', 'themes')
 
 // ── fallback (used when no theme file loads) ──────────────────────
 // Every role we know how to paint has an entry, so the TUI can boot
-// even against a corrupt user theme. Values mirror the Sakura defaults.
+// even against a corrupt user theme. Values mirror the Blossom defaults.
 const FALLBACK_ROLES = Object.freeze({
   bg: 'pearl', bgPanel: 'pearlLight', bgHover: 'pearlShadow',
   fg: 'fg', fgDim: 'fgDim',
@@ -149,11 +149,11 @@ export function listThemes() {
  * `.colors` (name → RGB triple), `.name`, `.aesthetic`, and `.roleColor`
  * (role → color-name string, useful for the tier-based Screen API).
  *
- * On any load failure, returns a Sakura-shaped fallback so callers can
+ * On any load failure, returns a Blossom-shaped fallback so callers can
  * always paint something.
  */
 export function loadTheme(name) {
-  const themeName = String(name || 'sakura').toLowerCase()
+  const themeName = String(name || 'blossom').toLowerCase()
   // Seed user dir on the first loadTheme call — cheap check, silent
   // when already seeded. This means the first `motoi tui` a user runs
   // populates ~/motoi/themes/ so `motoi tui --theme mine` works once
@@ -176,13 +176,13 @@ export function loadTheme(name) {
     } catch { /* try next */ }
   }
   if (src == null) {
-    // Unknown theme — fall back to Sakura shipped. If even that
+    // Unknown theme — fall back to Blossom shipped. If even that
     // fails, use the hardcoded fallback role map.
-    if (themeName !== 'sakura') {
-      try { return loadTheme('sakura') } catch { /* fall through */ }
+    if (themeName !== 'blossom') {
+      try { return loadTheme('blossom') } catch { /* fall through */ }
     }
     return {
-      name: 'sakura',
+      name: 'blossom',
       aesthetic: 'cherry blossom · soft · warm',
       colors: {},
       roles: { ...FALLBACK_ROLES },      // role → color name
@@ -207,7 +207,7 @@ export function loadTheme(name) {
 
 /**
  * Pick the active theme based on:
- *   opts.theme  (explicit)  →  MOTOI_THEME env  →  opts.hacker → 'hacker'  →  'sakura'
+ *   opts.theme  (explicit)  →  MOTOI_THEME env  →  opts.hacker → 'hacker'  →  'blossom'
  */
 export function activeTheme(opts = {}) {
   const explicit = opts.theme
@@ -215,7 +215,7 @@ export function activeTheme(opts = {}) {
   const env = process.env.MOTOI_THEME
   if (env) return loadTheme(env)
   if (opts.hacker) return loadTheme('hacker')
-  return loadTheme('sakura')
+  return loadTheme('blossom')
 }
 
 /**

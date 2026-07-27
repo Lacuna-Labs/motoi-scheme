@@ -448,8 +448,8 @@ export function handleComposerKey(key, state, ctx) {
 
 // ── helpers ─────────────────────────────────────────────────────────
 
-// Not every theme paints `amber` (Sakura's blossom-name tier). If the
-// theme doesn't know it, fall through to the built-in SAKURA palette,
+// Not every theme paints `amber` (a blossom-name tier). If the
+// theme doesn't know it, fall through to the built-in BLOSSOM palette,
 // which does. Screen's palette module already does exactly this in
 // makePalette.rgbFor — we're just guarding against typos here.
 function safeColor(name, state) {

@@ -1,4 +1,5 @@
-// Tiny s-expression reader — no dependencies.
+// Tiny s-expression reader — one leaf dependency (r7rs-types, pure value
+// classes) for the R7RS §6.6 character type produced by `#\` literals.
 //
 // Parses Scheme source into plain JS values so the interpreter can walk them:
 //   number  → JS number          string → JS string
@@ -26,9 +27,29 @@
 //      is bounded (LRU-ish, capped) so a long session can't grow it
 //      without limit. `clearParseCache()` is the test seam.
 
+import { ch, mkVec } from '../lib/base/r7rs-types.js'
+import { makeRational } from '../lib/math/exact.js'
+
 export class Sym {
   constructor(name) { this.name = name }
   toString() { return this.name }
+}
+
+// R7RS §6.6 named character literals → their scalar values. Anything not
+// listed is a single-character literal (#\a) or a #\xHH hex escape.
+const CHAR_NAMES = {
+  space: ' ', newline: '\n', tab: '\t', return: '\r', nul: '\0', null: '\0',
+  delete: '\x7f', escape: '\x1b', altmode: '\x1b', backspace: '\b',
+  alarm: '\x07', linefeed: '\n', page: '\f', rubout: '\x7f',
+}
+function charFromToken(rest) {
+  if (rest.length === 1) return rest                       // #\a #\( #\space-as-literal
+  const lower = rest.toLowerCase()
+  if (lower in CHAR_NAMES) return CHAR_NAMES[lower]
+  if ((rest[0] === 'x' || rest[0] === 'X') && /^[0-9a-fA-F]+$/.test(rest.slice(1))) {
+    return String.fromCodePoint(parseInt(rest.slice(1), 16))
+  }
+  throw new ReadError(`unknown character literal #\\${rest}`, null, null)
 }
 
 const SYMS = new Map()
@@ -59,6 +80,7 @@ export function tagPos(form, pos) {
 // `e` after digits (no exponent digits) is NOT a number — it stays a
 // symbol, matching Scheme reader tradition.
 const NUM_RE = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/
+const RAT_RE = /^[+-]?\d+\/\d+$/
 const DELIM = new Set([' ', '\t', '\n', '\r', '(', ')', ';', "'", '"'])
 
 // A reader error that carries a {line,col} so callers can point at the
@@ -147,6 +169,31 @@ export function tokenize(src) {
       out.push({ t: { str: s }, line: L, col: C })
       continue
     }
+    // R7RS §6.9 bytevector literal: #u8(b0 b1 …). Emit an open-token that the
+    // parser turns into a Uint8Array; the trailing `(` is consumed here.
+    if (c === '#' && src[i + 1] === 'u' && src[i + 2] === '8' && src[i + 3] === '(') {
+      out.push({ t: '#u8(', line: L, col: C }); adv(4); continue
+    }
+    // R7RS §6.8 vector literal: #(e0 e1 …). Emit an open-token that the
+    // parser turns into a SchemeVector; the trailing `(` is consumed here.
+    if (c === '#' && src[i + 1] === '(') {
+      out.push({ t: '#(', line: L, col: C }); adv(2); continue
+    }
+    // R7RS §6.6 character literal: #\X, #\space, #\(, #\newline, #\x41 ...
+    // The char immediately after `#\` is ALWAYS taken literally (even a
+    // delimiter like `(` or a space); if it's a letter we keep reading to
+    // capture named literals (space/newline/tab/…).
+    if (c === '#' && src[i + 1] === '\\') {
+      let j = i + 2
+      if (j < n) {
+        const first = src[j]
+        j++                                     // always consume one char
+        if (/[A-Za-z]/.test(first)) { while (j < n && !DELIM.has(src[j])) j++ }
+      }
+      out.push({ t: src.slice(i, j), line: L, col: C })
+      adv(j - i)
+      continue
+    }
     let j = i                                                               // atom
     while (j < n && !DELIM.has(src[j])) j++
     out.push({ t: src.slice(i, j), line: L, col: C })
@@ -159,6 +206,16 @@ function atom(tok) {
   if (typeof tok === 'object' && tok && 'str' in tok) return tok.str
   if (tok === '#t') return true
   if (tok === '#f') return false
+  if (tok.length >= 3 && tok[0] === '#' && tok[1] === '\\') return ch(charFromToken(tok.slice(2)))
+  // R7RS number tower: inexact infinities/NaN, then exact rational literals.
+  if (tok === '+inf.0') return Infinity
+  if (tok === '-inf.0') return -Infinity
+  if (tok === '+nan.0' || tok === '-nan.0') return NaN
+  if (RAT_RE.test(tok)) {
+    const slash = tok.indexOf('/')
+    const den = BigInt(tok.slice(slash + 1))
+    if (den !== 0n) return makeRational(BigInt(tok.slice(0, slash)), den)
+  }
   if (NUM_RE.test(tok)) return parseFloat(tok)
   return sym(tok)
 }
@@ -180,6 +237,26 @@ function parseInner(src) {
       }
       pos++ // consume )
       return tagPos(list, { line: tk.line, col: tk.col })
+    }
+    if (t === '#u8(') {
+      const bytes = []
+      while (true) {
+        if (pos >= toks.length) throw new ReadError('missing ) in bytevector', tk.line, tk.col)
+        if (toks[pos].t === ')') break
+        bytes.push(read())
+      }
+      pos++ // consume )
+      return Uint8Array.from(bytes.map((b) => Number(b) & 0xff))
+    }
+    if (t === '#(') {
+      const items = []
+      while (true) {
+        if (pos >= toks.length) throw new ReadError('missing ) in vector', tk.line, tk.col)
+        if (toks[pos].t === ')') break
+        items.push(read())
+      }
+      pos++ // consume )
+      return mkVec(items)
     }
     if (t === ')') throw new ReadError('unexpected )', tk.line, tk.col)
     if (t === "'") return tagPos([sym('quote'), read()], { line: tk.line, col: tk.col })

@@ -6,7 +6,7 @@ titleTemplate: A language you can hold and change
 hero:
   name: Motoi Scheme
   text: A language you can hold and change
-  tagline: Small enough for an 11-year-old. Open. Nobody's product. The substrate Sakura, Curator, and Lacuna share.
+  tagline: Small enough for an 11-year-old. Open. Nobody's product. The substrate downstream dialects, Curator, and Lacuna share.
   actions:
     - theme: brand
       text: Try the Composer
@@ -37,7 +37,7 @@ features:
 
 # Motoi Scheme
 
-Motoi (基, "foundation") is the base Scheme dialect Sakura and Lacuna share. It's small. Open source. Not a product.
+Motoi (基, "foundation") is the base Scheme dialect its downstream dialects and Lacuna share. It's small. Open source. Not a product.
 
 The point of Motoi isn't Motoi. It's the kid — the one who opens the composer, drags a slider, sees a number change in the file, and realizes the file was hers all along. Motoi is a stepping stone to Claude, to other languages, to systems the kid didn't know were reachable.
 

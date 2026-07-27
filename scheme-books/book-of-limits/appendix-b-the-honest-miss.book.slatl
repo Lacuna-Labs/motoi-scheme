@@ -1,0 +1,192 @@
+(chapter
+  :book             "Book of Limits"
+  :chapter-number   "B"
+  :kind             "appendix"
+  :title            "The Honest Miss — what the error census structurally cannot see"
+  :audience         "motoi-copilot + operators + programmer-learning-motoi"
+  :dialect          "motoi"
+  :voice            "motoi-copilot"
+  :training-eligible #t
+  :confidentiality  "public"
+  :provenance
+    ((:authored-at "2026-07-27"
+      :authored-by "introspection+limits authoring lane"
+      :method "every error message and every code block in this appendix was produced by running it through ./bin/motoi run (isolated MOTOI_STATS_PATH for census counts) — nothing here is aspirational"
+      :sources
+        ((:impl "lib/system/verb-stats.js" :note "noteError fires at the eval boundary; PROMOTE_THRESHOLD; _ERR_FAMILIES roster")
+         (:impl "src/interp.js" :note "the run/eval/REPL boundary the error hook watches")
+         (:card "scheme/reference/error-cards/silent-non-errors.slatl" :note "blind spot (a) — wrong value, no throw")
+         (:card "scheme/reference/error-cards/expand-and-reader-time.slatl" :note "blind spot (b) — errors before the eval boundary")
+         (:card "scheme/reference/error-cards/roster-not-observed.slatl" :note "blind spot (c) — reserved keys never thrown")
+         (:book "book-of-limits" :chapter "A" :section "reading-the-error"))))
+  :prose
+"# Appendix B — The Honest Miss
+
+Appendix A taught you to *read* an error: the clean errors, the leaky
+ones, and the census card behind a count. This appendix teaches the
+opposite skill — reading what the census *cannot* show you. It is the
+hardest honesty a metric can offer: knowing where its own vision ends.
+
+The error census is a WRONG SINK. Every failure that escapes a running
+program drains into it, is normalized to a stable key, and is counted.
+That is a real and useful thing. But a sink only collects what flows
+*into* it, and the census sits at exactly one place in the pipeline:
+the run / eval / REPL boundary. `noteError` in `lib/system/verb-stats.js`
+fires only for errors that ESCAPE a program at that boundary. Anything
+that fails somewhere else — earlier, quieter, or not at all — never
+reaches the drain.
+
+So there are three blind spots the census cannot see *by construction*.
+Not bugs. Not gaps to be patched by reading harder. Structural silences.
+This appendix names all three, and then draws the one lesson that ties
+them together: a zero in this census means \"unmet here, so far,\" never
+\"impossible.\"
+
+## B.1 Blind spot (a): the silent non-error
+
+The most dangerous failures make no noise at all. Motoi's core is
+permissive — it coerces rather than complains. So a whole class of
+programs are *wrong* and yet throw *nothing*:
+
+```scheme
+(display (string-length 5))
+;; => 1
+```
+
+That should be a type error — `5` is not a string. Instead the host
+coerces `5` to `\"5\"`, measures it, and hands back `1`. No `error:`
+line. No condition raised. `guard` never fires. And because nothing was
+thrown, the census counted *nothing*. Same shape here:
+
+```scheme
+(display (/ 1 0))
+;; => +inf.0
+```
+
+Division by zero is IEEE floating point in Motoi, not a raised error. It
+yields `+inf.0` and the program runs to the end. The census stays flat.
+
+These are not errors — they are wrong *answers*. A sink for thrown
+wrongs cannot catch a wrong that was never thrown. That is blind spot
+(a), and it is why the disciplined reflex is not \"read the error\" but
+\"check the result.\" The full catalogue of observed silent non-errors —
+`(+ 1 \"x\")`, `(cons 1 2 3)`, `(sqrt -4)`, arity mismatches, out-of-range
+reads — lives in the error card
+`scheme/reference/error-cards/silent-non-errors.slatl`. Read it when a
+result looks wrong but the census is empty; the emptiness is the census
+being honest, not the program being fine.
+
+## B.2 Blind spot (b): reader-time and expand-time errors
+
+The census watches the *eval* boundary. But a program has to be READ
+into forms, and macros have to be EXPANDED into core forms, before
+`eval` ever runs a line. Errors in those two upstream phases are real,
+they stop your program, they print a clear message — and they fire
+*before* the hook that counts:
+
+```scheme
+(display \"abc
+;; error: unterminated string (line 1, col 10)
+```
+
+That is a genuine failure. Your program did not run. But it failed in
+the READER, turning source text into forms, upstream of `eval`. The
+census never saw it. The same is true of a missing paren
+(`error: missing )`), an unexpected close paren, an end-of-input
+mid-form, and a runaway macro that expands into itself. All real, all
+common in language and module work, all invisible to `stats/error-*`.
+
+There is a sharp consequence for detection. You cannot `guard` a reader
+error inside the same source that fails to read — the whole text is
+rejected before evaluation begins, so there is nothing for `guard` to
+wrap:
+
+```scheme
+(display (guard (e (#t 'caught)) 1
+;; error: missing ) (line 1, col 10)
+```
+
+The `guard` you wrote is never reached; the reader error escapes past
+it. Detection here is a TOOLING job — editor paren-balance, string-close
+checks, a base case on every recursive macro — not a runtime one. The
+full accounting, including the honest note that several real reader
+messages do not even match their intended roster family regex, is in
+`scheme/reference/error-cards/expand-and-reader-time.slatl`. The lesson
+for this book: **a flat census after a parse failure is not 'no
+problems' — it is the census looking the other way.**
+
+## B.3 Blind spot (c): reserved keys that never fire
+
+Open `_ERR_FAMILIES` in `lib/system/verb-stats.js` and you will find
+fourteen family regexes — reserved coordinates for classic error kinds.
+Reserving a coordinate is not the same as occupying it. Several of those
+keys have no code path in Motoi that throws a message matching them.
+They sit at zero, forever, until the language changes.
+
+You can ask the census directly:
+
+```scheme
+(stats/error-count-of \"division-by-zero\")
+;; => 0
+
+(stats/error-count-of \"not-a-pair\")
+;; => 0
+```
+
+Both are zero — and will stay zero — because the underlying operations
+are *silent non-errors* today (`(/ 1 0)` returns `+inf.0`; `(car 5)`
+returns nothing) rather than clean throws. The key `division-by-zero` is
+a *promise the taxonomy makes*, not a *description of what Motoi does*.
+The reserved roster (`not-a-pair`, `wrong-arity`, `division-by-zero`,
+`index-out-of-range`, `program-too-big`, `frozen-sandbox`,
+`unquote-splicing-misplaced`) is a to-do list for making the language
+stricter, catalogued honestly in
+`scheme/reference/error-cards/roster-not-observed.slatl`. When one of
+these starts throwing cleanly at the eval boundary, its count will begin
+to rise and the reserved coordinate graduates into an observed one.
+
+## B.4 The one lesson: a zero is 'unmet here, so far'
+
+Put the three blind spots together and a single discipline falls out.
+When `stats/error-count-of` returns `0`, it can mean any of at least
+four different things:
+
+1. This wrong genuinely never happened. (The optimistic reading.)
+2. This wrong happens silently — no throw, so nothing to count (B.1).
+3. This wrong fires before the eval boundary — read/expand time (B.2).
+4. This key is reserved but no code path throws it yet (B.3).
+
+The census cannot tell these apart for you. It reports the count and
+nothing more. So the honest reading of a zero is never \"this is
+impossible\" — it is **\"unmet here, so far.\"** Unmet: no escaped throw
+landed on this key. Here: at the eval boundary, which is not the whole
+pipeline. So far: over the sessions on disk, which is not all time.
+
+This is the deepest limit in the whole book, because it is a limit *of a
+measurement*, not of the language. A programmer — or a small model
+writing code — who reads a zero as proof of safety will ship the exact
+bug the census could not see. The operator who reads a zero as \"unmet
+here, so far\" reaches past the metric: checks the result for a silent
+coercion, balances the parens the reader would have choked on, and does
+not claim \"Motoi throws division-by-zero\" when it actually returns
+`+inf.0`.
+
+## B.5 The reflex, stated once
+
+- A nonzero count is a *fact*: that wrong escaped, that many times, at
+  the eval boundary. Trust it as far as it goes.
+- A zero count is *not* a fact about the world — it is a fact about the
+  sink. Ask which of the four readings applies before you rely on it.
+- When correctness matters and the census is silent, add the throw the
+  language does not: guard your own preconditions with `(error ...)` so
+  a silent wrong becomes a loud, countable one — moving it out of the
+  blind spot and into the sink where it can be seen.
+- For reader and macro failures, reach for tooling, not telemetry. The
+  census will stay flat; that is correct, not comforting.
+
+Reasoning about what a metric CANNOT see is the same skill as reasoning
+about what a *language* cannot do — the skill this whole book is about.
+The census is honest precisely because it does not pretend its silence
+is safety. Neither should you.
+"
+)

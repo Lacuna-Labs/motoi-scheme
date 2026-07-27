@@ -1,8 +1,7 @@
 ;; ch02-story-tree.book.slatl
 ;; Book of Narrative Games — Chapter 2: The Story Tree
 
-(dialect :applies ("motoi" "sakura"))
-
+(dialect :applies ("motoi") :note "Applies to Motoi. Per-record :dialect overrides where a record is specific to one surface.")
 (chapter
   :book                "Book of Narrative Games"
   :chapter-number      2
@@ -14,7 +13,7 @@
   :author-lane         "narrative-games-engineer-lane-2026-07-16"
   :training-eligible   #t
   :confidentiality     "public"
-  :voice               "sakura-teaching + narrative-craft"
+  :voice               "motoi-teaching + narrative-craft"
   :book-version        "1.0.0"
   :draws-from-preserved (:book "book-of-games-preserved" :ch 1 :ch 2)
   :prose
@@ -90,38 +89,27 @@ We need one function that takes a story and a starting id and does the
 right thing. Here is the whole engine.
 
 ```scheme
-;; Find a node in the story by id.
-(define (node-lookup story id)
-  (find (lambda (n) (eq? (node-get n :id) id)) story))
+(define (say . xs) (for-each display xs) (newline))
 
+;; Read a keyed field out of a node's flat plist.
 (define (node-get node key)
   (cond ((null? node) #f)
         ((eq? (car node) key) (cadr node))
         (else (node-get (cddr node) key))))
 
-;; Paint a node and let the kid choose.
-(define (play-node story id)
-  (let ((node (node-lookup story id)))
-    (if (not node)
-        (paint-text 20 40 (string-append \"?? node not found: \" (symbol->string id)))
-        (begin
-          (scene/imagine)
-          (surface/paper)
-          (paint-text 20 40 (node-get node :text))
-          (paint-choices (node-get node :choices) 20 160)
-          (on-key
-            (lambda (k)
-              (let ((chosen (choice-for-key (node-get node :choices) k)))
-                (if chosen
-                    (play-node story (node-get chosen :goto))
-                    (play-node story id)))))))))
+;; Find a node in the story by id.
+(define (node-lookup story id)
+  (find (lambda (n) (eq? (node-get n :id) id)) story))
 
-(define (paint-choices choices y0 x)
+;; Paint a node: its text and its numbered choices.
+(define (paint-node node)
+  (say (node-get node :text))
+  (paint-choices (node-get node :choices)))
+
+(define (paint-choices choices)
   (let loop ((cs choices) (i 0))
     (when (not (null? cs))
-      (paint-text x (+ y0 (* i 25))
-        (string-append \"[\" (number->letter (+ i 1)) \"] \"
-                       (node-get (car cs) :label)))
+      (say \"[\" (number->letter (+ i 1)) \"] \" (node-get (car cs) :label))
       (loop (cdr cs) (+ i 1)))))
 
 (define (choice-for-key choices k)
@@ -139,14 +127,35 @@ right thing. Here is the whole engine.
     ((e) 4) ((f) 5) ((g) 6) ((h) 7)
     (else -1)))
 
-;; Kick it off.
-(big-bang :init (lambda () (play-node story 'kitchen)))
+;; The engine: paint the current node, take one key, move to the next id.
+;; In a host this loops on live key presses; here we drive it with a
+;; scripted list of keys so the whole walk runs at the REPL.
+(define (play-node story id keys)
+  (let ((node (node-lookup story id)))
+    (if (not node)
+        (say \"?? node not found: \" id)
+        (begin
+          (paint-node node)
+          (if (null? keys)
+              id                        ;; out of input — stop here
+              (let ((chosen (choice-for-key (node-get node :choices)
+                                            (car keys))))
+                (if chosen
+                    (play-node story (node-get chosen :goto) (cdr keys))
+                    (play-node story id (cdr keys)))))))))
+
+;; Kick it off: walk from the kitchen, pressing A then B.
+(play-node story 'kitchen '(a b))
 ```
 
-Twenty-five lines of engine, plus five of helpers. It never mentions
-kitchens, doors, or gardens. It works for any story you write in the
-same shape. This is the point of pulling data out of code: the engine
+The engine is a small recursive walker plus a few helpers. It never
+mentions kitchens, doors, or gardens. It works for any story you write in
+the same shape. This is the point of pulling data out of code: the engine
 gets reused; the story gets rewritten as often as you like.
+
+In a graphics host the `say` calls become `paint-text` at pixel
+coordinates and the scripted `keys` list is replaced by an on-key handler
+the runtime calls for every keystroke. The walk logic is identical.
 
 Change the story and the engine still works. Add ten more scenes to
 `story` and press play again. That is a design win worth pausing on.
@@ -161,36 +170,38 @@ A kid plays a small tree twice and the second time she should see which
 choices she has already tried. We use Cortex to track it.
 
 ```scheme
-;; Track visited nodes across sessions.
-(define (play-node-remembering story id)
-  (cortex/write 'last-node id)
-  (let* ((visited (or (cortex/read 'visited-nodes) '()))
-         (already (member id visited)))
-    (cortex/write 'visited-nodes (cons id visited))
-    (let ((node (node-lookup story id)))
-      (scene/imagine)
-      (surface/paper)
-      (paint-text 20 40 (node-get node :text))
-      (paint-choices-with-visited
-        (node-get node :choices) visited 20 160)
-      (on-key
-        (lambda (k)
-          (let ((chosen (choice-for-key (node-get node :choices) k)))
-            (if chosen
-                (play-node-remembering story (node-get chosen :goto))
-                (play-node-remembering story id))))))))
+;; Cortex stores ids as strings (values round-trip through disk as text),
+;; so we key the visited-set on the id's string form.
+(define (id->key id) (symbol->string id))
 
-(define (paint-choices-with-visited choices visited x y0)
-  (let loop ((cs choices) (i 0))
-    (when (not (null? cs))
-      (let* ((c (car cs))
-             (target (node-get c :goto))
-             (seen? (member target visited))
-             (label (string-append \"[\" (number->letter (+ i 1)) \"] \"
-                                   (node-get c :label)
-                                   (if seen? \" (visited)\" \"\"))))
-        (paint-text x (+ y0 (* i 25)) label))
-      (loop (cdr cs) (+ i 1)))))
+;; Mark a node visited and report whether it had been seen before.
+(define (visit-node! id)
+  (let* ((k       (id->key id))
+         (visited (or (cortex/read 'visited-nodes) '()))
+         (seen?   (if (member k visited) #t #f)))
+    (cortex/write 'visited-nodes (cons k visited))
+    seen?))
+
+;; Paint choices, tagging any whose target has already been visited.
+(define (paint-choices-with-visited choices)
+  (let ((visited (or (cortex/read 'visited-nodes) '())))
+    (let loop ((cs choices) (i 0))
+      (when (not (null? cs))
+        (let* ((c      (car cs))
+               (target (id->key (node-get c :goto)))
+               (seen?  (member target visited)))
+          (say \"[\" (number->letter (+ i 1)) \"] \"
+               (node-get c :label)
+               (if seen? \" (visited)\" \"\")))
+        (loop (cdr cs) (+ i 1))))))
+
+;; Try it: visit a couple of nodes, then paint the kitchen's choices.
+(cortex/write 'visited-nodes '())
+(visit-node! 'kitchen)
+(visit-node! 'garden)
+(paint-choices-with-visited (node-get (node-lookup story 'kitchen) :choices))
+(display \"garden seen already? \")
+(display (visit-node! 'garden)) (newline)      ;; => #t
 ```
 
 Now when the kid opens the game tomorrow, the choices she has already
@@ -201,8 +212,10 @@ for her time.
 
 `cortex/read` returns `#f` if the key has never been set. We
 `(or ... '())` to default to the empty list. Then `member` checks if a
-node id is in the list. `member` returns a tail-list if found, `#f` if
-not, which is truthy/falsy — perfect for `if`.
+node id (as a string) is in the list. `member` returns a tail-list if
+found, `#f` if not, which is truthy/falsy — perfect for `if`. Because
+Cortex saves values as text, we store the id's `symbol->string` form and
+compare strings; that is why `visit-node!` calls `id->key` first.
 
 ---
 
@@ -212,30 +225,32 @@ An ending is any node whose choices list is empty. The engine should
 notice this and offer the kid a way to reset or replay.
 
 ```scheme
-(define (play-node-with-endings story id)
-  (let ((node (node-lookup story id)))
-    (scene/imagine)
-    (surface/paper)
-    (paint-text 20 40 (node-get node :text))
-    (let ((choices (node-get node :choices)))
-      (if (null? choices)
-          (paint-ending-panel)
-          (paint-choices choices 20 160))
-      (on-key
-        (lambda (k)
+(define (paint-ending-panel)
+  (say \"~~~ end ~~~\")
+  (say \"[R] replay from start   [Q] back to menu\"))
+
+(define (play-node-with-endings story id keys)
+  (let* ((node    (node-lookup story id))
+         (choices (node-get node :choices)))
+    (say (node-get node :text))
+    (if (null? choices)
+        (paint-ending-panel)
+        (paint-choices choices))
+    (if (null? keys)
+        id
+        (let ((k (car keys)))
           (if (null? choices)
               (case k
-                ((r) (play-node-with-endings story 'kitchen))   ;; replay
-                ((q) (return-to-menu))
-                (else (play-node-with-endings story id)))
+                ((r) (play-node-with-endings story 'kitchen (cdr keys))) ;; replay
+                ((q) 'menu)                                              ;; back to menu
+                (else (play-node-with-endings story id (cdr keys))))
               (let ((chosen (choice-for-key choices k)))
                 (if chosen
-                    (play-node-with-endings story (node-get chosen :goto))
-                    (play-node-with-endings story id)))))))))
+                    (play-node-with-endings story (node-get chosen :goto) (cdr keys))
+                    (play-node-with-endings story id (cdr keys)))))))))
 
-(define (paint-ending-panel)
-  (paint-text 20 220 \"~~~ end ~~~\")
-  (paint-text 20 260 \"[R] replay from start   [Q] back to menu\"))
+;; Walk to an ending, then press R to replay from the kitchen.
+(play-node-with-endings story 'kitchen '(b a r))
 ```
 
 The kid reaches the ending scene. The engine sees the empty choices

@@ -64,7 +64,16 @@ import sys
 from pathlib import Path
 from datetime import datetime, timezone
 
-REF_PATH = Path("/Users/alfred/code/motoi-scheme/scheme/MOTOI-SCHEME-REFERENCE.slat")
+# The reference is now a chaptered book (one folder, many .slat chapters). The
+# old single-file monolith (scheme/MOTOI-SCHEME-REFERENCE.slat) was retired
+# 2026-07-24 and archived under _archive/. Read every chapter and concatenate.
+REF_DIR = Path("/Users/alfred/code/motoi-scheme/scheme/reference")
+
+
+def read_reference_text() -> str:
+    """Concatenate every chapter .slat in the reference book, in filename order."""
+    chapters = sorted(p for p in REF_DIR.glob("*.slat"))
+    return "\n".join(p.read_text() for p in chapters)
 OUT_JSONL = Path(
     "/Users/alfred/code/motoi-scheme/training-data/reference-examples-2026-07-16.jsonl"
 )
@@ -294,11 +303,11 @@ def build_assistant_reply(code: str, note: str, summary: str | None) -> str:
 
 
 def main() -> int:
-    if not REF_PATH.exists():
-        print(f"ERROR: reference not found at {REF_PATH}", file=sys.stderr)
+    if not REF_DIR.is_dir():
+        print(f"ERROR: reference book not found at {REF_DIR}", file=sys.stderr)
         return 2
 
-    text = REF_PATH.read_text()
+    text = read_reference_text()
 
     verb_records: list[dict] = []
     malformed_forms = 0
@@ -406,7 +415,7 @@ def main() -> int:
         "_provenance_header": True,
         "generated_at": GENERATED_AT,
         "generator": GENERATOR,
-        "source": str(REF_PATH),
+        "source": str(REF_DIR),
         "verb_records_scanned": len(verb_records),
         "unique_verb_names": len(seen_names),
         "duplicate_verb_names": len(duplicate_names),
@@ -505,7 +514,7 @@ def write_coverage(
     lines.append(
         ";;; Coverage of Blocker B4 reference-example-extractor.py against"
     )
-    lines.append(";;; /Users/alfred/code/motoi-scheme/scheme/MOTOI-SCHEME-REFERENCE.slat")
+    lines.append(";;; /Users/alfred/code/motoi-scheme/scheme/reference/ (chaptered book)")
     lines.append(";;;")
     lines.append(";;; :audience         :engineer")
     lines.append(";;; :dialect          \"motoi\"")
@@ -524,7 +533,7 @@ def write_coverage(
     lines.append("(coverage-report")
     lines.append(f'  :generated-at "{GENERATED_AT}"')
     lines.append(f'  :generator "{_slat_str(GENERATOR)}"')
-    lines.append(f'  :source "{REF_PATH}"')
+    lines.append(f'  :source "{REF_DIR}"')
     lines.append(f'  :jsonl-output "{OUT_JSONL}"')
     lines.append(f"  :verb-records-scanned {verb_records}")
     lines.append(f"  :unique-verb-names {unique_verbs}")

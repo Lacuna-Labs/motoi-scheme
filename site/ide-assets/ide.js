@@ -143,9 +143,80 @@ function cycleFocus() {
 function log(kind, text) {
   const logNode = $('#repl-log')
   if (!logNode) return
+  // ANSI passthrough — fb/dump emits `\x1b[38;5;N;48;5;Mm▀` runs. If the
+  // stdout stream contains those, render each escape-run into a styled
+  // <span> so the ▀ blocks paint as colored pixels in the panel. Non-ANSI
+  // text (the vast majority of REPL output) takes the fast path.
+  if (typeof text === 'string' && text.indexOf('\x1b[') !== -1) {
+    const line = el('div', { class: kind + ' motoi-ansi' })
+    fillAnsiInto(line, text)
+    logNode.appendChild(line)
+    logNode.scrollTop = logNode.scrollHeight
+    return
+  }
   const line = el('div', { class: kind }, [text])
   logNode.appendChild(line)
   logNode.scrollTop = logNode.scrollHeight
+}
+
+// ── ANSI-to-DOM (Task 4, 2026-07-20) ─────────────────────────────────
+// Decode xterm-256 fg/bg escapes into per-run <span> elements. Supports
+// the exact SGR shape `fb/dump` emits (`\x1b[38;5;N;48;5;Mm...`) plus
+// `\x1b[0m` resets. Anything else is ignored — the escape is stripped
+// and the payload printed with the current colors. Multi-line output is
+// preserved (each newline emits a <br>). About 50 lines total.
+
+const XTERM_LOW = [
+  [0,0,0],[128,0,0],[0,128,0],[128,128,0],[0,0,128],[128,0,128],[0,128,128],[192,192,192],
+  [128,128,128],[255,0,0],[0,255,0],[255,255,0],[0,0,255],[255,0,255],[0,255,255],[255,255,255],
+]
+function xterm256ToCss(n) {
+  n = n | 0
+  if (n < 16) { const c = XTERM_LOW[n] || [0,0,0]; return `rgb(${c[0]},${c[1]},${c[2]})` }
+  if (n >= 232) { const g = 8 + (n - 232) * 10; return `rgb(${g},${g},${g})` }
+  const i = n - 16
+  const r = Math.floor(i / 36), g = Math.floor((i % 36) / 6), b = i % 6
+  const s = (v) => v === 0 ? 0 : 55 + v * 40
+  return `rgb(${s(r)},${s(g)},${s(b)})`
+}
+function fillAnsiInto(root, text) {
+  let fg = null, bg = null
+  let buf = ''
+  const flush = () => {
+    if (!buf) return
+    const style = []
+    if (fg) style.push('color:' + fg)
+    if (bg) style.push('background:' + bg)
+    // Use white-space: pre so runs of ▀ don't collapse; per-span style
+    // beats the wall-clock cost of splitting every char to its own node.
+    const span = document.createElement('span')
+    if (style.length) span.setAttribute('style', style.join(';'))
+    span.textContent = buf
+    root.appendChild(span)
+    buf = ''
+  }
+  let i = 0
+  while (i < text.length) {
+    const c = text[i]
+    if (c === '\x1b' && text[i + 1] === '[') {
+      const mEnd = text.indexOf('m', i + 2)
+      if (mEnd < 0) { i++; continue }
+      flush()
+      const params = text.slice(i + 2, mEnd).split(';').map((s) => parseInt(s, 10) | 0)
+      for (let p = 0; p < params.length; p++) {
+        const v = params[p]
+        if (v === 0) { fg = null; bg = null }
+        else if (v === 38 && params[p + 1] === 5) { fg = xterm256ToCss(params[p + 2]); p += 2 }
+        else if (v === 48 && params[p + 1] === 5) { bg = xterm256ToCss(params[p + 2]); p += 2 }
+      }
+      i = mEnd + 1
+      continue
+    }
+    if (c === '\n') { flush(); root.appendChild(document.createElement('br')); i++; continue }
+    buf += c
+    i++
+  }
+  flush()
 }
 
 // Append an already-constructed DOM node to the REPL log (for structured
@@ -597,18 +668,120 @@ function renderInlineProse(root, prose, t, nextIdx) {
   const parts = String(prose).split(/```scheme\s*\n([\s\S]*?)\n```/g)
   parts.forEach((chunk, i) => {
     if (i % 2 === 0) {
-      const paras = chunk.split(/\n\n+/)
-      for (const p of paras) {
-        const text = p.trim()
-        if (!text) continue
-        if (/^##\s/.test(text)) root.appendChild(el('h2', {}, [text.replace(/^##\s*/, '')]))
-        else if (/^#\s/.test(text)) { /* skip; chapter h1 already rendered */ }
-        else root.appendChild(el('p', {}, [text]))
-      }
+      renderMarkdownChunk(root, chunk)
     } else {
       root.appendChild(makeCodeBlock(chunk, '', t, nextIdx()))
     }
   })
+}
+
+// ── mini-markdown renderer ─────────────────────────────────────────
+//
+// Handles headings (#, ##, ###), unordered lists (- / *), ordered lists
+// (1.), fenced code blocks other than ```scheme (rendered read-only —
+// scheme blocks are already split upstream so they become Run-able), blockquotes
+// (>), horizontal rules (---), paragraphs, and inline bold/em/code/links.
+// Deliberately tiny — Motoi is hermetic; a full parser would be overkill.
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+
+// Inline: `code`, **bold**, *em* / _em_, [text](url). Order matters —
+// code first (its content should not be re-tokenized), then bold before
+// em (** wraps *).
+function renderInline(text) {
+  let s = escHtml(text)
+  s = s.replace(/`([^`\n]+)`/g, (_m, c) => '<code>' + c + '</code>')
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+  s = s.replace(/(^|[^\w])_([^_\n]+)_(?=[^\w]|$)/g, '$1<em>$2</em>')
+  s = s.replace(/(^|[^*\w])\*([^*\n]+)\*(?=[^*\w]|$)/g, '$1<em>$2</em>')
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g,
+    (_m, t, u) => '<a href="' + u + '" target="_blank" rel="noopener">' + t + '</a>')
+  return s
+}
+
+function renderMarkdownChunk(root, chunk) {
+  const lines = String(chunk).replace(/\r\n/g, '\n').split('\n')
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]
+    if (line.trim() === '') { i++; continue }
+    // Headings.
+    let m = line.match(/^(#{1,3})\s+(.*)$/)
+    if (m) {
+      const level = m[1].length
+      if (level === 1) { /* chapter h1 already emitted; skip */ i++; continue }
+      const tag = level === 2 ? 'h2' : 'h3'
+      root.appendChild(el(tag, { html: renderInline(m[2]) }))
+      i++
+      continue
+    }
+    // Horizontal rule.
+    if (/^\s*---+\s*$/.test(line)) {
+      root.appendChild(el('hr'))
+      i++
+      continue
+    }
+    // Blockquote — gather consecutive `> ` lines.
+    if (/^>\s?/.test(line)) {
+      const buf = []
+      while (i < lines.length && /^>\s?/.test(lines[i])) {
+        buf.push(lines[i].replace(/^>\s?/, ''))
+        i++
+      }
+      root.appendChild(el('blockquote', { html: renderInline(buf.join(' ')) }))
+      continue
+    }
+    // Unordered list.
+    if (/^\s*[-*]\s+/.test(line)) {
+      const ul = el('ul')
+      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+        const text = lines[i].replace(/^\s*[-*]\s+/, '')
+        ul.appendChild(el('li', { html: renderInline(text) }))
+        i++
+      }
+      root.appendChild(ul)
+      continue
+    }
+    // Ordered list.
+    if (/^\s*\d+\.\s+/.test(line)) {
+      const ol = el('ol')
+      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+        const text = lines[i].replace(/^\s*\d+\.\s+/, '')
+        ol.appendChild(el('li', { html: renderInline(text) }))
+        i++
+      }
+      root.appendChild(ol)
+      continue
+    }
+    // Fenced code block (non-scheme — scheme blocks were already split).
+    if (/^```/.test(line)) {
+      const buf = []
+      i++
+      while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i++ }
+      if (i < lines.length) i++   // consume closing fence
+      root.appendChild(el('pre', {}, [el('code', {}, [buf.join('\n')])]))
+      continue
+    }
+    // Paragraph — gather consecutive non-blank, non-block lines.
+    const paraBuf = []
+    while (i < lines.length && lines[i].trim() !== ''
+           && !/^(#{1,3})\s/.test(lines[i])
+           && !/^```/.test(lines[i])
+           && !/^\s*[-*]\s+/.test(lines[i])
+           && !/^\s*\d+\.\s+/.test(lines[i])
+           && !/^>\s?/.test(lines[i])
+           && !/^\s*---+\s*$/.test(lines[i])) {
+      paraBuf.push(lines[i])
+      i++
+    }
+    if (paraBuf.length) {
+      root.appendChild(el('p', { html: renderInline(paraBuf.join(' ')) }))
+    }
+  }
 }
 
 // A code block + inline output card. Pressing Run runs the block and

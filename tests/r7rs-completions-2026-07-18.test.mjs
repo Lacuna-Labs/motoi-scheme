@@ -58,8 +58,11 @@ test('filter-map — SRFI-1 map then drop #f', () => {
   assert.deepEqual(run('(filter-map (lambda (x) (if (odd? x) (* x x) #f)) (list 1 2 3 4 5))'), [1, 9, 25])
 })
 
-test('partition — SRFI-1 split by predicate', () => {
-  const r = run('(partition odd? (list 1 2 3 4 5))')
+test('partition — SRFI-1 split by predicate (returns TWO values)', () => {
+  // SRFI-1 partition returns two values (in-list out-list); receive them.
+  // (values/call-with-values live in the core env; let-values is a base
+  // special form, so the base-env harness consumes the values that way.)
+  const r = run('(let-values (((yes no) (partition odd? (list 1 2 3 4 5)))) (list yes no))')
   assert.deepEqual(r, [[1, 3, 5], [2, 4]])
 })
 
@@ -265,18 +268,20 @@ test('utf8->string / string->utf8 — R7RS §6.9', () => {
 
 // ── Hash tables — SRFI-125 ──────────────────────────────────────────
 
-test('make-hash-table / set! / ref / exists?', () => {
+test('make-hash-table / set! / ref / contains?', () => {
   const src = `
     (define h (make-hash-table))
     (hash-table-set! h "k" 42)
-    (list (hash-table-ref h "k") (hash-table-exists? h "k") (hash-table-exists? h "missing"))
+    (list (hash-table-ref h "k") (hash-table-contains? h "k") (hash-table-contains? h "missing"))
   `
   assert.deepEqual(run(src), [42, true, false])
 })
 
-test('hash-table-ref default value on miss', () => {
-  assert.equal(run('(hash-table-ref (make-hash-table) "k" "default")'), 'default')
-  assert.equal(run('(hash-ref (make-hash-table) "k" "sakura-default")'), 'sakura-default')
+test('hash-table-ref/default value on miss; hash-table-ref failure thunk', () => {
+  // SRFI-125: hash-table-ref/default takes a plain default value.
+  assert.equal(run('(hash-table-ref/default (make-hash-table) "k" "default")'), 'default')
+  // SRFI-125: hash-table-ref's 3rd arg is a FAILURE THUNK, not a plain value.
+  assert.equal(run('(hash-table-ref (make-hash-table) "k" (lambda () "thunk-default"))'), 'thunk-default')
 })
 
 test('hash-table-delete! / hash-table-size / hash-table-clear!', () => {
@@ -327,20 +332,22 @@ test('hash-table-fold — left fold over entries', () => {
 // ── Vectors — R7RS §6.8 ──────────────────────────────────────────────
 
 test('vector / make-vector / vector? / vector-length', () => {
-  assert.deepEqual(run('(vector 1 2 3)'), [1, 2, 3])
-  assert.deepEqual(run('(make-vector 3 0)'), [0, 0, 0])
+  // R7RS §6.8: vectors are a DISTINCT type (SchemeVector), never a list.
+  assert.deepEqual(run('(vector 1 2 3)').items, [1, 2, 3])
+  assert.deepEqual(run('(make-vector 3 0)').items, [0, 0, 0])
   assert.equal(run('(vector? (vector 1 2))'), true)
+  assert.equal(run('(vector? (list 1 2))'), false)   // disjoint from lists
   assert.equal(run('(vector-length (vector 1 2 3))'), 3)
 })
 
 test('vector-map / vector-for-each / vector-fill!', () => {
-  assert.deepEqual(run('(vector-map square (vector 1 2 3))'), [1, 4, 9])
+  assert.deepEqual(run('(vector-map square (vector 1 2 3))').items, [1, 4, 9])
   const src = `
     (define v (vector 1 2 3))
     (vector-fill! v 0)
     v
   `
-  assert.deepEqual(run(src), [0, 0, 0])
+  assert.deepEqual(run(src).items, [0, 0, 0])
 })
 
 // ── Exceptions — R7RS §6.11 ─────────────────────────────────────────

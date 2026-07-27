@@ -2,8 +2,7 @@
 ;; Book of Simulation Games — Chapter 12: Game Theory: Nim, Wythoff, Grundy
 ;; Authored 2026-07-16 by simulation-games-engineer-lane.
 
-(dialect :applies ("motoi" "sakura"))
-
+(dialect :applies ("motoi") :note "Applies to Motoi. Per-record :dialect overrides where a record is specific to one surface.")
 (chapter
   :book                "Book of Simulation Games"
   :chapter-number      12
@@ -15,7 +14,7 @@
   :author-lane         "simulation-games-engineer-lane-2026-07-16"
   :training-eligible   #t
   :confidentiality     "public"
-  :voice               "sakura-teaching + physics-simulation-emergent"
+  :voice               "motoi-teaching + physics-simulation-emergent"
   :book-version        "1.0.0"
   :draws-from-preserved (:book "book-of-games-preserved" :ch 10)
   :provenance          ((:authored-by "Engineer") (:date "2026-07-16"))
@@ -49,19 +48,52 @@ positions; the 'forces' are legal moves.
 ## 12.1 Nim, played out
 
 ```scheme
-;; Nim with three piles.
+;; Nim's whole strategy is arithmetic: the Nim-sum is the XOR of the
+;; pile sizes. Motoi has no bitwise XOR primitive, so we build one
+;; from ordinary arithmetic — extract bits, compare, reassemble.
+(define (bit-xor2 a b)
+  (let loop ((a a) (b b) (bit 1) (acc 0))
+    (if (and (= a 0) (= b 0))
+        acc
+        (let ((da (modulo a 2)) (db (modulo b 2)))
+          (loop (quotient a 2) (quotient b 2) (* bit 2)
+                (+ acc (* bit (if (= da db) 0 1))))))))
+(define (nim-sum piles) (fold bit-xor2 0 piles))
+
+;; A move is (pile-index new-size). nim-move finds the winning move
+;; (leaves Nim-sum zero) or #f if none exists.
+(define (nim-move piles)
+  (let ((s (nim-sum piles)))
+    (let loop ((i 0) (ps piles))
+      (if (null? ps)
+          #f
+          (let ((target (bit-xor2 s (car ps))))
+            (if (< target (car ps))
+                (list i target)
+                (loop (+ i 1) (cdr ps))))))))
+(define (best-nim-move state)
+  (or (nim-move state)                       ;; winning move if one exists
+      (let loop ((i 0) (ps state))           ;; else (losing): take 1
+        (cond ((null? ps) #f)
+              ((> (car ps) 0) (list i (- (car ps) 1)))
+              (else (loop (+ i 1) (cdr ps)))))))
+(define (apply-move state mv)
+  (let loop ((i 0) (ps state))
+    (if (null? ps)
+        '()
+        (cons (if (= i (car mv)) (cadr mv) (car ps))
+              (loop (+ i 1) (cdr ps))))))
+
+;; Nim with three piles: both players play perfectly.
 (define (nim-play piles)
-  (world/reset!)
   (let loop ((state piles) (turn 'A))
-    (cond
-      ((andmap zero? state)
-       (list 'winner (if (eq? turn 'A) 'B 'A)))
-      (else
-        (let ((move (if (eq? turn 'A)
-                        (best-nim-move state)
-                        (best-nim-move state))))
-          (loop (apply-move state move)
-                (if (eq? turn 'A) 'B 'A)))))))
+    (if (every zero? state)
+        (list 'winner (if (eq? turn 'A) 'B 'A))
+        (loop (apply-move state (best-nim-move state))
+              (if (eq? turn 'A) 'B 'A)))))
+
+(nim-play '(3 5 6))
+;; => (winner B)   ;; (3 5 6) is a P-position: player A (the mover) loses
 ```
 
 `best-nim-move` finds the move that leaves an XOR-zero state, if any
@@ -70,16 +102,20 @@ x3`. If it's zero, the current player is in a losing position (P-
 position); if nonzero, they can move to a P-position and win.
 
 ```scheme
-(game/nim-sum '(3 5 6))
+(nim-sum '(3 5 6))
 ;; => 0     (this is a P-position — the mover loses with perfect play)
 
-(game/nim-sum '(4 5 6))
+(nim-sum '(4 5 6))
 ;; => 7     (N-position — the mover has a winning move)
 
-(game/nim-outcome '(4 5 6))
+;; the outcome falls straight out of the Nim-sum
+(define (nim-outcome piles)
+  (if (zero? (nim-sum piles)) 'P 'N))
+
+(nim-outcome '(4 5 6))
 ;; => N     (Next-player wins)
 
-(game/nim-outcome '(3 5 6))
+(nim-outcome '(3 5 6))
 ;; => P     (Previous-player wins, i.e., current mover loses)
 ```
 
@@ -108,12 +144,12 @@ eventually loses. That's why Nim-sum-zero is a P-position (previous
 player wins).
 
 From Nim-sum-nonzero, you can always find a pile to reduce so the
-new Nim-sum becomes zero. That's the winning move. `game/nim-move`
-finds it.
+new Nim-sum becomes zero. That's the winning move. `nim-move`
+(defined above) finds it.
 
 ```scheme
-(game/nim-move '(4 5 6))
-;; => (0 . 3)     ;; reduce pile 0 (the '4') to 3, making Nim-sum zero
+(nim-move '(4 5 6))
+;; => (0 3)     ;; reduce pile 0 (the '4') to 3, making Nim-sum zero
 ```
 
 That is the complete strategy for Nim, in one function call. There
@@ -131,10 +167,22 @@ where phi is the golden ratio. The golden ratio, of all things,
 appears at the heart of a two-pile game.
 
 ```scheme
-(game/wythoff-p? 3 5)
+;; The P-positions are the pairs (floor(k*phi), floor(k*phi^2)).
+;; We scan k upward until the smaller coordinate passes ours.
+(define phi (/ (+ 1 (sqrt 5)) 2))
+(define (wythoff-p? a b)
+  (let ((lo (min a b)) (hi (max a b)))
+    (let scan ((k 0))
+      (let ((wl (exact (floor (* k phi))))
+            (wh (exact (floor (* k phi phi)))))
+        (cond ((> wl hi) #f)
+              ((and (= wl lo) (= wh hi)) #t)
+              (else (scan (+ k 1))))))))
+
+(wythoff-p? 3 5)
 ;; => #t     (this is (floor(2*phi), floor(2*phi^2)))
 
-(game/wythoff-p? 4 5)
+(wythoff-p? 4 5)
 ;; => #f
 ```
 
@@ -156,10 +204,15 @@ excludant) of the Grundy numbers of all positions reachable in one
 move.
 
 ```scheme
-(game/mex '(0 1 2 4))
+;; mex = smallest non-negative integer NOT in the set.
+(define (mex lst)
+  (let loop ((m 0))
+    (if (member m lst) (loop (+ m 1)) m)))
+
+(mex '(0 1 2 4))
 ;; => 3     (smallest non-negative integer not in the set)
 
-(game/mex '(1 2 3))
+(mex '(1 2 3))
 ;; => 0
 ```
 
@@ -172,14 +225,26 @@ Nim: three independent piles = XOR of pile sizes = Nim-sum.
 Now compute Grundy for an arbitrary impartial game:
 
 ```scheme
-;; Subtraction game: pile of N, each turn take 1, 2, or 3 stones.
-(define (sub-moves n)
-  (filter positive? (map (lambda (k) (- n k)) '(1 2 3))))
+;; grundy(pos) = mex of grundy over all reachable positions.
+;; Memoize so repeated positions cost nothing.
+(define grundy-cache (make-hash-table))
+(define (grundy pos moves-fn)
+  (or (hash-table-ref/default grundy-cache pos #f)
+      (let ((g (mex (map (lambda (p) (grundy p moves-fn))
+                         (moves-fn pos)))))
+        (hash-table-set! grundy-cache pos g)
+        g)))
 
-(game/grundy 0  sub-moves)  ;; => 0  (terminal)
-(game/grundy 1  sub-moves)  ;; => 1
-(game/grundy 4  sub-moves)  ;; => 0
-(game/grundy 5  sub-moves)  ;; => 1
+;; Subtraction game: pile of N, each turn take 1, 2, or 3 stones.
+;; Keep 0 (the terminal position) in the move set — dropping it is a
+;; classic off-by-one that corrupts every Grundy value downstream.
+(define (sub-moves n)
+  (filter (lambda (x) (>= x 0)) (map (lambda (k) (- n k)) '(1 2 3))))
+
+(grundy 0  sub-moves)  ;; => 0  (terminal)
+(grundy 1  sub-moves)  ;; => 1
+(grundy 4  sub-moves)  ;; => 0
+(grundy 5  sub-moves)  ;; => 1
 ;; Pattern: Grundy(n) = n mod 4
 ```
 
@@ -192,42 +257,41 @@ Try inventing your own subtraction set:
 ```scheme
 ;; Take 1, 3, or 4.
 (define (sub134-moves n)
-  (filter positive? (map (lambda (k) (- n k)) '(1 3 4))))
+  (filter (lambda (x) (>= x 0)) (map (lambda (k) (- n k)) '(1 3 4))))
 
-(map (lambda (n) (game/grundy n sub134-moves)) '(0 1 2 3 4 5 6 7 8 9))
-;; => (0 1 0 1 2 3 2 0 1 0)     <- more complex pattern
+(map (lambda (n) (grundy n sub134-moves)) '(0 1 2 3 4 5 6 7 8 9))
+;; => (0 1 2 3 0 1 0 1 2 3)     <- period 7, more complex than mod-4
 ```
 
-The Grundy sequence for take-1-3-4 is quasi-periodic. Neither purely
-mod-N nor random. The pattern tells you the game's structure.
+The Grundy sequence for take-1-3-4 is eventually periodic (period 7).
+Neither purely mod-N nor random. The pattern tells you the game's
+structure.
 
 ## 12.5 Playing a game with a Grundy-informed bot
 
 ```scheme
 ;; Bot picks a move that leaves Grundy 0 (a P-position) if possible.
+;; A candidate is (next-state grundy-of-next-state).
 (define (grundy-bot state moves-fn)
   (let* ((next-states (moves-fn state))
-         (with-g      (map (lambda (s) (cons s (game/grundy s moves-fn))) next-states))
-         (p-moves     (filter (lambda (sg) (zero? (cdr sg))) with-g)))
+         (with-g      (map (lambda (s) (list s (grundy s moves-fn))) next-states))
+         (p-moves     (filter (lambda (sg) (zero? (cadr sg))) with-g)))
     (if (null? p-moves)
         (car (car with-g))          ;; forced to move to an N-position; pick any
         (car (car p-moves)))))      ;; move to a P-position
 
-;; Interactive play:
+;; Bot vs. bot, so it runs without a keyboard. Give a state, a
+;; moves function, and a terminal test; watch perfect play unfold.
 (define (play-vs-grundy start moves-fn terminal?)
-  (let loop ((state start) (turn 'human))
-    (cond
-      ((terminal? state)
-       (list 'winner (if (eq? turn 'human) 'bot 'human)))
-      ((eq? turn 'human)
-       (display state)
-       (let ((move (read)))
-         (loop move 'bot)))
-      (else
-       (let ((move (grundy-bot state moves-fn)))
-         (display (list 'bot-plays move))
-         (newline)
-         (loop move 'human))))))
+  (let loop ((state start) (turn 'first))
+    (if (terminal? state)
+        (list 'winner (if (eq? turn 'first) 'second 'first))
+        (let ((move (grundy-bot state moves-fn)))
+          (loop move (if (eq? turn 'first) 'second 'first))))))
+
+;; take-1-2-3 from a pile of 5 (an N-position: mover should win)
+(play-vs-grundy 5 sub-moves zero?)
+;; => (winner second)   ;; the mover moves to grundy-0 and wins
 ```
 
 The bot is unbeatable when you start from a Grundy-nonzero position
@@ -258,8 +322,8 @@ UNEQUAL non-empty stacks. Player who can't move loses.'
                       (range 1 (quotient (- n 1) 2))))))
          (range 0 (length state)))))
 
-(game/grundy '(7) unequal-split-moves)
-;; => ??? (compute it — the kid does this and learns)
+(grundy '(7) unequal-split-moves)
+;; => 2   (nonzero — the mover can win going first)
 ```
 
 They compute the Grundy value. If nonzero, they know they can win
@@ -274,6 +338,8 @@ who ought to win.
 **Composition.** `grundy-bot` is composed from `game/grundy`, filter,
 and pick-first. A more sophisticated bot composes `game/grundy` with
 `game/expectation` for probabilistic games (chapter's outside our
+  :book "Book of Simulation Games"
+  :title "Ch12 Game Theory Nim Wythoff Grundy"
 impartial-game scope).
 
 **Orchestration.** A tournament orchestrates: play N games,

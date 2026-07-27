@@ -1,8 +1,7 @@
 ;; ch02-paddle-and-wall.book.slatl
 ;; Book of Arcade Games — Chapter 2: Paddle and Wall
 
-(dialect :applies ("motoi" "sakura"))
-
+(dialect :applies ("motoi") :note "Applies to Motoi. Per-record :dialect overrides where a record is specific to one surface.")
 (chapter
   :book                "Book of Arcade Games"
   :chapter-number      2
@@ -14,7 +13,7 @@
   :author-lane         "arcade-games-engineer-lane-2026-07-16"
   :training-eligible   #t
   :confidentiality     "public"
-  :voice               "sakura-teaching + game-design"
+  :voice               "motoi-teaching + game-design"
   :book-version        "1.0.0"
   :prose
 "A ball that bounces is beautiful. A ball that bounces off a wall you
@@ -41,32 +40,33 @@ is the whole physics of the paddle-and-wall family.
 Before the ball, the paddle. Before the wall, the input.
 
 ```scheme
-;; A paddle you slide left/right along the bottom of the screen.
-(define paddle-x 160)
-(define (paddle-only)
-  (world/reset!)
-  (on-frame
-   (lambda ()
-     (when (input/down? 'left)  (set! paddle-x (max 20  (- paddle-x 4))))
-     (when (input/down? 'right) (set! paddle-x (min 300 (+ paddle-x 4))))
-     (paint-clear)
-     (paint-cell 'paddle paddle-x 230 40 6))))
+;; A paddle is just an x-coordinate. Each input nudges it, clamped to the
+;; screen. `inputs` is a script of 'left / 'right / 'stay, one per frame;
+;; on a real cabinet you would read (input/down? 'left) instead.
+(define (move-paddle x dir)
+  (cond ((eq? dir 'left)  (max 20  (- x 4)))
+        ((eq? dir 'right) (min 300 (+ x 4)))
+        (else x)))
 
-(big-bang paddle-only)
+(define (paddle-run inputs)
+  (fold (lambda (dir x) (move-paddle x dir)) 160 inputs))
+
+;; Hold 'right for 10 frames: 160 → 200 (four px per frame).
+(paddle-run (map (lambda (i) 'right) (iota 10)))
+;; => 200
 ```
 
-`input/down?` returns true every frame the button is held. Unlike
-`input/pressed?` (chapter 1), which fires only on the transition, this
-one continuously polls state. Hold 'right' and the paddle moves right
-four pixels per frame. Sixty pixels per second is a moderate feel;
-try 8 for twitchy, 2 for stately.
+On a real cabinet `(input/down? 'right)` returns true every frame the
+button is held — unlike `(input/pressed? 'right)` (chapter 1), which
+fires only on the transition. Hold 'right' and the paddle moves right
+four pixels per frame. Sixty pixels per second is a moderate feel; try 8
+for twitchy, 2 for stately.
 
 The `max 20` and `min 300` clamps are hand-rolled walls. The paddle
-cannot slip off the screen. This is the first time we handle a
-boundary in code rather than by physics; there is no `world/floor!` for
-lateral motion because the runtime lets entities pass horizontally
-freely by default. Later chapters use `world/camera-bounds!` for
-larger-scale confinement; here we just clamp.
+cannot slip off the screen. This is the first time we handle a boundary
+in code rather than by physics: there is no floor for lateral motion, so
+we clamp the coordinate ourselves. `fold` threads the paddle's x through
+every input in the script — the accumulator IS the paddle position.
 
 ---
 
@@ -75,42 +75,47 @@ larger-scale confinement; here we just clamp.
 Now the ball.
 
 ```scheme
-;; A ball that falls and a paddle that can catch it (or miss).
-(define paddle-x 160)
-(define (paddle-with-ball)
-  (world/reset!)
-  (world/gravity! 0 0.35)
-  (world/floor! 244)                 ;; below paddle
-  (let ((ball (world/spawn 'ball 160 30)))
-    (entity/bounce! ball 0.9)
-    (entity/shape! ball 'circle 6)
-    (on-frame
-     (lambda ()
-       (when (input/down? 'left)  (set! paddle-x (max 20  (- paddle-x 5))))
-       (when (input/down? 'right) (set! paddle-x (min 300 (+ paddle-x 5))))
-       ;; Reflection: if the ball is at paddle height AND overlaps in x,
-       ;; flip its vertical velocity.
-       (let ((bx (entity/x ball)) (by (entity/y ball))
-             (vx (car (entity/vel ball))) (vy (cadr (entity/vel ball))))
-         (when (and (>= by 224) (<= by 232)
-                    (> bx (- paddle-x 22)) (< bx (+ paddle-x 22))
-                    (> vy 0))
-           (entity/set-vel! ball vx (* -1 vy 0.95))))
-       (world/step)
-       (paint-clear)
-       (paint-cell 'paddle paddle-x 230 40 6)
-       (paint-cell 'ball (entity/x ball) (entity/y ball) 6 6)))))
+;; A ball is a (pos vel) pair; helpers pull out its coordinates.
+(define (body pos vel) (list pos vel))
+(define (body-pos b) (car b))
+(define (body-vel b) (cadr b))
+(define (bx b) (car (body-pos b)))    (define (by b) (cadr (body-pos b)))
+(define (bvx b) (car (body-vel b)))   (define (bvy b) (cadr (body-vel b)))
 
-(big-bang paddle-with-ball)
+;; Fall one frame under vertical gravity g.
+(define (fall b g)
+  (let ((v (vec/add (body-vel b) (vec/make 0 g))))
+    (body (vec/add (body-pos b) v) v)))
+
+;; Reflection: if the ball is at paddle height, overlaps the paddle in x,
+;; and is moving DOWN, flip its vertical velocity (× 0.95, slight loss).
+(define (paddle-bounce b paddle-x)
+  (if (and (>= (by b) 224) (<= (by b) 232)
+           (> (bx b) (- paddle-x 22)) (< (bx b) (+ paddle-x 22))
+           (> (bvy b) 0))
+      (body (body-pos b) (vec/make (bvx b) (* -1 (bvy b) 0.95)))
+      b))
+
+;; Drop the ball; the paddle sits at x=160. Report the ball's velocity
+;; after 40 frames — negative y means it was caught and sent back up.
+(define (paddle-with-ball frames)
+  (let loop ((b (body (vec/make 160 30) (vec/make 0 0))) (n frames))
+    (if (= n 0)
+        (body-vel b)
+        (loop (fall (paddle-bounce b 160) 0.35) (- n 1)))))
+
+(paddle-with-ball 40)
+;; => (0 -8.522499999999996)
 ```
 
-Read the collision block slowly. We ask five things: is the ball at
-paddle-height (`by` between 224 and 232), is it within the paddle's
-horizontal span (`bx` within 22 px of `paddle-x`), and is it moving
-DOWN (`vy > 0`, because y grows down in screen coordinates). If all
-five, we flip the sign of `vy` and scale by 0.95 — a slight energy
-loss on impact. Otherwise the ball continues its fall and the
-`world/floor!` at 244 catches it (a game-over if you were tracking
+Read the collision block slowly. We ask five things via plain coordinate
+comparisons: is the ball at paddle-height (`by` between 224 and 232), is
+it within the paddle's horizontal span (`bx` within 22 px of `paddle-x`),
+and is it moving DOWN (`bvy > 0`, because y grows down in screen
+coordinates). If all five, we flip the sign of the y-velocity and scale
+by 0.95 — a slight energy loss on impact. The result above,
+`(0 -8.522...)`, is the ball travelling UP: it was caught. Otherwise the
+ball continues its fall past the paddle (a game-over if you were tracking
 misses).
 
 That five-line collision check IS the paddle. Everything else is
@@ -120,51 +125,43 @@ under condition C, transform velocity by rule R.'
 
 ---
 
-## 2.3 Use the engine's collision
+## 2.3 Factor the collision
 
-Rolling collisions by hand is instructive but does not scale. When the
-world grows to eight paddles or forty bricks, `world/collisions` does
-the work for us.
+Rolling the collision by hand is instructive AND it scales — as long as
+you FACTOR it. The trick is to make the collision a small pure function
+you can reuse. `paddle-bounce` already is one. Now write a general
+AABB (axis-aligned bounding box) overlap test once, and every collision
+in the book is a call to it.
 
 ```scheme
-;; Same game, but the paddle is a real entity and world/collisions
-;; drives the reflection.
-(define (engine-paddle)
-  (world/reset!)
-  (world/gravity! 0 0.35)
-  (let ((ball   (world/spawn 'ball 160 30))
-        (paddle (world/spawn 'paddle 160 230))
-        (floor  (world/spawn 'floor 160 244)))
-    (entity/bounce! ball 0.92)
-    (entity/shape! ball 'circle 6)
-    (entity/shape! paddle 'rect 40 6)
-    (entity/shape! floor 'rect 320 4)
-    (entity/solid! paddle #t)
-    (entity/solid! floor #t)
-    (on-frame
-     (lambda ()
-       (when (input/down? 'left)
-         (entity/move! paddle -5 0))
-       (when (input/down? 'right)
-         (entity/move! paddle 5 0))
-       (world/step)
-       (paint-clear)
-       (paint-cell 'paddle (entity/x paddle) (entity/y paddle) 40 6)
-       (paint-cell 'ball   (entity/x ball)   (entity/y ball)   6 6)
-       (paint-cell 'floor  (entity/x floor)  (entity/y floor)  320 4)))))
+;; AABB overlap: does a point (px py) fall inside a box centred at
+;; (cx cy) with half-width hw and half-height hh?  Plain comparisons.
+(define (inside-box? px py cx cy hw hh)
+  (and (> px (- cx hw)) (< px (+ cx hw))
+       (> py (- cy hh)) (< py (+ cy hh))))
 
-(big-bang engine-paddle)
+;; Reflect off a solid box: if the ball overlaps it and is moving toward
+;; it, flip the vertical velocity (× bounce).
+(define (box-bounce b cx cy hw hh bounce)
+  (if (and (inside-box? (bx b) (by b) cx cy hw hh) (> (bvy b) 0))
+      (body (body-pos b) (vec/make (bvx b) (* -1 (bvy b) bounce)))
+      b))
+
+;; Paddle at (160 230), 40×6 → half-width 20, half-height 3, bounce 0.92.
+(define b1 (body (vec/make 160 229) (vec/make 0 4)))
+(box-bounce b1 160 230 20 3 0.92)
+;; => ((160 229) (0 -3.68))
 ```
 
-`entity/solid! paddle #t` tells the physics engine 'this entity
-participates in collisions and pushes other solids back.' Now
-`world/step` handles the reflection automatically — the ball's bounce
-coefficient (0.92) is applied to the impact, and the paddle stops the
-ball from passing through. We got rid of the manual velocity flip.
+`inside-box?` is the one collision test the rest of the book leans on:
+four comparisons, no engine. `box-bounce` composes it with a velocity
+flip. The paddle is now just a box you pass to `box-bounce`; walls and
+bricks will be boxes too. Reflection (0.92) is applied to the impact and
+the ball is sent back up — the `(0 -3.68)` result — without any manual
+per-site velocity code. We factored the flip into one reusable verb.
 
-`entity/move! paddle -5 0` shifts the paddle without disturbing its
-velocity. Under the hood it's `(entity/set-pos! paddle (- (entity/x
-paddle) 5) (entity/y paddle))` — but move is more readable.
+To slide the paddle you just add or subtract from its x-coordinate, the
+same clamp-and-nudge you saw in 2.1 — no separate move verb needed.
 
 ---
 
@@ -173,47 +170,34 @@ paddle) 5) (entity/y paddle))` — but move is more readable.
 Add three walls: top, left, right.
 
 ```scheme
-;; The ball is enclosed by top, left, right, and paddle-below.
-(define (walled-court)
-  (world/reset!)
-  (world/gravity! 0 0.3)
-  (let ((ball   (world/spawn 'ball 160 120))
-        (paddle (world/spawn 'paddle 160 230))
-        (top    (world/spawn 'wall 160 4))
-        (left   (world/spawn 'wall 4 120))
-        (right  (world/spawn 'wall 316 120)))
-    (entity/bounce! ball 0.95)
-    (entity/shape! ball 'circle 6)
-    (entity/shape! paddle 'rect 40 6)
-    (entity/shape! top 'rect 320 4)
-    (entity/shape! left 'rect 4 240)
-    (entity/shape! right 'rect 4 240)
-    (for-each (lambda (e) (entity/solid! e #t))
-              (list paddle top left right))
-    (entity/set-vel! ball 2 -3)          ;; kick the ball diagonally
-    (on-frame
-     (lambda ()
-       (when (input/down? 'left)  (entity/move! paddle -5 0))
-       (when (input/down? 'right) (entity/move! paddle 5 0))
-       (world/step)
-       (paint-clear)
-       (paint-cell 'paddle (entity/x paddle) (entity/y paddle) 40 6)
-       (paint-cell 'ball   (entity/x ball)   (entity/y ball)   6 6)
-       (paint-cell 'wall   (entity/x top)    (entity/y top)    320 4)
-       (paint-cell 'wall   (entity/x left)   (entity/y left)   4 240)
-       (paint-cell 'wall   (entity/x right)  (entity/y right)  4 240)))))
+;; The ball is enclosed by top, left, and right walls. Each wall is a
+;; coordinate line; crossing it flips the matching velocity component.
+(define (wall-bounce b)
+  (let* ((x (bx b)) (y (by b)) (vx (bvx b)) (vy (bvy b))
+         (vx2 (if (or (< x 8) (> x 312)) (* -0.95 vx) vx))   ;; side walls
+         (vy2 (if (< y 8) (* -0.95 vy) vy)))                 ;; top wall
+    (body (body-pos b) (vec/make vx2 vy2))))
 
-(big-bang walled-court)
+;; Kick the ball diagonally and let it rattle in the box.
+(define (walled-court frames)
+  (let loop ((b (body (vec/make 160 120) (vec/make 2 -3))) (n frames))
+    (if (= n 0)
+        (body-pos b)
+        (loop (fall (wall-bounce (paddle-bounce b 160)) 0.3) (- n 1)))))
+
+(walled-court 30)
+;; => (220 169.5)
 ```
 
-Notice `for-each`: it applies a function to each item in a list, with
-no return value. `for-each` and `map` are twins; `map` collects results,
-`for-each` runs for side effects. We use `for-each` to configure four
-entities in one sweep.
+The ball rattles in the box: `wall-bounce` flips the x-velocity at the
+left (x < 8) or right (x > 312) walls, and the y-velocity at the top
+(y < 8). Each is a plain comparison; the reflection is one sign-flip.
 
-Notice `entity/set-vel! ball 2 -3` — an initial diagonal velocity. If
-we did not kick the ball, gravity alone would drop it and we'd never
-see wall reflection. The kick starts the game.
+The initial velocity `(vec/make 2 -3)` is a diagonal kick. Without it,
+gravity alone would drop the ball straight and we would never see wall
+reflection. The kick starts the game. Note how the frame combines three
+pure functions — `paddle-bounce`, `wall-bounce`, then `fall` — each
+handed the previous result. That composition IS the game loop.
 
 Now the ball rattles in the box. It bounces off the top, off the sides,
 falls into the paddle, bounces back up. The kid moves the paddle to
@@ -227,61 +211,41 @@ game.
 Replace the top wall with a grid of bricks. The ball breaks them.
 
 ```scheme
-;; Breakout-lite. A row of bricks; ball breaks them on contact.
-(define (brick-court)
-  (world/reset!)
-  (world/gravity! 0 0.3)
-  (let ((ball   (world/spawn 'ball 160 180))
-        (paddle (world/spawn 'paddle 160 230))
-        (left   (world/spawn 'wall 4 120))
-        (right  (world/spawn 'wall 316 120))
-        (top    (world/spawn 'wall 160 4)))
-    (entity/bounce! ball 0.98)
-    (entity/shape! ball 'circle 5)
-    (entity/shape! paddle 'rect 40 6)
-    (entity/shape! left 'rect 4 240)
-    (entity/shape! right 'rect 4 240)
-    (entity/shape! top 'rect 320 4)
-    (for-each (lambda (e) (entity/solid! e #t))
-              (list paddle left right top))
-    ;; Rows of bricks — 8 columns, 4 rows.
-    (scene/grid 'brick 8 4 32 12 12 30)
-    (world/each 'brick
-                (lambda (b)
-                  (entity/solid! b #t)
-                  (entity/shape! b 'rect 30 10)))
-    (entity/set-vel! ball 2 -3)
-    (on-frame
-     (lambda ()
-       (when (input/down? 'left)  (entity/move! paddle -6 0))
-       (when (input/down? 'right) (entity/move! paddle 6 0))
-       (world/step)
-       ;; Any collision where one party is a brick: despawn the brick.
-       (for-each
-        (lambda (pair)
-          (let ((a (car pair)) (b (cadr pair)))
-            (when (eq? (entity/kind a) 'brick) (entity/despawn! a))
-            (when (eq? (entity/kind b) 'brick) (entity/despawn! b))))
-        (world/collisions))
-       (paint-clear)
-       (world/each 'brick
-                   (lambda (br)
-                     (paint-cell 'brick (entity/x br) (entity/y br) 30 10)))
-       (paint-cell 'paddle (entity/x paddle) (entity/y paddle) 40 6)
-       (paint-cell 'ball   (entity/x ball)   (entity/y ball)   5 5)))))
+;; Breakout-lite. Bricks are a list of (cx cy) centres; the ball breaks
+;; the ones it overlaps. Build the grid by mapping over rows × columns.
+(define (make-bricks cols rows w h x0 y0)
+  (apply append
+    (map (lambda (r)
+           (map (lambda (c) (list (+ x0 (* c w)) (+ y0 (* r h))))
+                (iota cols)))
+         (iota rows))))
 
-(big-bang brick-court)
+;; Ball overlaps a brick? Brick half-size is 15 × 5.
+(define (hits-brick? b brick)
+  (and (< (abs (- (bx b) (car brick))) 15)
+       (< (abs (- (by b) (cadr brick))) 5)))
+
+;; Keep only the bricks the ball is NOT touching (filter = SRFI-1).
+(define (break-bricks b bricks)
+  (filter (lambda (br) (not (hits-brick? b br))) bricks))
+
+(define bricks0 (make-bricks 8 4 32 12 12 30))     ;; 8×4 = 32 bricks
+(define ball-on-brick (body (vec/make 12 30) (vec/make 0 0)))
+(list (length bricks0)
+      (length (break-bricks ball-on-brick bricks0)))
+;; => (32 31)
 ```
 
-`scene/grid 'brick 8 4 32 12 12 30` spawns 8 columns by 4 rows of
-'brick entities, each cell 32×12 pixels, top-left origin at (12, 30).
-That is thirty-two bricks with one call.
+`make-bricks 8 4 32 12 12 30` builds 8 columns by 4 rows of brick
+centres, each cell 32×12 pixels, top-left origin at (12, 30). It is two
+nested `map`s flattened with `apply append` — thirty-two bricks from one
+call.
 
-`world/collisions` returns a list of pairs — every colliding entity
-pair this frame. We walk the list; if either partner is tagged 'brick,
-despawn the brick. The engine handles the reflection off the brick
-before we despawn it, so the ball bounces AND the brick disappears in
-the same frame.
+`break-bricks` is `filter`: keep every brick the ball is NOT touching.
+The one the ball sits on drops out, so 32 becomes 31. In a full frame you
+would also reflect the ball off the brick it hit (a `box-bounce` per
+overlapped brick) before filtering, so the ball bounces AND the brick
+disappears in the same frame.
 
 The kid has now built Breakout in about forty lines. The ball breaks
 bricks; the paddle catches the ball; the walls contain the court. Add
@@ -292,39 +256,38 @@ a score counter (chapter 13), a life counter (chapter 14), a boss
 
 ## 2.6 Collision layers
 
-Right now anything solid collides with anything solid. In a bigger game
-you want the ball to hit bricks but not the paddle's shadow, or the
-player's bullet to miss the player. That is `collision/define-layers!`.
+Right now our collision code checks every pair. In a bigger game you
+want the ball to hit bricks but not the paddle's shadow, or the player's
+bullet to miss the player. A collision layer table — plain data — lets
+you ask "should these two kinds collide?" before running the box test.
 
 ```scheme
-;; The ball, the paddle, the bricks, and the walls all live on
-;; different collision layers so we can control who hits whom.
-(define (layered-court)
-  (world/reset!)
-  (world/gravity! 0 0.3)
-  (collision/define-layers!
-   '((ball   :collides-with (paddle brick wall))
-     (paddle :collides-with (ball wall))
-     (brick  :collides-with (ball))
-     (wall   :collides-with (ball paddle))))
-  ;; Rest of setup as before, but each spawn also:
-  ;;   (entity/layer! ball 'ball)
-  ;;   (entity/layer! paddle 'paddle)
-  ;;   ... etc.
-  ;; The engine now consults the layer table instead of colliding
-  ;; every solid pair.
-  ...)
+;; A layer table: for each kind, the list of kinds it collides with.
+(define layers
+  '((ball   (paddle brick wall))
+    (paddle (ball wall))
+    (brick  (ball))
+    (wall   (ball paddle))))
+
+;; Should kind `a` collide with kind `b`?  Look it up in the table.
+(define (collides? a b)
+  (let ((row (assq a layers)))
+    (and row (memq b (cadr row)) #t)))
+
+(list (collides? 'ball 'brick)      ;; yes
+      (collides? 'brick 'brick))    ;; no — bricks ignore each other
+;; => (#t #f)
 ```
 
-The full worked layered example is in Appendix B (Layered Collision
-Cookbook). Chapter 5 will lean on layers heavily when we have four
-kinds of entities on screen (player, enemy, player-bullet,
-enemy-bullet) and need to prevent friendly fire.
+`collides?` uses `assq` to find the kind's row and `memq` to test
+membership — two list lookups, no engine. Before you run a `box-bounce`
+between two entities, gate it with `(collides? kind-a kind-b)`. Chapter 5
+leans on this when we have four kinds on screen (player, enemy,
+player-bullet, enemy-bullet) and need to prevent friendly fire.
 
-The lesson: composition of entities from parts (solid + shape + bounce
-+ layer) is what LETS the physics stay clean at scale. Without layers,
-every new entity type multiplies the collision-pair count and the
-programmer's confusion.
+The lesson: a collision layer is just a data table plus a predicate.
+Without it, every new entity kind multiplies the collision-pair count and
+the programmer's confusion; with it, the table stays readable.
 
 ---
 
@@ -333,31 +296,27 @@ programmer's confusion.
 Chapter 1 introduced the four patterns; this chapter uses them at
 scale.
 
-**Composition.** The paddle is composed: `entity/shape!` gives it a
-rect, `entity/solid!` makes it a physics participant, `entity/move!`
-lets it slide. The ball is composed: `entity/bounce!` gives it
-elasticity, `entity/set-vel!` gives it a starting kick, `entity/shape!`
-gives it a circle. Each entity is a bag of small verbs applied in
-sequence.
+**Composition.** The paddle is composed: a box (centre + half-size) plus
+a bounce coefficient. The ball is composed: a `(pos vel)` pair plus a
+starting kick. Each is a small value assembled from parts, and the
+collision functions take those parts as arguments.
 
-**Orchestration.** The frame loop orchestrates poll (input/down?),
-update (world/step), collision-response (walk world/collisions),
-draw (paint-cell over all entity kinds). Order matters. If we draw
-before update, the drawn frame is one behind reality. If we handle
-collisions before update, we handle YESTERDAY'S collisions.
+**Orchestration.** The frame loop orchestrates poll (read the input
+script), update (`fall`), collision-response (`paddle-bounce`,
+`wall-bounce`, `break-bricks`), draw (record positions). Order matters.
+If we draw before update, the drawn frame is one behind reality. If we
+resolve collisions after moving, we resolve them a frame late.
 
-**In-routing.** Input events route to handlers via the `when
-(input/down? 'left)` dispatch. Each button has its own handler. Real
-arcade games have more elaborate in-routing — chapter 5 shows
-button-context tables where 'a' means 'fire' during play and 'confirm'
-during menu.
+**In-routing.** Input events route to handlers via `move-paddle` on each
+scripted direction. Each direction has its own branch. Real arcade games
+have more elaborate in-routing — chapter 5 shows button-context tables
+where 'a' means 'fire' during play and 'confirm' during menu.
 
-**Routing.** Collision events route to consumers. In section 2.5, every
-collision-pair routes through our `for-each` walk, and 'brick-involved
-collisions route to `entity/despawn!`. The reflection itself routes
-through the physics engine to `entity/set-vel!` on the ball. We do
-not see that routing because it happens inside `world/step`, but it
-is there.
+**Routing.** Collision results route to consumers. In section 2.5, the
+overlap test routes each hit brick into `break-bricks` (which drops it
+from the list). The reflection routes through `box-bounce`, which returns
+a new ball with a flipped velocity. Every result is a returned value we
+thread onward — no hidden mutation.
 
 Every arcade game weaves these four. Once you see them named you cannot
 un-see them.
@@ -370,10 +329,10 @@ Two shop-side uses of paddle-and-wall physics:
 
 **The unlock paddle-game.** A customer is browsing. A small ribbon at
 the bottom of the item page says 'Play 30 seconds of Paddle for 5% off.'
-The kid taps play. They get a 30-second brickout. Bricks broken =
-percent off, capped at ten. The physics engine is the game AND the
-score generator. `cortex/write` at the end lands the discount in the
-shopper's session.
+The kid taps play. They get a 30-second brickout. Bricks broken (the
+length drop in `break-bricks`) = percent off, capped at ten. The same
+physics functions are the game AND the score generator. `cortex/write` at
+the end lands the discount in the shopper's session.
 
 **The bounce-your-cursor scoreboard.** A shop wants to show 'top items
 of the week' as a physical scene: each item is a ball, ball size scales
@@ -386,45 +345,41 @@ each item's details. Physics as browse.
 ## 2.9 Pitfalls
 
 **The ball tunnels through a wall.** If the ball moves fast enough that
-one frame's velocity carries it entirely past the wall, `world/step`
-misses the collision. Fix: lower the ball's speed, thicken the wall,
-or read Appendix I (Reading world/collisions Efficiently) for
-sweep-based collision patterns.
+one frame's velocity carries it entirely past the wall line, the
+coordinate test never fires. Fix: lower the ball's speed, widen the wall
+band (test `< x 12` instead of `< x 8`), or sweep — check the segment
+from last position to new position instead of a single point.
 
-**The paddle passes THROUGH the ball.** `entity/solid! paddle #t` was
-missing. Or `entity/solid! ball #t` was missing (it is not set by
-default in this chapter's examples; the engine treats non-solid
-entities as ghosts).
+**The paddle passes THROUGH the ball.** Your `paddle-bounce` guard is too
+tight — the ball's `by` skipped past the 224–232 band in one frame
+because it was moving fast. Widen the band or clamp the ball back to the
+paddle line when it overlaps.
 
-**Bricks despawn but the ball keeps bouncing off empty space.** Your
-`for-each` over `world/collisions` walked the pair but did not despawn
-the brick before drawing. The order matters: despawn first, THEN
-`world/step` next frame will not see the brick, and the ball will
-pass through cleanly.
+**Bricks stay after being hit.** You forgot to thread the filtered brick
+list back into the loop — a named-let slip, passing the old `bricks`
+instead of `(break-bricks b bricks)`. The list never shrinks.
 
-**All bricks disappear at once.** The ball bounced against the corner
-of one brick, which forwarded impulse to adjacent bricks, and your
-`world/collisions` list has a chain of pairs. Solid answer: for game
-feel, set `entity/mass! brick 1000` so bricks do not transmit impulse
-laterally. Or use `entity/sensor! brick #t` (chapter 11 covers
-sensors) so the brick registers as hit without physically pushing back.
+**All bricks disappear at once.** Your overlap half-sizes are too large,
+so the ball's box covers several brick centres at once. Shrink the
+half-width/half-height in `hits-brick?`, or break only the single
+closest brick per frame (sort by distance, take the first).
 
 ---
 
 ## 2.10 Try this yourself
 
-1. Change the paddle-speed clamp from 5 to 2 (sluggish) and to 12
+1. Change the paddle-speed step from 4 to 2 (sluggish) and to 12
    (twitchy). Which feels better? Where is the sweet spot?
 2. Give the brick rows different bounce coefficients. Top row 0.5,
    middle 0.9, bottom 1.1. Where does the ball spend the most time?
-3. Randomize brick colors by hashing (entity/id brick) and drawing
-   different colored cells. What's the visual effect?
-4. Add a lives counter — every time the ball hits the floor
-   (`world/floor! 244`), decrement lives. Game over at zero.
-5. Add a power-up — a 'brick that when broken spawns a ball' — so
-   the game escalates.
-6. Try `entity/bounce! ball 1.02` — non-physical. Watch the ball gain
-   energy on every hit. When does the game break?
+3. Tag each brick centre with a colour index (hash its coordinates) and
+   record it in the trace. What's the visual pattern?
+4. Add a lives counter — every time the ball's `by` passes 244,
+   decrement lives. Game over at zero.
+5. Add a power-up — a brick that, when broken, appends a new ball to the
+   world — so the game escalates.
+6. Pass `bounce` = 1.02 to `box-bounce` — non-physical. Watch the ball
+   gain energy on every hit. When does the game break?
 
 ---
 
@@ -440,43 +395,28 @@ the story. You will learn heading-versus-velocity and never confuse
 them again.")
 
 (code-block :chapter 2 :lang "scheme" :source
-"(define (paddle-and-ball-anchor)
-  (world/reset!)
-  (world/gravity! 0 0.3)
-  (let ((ball   (world/spawn 'ball 160 30))
-        (paddle (world/spawn 'paddle 160 230))
-        (left   (world/spawn 'wall 4 120))
-        (right  (world/spawn 'wall 316 120))
-        (top    (world/spawn 'wall 160 4)))
-    (entity/bounce! ball 0.95)
-    (entity/shape! ball 'circle 6)
-    (entity/shape! paddle 'rect 40 6)
-    (entity/shape! left 'rect 4 240)
-    (entity/shape! right 'rect 4 240)
-    (entity/shape! top 'rect 320 4)
-    (for-each (lambda (e) (entity/solid! e #t))
-              (list paddle left right top))
-    (scene/grid 'brick 8 4 32 12 12 30)
-    (world/each 'brick
-                (lambda (b)
-                  (entity/solid! b #t)
-                  (entity/shape! b 'rect 30 10)))
-    (entity/set-vel! ball 2 -3)
-    (on-frame
-     (lambda ()
-       (when (input/down? 'left)  (entity/move! paddle -6 0))
-       (when (input/down? 'right) (entity/move! paddle 6 0))
-       (world/step)
-       (for-each
-        (lambda (pair)
-          (let ((a (car pair)) (b (cadr pair)))
-            (when (eq? (entity/kind a) 'brick) (entity/despawn! a))
-            (when (eq? (entity/kind b) 'brick) (entity/despawn! b))))
-        (world/collisions))
-       (paint-clear)
-       (world/each 'brick
-                   (lambda (br)
-                     (paint-cell 'brick (entity/x br) (entity/y br) 30 10)))
-       (paint-cell 'paddle (entity/x paddle) (entity/y paddle) 40 6)
-       (paint-cell 'ball   (entity/x ball)   (entity/y ball)   6 6)))))
-(big-bang paddle-and-ball-anchor)")
+"(define (body pos vel) (list pos vel))
+(define (body-pos b) (car b))
+(define (body-vel b) (cadr b))
+(define (bx b) (car (body-pos b)))    (define (by b) (cadr (body-pos b)))
+(define (bvx b) (car (body-vel b)))   (define (bvy b) (cadr (body-vel b)))
+(define (fall b g)
+  (let ((v (vec/add (body-vel b) (vec/make 0 g))))
+    (body (vec/add (body-pos b) v) v)))
+(define (paddle-bounce b paddle-x)
+  (if (and (>= (by b) 224) (<= (by b) 232)
+           (> (bx b) (- paddle-x 22)) (< (bx b) (+ paddle-x 22))
+           (> (bvy b) 0))
+      (body (body-pos b) (vec/make (bvx b) (* -1 (bvy b) 0.95)))
+      b))
+(define (wall-bounce b)
+  (let* ((x (bx b)) (y (by b)) (vx (bvx b)) (vy (bvy b))
+         (vx2 (if (or (< x 8) (> x 312)) (* -0.95 vx) vx))
+         (vy2 (if (< y 8) (* -0.95 vy) vy)))
+    (body (body-pos b) (vec/make vx2 vy2))))
+(define (paddle-and-ball-anchor frames)
+  (let loop ((b (body (vec/make 160 120) (vec/make 2 -3))) (n frames))
+    (if (= n 0)
+        (body-pos b)
+        (loop (fall (wall-bounce (paddle-bounce b 160)) 0.3) (- n 1)))))
+(paddle-and-ball-anchor 30)")

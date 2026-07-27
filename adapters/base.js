@@ -9,7 +9,7 @@
 // `bin/motoi` works standalone: arithmetic, forms, macros, REPL all fly
 // with zero host wiring.
 //
-// A DIALECT LAYER (Sakura, Lacuna, or any other) overrides these by
+// A DIALECT LAYER (a downstream dialect, Lacuna, or any other) overrides these by
 // calling `setAdapters({ ... })` before the first dispatch. The runtime
 // keeps overrides in one state record; imports below are stable exports
 // that resolve current values at call time — so dialect code that

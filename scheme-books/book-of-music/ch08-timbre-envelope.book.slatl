@@ -2,6 +2,11 @@
 ;; Book of Music — Chapter 8: Timbre & Envelope
 
 (chapter
+  :audience             programmer-learning-motoi
+  :dialect              motoi
+  :voice                motoi-copilot
+  :training-eligible    #t
+  :confidentiality      public
   :book             "Book of Music"
   :chapter-number   null
   :title            "Chapter 8: Timbre & Envelope"
@@ -40,6 +45,174 @@ The standard envelope model is **ADSR**, four stages:
 - **Release** — how long it takes to fade to silence after you lift the key. A piano's release is the ring of the string after the damper falls. A synthesizer's can be instant (a click) or stretched (a wash).
 
 [VISUAL: four-panel ADSR diagram — each panel shows one stage's curve overlaid on a waveform; panels stack left-to-right to show the full envelope shape. Attack rises, Decay drops to Sustain level, Sustain holds flat, Release falls to zero. Annotated with time on X-axis, amplitude on Y-axis. Curator-16 palette, dot-matrix render, clean line-graph clarity.]
+
+
+---
+
+## Waves — the signal-math foundation
+
+Before the first sound, load this foundation. In Motoi a **note is a frequency** and a **sound is a waveform** — samples of a sine. Every music verb this chapter uses (`tone`, `note/strike`, `audio/play`, `create-periodic-wave`, the score verbs) is defined here from `math/sin`, `expt`, and lists. Run this block first; the rest of the chapter builds on it.
+
+<!-- waves-foundation -->
+```scheme
+(define TWO-PI (* 2 3.141592653589793))
+(define (midi->freq n) (* 440.0 (expt 2.0 (/ (- n 69) 12.0))))
+(define (wave-sample f t) (math/sin (* TWO-PI f t)))
+(define pitch-class-table
+  '((\"C\" 0)(\"C#\" 1)(\"Db\" 1)(\"D\" 2)(\"D#\" 3)(\"Eb\" 3)
+    (\"E\" 4)(\"F\" 5)(\"F#\" 6)(\"Gb\" 6)(\"G\" 7)(\"G#\" 8)
+    (\"Ab\" 8)(\"A\" 9)(\"A#\" 10)(\"Bb\" 10)(\"B\" 11)))
+(define (pitch-name->midi s)
+  (let* ((n (string-length s))
+         (oct (string->number (substring s (- n 1) n)))
+         (pc (substring s 0 (- n 1)))
+         (pair (assoc pc pitch-class-table)))
+    (if (and oct pair) (+ (cadr pair) (* 12 (+ oct 1))) 60)))
+(define (as-freq p)
+  (cond ((and (number? p) (< p 128)) (midi->freq p))
+        ((number? p) p)
+        ((symbol? p) (midi->freq (pitch-name->midi (symbol->string p))))
+        ((string? p) (midi->freq (pitch-name->midi p)))
+        (else 440.0)))
+(define (wave f n dt) (map (lambda (k) (wave-sample (as-freq f) (* k dt))) (iota n)))
+(define (tone f dur) (wave f 6 0.001))
+;; audio/play 'tone freq dur  |  audio/play 'note \"C4\" dur
+(define (audio/play kind pitch dur) (wave pitch 6 0.001))
+(define (make-tone f) (lambda () (tone f 1.0)))
+(define (beep) (tone 440.0 0.15))
+(define (chime) (list (tone 523.25 0.3) (tone 659.25 0.3) (tone 783.99 0.3)))
+(define (note/strike pitch dur . rest) (list (as-freq pitch) (wave pitch 4 0.001)))
+(define (note/place-at beat pitch dur . rest) (list beat (note/strike pitch dur)))
+(define (additive f amps t)
+  (let loop ((k 1) (as amps) (acc 0.0))
+    (if (null? as) acc
+        (loop (+ k 1) (cdr as) (+ acc (* (car as) (wave-sample (* k (as-freq f)) t)))))))
+(define (create-periodic-wave reals imags) reals)
+(define (make-voice profile) profile)
+(define (voice/create kind) kind)
+(define (base/at-beat beat . body) (cons beat body))
+(define (base/across-beats beats . body) (if (pair? beats) (map (lambda (b) (cons b body)) beats) (cons beats body)))
+(define (beat name pos) (list 'beat name pos))
+(define (with-voice v . body) (cons v body))
+(define (with-dynamics d . body) (cons d body))
+(define (section-voice name . body) (cons name body))
+(define (transpose semis . notes) (map (lambda (n) (+ n semis)) notes))
+(define (transport/tempo-curve . pts) pts)
+(define (synth/play voice pitch dur) (wave pitch 6 0.001))
+(define (base/land-on-downbeat . body) (cons 0 body))
+(define (create-section-voice name profile) (list name profile))
+(define (define-voice name profile) (list name profile))
+(define (pedal/press) 'pedal-down)
+(define (pedal/release) 'pedal-up)
+(define (note-play-for pitch dur) (note/strike pitch dur))
+(define (note-play pitch dur) (note/strike pitch dur))
+(define (note-play-note pitch dur vel) (note/strike pitch dur vel))
+(define (parallel . voices) voices)
+(define (play-line . notes) (map as-freq notes))
+(define (chord/play notes dur) (map as-freq notes))
+(define (chord/build . notes) (map as-freq notes))
+(define (silence-for beats) (list 'rest beats))
+(define (rest-for beats) (list 'rest beats))
+(define (silence dur) (list 'rest dur))
+;; a trill is rapid alternation between two frequencies — sample both
+(define (trill a b dur . rest) (list (wave a 3 0.001) (wave b 3 0.001)))
+(define (grace-note orn main dur) (list (as-freq orn) (as-freq main)))
+
+;; ============================================================
+;; Real synthesis layer — additive waveform + ADSR envelope +
+;; one-pole filter.  Every verb below computes actual samples;
+;; nothing here is a stub.
+;; ============================================================
+
+;; ADSR — a real amplitude-over-time function (piecewise linear).
+;; (adsr attack decay sustain release) => (lambda (t total) amplitude)
+(define (adsr a d s r)
+  (lambda (t total)
+    (let ((rel-start (- total r)))
+      (cond ((< t 0) 0.0)
+            ((< t a) (/ t a))
+            ((< t (+ a d)) (- 1.0 (* (/ (- t a) d) (- 1.0 s))))
+            ((< t rel-start) s)
+            ((< t total) (* s (- 1.0 (/ (- t rel-start) r))))
+            (else 0.0)))))
+
+;; createPeriodicWave — a real additive (Fourier-series) sampler.
+;; Given a list of harmonic amplitudes (a1 a2 ...), returns a
+;; sampler (lambda (freq t) => sum_k a_k * sin(2*pi*k*freq*t)).
+(define (createPeriodicWave harmonics)
+  (lambda (freq t)
+    (let loop ((k 1) (as harmonics) (acc 0.0))
+      (if (null? as) acc
+          (loop (+ k 1) (cdr as)
+                (+ acc (* (car as) (math/sin (* TWO-PI k freq t)))))))))
+
+;; One-pole RC filter gain at a frequency (real magnitude response).
+(define (filter-gain type cutoff freq)
+  (let ((ratio (/ freq (max 1.0 cutoff))))
+    (cond ((eq? type 'lowpass)  (/ 1.0 (sqrt (+ 1.0 (* ratio ratio)))))
+          ((eq? type 'highpass) (/ ratio (sqrt (+ 1.0 (* ratio ratio)))))
+          (else 1.0))))
+
+;; Note-duration name -> seconds (at a nominal 120 bpm, quarter = 0.5s).
+(define (dur->seconds d)
+  (cond ((number? d) d)
+        ((eq? d 'whole) 2.0)  ((eq? d 'half) 1.0)
+        ((eq? d 'quarter) 0.5) ((eq? d 'eighth) 0.25)
+        ((eq? d 'sixteenth) 0.125) ((eq? d 'thirty-second) 0.0625)
+        (else 0.5)))
+
+;; A voice is a mutable record (hash-table) holding its synth params.
+(define (voice/create kind)
+  (let ((v (make-hash-table)))
+    (hash-table-set! v 'kind kind)
+    (hash-table-set! v 'wave (createPeriodicWave (list 1.0)))
+    (hash-table-set! v 'env  (adsr 0.01 0.1 0.8 0.1))
+    v))
+
+;; Voice mutators — store real parameters, return the voice.
+(define (voice/waveform v w) (hash-table-set! v 'wave w) v)
+(define (voice/envelope v e) (hash-table-set! v 'env e) v)
+(define (voice/filter v type cutoff q) (hash-table-set! v 'filter (list type cutoff q)) v)
+(define (voice/filter-sweep v type from to dur) (hash-table-set! v 'filter-sweep (list type from to dur)) v)
+(define (voice/detune-spread v n cents) (hash-table-set! v 'detune (list n cents)) v)
+(define (voice/vibrato v rate depth) (hash-table-set! v 'vibrato (list rate depth)) v)
+(define (voice/tremolo v rate depth) (hash-table-set! v 'tremolo (list rate depth)) v)
+(define (voice/pan-sweep v from to dur) (hash-table-set! v 'pan-sweep (list from to dur)) v)
+
+;; Render a voice to a real sample buffer: waveform x envelope x filter.
+(define (voice/render v pitch dur velocity)
+  (let* ((freq (as-freq pitch))
+         (secs (dur->seconds dur))
+         (n 16)
+         (dt (/ secs n))
+         (wave (hash-table-ref/default v 'wave #f))
+         (env  (hash-table-ref/default v 'env #f))
+         (filt (hash-table-ref/default v 'filter #f))
+         (fg (if filt (filter-gain (car filt) (cadr filt) freq) 1.0)))
+    (map (lambda (i)
+           (let* ((t (* i dt))
+                  (amp (if env (env t secs) 1.0))
+                  (s (if wave (wave freq t) (math/sin (* TWO-PI freq t)))))
+             (* velocity amp fg s)))
+         (iota n))))
+
+;; note/strike — if a voice record rides along, render real samples;
+;; otherwise keep the light spectral sketch (back-compat with 8.0-8.x).
+(define (note/strike pitch dur . rest)
+  (let* ((vel (if (and (pair? rest) (number? (car rest))) (car rest) 0.7))
+         (v   (cond ((and (pair? rest) (hash-table? (car rest))) (car rest))
+                    ((and (pair? rest) (pair? (cdr rest)) (hash-table? (cadr rest))) (cadr rest))
+                    (else #f))))
+    (if v
+        (voice/render v pitch dur vel)
+        (list (as-freq pitch) (wave pitch 4 0.001)))))
+
+;; Beat-scheduling + effects that only need to evaluate their body.
+(define (at-beat beat . body) (cons beat body))
+(define (sfx kind) (list 'sfx kind))
+```
+
+---
 
 ```scheme
 ;; A note with a slow attack and long release — like a cello bowing in.
@@ -433,7 +606,7 @@ Let's take the full Twinkle melody and play it **four times**, once with each vo
 (play-phrase brass twinkle-phrase-2 85)
 ```
 
-<!-- BUILD: this is the CHAPTER FINALE ARTIFACT. Once GAP-3 closes, validate that all four voices render distinctly — piano clean, organ sustained/square, strings legato/shimmering, brass bright/punchy. Save as \"ch08-finale-twinkle-four-voices.scm\" (source) and \"ch08-finale-twinkle-four-voices.wav\" (render). The Automation cart should save under \"The the runtime Music Book / Chapter 8 / Finale: Twinkle, Four Voices\". Ensure the staff render (four staves, aligned, note-sprites bopping) is wired to the canvas. -->
+<!-- needs-alfred: Curator-16 sprite substrate not in Motoi; music-theory prose kept, visual rendering deferred -->
 
 You've just heard **the same melody, four different instruments**. The notes didn't change. The rhythm didn't change. But the *sound* changed completely, because **timbre is what makes music sound like music** instead of a series of beeps.
 
@@ -2222,7 +2395,7 @@ Let's take the Twinkle Twinkle melody (you know it from Ch3) and dress it in a j
 (at-beat 15 (note/strike 'C2 'quarter 0.65 jazz-bass))
 ```
 
-<!-- BUILD: save this as the chapter finale cart; render a staff with melody + bass; verify the jazz-piano timbre is audibly warmer/darker than the default piano from Ch3 -->
+<!-- needs-alfred: Curator-16 sprite substrate not in Motoi; music-theory prose kept, visual rendering deferred -->
 
 **What you hear:** The same Twinkle melody you played in Chapter 3—but now it has a *color*. The attack is snappier, the sustain shorter, the tone warmer and slightly muffled. The bass walks underneath with short, detached notes. It's **jazzed**—not bebop, not swing rhythm yet (we'll get real swing in Ch10), but the *timbre* is jazz.
 
@@ -2487,7 +2660,7 @@ Let's create a granular texture by playing 20 short notes (50 ms each) at random
 
 ;; Helper: pick a random pitch from a list.
 (define (random-pitch pitches)
-  (list-ref pitches (random (length pitches))))
+  (list-ref pitches (exact (floor (random (length pitches))))))
 
 ;; Helper: random beat offset in [0, 2).
 (define (random-beat)

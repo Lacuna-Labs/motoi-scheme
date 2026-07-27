@@ -176,7 +176,7 @@ pairs.push(pair(
 
 pairs.push(pair(
   "Motoi is headless — how do I hear my layered song?",
-  "Two paths. First, run the cart on a machine with a real audio device (`./bin/motoi run carts/cart-maker-3-music/layered-song.scm`) — the audio driver fires each `note`, `chord`, and `synth/kit` call through the OS mixer as it walks the sequence. Second, hand the `composer/emit` form to a downstream renderer (Curator, a DAW export, or a live Sakura session) that reads the voice-pool routing and produces the mix. The cart runs the same either way; only the audible result differs.",
+  "Two paths. First, run the cart on a machine with a real audio device (`./bin/motoi run carts/cart-maker-3-music/layered-song.scm`) — the audio driver fires each `note`, `chord`, and `synth/kit` call through the OS mixer as it walks the sequence. Second, hand the `composer/emit` form to a downstream renderer (Curator, a DAW export, or a live downstream-dialect session) that reads the voice-pool routing and produces the mix. The cart runs the same either way; only the audible result differs.",
   { source: 'carts/cart-maker-3-music/layered-song.scm', tags: ['music', 'headless', 'composer', 'render'] },
 ))
 

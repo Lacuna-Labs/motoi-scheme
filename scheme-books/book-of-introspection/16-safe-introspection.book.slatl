@@ -56,16 +56,104 @@ A cart author can mark specific values as never-introspectable. The runtime resp
 
 The type is `opaque`. The mechanical fields are minimal. The LLM's prose is honest — the value cannot be introspected because someone said so.
 
-## Sections 16.4 through 16.11 — pending Wave 4 authoring
+## 16.4 The perm tiers in detail
 
-- 16.4 The eight perm tiers in detail
-- 16.5 Sandbox mechanics
-- 16.6 Redaction policies
-- 16.7 Opaque values and how to make them
-- 16.8 Cortex privacy — record source and confidentiality tags
-- 16.9 Auditing your own cart for what you leak
-- 16.10 The LLM and sensitive data
-- 16.11 Cross-cart isolation
+Motoi's permission model has eight tiers. Every verb belongs to exactly one. The dispatcher checks the tier before dispatch and refuses calls that exceed the current session's grant.
+
+**`read`** — pure query. No state change. Every introspection verb (help, describe, arity-of, source-of, doc-of, type-of, all-verbs, stats/verb-calls-of) is at this tier. Safe to expose to any caller including untrusted code.
+
+**`paint`** — writes visible surface only. Sprite draws, tone plays, framebuffer text. No persistent state. Reversible on the next redraw.
+
+**`state-change`** — mutates persistent state. Writing to Cortex, saving artifacts, spawning entities. Reversible only via explicit undo verbs.
+
+**`network`** — reaches beyond the machine. HTTP, socket calls. Explicitly gated because a small model shouldn't be able to phone home by mistake.
+
+**`fs-write`** — writes to disk outside the sandbox area. Distinct from Cortex because Cortex is a curated store with its own permission story.
+
+**`fs-read`** — reads from disk outside the sandbox. Requires explicit grant because file contents are, in general, sensitive.
+
+**`process`** — spawns or signals other processes. Almost never granted; the language is meant to be self-contained.
+
+**`dispatcher-only`** — verbs the runtime uses internally that programs cannot call. This is not a tier a user grants; it's a mark on verbs like `internal/fuel-reset` that must not appear in user code.
+
+Every `help` return carries the perm. `(cdr (assoc :perm (help 'audio/play)))` returns `'paint`. The audit tool from chapter 12 uses this to grade a cart's blast radius before running it.
+
+## 16.5 Sandbox mechanics
+
+A session starts with a permission grant. The default REPL grants `read` + `paint`. Anything above that requires an explicit lift by the operator: `(session/grant 'state-change)`. Grants are per-session; there is no persistent elevation.
+
+When a dispatched call requires a perm the session doesn't have, the dispatcher raises `perm-denied` with `:verb`, `:required`, and `:granted` fields. The caller can `catch` it and fall back, or the error propagates to the top level for the operator to see.
+
+The sandbox has no lock-picking mechanism. A verb at tier `state-change` cannot be renamed to look like a `read` verb; the dispatcher enforces the perm from the registry, not from the surface name. Programs cannot elevate their own perms mid-run.
+
+## 16.6 Redaction policies
+
+Some values must not be introspected fully even when the perm allows it. Cortex records tagged confidential, cart metadata that includes user PII, artifact contents from private folders — all pass through a redaction layer before being returned.
+
+The redaction layer replaces the value with `'REDACTED` (a symbol) and preserves the shape. So a redacted alist still looks like an alist — you can walk it — but the sensitive fields are elided.
+
+```scheme
+(cortex/recall 'my-personal-notes)
+;; => ((:kind 'note) (:body 'REDACTED) (:date "2026-07-22"))
+```
+
+The kind and date are visible; the body is not. Downstream code doesn't crash because the shape is intact; it just can't see the body.
+
+## 16.7 Opaque values
+
+An opaque value is one the language cannot walk. It exists at runtime; you can pass it around; but you cannot `assoc` into it and you cannot print its contents. The typical use is for credentials — an API token has to travel through Motoi code without being loggable.
+
+The runtime provides `(opaque-wrap v)` which wraps a value:
+
+```scheme
+(define token (opaque-wrap "sk-abc123..."))
+(display token)              ;; => #<opaque>
+(assoc :key token)           ;; => #<opaque>  (still opaque; can't peek)
+(opaque-use token http/post) ;; => the wrapped value is fed to http/post
+                             ;;    but does not surface anywhere else.
+```
+
+The only verb that can peek inside is `opaque-use`, which requires a callee — and the callee itself is checked for perm. Programs that log verbatim cannot log the wrapped value.
+
+## 16.8 Cortex privacy — the confidentiality tag
+
+Every Cortex record carries a `:confidentiality` field: `'public`, `'private`, `'redacted`. When the model reads Cortex through `cortex/recall`, it sees `'public` records verbatim, `'private` records with their body redacted, and `'redacted` records not at all.
+
+That means confidential facts can live in Cortex safely — they participate in the recall pipeline for the operator's own reasoning but are elided when the model reads. The audit path is unified: one storage layer, one visibility rule per record.
+
+## 16.9 Auditing your own cart for what it leaks
+
+Before you run someone else's cart, run this on it:
+
+```scheme
+(define (audit-cart-perms cart-body)
+  (let* ((verbs-called (extract-verbs cart-body))
+         (perms (map (lambda (v)
+                       (list v (cdr (assoc :perm (help v)))))
+                     verbs-called)))
+    (list :above-read (filter (lambda (row)
+                                (not (eq? (cadr row) 'read)))
+                              perms)
+          :network    (filter (lambda (row)
+                                (eq? (cadr row) 'network))
+                              perms))))
+```
+
+The result shows exactly which verbs elevate above `read` and which reach the network. That's the leak surface. If the report is empty, the cart is safe by construction. If it's not, you know exactly what you're granting.
+
+## 16.10 The LLM and sensitive data
+
+The most subtle safety concern: when the local model reads Cortex or the trace log, it can incorporate content into its next generation. If a private record leaks into a prompt, it may appear in an answer meant for a different context.
+
+Motoi's mitigation is architectural. The model always reads Cortex through the same visibility filter as the operator — never through a privileged read. The `confidentiality` field is honored at the pipeline layer, not at the display layer. That means the model literally cannot see a `'private` body; it wasn't in the retrieved value.
+
+That's the honest boundary. Even a well-intentioned model cannot leak what the pipeline never showed it.
+
+## 16.11 Cross-cart isolation
+
+Each cart runs in its own session with its own Cortex namespace. Cart A cannot read Cart B's Cortex records unless the operator explicitly grants a `cortex/read-namespace` permission for B, which is a rare and audited operation.
+
+That means a compromised or malicious cart can leak only what's in its own namespace. Global state (the counter, the shared registry) is read-only from the cart's perspective; it cannot exfiltrate a neighbor cart's private data because it cannot reach into that neighbor's Cortex to begin with.
 
 ## 16.12 Networked runtime concerns (subsystem-limit awareness for the engineering audience)
 
@@ -97,7 +185,7 @@ For each of the fourteen subsystems Motoi does not natively include, the runtime
 ;;     :adjacent-capability \"http/serve — Motoi as LOCAL server\"
 ;;     :canonical-refusal-template \"honest-capability + honest-limit +
 ;;       meta-honesty + fish-in-car-metaphor + redirect-to-curl-or-Claude\"
-;;     :redirect-targets (\"curl\" \"user-terminal\" \"claude\" \"sakura\")
+;;     :redirect-targets (\"curl\" \"user-terminal\" \"claude\" \"motoi\")
 ;;     :book-crossref \"book-of-computing/08 §8.9\"
 ;;     :systems-crossref \"book-of-systems/02 networking section\")
 ```
@@ -164,7 +252,7 @@ result
 ;;     :honest-limit-template \"Motoi does not have client-side networking.
 ;;       He can serve HTTP locally. He cannot fetch.\"
 ;;     :adjacent-capability \"http/serve\"
-;;     :redirect \"curl in user's terminal, or Claude, or Sakura for
+;;     :redirect \"curl in user's terminal, or Claude, or Motoi for
 ;;       business-side wire\")
 ```
 
@@ -218,12 +306,63 @@ This is analogous to Wave 6's crisis-refusal-template consistency: the template 
 - Book of Motoi Scheme Appendix G — the kid-facing version.
 - Motoi safety refusals (see Book of Reason if it exists in your tree, or the motoi-safety-refusals doctrine) — a distinct system; subsystem-limits are ADDITIVE to safety refusals, not replacements.
 
-## Sections 16.13 through 16.16 — pending Wave 4 authoring
+## 16.13 The confidentiality flag on chapter metadata
 
-- 16.13 The confidentiality flag on chapter metadata
-- 16.14 Testing your privacy posture
-- 16.15 Reporting introspection leaks
-- 16.16 Closing — honesty about limits
+Every SLAT chapter (see the header at the top of every reference chapter and every book chapter) carries a `:confidentiality` field: `"public"`, `"internal"`, or `"restricted"`. The training-eligibility flag consults this before including a chapter in the training corpus.
+
+That means chapters marked `"restricted"` never appear in the model's training data — the pipeline filters them at the corpus-emission step. The chapters still exist for human readers with the right access; they simply don't propagate into weights. This is the same architectural pattern as Cortex confidentiality, applied to authored content instead of runtime records.
+
+If you author a chapter that discusses proprietary integration details or unshipped features, set `:confidentiality "restricted"` at the top. The pipeline honors it.
+
+## 16.14 Testing your privacy posture
+
+Three tests worth running before shipping a Motoi cart to production.
+
+**Test one: what does the cart introspect at runtime?** Run the cart with the trace on, filter the trace for calls to `help`, `describe`, `cortex/recall`, and `all-verbs`. Anything unexpected is a leak vector.
+
+**Test two: what perm level does the cart require?** The `audit-cart-perms` function from 16.9 tells you. If the cart runs at `paint` when you thought it only needed `read`, something is elevating without your knowledge.
+
+**Test three: what does the cart's own error messages leak?** Errors carry `:context` fields. When those fields include user input or state, they can end up in log files. Grep your error records for anything that looks like a name, an ID, or a token.
+
+Passing all three tests is not "safe" — nothing is safe in the general sense — but it means you've named the leak surface. Naming is the prerequisite for shipping.
+
+## 16.15 Reporting introspection leaks
+
+When you find a leak in someone else's cart (or your own), the record shape is short:
+
+```
+(leak-report
+  :date "2026-07-22"
+  :cart "path/to/cart.sks"
+  :vector 'cortex-recall     ;; how the leak happened
+  :leaked-field 'user-email
+  :severity 'medium
+  :fix-suggestion "wrap the recall with a redaction filter")
+```
+
+The convention is to record leak reports in Cortex under the key `'security/leak-reports`. Reviewers walk that key before every release. Small model, small operation — the process is human-scale and works.
+
+## 16.16 Closing — honesty about limits
+
+Motoi does not solve the general information-flow problem. No language does. What Motoi does is expose ITS OWN introspection surface in a way that is auditable, tier-enforced, and honest about what it cannot see.
+
+If a cart runs and a private field ends up in a log, the trace records show which verb dispatched the leak. If a permission was elevated, the elevation record shows when and by whom. If the model was fed a redacted record, the redaction is visible in the record shape. Every safety mechanism is a value you can walk, not a black-box promise.
+
+That's the honest ceiling. The language is transparent about its introspection surface. The rest — what the operator grants, what the cart author writes, what the runtime environment enforces — is upstream.
+
+Introspection safety is not the same as system safety. Introspection is the mirror; the mirror is honest; what you see is what's there. Whether what's there was safe to expose in the first place is a decision made by the layers above the language.
+
+## The bridge to the reader
+
+If you have read this book from chapter 1 through chapter 16, you now know how Motoi looks at itself: the seven basic introspection verbs, the persistent per-verb counter, the trace and watch primitives, errors as data, the registry as single source of truth, search as a shape query, and the perm-tier safety model.
+
+None of these mechanisms is exotic. Every one is a small composition of primitives already in the language. The book has been long because introspection touches everything, not because introspection is complicated.
+
+The reference manual covers every verb in detail. When you want the exact signature and the three-tier example programs, go there. This book was about WHY — why the language is introspective by design, why that matters more for a small model than for a large one, and how you compose the introspection surface to build tools that don't require the language to grow.
+
+Turn the last page. There's an appendix set — verb-record schema, introspection cheat-sheet, build-a-help-command walkthrough, boundary introspection, teacher tools, debugger patterns, LLM-value enumeration, and the cross-domain compositions. Each appendix picks one lens and goes deeper.
+
+You have the mirror. Use it.
 
 ## 16.17 The three principles
 
@@ -310,7 +449,7 @@ Cortex records can carry a `:confidentiality` field:
 (cortex/record
   :subject 'user
   :predicate 'ssn
-  :object \"123-45-6789\"
+  :object \"XXX-XX-XXXX\"  ;; never a real SSN — masked placeholder
   :at (current-second)
   :source 'user-input
   :confidentiality 'personal-data)

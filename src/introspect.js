@@ -1,7 +1,7 @@
 // motoi-scheme — introspection surface
 //
 // One source of truth for what a verb IS: what it does, what it takes,
-// what it returns, where it lives. REPL, CLI, docs, and Sakura all
+// what it returns, where it lives. REPL, CLI, docs, and downstream dialects all
 // read from these functions.
 //
 // The registry itself lives in verbRegistry.js; this module just

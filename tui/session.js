@@ -86,6 +86,17 @@ export class Session {
   /** Evaluate a source string; return { ok, value, stdout, error }. */
   evalSource(source) {
     this.captured = ''
+    // Hijack process.stdout.write during eval so verbs that bypass
+    // (display) — notably `fb/dump`, which emits ANSI colored blocks
+    // directly to process.stdout — get captured instead of trashing
+    // the alt-screen. The REPL painter (paintRepl in tui.js) knows how
+    // to detect and render the ANSI-escape lines that come back.
+    const realWrite = process.stdout.write.bind(process.stdout)
+    process.stdout.write = (chunk /* , enc?, cb? */) => {
+      try { this.captured += typeof chunk === 'string' ? chunk : chunk.toString('utf8') }
+      catch { /* soft-fail — chunk may be a bare buffer */ }
+      return true
+    }
     try {
       const forms = parse(source)
       const { forms: expanded } = expandProgram(forms, { fuel: { n: this.fuel } })
@@ -105,6 +116,8 @@ export class Session {
         stdout: this.captured,
         error: e.message,
       }
+    } finally {
+      process.stdout.write = realWrite
     }
   }
 

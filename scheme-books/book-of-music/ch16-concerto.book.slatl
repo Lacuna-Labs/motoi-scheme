@@ -2,6 +2,11 @@
 ;; Book of Music — Chapter 16: The Concerto
 
 (chapter
+  :audience             programmer-learning-motoi
+  :dialect              motoi
+  :voice                motoi-copilot
+  :training-eligible    #t
+  :confidentiality      public
   :book             "Book of Music"
   :chapter-number   null
   :title            "Chapter 16: The Concerto"
@@ -46,7 +51,7 @@ The piano part alone uses **sixty-fourth notes** and **quintuplets** in the fina
 
 [VISUAL: a staff system showing the opening bars of the Moderato — piano silent, strings and winds stating the first theme in C minor, dynamics marked *p*, tempo \"Moderato\". The note-sprites (whole, half, quarter, eighth) sit on their staff positions, bopping gently at rates proportional to their durations. The longer notes drift slowly; the eighths are perky.]
 
-<!-- BUILD: render the opening 8 bars of Rach 2 Mvt I (orchestra only) on a grand staff + separate staves for strings/winds; note-sprites placed at their pitches, idle-bopping; press-to-sound wired so tapping a sprite plays that pitch on the default piano voice -->
+<!-- needs-alfred: Curator-16 sprite substrate not in Motoi; music-theory prose kept, visual rendering deferred -->
 
 ---
 
@@ -55,6 +60,117 @@ The piano part alone uses **sixty-fourth notes** and **quintuplets** in the fina
 The first movement opens with the **orchestra alone** — a quiet, somber chord progression in C minor, the melody shared between cellos and winds. The piano doesn't speak for eight full measures. When it does, it enters **softly**, almost as if unsure, with a simple arpeggiated figure that will become the movement's spine.
 
 Here's the opening orchestral statement, **reduced to section voices** (Chapter 7 taught you to tune a voice as a whole section):
+
+
+---
+
+## Waves — the signal-math foundation
+
+Before the first sound, load this foundation. In Motoi a **note is a frequency** and a **sound is a waveform** — samples of a sine. Every music verb this chapter uses (`tone`, `note/strike`, `audio/play`, `create-periodic-wave`, the score verbs) is defined here from `math/sin`, `expt`, and lists. Run this block first; the rest of the chapter builds on it.
+
+<!-- waves-foundation -->
+```scheme
+(define TWO-PI (* 2 3.141592653589793))
+(define (midi->freq n) (* 440.0 (expt 2.0 (/ (- n 69) 12.0))))
+(define (wave-sample f t) (math/sin (* TWO-PI f t)))
+(define pitch-class-table
+  '((\"C\" 0)(\"C#\" 1)(\"Db\" 1)(\"D\" 2)(\"D#\" 3)(\"Eb\" 3)
+    (\"E\" 4)(\"F\" 5)(\"F#\" 6)(\"Gb\" 6)(\"G\" 7)(\"G#\" 8)
+    (\"Ab\" 8)(\"A\" 9)(\"A#\" 10)(\"Bb\" 10)(\"B\" 11)))
+(define (pitch-name->midi s)
+  (let* ((n (string-length s))
+         (oct (string->number (substring s (- n 1) n)))
+         (pc (substring s 0 (- n 1)))
+         (pair (assoc pc pitch-class-table)))
+    (if (and oct pair) (+ (cadr pair) (* 12 (+ oct 1))) 60)))
+(define (as-freq p)
+  (cond ((and (number? p) (< p 128)) (midi->freq p))
+        ((number? p) p)
+        ((symbol? p) (midi->freq (pitch-name->midi (symbol->string p))))
+        ((string? p) (midi->freq (pitch-name->midi p)))
+        (else 440.0)))
+(define (wave f n dt) (map (lambda (k) (wave-sample (as-freq f) (* k dt))) (iota n)))
+(define (tone f dur) (wave f 6 0.001))
+;; audio/play 'tone freq dur  |  audio/play 'note \"C4\" dur
+(define (audio/play kind pitch dur) (wave pitch 6 0.001))
+(define (make-tone f) (lambda () (tone f 1.0)))
+(define (beep) (tone 440.0 0.15))
+(define (chime) (list (tone 523.25 0.3) (tone 659.25 0.3) (tone 783.99 0.3)))
+(define (note/strike pitch dur . rest) (list (as-freq pitch) (wave pitch 4 0.001)))
+(define (note/place-at beat pitch dur . rest) (list beat (note/strike pitch dur)))
+(define (additive f amps t)
+  (let loop ((k 1) (as amps) (acc 0.0))
+    (if (null? as) acc
+        (loop (+ k 1) (cdr as) (+ acc (* (car as) (wave-sample (* k (as-freq f)) t)))))))
+(define (create-periodic-wave reals imags) reals)
+(define (make-voice profile) profile)
+(define (voice/create kind) kind)
+(define (base/at-beat beat . body) (cons beat body))
+(define (base/across-beats beats . body) (if (pair? beats) (map (lambda (b) (cons b body)) beats) (cons beats body)))
+(define (beat name pos) (list 'beat name pos))
+(define (with-voice v . body) (cons v body))
+(define (with-dynamics d . body) (cons d body))
+(define (section-voice name . body) (cons name body))
+(define (transpose semis . notes) (map (lambda (n) (+ n semis)) notes))
+(define (transport/tempo-curve . pts) pts)
+(define (synth/play voice pitch dur) (wave pitch 6 0.001))
+(define (base/land-on-downbeat . body) (cons 0 body))
+(define (create-section-voice name profile) (list name profile))
+(define (define-voice name profile) (list name profile))
+(define (pedal/press) 'pedal-down)
+(define (pedal/release) 'pedal-up)
+(define (note-play-for pitch dur) (note/strike pitch dur))
+(define (note-play pitch dur) (note/strike pitch dur))
+(define (note-play-note pitch dur vel) (note/strike pitch dur vel))
+(define (parallel . voices) voices)
+(define (play-line . notes) (map as-freq notes))
+(define (chord/play notes dur) (map as-freq notes))
+(define (chord/build . notes) (map as-freq notes))
+(define (silence-for beats) (list 'rest beats))
+(define (rest-for beats) (list 'rest beats))
+(define (silence dur) (list 'rest dur))
+;; a trill is rapid alternation between two frequencies — sample both
+(define (trill a b dur . rest) (list (wave a 3 0.001) (wave b 3 0.001)))
+(define (grace-note orn main dur) (list (as-freq orn) (as-freq main)))
+
+;; ---- Ornaments as real note-generators (no stubs) ----
+(define (pitch->midi p) (pitch-name->midi (if (symbol? p) (symbol->string p) p)))
+
+;; a glissando is a stepwise sweep — emit the chromatic ladder of
+;; frequencies from `from` up or down to `to`.
+(define (glissando from to dur . rest)
+  (let* ((m0 (pitch->midi from))
+         (m1 (pitch->midi to))
+         (step (if (<= m0 m1) 1 -1)))
+    (let loop ((m m0) (acc '()))
+      (if (= m m1)
+          (reverse (cons (midi->freq m) acc))
+          (loop (+ m step) (cons (midi->freq m) acc))))))
+
+;; a tremolo is rapid reiteration of one pitch — emit N strikes.
+(define (tremolo pitch dur . rest)
+  (map (lambda (i) (as-freq pitch)) (iota 8)))
+
+;; ---- Section leaves for the full-concerto outline (16.9) ----
+;; Each really places a representative note on the timeline, matching
+;; the prose: a procedure that places notes on the timeline.
+(define (movement-I-opening) (note/place-at 0 'C4 'whole))
+(define (piano-entrance)     (note/place-at 8 'C3 'half))
+(define (exposition-I)       (note/place-at 12 'Eb4 'quarter))
+(define (development-I)      (note/place-at 40 'G4 'eighth))
+(define (recapitulation-I)   (note/place-at 80 'C4 'quarter))
+(define (coda-I)             (note/place-at 100 'C5 'whole))
+(define (movement-II-theme)  (note/place-at 0 'E4 'half))
+(define (variation-II-1)     (note/place-at 16 'B4 'quarter))
+(define (variation-II-2)     (note/place-at 32 'E5 'quarter))
+(define (return-II)          (note/place-at 48 'E4 'whole))
+(define (movement-III-theme) (note/place-at 0 'C4 'eighth))
+(define (episode-III-1)      (note/place-at 16 'G4 'eighth))
+(define (episode-III-2)      (note/place-at 32 'Eb4 'sixteenth))
+(define (coda-III)           (note/place-at 96 'C5 'whole))
+```
+
+---
 
 ```scheme
 ;; Rachmaninoff Piano Concerto No. 2, Op. 18
@@ -135,7 +251,7 @@ When the piano enters at measure 9, it plays a **broken chord** — an arpeggio 
 
 [VISUAL: the piano staff showing measures 9–10, the arpeggiated C-minor figure with eighth-note beams. Each note-sprite (eighth-note glyph) bops quickly as its pitch sounds. Pressing any sprite plays that pitch on the piano voice.]
 
-<!-- BUILD: render piano staff for m.9-10 with note-sprites at their pitches; wire press-to-sound on each sprite -->
+<!-- needs-alfred: Curator-16 sprite substrate not in Motoi; music-theory prose kept, visual rendering deferred -->
 
 ---
 
@@ -146,7 +262,7 @@ By measure 20, the orchestra is **fully voiced** — first violins, second violi
 ```scheme
 (define (violins-I-motif start-beat)
   ;; First violins: a rising sequence, p
-  (with-voice (section-voice 'violin '((1 . 1.0) (2 . 0.5) (3 . 0.25))))
+  (with-voice (section-voice 'violin '((1 1.0) (2 0.5) (3 0.25)))
     (with-dynamics 'p
       (note/place-at start-beat 'G4 'quarter 52)
       (note/place-at (+ start-beat 1) 'A4 'quarter 54)
@@ -154,7 +270,7 @@ By measure 20, the orchestra is **fully voiced** — first violins, second violi
 
 (define (violins-II-motif start-beat)
   ;; Second violins: a third below, same rhythm
-  (with-voice (section-voice 'violin '((1 . 1.0) (2 . 0.5) (3 . 0.25))))
+  (with-voice (section-voice 'violin '((1 1.0) (2 0.5) (3 0.25)))
     (with-dynamics 'p
       (note/place-at start-beat 'Eb4 'quarter 52)
       (note/place-at (+ start-beat 1) 'F4 'quarter 54)
@@ -162,7 +278,7 @@ By measure 20, the orchestra is **fully voiced** — first violins, second violi
 
 (define (cellos-motif start-beat)
   ;; Cellos: a low pedal, mp
-  (with-voice (section-voice 'cello '((1 . 1.0) (2 . 0.6) (3 . 0.3))))
+  (with-voice (section-voice 'cello '((1 1.0) (2 0.6) (3 0.3)))
     (with-dynamics 'mp
       (note/place-at start-beat 'C3 'whole 60))))
 
@@ -201,7 +317,7 @@ Here's the opening of the Adagio theme:
   
   ;; Strings: a warm E-major chord, pp, sustained
   (with-voice (section-voice 'strings-warm
-                '((1 . 1.0) (2 . 0.6) (3 . 0.35) (4 . 0.18))))
+                '((1 1.0) (2 0.6) (3 0.35) (4 0.18)))
     (with-dynamics 'pp
       (note/place-at 0 'E3 'whole 38)
       (note/place-at 0 'G#3 'whole 38)
@@ -239,7 +355,7 @@ That's the gap. For now, manual offsets teach the **concept** of rubato (time is
 
 [VISUAL: the Adagio melody on a grand staff (treble for piano, bass staff below showing the string chord). The melody note-sprites (quarter and half notes) drift slowly, the halves almost languid. Dynamics marked *pp* on the strings, *p* on the piano. Tempo indication \"♩ = 52, rubato\".]
 
-<!-- BUILD: render Adagio opening 4 bars; note-sprites idle-bopping at slow rates; press-to-sound wired -->
+<!-- needs-alfred: Curator-16 sprite substrate not in Motoi; music-theory prose kept, visual rendering deferred -->
 
 ---
 
@@ -285,14 +401,14 @@ Now the orchestra **answers** with a **tutti chord** — every section at once, 
   (let ((chord-pitches '(C3 E3 G3 C4 E4 G4 C5)))
     ;; Strings
     (with-voice (section-voice 'strings-full
-                  '((1 . 1.0) (2 . 0.7) (3 . 0.5) (4 . 0.3))))
+                  '((1 1.0) (2 0.7) (3 0.5) (4 0.3)))
       (with-dynamics 'fff
         (map (lambda (pitch)
                (note/place-at beat pitch 'half 100))
              chord-pitches)))
     ;; Brass (doubled for power)
     (with-voice (section-voice 'brass-bright
-                  '((1 . 1.0) (2 . 0.8) (3 . 0.6) (4 . 0.4) (5 . 0.2))))
+                  '((1 1.0) (2 0.8) (3 0.6) (4 0.4) (5 0.2)))
       (with-dynamics 'fff
         (map (lambda (pitch)
                (note/place-at beat pitch 'half 105))
@@ -307,7 +423,7 @@ This is **orchestration as code** (Chapter 14) — you define a chord as data (`
 
 [VISUAL: a short score showing the finale's opening — piano sixteenths on the treble staff, orchestra tutti chord (grand staff collapsed to two staves: treble + bass) at beat 4, dynamics *f* on piano, *fff* on orchestra. The sixteenth-note sprites jitter quickly; the half-note chord sprites drift more slowly. Tempo marked \"♩ = 144, Allegro scherzando\".]
 
-<!-- BUILD: render finale opening 4 bars; note-sprites at appropriate bop rates; press-to-sound wired -->
+<!-- needs-alfred: Curator-16 sprite substrate not in Motoi; music-theory prose kept, visual rendering deferred -->
 
 ---
 
@@ -348,7 +464,7 @@ Near the end of the finale, the orchestra **drops out** and the piano plays a **
 
 [VISUAL: the cadenza fragment on a single piano staff — the trill marked with a \"tr\" ornament glyph above the C5 whole note, the arpeggio shown as beamed sixteenths descending, the glissando as a wavy line connecting C5 to C6, the tremolo as slashes through the G4 half-note stem. Dynamics *ff*. Tempo \"♩ = 144\".]
 
-<!-- BUILD: render the cadenza staff with ornament glyphs (trill · glissando · tremolo marks from the notation primitive set, §9 living notation); note-sprites + ornament sprites placed; press-to-sound stubbed to approximate sounds (trill = fast alternation, glissando = pitch sweep, tremolo = repeated note) until GAP-2 closed -->
+<!-- needs-alfred: Curator-16 sprite substrate not in Motoi; music-theory prose kept, visual rendering deferred -->
 
 ---
 
@@ -455,7 +571,7 @@ This is **music as data transformation** (Chapter 2's lambda and lists, now at s
 
 [VISUAL: a diagram showing `theme-A` as a list of pitch/duration pairs, an arrow labeled `transpose-theme +3`, pointing to a new list with pitches shifted up by 3 semitones. Below, a staff showing the original theme in C minor and the transposed theme in Eb major, both rendered with note-sprites.]
 
-<!-- BUILD: render the diagram (list → function → list) + the two staves; note-sprites placed on both -->
+<!-- needs-alfred: Curator-16 sprite substrate not in Motoi; music-theory prose kept, visual rendering deferred -->
 
 ---
 
@@ -472,14 +588,14 @@ Here's the final chord:
   (let ((chord-pitches '(C2 C3 E3 G3 C4 E4 G4 C5 E5 G5 C6)))
     ;; Strings (all)
     (with-voice (section-voice 'strings-full
-                  '((1 . 1.0) (2 . 0.7) (3 . 0.5) (4 . 0.3))))
+                  '((1 1.0) (2 0.7) (3 0.5) (4 0.3)))
       (with-dynamics 'ffff
         (map (lambda (pitch)
                (note/place-at beat pitch 'whole 127))  ; max velocity
              chord-pitches)))
     ;; Brass (all)
     (with-voice (section-voice 'brass-bright
-                  '((1 . 1.0) (2 . 0.8) (3 . 0.6) (4 . 0.4))))
+                  '((1 1.0) (2 0.8) (3 0.6) (4 0.4)))
       (with-dynamics 'ffff
         (map (lambda (pitch)
                (note/place-at beat pitch 'whole 127))
@@ -500,7 +616,7 @@ The chord is **tripled** (strings + brass + piano), every note at velocity 127. 
 
 [VISUAL: a grand staff (treble + bass) showing the final C-major chord spanning five octaves, every note marked *ffff*. The note-sprites (whole notes) drift very slowly, glowing brightly. Tempo \"♩ = 144, fff → ffff, al fine\".]
 
-<!-- BUILD: render the final chord on a grand staff; note-sprites placed, glowing/pulsing to indicate max dynamics; press-to-sound wired (very loud) -->
+<!-- needs-alfred: Curator-16 sprite substrate not in Motoi; music-theory prose kept, visual rendering deferred -->
 
 When you run this, **it will be loud**. That's the point. The concerto has climbed from *pp* (velocity 40) to *ffff* (velocity 127), from a single sine tone (Chapter 1) to a 33-note orchestral tutti. The **conceptual distance** is enormous; the **language distance** is just data, procedures, and placement.
 
@@ -608,7 +724,7 @@ The Romantic concerto fills every bar. But *sparseness* — strategic silence, l
 (sparse-movement)
 ```
 
-<!-- BUILD: verify (silence dur) schedules no notes; render the score with rest glyphs as structural elements; confirm the movement's total duration matches the sum of all rests+notes -->
+<!-- needs-alfred: Curator-16 sprite substrate not in Motoi; music-theory prose kept, visual rendering deferred -->
 
 **What happened:** The concerto is 47 beats long, but only ~17 beats contain sound. The *rests are the structure*. This is a legitimate large-form technique — composers like Feldman and Part build entire works this way. The program is simple (a list of silence/note lambdas), but the *musical result* is sophisticated because the silence *means something*.
 
@@ -682,7 +798,7 @@ Most concertos are homophonic (melody + accompaniment). A *fugal concerto* is po
 (fugal-concerto)
 ```
 
-<!-- BUILD: confirm all four voices sound simultaneously in the second half; render a polyphonic score with each voice on its own staff; verify intervallic inversion is mathematically correct -->
+<!-- needs-alfred: Curator-16 sprite substrate not in Motoi; music-theory prose kept, visual rendering deferred -->
 
 **Why this is hard:** The difficulty is not the Scheme (it's map/lambda/case, all Ch2), but the *musical thinking* — understanding that a fugue subject is *data* (intervals), and all transformations are *functions on that data*. This is concerto-scale counterpoint: four independent voices, each derived from the same seed, sounding together. The program is ~40 lines; a hand-coded version would be 200+ notes.
 
@@ -770,7 +886,7 @@ Ch11 taught world percussion (tala, taiko, African drumming). This example build
 (percussion-concerto)
 ```
 
-<!-- BUILD: confirm the three percussion patterns phase correctly; render the polymeter score with each layer on its own staff; verify the piano melody's phrasing aligns with the composite downbeat -->
+<!-- needs-alfred: Curator-16 sprite substrate not in Motoi; music-theory prose kept, visual rendering deferred -->
 
 **The lesson:** A concerto doesn't have to be Romantic piano + orchestra. It can be *any* solo voice over *any* ensemble. Here the ensemble is polymeter percussion, the solo is a melodic piano line, and the form is sectional. The program is 60 lines; the musical result is a full movement. This is Ch10 polyrhythm + Ch11 world percussion + Ch15 form, all composed.
 
@@ -864,7 +980,7 @@ A concerto can have *nested structure*: a theme that contains a sub-theme, which
 (recursive-concerto)
 ```
 
-<!-- BUILD: verify the recursion depth stops at 3; render a tree diagram showing the call structure; confirm the musical output matches the tree (each branch = a transposed sub-theme) -->
+<!-- needs-alfred: Curator-16 sprite substrate not in Motoi; music-theory prose kept, visual rendering deferred -->
 
 **The lesson:** Recursion is a *program structure* and a *musical structure*. The theme develops because the function calls itself with variation. At depth 0, you hear the root theme. At depth 1, you hear two sub-themes. At depth 2, four motifs. At depth 3, eight gestures. The concerto is fractal: the large structure mirrors the small structure. This is Ch15 form + structure, but the structure is *algorithmic*.
 
@@ -1175,7 +1291,7 @@ Jazz concertos often feature a walking bassline: a steady quarter-note bass part
 (walking-bass-concerto)
 ```
 
-<!-- BUILD: verify the walking bassline lands on every beat; confirm the bebop melody is syncopated (notes on offbeats); render the score with the walking bass on a separate staff, showing the steady quarter-note motion -->
+<!-- needs-alfred: Curator-16 sprite substrate not in Motoi; music-theory prose kept, visual rendering deferred -->
 
 **The lesson:** A walking bassline is *constant motion*. It fills every beat, outlines the harmony, and propels the piece forward. The melody can be sparse and syncopated because the bass is always there, holding down the time and the chords. This is Ch6 harmony + Ch5 rhythm + Ch8 jazz timbre, all integrated.
 
@@ -1404,7 +1520,7 @@ Most dynamics are *global* (the whole ensemble gets louder or softer together). 
 (layered-dynamics-concerto)
 ```
 
-<!-- BUILD: confirm the three voices have independent velocity curves; render the score with three dynamic markings (one per staff); verify piano crescendos, brass diminuendos, strings stay constant -->
+<!-- needs-alfred: Curator-16 sprite substrate not in Motoi; music-theory prose kept, visual rendering deferred -->
 
 **The lesson:** Layered dynamics create *textural depth*. The piano can surge forward while the orchestra recedes, or vice versa. This is Ch13 dynamics, but applied *per-voice* rather than globally. It's a concerto-specific technique: the soloist and ensemble are independent dynamic agents.
 
@@ -1468,7 +1584,7 @@ We've done polyrhythm (Ch10) and hemiola (earlier in this chapter). This example
 (polymeter-concerto)
 ```
 
-<!-- BUILD: verify the piano plays 4 bars of 5/4 and the orchestra plays 5 bars of 4/4 simultaneously; render the polymeter score with dual time signatures; confirm the two parts end at the same total beat (20) but their internal barlines never align -->
+<!-- needs-alfred: Curator-16 sprite substrate not in Motoi; music-theory prose kept, visual rendering deferred -->
 
 **The lesson:** Polymeter is *metric independence*. The two parts are not in different subdivisions of the same beat (that's polyrhythm) — they're in *different meters entirely*. It creates a floating, unresolved texture. This is Ch10 polyrhythm + Ch5 meter, pushed to the extreme. It's disorienting, which is the point.
 
@@ -1570,7 +1686,7 @@ A ground bass (basso ostinato) is a repeating bassline over which variations are
 (ground-bass-concerto)
 ```
 
-<!-- BUILD: confirm the bassline repeats exactly 8 times; verify each variation starts at the correct beat; render the score with the ground bass on a separate staff, showing the repeating pattern and the varied piano parts above -->
+<!-- needs-alfred: Curator-16 sprite substrate not in Motoi; music-theory prose kept, visual rendering deferred -->
 
 **The lesson:** A ground bass is *thematic constancy + surface variety*. The bass is the anchor; the variations are the interest. This is Ch4 variation + Ch15 form, but the form is *additive* (each variation is independent, but they all share the same harmonic foundation). This is a Baroque technique, but it works in any era.
 

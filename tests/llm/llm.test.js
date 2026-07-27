@@ -18,6 +18,7 @@ import { existsSync, readFileSync, unlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
+import { copilotDir } from '../../src/paths.js'
 import { makeCoreEnv } from '../../core/index.js'
 import { evaluate } from '../../src/interp.js'
 import { parse, Sym, sym } from '../../src/reader.js'
@@ -345,13 +346,15 @@ test('llm — mock endpoint: copilot/fix returns a repaired form', async () => {
 
 // ── (3) scaffold — writes to disk ─────────────────────────────────────
 
-test('llm — copilot/scaffold writes a real file to a tmp dir + returns path', () => {
+test('llm — copilot/scaffold writes a real file inside the copilot home + returns path', () => {
   clearEnv()
-  const dir = join(tmpdir(), `motoi-llm-scaffold-${process.pid}`)
+  // :dir must be inside the copilot home to be honored (confinement).
+  const dir = join(copilotDir(), `scaffold-test-${process.pid}`)
   const src = `(copilot/scaffold (quote verb) :name (quote hello) :purpose "say hi" :dir ${JSON.stringify(dir)})`
   const path = evalSrc(src)
   assert.ok(typeof path === 'string', 'scaffold returned a path')
   assert.ok(existsSync(path), `file exists at ${path}`)
+  assert.ok(path.startsWith(copilotDir()), `path is confined to copilot home; got ${path}`)
   const content = readFileSync(path, 'utf8')
   assert.ok(content.includes(':name hello'), 'file contains :name')
   assert.ok(content.includes('"say hi"'), 'file contains :purpose')
@@ -361,13 +364,26 @@ test('llm — copilot/scaffold writes a real file to a tmp dir + returns path', 
 
 test('llm — copilot/scaffold test-kind writes a .test.js', () => {
   clearEnv()
-  const dir = join(tmpdir(), `motoi-llm-scaffold-${process.pid}-b`)
+  const dir = join(copilotDir(), `scaffold-test-${process.pid}-b`)
   const src = `(copilot/scaffold (quote test) :name (quote demo) :purpose "smoke" :dir ${JSON.stringify(dir)})`
   const path = evalSrc(src)
   assert.ok(typeof path === 'string')
   assert.ok(path.endsWith('.test.js'), `expected .test.js; got ${path}`)
   const content = readFileSync(path, 'utf8')
   assert.ok(content.includes("import { test }"))
+  try { unlinkSync(path) } catch { /* ignore */ }
+})
+
+test('llm — copilot/scaffold CONFINEMENT: an outside :dir is ignored, write stays in copilot home', () => {
+  clearEnv()
+  // A hostile :dir pointing outside the copilot home must NOT be honored.
+  const escape = join(tmpdir(), `motoi-escape-${process.pid}`)
+  const src = `(copilot/scaffold (quote verb) :name (quote pwned) :purpose "escape" :dir ${JSON.stringify(escape)})`
+  const path = evalSrc(src)
+  assert.ok(typeof path === 'string', 'scaffold returned a path')
+  assert.ok(path.startsWith(copilotDir()), `write confined to copilot home; got ${path}`)
+  assert.ok(!path.startsWith(tmpdir()), 'write did NOT escape to tmpdir')
+  assert.ok(!existsSync(escape), 'no file was written outside the copilot home')
   try { unlinkSync(path) } catch { /* ignore */ }
 })
 

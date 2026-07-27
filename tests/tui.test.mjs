@@ -2,7 +2,7 @@
 //
 // Provenance: 2026-07-19 (Marcus, TUI wave). Alfred asked for a
 // terminal-hosted 4-region IDE mirroring the browser IDE, using
-// Sakura's palette (cream · pink · lilac · magic).
+// the Cherry Tree palette (cream · pink · lilac · magic).
 //
 // These tests boot the TUI against a mocked TTY, verify it paints
 // the four regions, and simulate keystrokes to prove the input
@@ -38,7 +38,7 @@ test('palette emits truecolor ANSI for the cherry-tree tiers', () => {
 test('palette exposes legacy aliases for the pre-cherry-tree tiers', () => {
   // Prior draft used lilac/magic; those alias to mint/cedar so
   // downstream panel code that references them still paints
-  // Sakura colors instead of crashing.
+  // the brand colors instead of crashing.
   const p = makePalette('truecolor')
   assert.equal(p.fg('lilac'), p.fg('mint'),  'lilac → mint')
   assert.equal(p.fg('magic'), p.fg('cedar'), 'magic → cedar')
@@ -204,7 +204,7 @@ test('TUI paints all four regions on boot', async () => {
   assert.ok(all.includes('Help'),         'Help menu label')
   // Stripes
   assert.ok(all.includes('▂'),           'stripe glyph rendered')
-  // Sakura Cherry Tree tiers (truecolor)
+  // Cherry Tree tiers (truecolor)
   assert.ok(all.includes('\x1b[38;2;244;160;181m'), 'pink FG emitted (blossoms)')
   assert.ok(all.includes('\x1b[38;2;159;227;197m'), 'mint FG emitted (leaves)')
   assert.ok(all.includes('\x1b[38;2;163;113;82m'),  'cedar FG emitted (trunk)')

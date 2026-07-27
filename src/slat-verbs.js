@@ -1,17 +1,17 @@
-// slat-verbs.js — install the SLAT primitives into a Sakura Scheme env.
+// slat-verbs.js — install the SLAT primitives into a Motoi Scheme env.
 //
 // Wires the minimum-viable set for Book of SLAT (17 chapters + 10 appendices)
 // into the runtime. Before this file, the Book taught ~9 verbs (slat-loads,
 // slat-load, slat-load-doc, slat-dumps, slat-dump, slat-dump-doc, slat-read,
 // slat-write, slat-key) that ZERO of the interpreter's base env exposed.
-// Training on that corpus would have taught Sakura to call verbs that don't
+// Training on that corpus would have taught a downstream model to call verbs that don't
 // exist at runtime — a launch-blocker flagged in PRE-LAUNCH-POLISH-BURNDOWN
 // -2026-07-12 §2 (Zain lane, item #1).
 //
 // This is the substrate. Every verb here:
-//   - accepts Sakura Scheme values (Sym, arrays, plain objects)
+//   - accepts Motoi Scheme values (Sym, arrays, plain objects)
 //   - bridges to the SLAT binding's SlatValue shape at the boundary
-//   - returns Sakura Scheme values on the way back
+//   - returns Motoi Scheme values on the way back
 //   - reports errors as (error :kind ... :message ...) records — never a
 //     JS throw that would crash the interpreter
 //
@@ -29,11 +29,11 @@
 //
 // 3. Records. The slat binding returns forms with head symbols as JS
 //    plain objects: `{ _form: 'event', ts: ..., _positional: [...] }`.
-//    Sakura Scheme code (per the Book) reads these directly and calls
+//    Motoi Scheme code (per the Book) reads these directly and calls
 //    slat-key to pull fields. We keep them as plain JS objects — the
 //    interpreter treats them as opaque values, which is exactly right.
 //
-// 4. Streams. Sakura Scheme has no stream/port abstraction in the base env.
+// 4. Streams. Motoi Scheme has no stream/port abstraction in the base env.
 //    slat-load / slat-dump accept a STRING (multi-line text) rather than a
 //    stream handle: slat-load parses many forms, returns a list; slat-dump
 //    takes a list of values and returns the serialized text. This matches
@@ -96,7 +96,7 @@ function wrapStructured(fn, verbName) {
 // ─────────────────────────────────────────────────────────────────────────
 // Sym ↔ SlatValue bridge.
 //
-// Sakura Scheme uses Sym instances for symbols; the reader interns them
+// Motoi Scheme uses Sym instances for symbols; the reader interns them
 // via sym(name). Keywords land as Sym(':name') (colon included).
 //
 // The slat binding uses SlatValue('symbol', name) for symbols and
@@ -124,7 +124,7 @@ function fromSlatValues(v) {
     if (v.kind === 'symbol') return sym(v.value)
     if (v.kind === 'keyword') return sym(':' + v.value)
     // Other kinds (rational, char, etc.) stay as SlatValue — they're
-    // opaque to the interpreter and their Sakura Scheme representation
+    // opaque to the interpreter and their Motoi Scheme representation
     // is not defined in the minimum-viable set.
     return v
   }
@@ -172,7 +172,7 @@ function toSlatValues(v) {
 // ─────────────────────────────────────────────────────────────────────────
 // Error helpers.
 //
-// Sakura Scheme's honest-null pattern: never throw across the Scheme
+// Motoi Scheme's honest-null pattern: never throw across the Scheme
 // boundary. Return a structured (error :kind ... :message ...) record
 // that consumers can pattern-match.
 // ─────────────────────────────────────────────────────────────────────────
@@ -191,7 +191,7 @@ function tryOr(fn, kind) {
 // ─────────────────────────────────────────────────────────────────────────
 // The verbs themselves.
 //
-// Each returns a Sakura Scheme value (or an error record on failure). The
+// Each returns a Motoi Scheme value (or an error record on failure). The
 // binding-level slatLoads / slatDumps do the heavy lifting; the wrappers
 // bridge Sym ↔ SlatValue and translate the surface into what the Book
 // taught.

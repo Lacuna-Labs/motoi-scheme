@@ -37,6 +37,7 @@
 
 import { Sym } from './reader.js'
 import { registerVerbMeta, defaultMetaFor } from './verbRegistry.js'
+import { Values, RaisedValue } from '../lib/base/r7rs-types.js'
 
 // v2.20.0-A5 — track which verb names have already emitted a
 // missing-perm warning, so a hot-mounted installer (test setup re-runs
@@ -63,6 +64,31 @@ export function setStackHooks({ push, pop } = {}) {
   _STACK_POP  = typeof pop  === 'function' ? pop  : null
 }
 export function clearStackHooks() { _STACK_PUSH = null; _STACK_POP = null }
+
+// Verb-call counter hook (2026-07-22). Alfred asked for a trillion-scale
+// per-verb call counter on 2026-07-14 (task #749); this is the runtime seam
+// that lib/system/verb-stats.js hangs its BigInt Map off. No-op when the
+// module isn't installed. The hook fires ONCE per primitive dispatch.
+let _COUNT_HOOK = null
+export function setCountHook(fn) { _COUNT_HOOK = typeof fn === 'function' ? fn : null }
+export function clearCountHook() { _COUNT_HOOK = null }
+
+// Error-census hook (2026-07-27). The mirror of the count hook: where the
+// count hook counts what RAN, this notes what BROKE. lib/system/verb-stats.js
+// hangs its error-key ledger off this seam. Fired at the run/eval/REPL
+// boundary (see noteError) for every error that ESCAPES a program — i.e. an
+// unhandled failure, not one a Scheme `guard` caught and handled. No-op when
+// the module isn't installed. Doctrine: this is the "wrong sink" — it exists
+// to count and eliminate wrongs, not to rank rights. weights ≠ facts.
+let _ERROR_HOOK = null
+export function setErrorHook(fn) { _ERROR_HOOK = typeof fn === 'function' ? fn : null }
+export function clearErrorHook() { _ERROR_HOOK = null }
+// Record an error via the hook, then return it so callers can `throw noteError(err)`.
+// Never throws itself — telemetry must not break the failure it is recording.
+export function noteError(err) {
+  if (_ERROR_HOOK) { try { _ERROR_HOOK(err) } catch { /* never break on telemetry */ } }
+  return err
+}
 
 export class Env {
   constructor(parent = null) {
@@ -297,11 +323,31 @@ export function evaluate(form, env, fuel) {
 // per verb call, which is the dominant call shape in a card runtime.
 const SPECIAL_FORMS = new Set([
   'quote', 'if', 'define', 'set!', 'lambda', 'begin',
-  'let', 'let*', 'letrec', 'quasiquote', 'when', 'and',
+  'let', 'let*', 'letrec', 'let-values', 'let*-values', 'quasiquote', 'when', 'and',
   'or', 'unless', 'cond', 'case',
   // R7RS §5.5 / §4.2.7 / §4.2.4 / §4.2.5 — 2026-07-18 finalization.
   'define-record-type', 'guard', 'do', 'delay',
 ])
+
+// Destructure a producer's result (a Values wrapper, or a bare single value)
+// against let-values formals and define each name in `env`. Formals may be a
+// proper list of symbols `(a b)` — positional — or a single symbol `rest`,
+// which binds ALL the produced values as a list.
+function bindValues(formals, result, env) {
+  const vals = result instanceof Values ? result.vals : [result]
+  if (formals instanceof Sym) {            // (rest) — collect every value
+    env.define(formals.name, vals)
+    return
+  }
+  if (Array.isArray(formals)) {
+    if (formals.length !== vals.length) {
+      throw new Error(`let-values: expected ${formals.length} value(s), got ${vals.length}`)
+    }
+    for (let i = 0; i < formals.length; i++) env.define(formals[i].name, vals[i])
+    return
+  }
+  throw new Error('let-values: malformed formals')
+}
 
 function evalStep(form, env, fuel) {
   if (--fuel.n < 0) throw new Error('fuel exhausted')
@@ -409,6 +455,29 @@ function evalStep(form, env, fuel) {
         if (form.length === 2) return undefined
         return new Tail(form[form.length - 1], e2)
       }
+      case 'let-values': {
+        // R7RS §4.2.2 — (let-values (((a b) init) (rest init2)) body...)
+        // Each init is evaluated in the OUTER env (parallel binding); its
+        // (possibly multiple) values are destructured against the formals.
+        const e2 = new Env(env)
+        for (const [formals, initExpr] of form[1]) {
+          bindValues(formals, evaluate(initExpr, env, fuel), e2)
+        }
+        for (let i = 2; i < form.length - 1; i++) evaluate(form[i], e2, fuel)
+        if (form.length === 2) return undefined
+        return new Tail(form[form.length - 1], e2)
+      }
+      case 'let*-values': {
+        // Like let-values but each init sees the bindings established by the
+        // clauses before it (sequential).
+        const e2 = new Env(env)
+        for (const [formals, initExpr] of form[1]) {
+          bindValues(formals, evaluate(initExpr, e2, fuel), e2)
+        }
+        for (let i = 2; i < form.length - 1; i++) evaluate(form[i], e2, fuel)
+        if (form.length === 2) return undefined
+        return new Tail(form[form.length - 1], e2)
+      }
       case 'quasiquote':
         return quasiExpand(form[1], env, fuel)
       case 'when': {
@@ -451,6 +520,11 @@ function evalStep(form, env, fuel) {
           const t = isElse ? true : evaluate(test, env, fuel)
           if (t !== false) {
             if (clause.length === 1) return t            // (cond (x)) → x's value
+            // R7RS `=>`: (cond (test => proc)) applies proc to test's value.
+            if (clause.length === 3 && clause[1] instanceof Sym && clause[1].name === '=>') {
+              const proc = evaluate(clause[2], env, fuel)
+              return apply(proc, [t], fuel)
+            }
             for (let j = 1; j < clause.length - 1; j++) evaluate(clause[j], env, fuel)
             return new Tail(clause[clause.length - 1], env)
           }
@@ -539,8 +613,9 @@ function evalStep(form, env, fuel) {
         } catch (err) {
           // Only catch SchemeError / values raised via `raise`; native
           // errors flow through too (R7RS treats any raised value as a
-          // condition object).
-          const condition = err.isSchemeError || err instanceof Error ? err : err
+          // condition object). A value raised via `raise` arrives wrapped in
+          // RaisedValue — unwrap so the guard variable binds the raw datum.
+          const condition = err instanceof RaisedValue ? err.value : err
           const e2 = new Env(env)
           e2.define(varSym.name, condition)
           for (const clause of clauses) {
@@ -627,12 +702,20 @@ export function apply(fn, args, fuel) {
  * evaluated for side-effects). The trampoline unwinds the Tail.
  */
 function applyStep(fn, args, fuel) {
+  // `(:honest-null "reason")` is the authored sentinel for a slot whose
+  // program is genuinely N/A (MUT verbs, world/scene introspection, etc.).
+  // It is documentation, not a call — evaluate it to its reason string so
+  // it runs cleanly instead of raising "not a function".
+  if (fn instanceof Sym && fn.name === ':honest-null') {
+    return args.length ? args[0] : undefined
+  }
   if (typeof fn === 'function') {
     // Stack hook (2026-07-19). Push a frame for named primitives so a
     // panel can show "we're inside `book/read`" while it runs. Anonymous
     // JS fns (arrow closures inside apply, etc.) are skipped — they'd
     // just be noise. finally-pop keeps the ledger balanced even if the
     // primitive throws.
+    if (_COUNT_HOOK && fn.__verbName) _COUNT_HOOK(fn.__verbName)
     if (_STACK_PUSH && fn.__verbName) {
       _STACK_PUSH(fn.__verbName, 'primitive')
       try { return fn(...args) }
