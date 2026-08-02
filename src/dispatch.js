@@ -32,7 +32,7 @@
 // and even that is a defence-in-depth nicety; untrusted input shouldn't
 // reach the parser at all (it's data, not code).
 
-import { parse, Sym } from './reader.js'
+import { parse, Sym, Pair, pairToString } from './reader.js'
 import { expandProgram } from './macro.js'
 import { getVerbMeta, validateRegistry } from './verbRegistry.js'
 
@@ -427,6 +427,10 @@ function previewArg(arg, depth = 0) {
     if (arg.length === 0) return '()'
     return '(' + arg.slice(0, 4).map((a) => previewArg(a, depth + 1)).join(' ') +
       (arg.length > 4 ? ' …' : '') + ')'
+  }
+  if (arg instanceof Pair) {
+    if (depth > 2) return '(…)'
+    return pairToString(arg, (a) => previewArg(a, depth + 1))
   }
   return String(arg).slice(0, 24)
 }

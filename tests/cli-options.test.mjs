@@ -73,3 +73,48 @@ test('cli — unknown command still surfaces "unknown command"', () => {
   assert.strictEqual(r.code, 1)
   assert.match(r.stderr, /unknown command '?definitely-not-a-cmd'?/)
 })
+
+// ── `help` and `docs` — the two commands that read the verb registry ──
+//
+// Added 2026-08-02. Both were broken in the same way: the registry is filled
+// in by the library INSTALLERS, not by importing their modules, and neither
+// command built an environment first. `motoi help entity/make` therefore
+// answered "unknown verb" — indistinguishable, to a learner, from the verb
+// not existing — while `motoi help car` worked, because a handful of base
+// verbs happen to register at import time.
+//
+// `docs` had two further faults: a missing `await` (it wrote a Promise to
+// stdout and crashed), and `regen` defaulting to `docs/reference` instead of
+// the canonical `scheme/reference`, which would have quietly produced a
+// second divergent copy of the manual.
+
+test('cli — help finds a verb from a library, not just the base', () => {
+  for (const verb of ['car', 'string-join', 'random-integer']) {
+    const r = run(['help', verb])
+    assert.strictEqual(r.code, 0, `motoi help ${verb}: ${r.stderr}`)
+    assert.match(r.stdout, new RegExp(`^${verb.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+—`))
+  }
+})
+
+test('cli — help still reports a genuinely unknown verb', () => {
+  const r = run(['help', 'definitely-not-a-verb'])
+  assert.strictEqual(r.code, 1)
+  assert.match(r.stderr, /unknown verb/)
+})
+
+test('cli — docs writes the manual instead of a Promise', () => {
+  const r = run(['docs'])
+  assert.strictEqual(r.code, 0, r.stderr)
+  assert.doesNotMatch(r.stdout, /\[object Promise\]/)
+  assert.ok(r.stdout.length > 100_000,
+    `docs emitted only ${r.stdout.length} bytes — the manual is larger than that`)
+})
+
+test('cli — docs is not truncated at the 64K pipe buffer', () => {
+  // `process.exit` drops whatever stdout has not flushed. Through a pipe that
+  // capped the manual at exactly 65536 bytes, with exit code 0, so nothing
+  // reported that `motoi docs | less` had been cut off mid-sentence.
+  const r = run(['docs'])
+  assert.notStrictEqual(r.stdout.length, 65536)
+  assert.match(r.stdout.trimEnd().slice(-1), /\S/)
+})

@@ -35,7 +35,7 @@
 //   • operands to function calls (their order/side-effects matter)
 //   • initialiser expressions of `let` / `let*` / `letrec`
 
-import { Sym } from './reader.js'
+import { Sym, Pair } from './reader.js'
 import { registerVerbMeta, defaultMetaFor } from './verbRegistry.js'
 import { Values, RaisedValue } from '../lib/base/r7rs-types.js'
 
@@ -159,20 +159,21 @@ export class Env {
       // applyStep can push a labeled frame. Best-effort — some primitives
       // are exotic and reject assignment; ignore.
       try { if (!val.__verbName) val.__verbName = name } catch { /* frozen fn */ }
-      // v2.20.0-A5 perm-audit floor: warn (NOT throw) the first time a
-      // verb registers without an explicit `meta.perm`. The legacy
-      // 2-arg path still works (defaultMetaFor infers from the name);
-      // the warning surfaces every bare registration so authors of
-      // future verbs know to declare. See CARD-MANIFEST-CONTRACT §3.2.
-      // The check is best-effort — we never block boot or registration.
-      if ((!meta || meta.perm == null) && !MISSING_PERM_WARNED.has(name)) {
+      // perm-audit floor: the first time a verb registers without an
+      // explicit `meta.perm`, `defaultMetaFor` infers one from the name.
+      // This is a dev-only nicety and is SILENT by default — a plain
+      // user-level `(define name fn)` should never print engine chatter,
+      // and it must never leak downstream-consumer docs into base Motoi.
+      // Opt in with MOTOI_PERM_AUDIT=1 when you actually want the report.
+      const permAuditOn =
+        typeof process !== 'undefined' && process.env && process.env.MOTOI_PERM_AUDIT
+      if (permAuditOn && (!meta || meta.perm == null) && !MISSING_PERM_WARNED.has(name)) {
         MISSING_PERM_WARNED.add(name)
         try {
           if (typeof console !== 'undefined' && typeof console.warn === 'function') {
             console.warn(
-              `[verbRegistry] env.define('${name}') missing explicit perm — ` +
-              `falling back to defaultMetaFor inference. ` +
-              `Declare perm per CARD-MANIFEST-CONTRACT.md §3.2.`,
+              `[verbRegistry] '${name}' registered without an explicit perm — ` +
+              `inferring one from the name.`,
             )
           }
         } catch { /* never break on a log call */ }
@@ -254,6 +255,19 @@ export class Closure {
 function parseParams(symList) {
   const params = []
   let restParam = null
+  // `(define (f . rest) ...)` leaves a bare symbol as the whole param list.
+  if (symList instanceof Sym) return { params, restParam: symList.name }
+  // Dotted param lists now arrive as a Pair chain from the reader.
+  if (symList instanceof Pair) {
+    let x = symList
+    while (x instanceof Pair) {
+      if (!(x.car instanceof Sym)) throw new Error('lambda parameters must be identifiers')
+      params.push(x.car.name)
+      x = x.cdr
+    }
+    if (!(x instanceof Sym)) throw new Error('dotted-tail: a single rest name must follow `.`')
+    return { params, restParam: x.name }
+  }
   for (let i = 0; i < symList.length; i++) {
     const s = symList[i]
     if (s instanceof Sym && s.name === '.') {
@@ -327,6 +341,8 @@ const SPECIAL_FORMS = new Set([
   'or', 'unless', 'cond', 'case',
   // R7RS §5.5 / §4.2.7 / §4.2.4 / §4.2.5 — 2026-07-18 finalization.
   'define-record-type', 'guard', 'do', 'delay',
+  'letrec*', 'case-lambda', 'define-values', 'delay-force',
+  'parameterize', 'cond-expand',
 ])
 
 // Destructure a producer's result (a Values wrapper, or a bare single value)
@@ -347,6 +363,19 @@ function bindValues(formals, result, env) {
     return
   }
   throw new Error('let-values: malformed formals')
+}
+
+// R7RS §4.2.1 cond-expand feature requirements.
+const FEATURES = new Set(['motoi', 'scheme', 'r7rs', 'exact-closed', 'ratios', 'full-unicode'])
+function featureMatch(req) {
+  if (req instanceof Sym) return req.name === 'else' || FEATURES.has(req.name)
+  if (!Array.isArray(req) || req.length === 0) return false
+  const head = req[0] instanceof Sym ? req[0].name : ''
+  if (head === 'and') return req.slice(1).every(featureMatch)
+  if (head === 'or') return req.slice(1).some(featureMatch)
+  if (head === 'not') return !featureMatch(req[1])
+  if (head === 'library') return false   // no library registry to consult yet
+  return false
 }
 
 function evalStep(form, env, fuel) {
@@ -370,12 +399,14 @@ function evalStep(form, env, fuel) {
         return new Tail(test !== false ? form[2] : (form[3] ?? false), env)
       }
       case 'define': {
-        if (Array.isArray(form[1])) {                 // (define (f a b) body...)
-          const name = form[1][0].name
+        if (Array.isArray(form[1]) || form[1] instanceof Pair) { // (define (f a b) body...)
+          const head = form[1]
+          const isPairHead = head instanceof Pair
+          const name = (isPairHead ? head.car : head[0]).name
           // A6 (B3): dotted-tail params — (define (f a b . rest) body) binds
           // `rest` to a list of all args past the fixed ones. parseParams
-          // splits the `.` marker out of the param list.
-          const { params, restParam } = parseParams(form[1].slice(1))
+          // splits the dotted tail out of the param list.
+          const { params, restParam } = parseParams(isPairHead ? head.cdr : head.slice(1))
           const closure = new Closure(params, form.slice(2), env, restParam)
           // Stack-panel hook — same idea as JS primitives, so a lambda
           // defined via (define (f ...) ...) shows its own name.
@@ -442,6 +473,9 @@ function evalStep(form, env, fuel) {
         if (form.length === 2) return undefined
         return new Tail(form[form.length - 1], e2)
       }
+      // `letrec` here already evaluates its inits left-to-right in the new
+      // env, which is exactly R7RS §4.2.2 `letrec*` — one branch serves both.
+      case 'letrec*':
       case 'letrec': {
         // Each binding sees every binding (forward-references allowed) —
         // the standard Lisp pattern for mutually recursive lambdas.
@@ -541,6 +575,10 @@ function evalStep(form, env, fuel) {
               d === key || (d instanceof Sym && key instanceof Sym && d.name === key.name)))
           if (hit) {
             if (clause.length === 1) return undefined
+            // R7RS §4.2.1 — `(datums => proc)` applies proc to the key.
+            if (clause[1] instanceof Sym && clause[1].name === '=>') {
+              return new TailCall(evaluate(clause[2], env, fuel), [key])
+            }
             for (let j = 1; j < clause.length - 1; j++) evaluate(clause[j], env, fuel)
             return new Tail(clause[clause.length - 1], env)
           }
@@ -665,6 +703,67 @@ function evalStep(form, env, fuel) {
         promise.thunk = new Closure([], [expr], env)
         return promise
       }
+      // R7RS §4.2.5 — delay-force builds a promise whose thunk yields another
+      // promise; `force` already loops on that, which is what makes deep
+      // recursive streams run in constant space.
+      case 'delay-force': {
+        const promise = { __promise__: true, forced: false, value: undefined, thunk: null }
+        promise.thunk = new Closure([], [form[1]], env)
+        return promise
+      }
+      // R7RS §4.2.9 — (case-lambda ((a) body) ((a b) body) ((a . r) body))
+      case 'case-lambda': {
+        const clauses = form.slice(1).map((clause) => {
+          const { params, restParam } = parseParams(clause[0])
+          return new Closure(params, clause.slice(1), env, restParam)
+        })
+        const dispatch = (...args) => {
+          for (const c of clauses) {
+            if (c.restParam ? args.length >= c.params.length : args.length === c.params.length) {
+              return apply(c, args, fuel)
+            }
+          }
+          throw new Error(`case-lambda: no clause accepts ${args.length} argument(s)`)
+        }
+        return dispatch
+      }
+      // R7RS §5.3.3 — (define-values (a b) producer)
+      case 'define-values': {
+        bindValues(form[1], evaluate(form[2], env, fuel), env)
+        return undefined
+      }
+      // R7RS §4.2.6 — (parameterize ((param value) ...) body ...). Each
+      // parameter is pushed for the dynamic extent of the body and popped on
+      // the way out, including when the body raises.
+      case 'parameterize': {
+        const bound = []
+        for (const [paramExpr, valExpr] of form[1]) {
+          const p = evaluate(paramExpr, env, fuel)
+          const v = evaluate(valExpr, env, fuel)
+          if (!p || !p._isParameter) throw new Error('parameterize: not a parameter')
+          p._parameter.push(v)
+          bound.push(p._parameter)
+        }
+        try {
+          let last
+          for (let i = 2; i < form.length; i++) last = evaluate(form[i], env, fuel)
+          return last
+        } finally {
+          for (let i = bound.length - 1; i >= 0; i--) bound[i].pop()
+        }
+      }
+      // R7RS §4.2.1 — (cond-expand (feature body ...) ... (else body ...)).
+      case 'cond-expand': {
+        for (let i = 1; i < form.length; i++) {
+          const clause = form[i]
+          if (featureMatch(clause[0])) {
+            let last
+            for (let j = 1; j < clause.length; j++) last = evaluate(clause[j], env, fuel)
+            return last
+          }
+        }
+        return undefined
+      }
       default:
         break
     }
@@ -768,6 +867,9 @@ function applyStep(fn, args, fuel) {
 // nesting. This is the small-but-correct shape — sufficient for cards
 // and data-template code without dragging in a full macro expander.
 function quasiExpand(form, env, fuel) {
+  if (form instanceof Pair) {
+    return new Pair(quasiExpand(form.car, env, fuel), quasiExpand(form.cdr, env, fuel))
+  }
   if (!Array.isArray(form)) return form
   if (form.length === 0) return form
   const head = form[0]
@@ -778,7 +880,14 @@ function quasiExpand(form, env, fuel) {
     }
   }
   const out = []
-  for (const item of form) {
+  for (let i = 0; i < form.length; i++) {
+    const item = form[i]
+    // `(1 . ,x)` reads as `(1 unquote x)` — the dotted tail of a quasiquote.
+    if (i > 0 && item instanceof Sym && item.name === 'unquote' && form.length === i + 2) {
+      let acc = evaluate(form[i + 1], env, fuel)
+      for (let j = out.length - 1; j >= 0; j--) acc = new Pair(out[j], acc)
+      return acc
+    }
     if (Array.isArray(item) && item[0] instanceof Sym
         && item[0].name === 'unquote-splicing') {
       const spliced = evaluate(item[1], env, fuel)

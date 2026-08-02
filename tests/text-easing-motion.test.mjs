@@ -16,6 +16,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readdirSync, readFileSync } from 'node:fs'
 import { makeExtendedBaseEnv } from '../src/lib-loader.js'
 import { resetMediaState, getMediaState } from '../lib/media/media.js'
 import { setAdapters, getAdapters } from '../adapters/base.js'
@@ -180,47 +181,125 @@ test('bounce — one-call, one-emoji, spring by default', () => {
     `y at peak = ${last.y}, should be well above 60 (up)`)
 })
 
-// ── 6. Physics applied to a tween nudges the tween ──────────────────
+// ── 6. Physics ──────────────────────────────────────────────────────
+//
+// REBASELINED 2026-08-01 (bucket 1, stale-by-design). These two tests used
+// `physics/apply-force` / `physics/apply-gravity`, which are unbound: the
+// whole `installGame` installer was ripped 2026-07-25 as a Curator client
+// layer. Evidence — core/index.js:47-51:
+//   "The Curator game-object client verbs (installGame/installScene/... ) were
+//    ripped 2026-07-25 — they were dead stubs whose real bodies live in
+//    Curator's browser host. Archived to scratch/attic."
+// Corroboration: the `physics/*` namespace has ZERO documented entries in
+// scheme/reference/ (no :name, no :signature — only cross-references) and
+// zero entries in core/core-verbs.js, the authoritative 322-verb CORE
+// registry. Motoi's own physics surface survives under entity/* + world/*.
+//
+// NOTE (flagged to the lead): the bodies left in lib/game/game.js are real
+// implementations, not the "dead stubs" the rip comment describes. If Alfred
+// wants `physics/*` back in the language, the doctrine order is
+// reference-first (CLAUDE.md: "the reference IS the language"), then wire
+// installGame. The guard test below is what makes that ordering enforceable.
+//
+// RESOLVED 2026-08-02. Alfred ruled the physics should work ("Don't we have a
+// physics and chemistry module? ... Shouldn't the code work?"). It was re-wired
+// in lib/game/world.js over the ONE live entity store — NOT by re-installing
+// lib/game/game.js, which keeps a second, id-keyed store that nothing populates
+// any more (two stores is what silently broke motion/on-settle). The reference
+// was written first, per doctrine: the eight `physics/*` verbs are documented in
+// scheme/reference/72-world.slat (the chapter that owns the integrator they
+// delegate to), the four name-or-handle entity verbs in 24-entity.slat, and
+// `on-collision` in 28-game.slat.
+//
+// The gate below is UNCHANGED IN SPIRIT and still enforces reference-first
+// ordering — only the invariant it asserts has flipped. It is bidirectional:
+// binding without a reference entry fails, and a reference entry without a
+// binding fails. Neither half may drift from the other.
 
-test('physics — apply-gravity + apply-force operate on a text tween', () => {
+// Every `(verb :name "…")` record in scheme/reference/, by name.
+function documentedVerbNames() {
+  const dir = new URL('../scheme/reference/', import.meta.url)
+  const names = new Map() // name -> file it is documented in
+  for (const file of readdirSync(dir).filter((f) => f.endsWith('.slat'))) {
+    const src = readFileSync(new URL(file, dir), 'utf8')
+    for (const m of src.matchAll(/\(verb\s+:name\s+"([^"]+)"/g)) {
+      if (!names.has(m[1])) names.set(m[1], file)
+    }
+  }
+  return names
+}
+
+test('physics/* are bound AND documented — the two may not drift apart', () => {
   fresh()
   const env = makeExtendedBaseEnv()
-  const motion = env.vars.get('motion')
-  const applyGravity = env.vars.get('physics/apply-gravity')
-  const applyForce = env.vars.get('physics/apply-force')
+  const documented = documentedVerbNames()
 
-  const tween = motion(
-    new Sym(':target'), '💧',
-    new Sym(':from'), [100, 20],
-    new Sym(':to'), [100, 20],
-    new Sym(':duration'), 500,
-  )
-  const initialToY = tween.toY
-  applyGravity(tween, 5)
-  assert.ok(tween.toY > initialToY,
-    `gravity moved toY down (${initialToY} → ${tween.toY})`)
+  // The surface Alfred ruled back in, with the chapter each record must live in.
+  const REWIRED = {
+    'physics/step': '72-world.slat',
+    'physics/gravity!': '72-world.slat',
+    'physics/gravity': '72-world.slat',
+    'physics/friction!': '72-world.slat',
+    'physics/friction': '72-world.slat',
+    'physics/apply-force': '72-world.slat',
+    'physics/apply-gravity': '72-world.slat',
+    'physics/apply-impulse': '72-world.slat',
+    'entity/set-velocity!': '24-entity.slat',
+    'entity/move': '24-entity.slat',
+    'entity/collides?': '24-entity.slat',
+    'entity/static?': '24-entity.slat',
+    'on-collision': '28-game.slat',
+  }
 
-  const initialToX = tween.toX
-  applyForce(tween, 10, 0)
-  assert.equal(tween.toX, initialToX + 10, 'apply-force shifted toX')
+  for (const [verb, chapter] of Object.entries(REWIRED)) {
+    assert.equal(typeof env.vars.get(verb), 'function',
+      `${verb} is documented in scheme/reference/${chapter} but is NOT bound — ` +
+      'the reference is the language; wire it or retire the record')
+    assert.equal(documented.get(verb), chapter,
+      `${verb} is bound but has no (verb :name "${verb}") record in ` +
+      `scheme/reference/${chapter} — write the reference entry first`)
+  }
+
+  // Generic both-directions sweep, so a NEW physics/* verb cannot slip in
+  // (either way) without someone updating both sides.
+  const boundPhysics = [...env.vars.keys()].filter((k) => k.startsWith('physics/'))
+  for (const verb of boundPhysics) {
+    assert.ok(documented.has(verb),
+      `${verb} is bound but undocumented in scheme/reference/ — reference first`)
+  }
+  for (const verb of documented.keys()) {
+    if (!verb.startsWith('physics/')) continue
+    assert.equal(typeof env.vars.get(verb), 'function',
+      `${verb} has a reference record but is unbound — the reference IS the language`)
+  }
+  assert.equal(boundPhysics.length, 8,
+    `expected the 8-verb physics/* vocabulary, found ${boundPhysics.length}: ` +
+    `${boundPhysics.sort().join(', ')}`)
 })
 
-test('physics — apply-force + apply-gravity still work on entities', () => {
+test('physics — force and gravity on entities via the live world/* path', () => {
   fresh()
   const env = makeExtendedBaseEnv()
   const entityMake = env.vars.get('entity/make')
-  const applyForce = env.vars.get('physics/apply-force')
-  const applyGravity = env.vars.get('physics/apply-gravity')
+  const setVel = env.vars.get('entity/set-vel!')
   const state = env.vars.get('entity/state')
 
-  entityMake(new Sym('hero'), 0, 0)
-  applyForce(new Sym('hero'), 5, -3)
-  const s1 = state(new Sym('hero'))
-  // (id x y vx vy w h)
-  assert.equal(s1[3], 5, 'vx += 5')
-  assert.equal(s1[4], -3, 'vy += -3')
-  applyGravity(new Sym('hero'), 2)
-  const s2 = state(new Sym('hero'))
+  env.vars.get('world/reset!')()
+  // The 'player archetype is dynamic by default (lib/game/world.js); the
+  // world/step integrator only applies gravity to dynamic bodies.
+  const hero = entityMake(new Sym('player'), 0, 0)
+
+  // Impulse — what physics/apply-force used to spell.
+  setVel(hero, 5, -3)
+  const s1 = state(hero)
+  // (kind x y vx vy w h)
+  assert.equal(s1[3], 5, 'vx = 5')
+  assert.equal(s1[4], -3, 'vy = -3')
+
+  // Gravity — one fixed-timestep frame of the world integrator.
+  env.vars.get('world/gravity!')(0, 2)
+  env.vars.get('world/step')()
+  const s2 = state(hero)
   assert.equal(s2[4], -1, 'gravity added 2 to vy (from -3 to -1)')
 })
 
@@ -285,10 +364,21 @@ test('composition — kid one-liner and adult low-level share verbs', () => {
   // The 60-year-old builds up a physics sim by composing primitives:
   //   (bezier-ease t x1 y1 x2 y2)
   //   (spring-ease t opts)
-  //   (physics/apply-force target fx fy)
+  //   (entity/set-vel! e vx vy) + (world/step)
+  // REBASELINED 2026-08-01: the low-level leg used physics/apply-force, which
+  // was ripped 2026-07-25 with installGame (see the physics section above).
+  // The claim under test — "kid API and adult API share one runtime" — is
+  // unchanged; the adult surface is now entity/* + world/*.
   const bez = env.vars.get('bezier-ease')(0.5, 0.2, 0, 0, 1)
   assert.ok(bez > 0.5 && bez < 1, 'bezier-ease still exposed as primitive')
 
-  env.vars.get('physics/apply-force')(adultTween, 5, 5)
-  assert.equal(adultTween.toX, 95, 'physics still nudges the composed tween')
+  env.vars.get('world/reset!')()
+  const hero = env.vars.get('entity/make')(new Sym('player'), 0, 0)
+  env.vars.get('entity/set-vel!')(hero, 5, 5)
+  env.vars.get('world/step')()
+  const [x, y] = env.vars.get('entity/pos')(hero)
+  assert.ok(x > 0 && y > 0, 'low-level physics still integrates on the shared runtime')
+
+  // ...and the kid-level tweens are untouched by the entity world.
+  assert.equal(env.vars.get('animation/tweens')().length, 2, 'both tweens still registered')
 })

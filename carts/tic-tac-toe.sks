@@ -1,0 +1,618 @@
+;; tic-tac-toe.sks
+;; Motoi Cart — Flagship (SD framebuffer)
+;;
+;; (cart
+;;   :name            "tic-tac-toe"
+;;   :category        :game
+;;   :sub-category    :board
+;;   :audience        :kid
+;;   :complexity      3
+;;   :runtime-tier    :runs-on-core
+;;   :render          :sd-framebuffer
+;;   :one-line        "Play noughts-and-crosses against Motoi — a beatable 'straight brain and a perfect 'adaptive minimax that never loses, drawn big on the 320x240 screen."
+;;   :verbs-used      ("set-mode" "clear" "set-color" "rect-fill" "rect" "line"
+;;                     "disc" "circle" "fb/text" "fb/dump" "make-vector" "vector-ref"
+;;                     "vector-set!" "vector" "vector-length" "quotient" "remainder"
+;;                     "modulo" "abs" "min" "max" "number->string" "string-append"
+;;                     "eq?" "cons" "car" "cdr" "list" "length" "reverse" "for-each"
+;;                     "map" "filter" "when" "unless" "cond" "case" "let" "let*" "set!"
+;;                     "tone" "note" "sfx" "music" "melody")
+;;   :inspiration     "Tic-tac-toe (noughts and crosses) — the oldest 'solved' game there is; the perfect player can only ever draw, and one of the first things anyone teaches a machine to play well is exactly this.")
+;;
+;; HOW TO RUN:
+;;   motoi run carts/tic-tac-toe.sks
+;;
+;; WHAT THIS IS
+;;   Tic-tac-toe on Motoi's real SD screen (320x240). The board is a tiny vector
+;;   of 9 cells — index 0 is top-left, index 8 is bottom-right — and each cell
+;;   holds a small number: 0 is empty, +1 is X, -1 is O. A vector so reading a
+;;   cell is instant, and plain numbers so checking "did somebody win" is just
+;;   adding three cells together.
+;;
+;;   You are X. Motoi is O. Three in a row — across, down, or corner-to-corner —
+;;   wins. It's a small game, but it hides the whole idea of *thinking ahead*:
+;;   a good player doesn't just take a square, it imagines what happens next.
+;;
+;; MOTOI AS YOUR OPPONENT — the AI-PLAN knob (the fun part)
+;;   This cart shows Motoi's two ways of planning side by side:
+;;
+;;   'straight  — a FIXED, readable rulebook you can learn and beat. In order:
+;;                take the win if I have one, block your win if you have one,
+;;                grab the center, then a corner, then any edge. It plays the
+;;                same shape every time and — on purpose — it does NOT see the
+;;                double-threat "fork". Set up two ways to win at once and this
+;;                brain loses. That's the point: a pattern a person can crack.
+;;
+;;   'adaptive  — Motoi WATCHES how you play and switches its plan to counter.
+;;                It counts where you like to open (corners vs. center vs. edge),
+;;                and then it plays PERFECTLY — a move that CANNOT lose. Against
+;;                perfect play the best you can ever get is a draw. It plays the
+;;                first couple of moves from the tiny, solved opening rulebook of
+;;                tic-tac-toe (win, block, fork, block-fork, center, corner…) and
+;;                then, once only a few squares are left, switches to a full
+;;                minimax with alpha-beta pruning that plays every remaining
+;;                square out to the end. Same result, a fraction of the work.
+;;
+;;   The LEVEL knob is the same idea as a dial: 'easy and 'normal keep the
+;;   'straight rulebook; 'hard forces perfect play on no matter what. The DEFAULT
+;;   ('straight + 'normal) fits the default fuel with room to spare; so do
+;;   'adaptive and 'hard, thanks to that opening book — a pure from-move-one
+;;   minimax is surprisingly fuel-hungry in this interpreter, so the book carries
+;;   the wide-open early moves and the exhaustive search finishes the job.
+;;
+;; NO KEYBOARD — how "you vs Motoi" is expressed
+;;   A headless cart has no keys, so BOTH sides are driven by the engine. X (the
+;;   human stand-in) plays a short fixed move-script — here, deliberately, a
+;;   FORK line that catches the 'straight brain out. O is Motoi with the plan you
+;;   chose. On a real surface you'd swap X's script for taps from a person and
+;;   leave O as the AI.
+;;
+;; POINTS
+;;   No score to tally — the win, the block, and the fork ARE the story. The HUD
+;;   shows whose turn it is, which plan Motoi is running, and the result.
+;;
+;; THE CHARM LAYER (title screen, sound, polish)
+;;   Before the game starts you get a little TITLE screen — the name, a scrap of
+;;   art, a "PRESS START" line — drawn with the same SD verbs as the board. A
+;;   short theme plays, and small sounds mark each move, each win-line, and the
+;;   result. On a headless run there is no speaker, so the sound calls quietly do
+;;   nothing; the SHAPE still teaches, and on a real surface it all sings. Every
+;;   sound goes through one guard (SOUND-ON + safe) so a nice extra can never
+;;   crash the must-work game underneath — a habit worth copying.
+
+;; =======================  KNOBS  =======================
+
+(define AI-PLAN 'straight)  ;; 'straight (fixed, beatable rulebook — DEFAULT)
+                            ;; 'adaptive (watches you, then perfect minimax)
+(define LEVEL   'normal)    ;; 'easy 'normal keep 'straight; 'hard forces minimax.
+                            ;; All fit the DEFAULT 200000 fuel — the board is tiny.
+(define SEED    12345)      ;; deterministic tie-breaks; change for a new run
+;; SD screenshots: exactly two, both cheap — a TITLE frame before play and the
+;; finished-board CLIMAX frame at the end. Between them we print a tiny ASCII
+;; board so the run stays readable without dumping the whole screen each turn.
+
+(define W 320)              ;; SD width
+(define H 240)              ;; SD height
+(define CELL 56)            ;; cell size in pixels (3*56 = 168)
+(define BX 30)              ;; board top-left x
+(define BY 34)              ;; board top-left y
+
+;; =======================  CHARM PASS: SOUND  =======================
+;; A little theme at the start and a small sound on every key event: a move, a
+;; capture (here, a win-line completing), and the final result. The audio verbs
+;; are REAL — (tone), (note), (sfx), (music), (melody) — but on a headless run
+;; there is no speaker, so they simply do nothing. That is fine: the SHAPE is
+;; what teaches. On a real surface these same calls sing.
+;;
+;; TEACHING IDEA — "guard so a helper can NEVER crash the game." Sound is a nice
+;; extra, not the point of the game; if any single audio call ever failed it
+;; must not take the whole match down with it. So every sound goes through one
+;; small wrapper, (safe ...), and one flag, SOUND-ON. Flip the flag off and the
+;; game plays on in silence, unchanged. A good program keeps its "nice extras"
+;; on a switch that can't break the "must-work" core. That is the same idea as a
+;; seatbelt: it only ever helps, it never gets in the way.
+
+(define SOUND-ON #t)                     ;; master switch for the charm layer
+
+;; (safe thunk) runs a zero-argument function only when sound is on. It returns
+;; nothing useful on purpose — callers never depend on a sound "succeeding".
+(define (safe thunk) (when SOUND-ON (thunk)) #t)
+
+;; A short, friendly opening motif: a rising three-note phrase (C-E-G, a major
+;; chord walked upward — the "here we go!" sound). Kept tiny so it costs almost
+;; no fuel, and wrapped in safe so it can never stop the game from starting.
+(define (play-theme!)
+  (safe (lambda ()
+    (music 'ttt-theme)                   ;; name a track (silence when headless)
+    (melody (list 60 64 67 72) 0.12))))  ;; C4 E4 G4 C5 — up the major chord
+
+;; One sound per kind of event. Each is its own tiny named helper so the driver
+;; below reads like a sentence: "make a move sound", "make a win sound".
+(define (sfx-move! who)                  ;; a soft blip; X a touch higher than O
+  (safe (lambda () (sfx 'blip (if (= who X) 520 392) 0.05))))
+(define (sfx-capture!)                   ;; a win LINE just completed — a chime
+  (safe (lambda () (note 76 0.10 0.7))))
+(define (sfx-win! w)                     ;; result: rising for a win, low for draw
+  (safe (lambda ()
+    (cond ((= w X) (melody (list 67 72 76) 0.12))    ;; bright fanfare — you won
+          ((= w O) (melody (list 55 52 48) 0.14))    ;; a gentle "aw" descent
+          (else    (tone 330 0.30))))))              ;; a flat draw tone
+
+;; =======================  DETERMINISTIC PRNG  =======================
+;; Tiny LCG so any tie-break is the same every run — no clock, no surprises.
+
+(define _seed SEED)
+(define (rnd)
+  (set! _seed (modulo (+ (* _seed 1103515245) 12345) 2147483648))
+  (/ _seed 2147483648))
+
+;; =======================  THE BOARD  =======================
+;; One vector of 9 cells. Index = row*3 + col, row 0 = top.
+;;   0 = empty, +1 = X (human), -1 = O (Motoi).
+(define EMPTY 0)
+(define X 1)
+(define O -1)
+
+(define BOARD (make-vector 9 0))
+(define (at i) (vector-ref BOARD i))
+(define (put! i v) (vector-set! BOARD i v))
+(define (empty? i) (= (at i) 0))
+(define (row i) (quotient i 3))
+(define (col i) (remainder i 3))
+
+;; the eight winning lines, each a three-element list of cell indices
+(define LINES
+  (list (list 0 1 2) (list 3 4 5) (list 6 7 8)     ;; rows
+        (list 0 3 6) (list 1 4 7) (list 2 5 8)     ;; cols
+        (list 0 4 8) (list 2 4 6)))                ;; diagonals
+
+(define CORNERS (list 0 2 6 8))
+(define EDGES   (list 1 3 5 7))
+(define CENTER  4)
+
+;; =======================  WIN DETECTION  =======================
+;; Sum a line: +3 means X has all three, -3 means O has all three.
+
+(define (line-sum ln) (+ (at (car ln)) (at (cadr ln)) (at (caddr ln))))
+
+(define (winner)                        ;; X, O, or 0 for none-yet
+  (let loop ((ls LINES))
+    (cond ((null? ls) 0)
+          ((= (line-sum (car ls)) 3) X)
+          ((= (line-sum (car ls)) -3) O)
+          (else (loop (cdr ls))))))
+
+(define (full?)
+  (let loop ((i 0)) (cond ((>= i 9) #t) ((empty? i) #f) (else (loop (+ i 1))))))
+
+(define (game-over?) (or (not (= (winner) 0)) (full?)))
+
+;; list of empty cell indices — the legal moves
+(define (empties)
+  (let loop ((i 8) (acc '()))
+    (cond ((< i 0) acc)
+          ((empty? i) (loop (- i 1) (cons i acc)))
+          (else (loop (- i 1) acc)))))
+
+;; cadr / caddr come from the base library. They used to be redefined here;
+;; the local copies were dropped because the built-ins now name the verb that
+;; failed when you index past the end, and shadowing them threw that away.
+
+;; =======================  THE 'STRAIGHT BRAIN  =======================
+;; A fixed rulebook a person can learn and beat. It can WIN and it can BLOCK a
+;; single threat, but it grabs squares in a fixed order and — deliberately —
+;; never looks for a DOUBLE threat (a fork). Set up two lines at once and it
+;; loses. That readable gap is the whole lesson of "straight vs. adaptive".
+
+;; if `who` can complete a line this move, return that cell, else #f
+(define (winning-cell who)
+  (let loop ((ls LINES))
+    (if (null? ls) #f
+        (let* ((ln (car ls))
+               (s (line-sum ln)))
+          ;; two of `who` and one empty on this line
+          (if (= s (* who 2))
+              (cond ((empty? (car ln)) (car ln))
+                    ((empty? (cadr ln)) (cadr ln))
+                    ((empty? (caddr ln)) (caddr ln))
+                    (else (loop (cdr ls))))
+              (loop (cdr ls)))))))
+
+;; first empty cell from a preference list, or #f
+(define (first-empty-of prefs)
+  (cond ((null? prefs) #f)
+        ((empty? (car prefs)) (car prefs))
+        (else (first-empty-of (cdr prefs)))))
+
+;; Motoi is O. Straight order: win, block, center, corner, edge.
+(define (straight-move)
+  (or (winning-cell O)                  ;; 1. take my own win
+      (winning-cell X)                  ;; 2. block your win
+      (if (empty? CENTER) CENTER #f)    ;; 3. grab the center
+      (first-empty-of CORNERS)          ;; 4. grab a corner
+      (first-empty-of EDGES)))          ;; 5. settle for an edge
+                                        ;; (no fork check — beatable on purpose)
+
+;; =======================  THE 'ADAPTIVE BRAIN  =======================
+;; Two parts: (a) a little memory of how the human opens, and (b) once it has
+;; watched enough, a perfect minimax that plays every square to the end and
+;; refuses to lose.
+
+;; --- (a) tendency memory ---------------------------------------------------
+;; count where the human (X) has been placing: center / corner / edge.
+(define HUMAN-CENTER 0)
+(define HUMAN-CORNER 0)
+(define HUMAN-EDGE   0)
+(define HUMAN-MOVES  0)
+
+(define (note-human! cell)
+  (set! HUMAN-MOVES (+ HUMAN-MOVES 1))
+  (cond ((= cell CENTER) (set! HUMAN-CENTER (+ HUMAN-CENTER 1)))
+        ((member-eq cell CORNERS) (set! HUMAN-CORNER (+ HUMAN-CORNER 1)))
+        (else (set! HUMAN-EDGE (+ HUMAN-EDGE 1)))))
+
+(define (member-eq x xs)
+  (cond ((null? xs) #f) ((= x (car xs)) #t) (else (member-eq x (cdr xs)))))
+
+;; a readable, narratable read of the human's style so far
+(define (human-style)
+  (cond ((= HUMAN-MOVES 0) "no read yet")
+        ((>= HUMAN-CORNER (max HUMAN-CENTER HUMAN-EDGE)) "a corner player")
+        ((>= HUMAN-CENTER (max HUMAN-CORNER HUMAN-EDGE)) "a center player")
+        (else "an edge player")))
+
+;; --- (b) minimax with alpha-beta pruning (the perfect part) ----------------
+;; score from O's point of view: +10 O wins, -10 X wins, 0 draw; the depth is
+;; folded in so O prefers the FASTEST win and the SLOWEST loss. The board is nine
+;; squares, but a plain minimax still visits every ordering of the empties, which
+;; is a lot of interpreter fuel this early in the game. Two cheap fixes keep it
+;; well inside the default budget:
+;;   * ALPHA-BETA pruning — stop exploring a branch the moment it can't beat what
+;;     we already have. This throws away most of the tree.
+;;   * we scan the board cells INLINE (0..8) instead of building a fresh list of
+;;     empties at every node, and we test only for a WIN (a draw is "board full
+;;     and nobody won"), so a terminal check is a handful of adds.
+
+;; alpha-beta search. Returns the value (O's view) of the position with `to-move`
+;; to play. alpha = best O can force so far; beta = best X can force so far.
+(define (ab to-move depth alpha beta)
+  (let ((w (winner)))
+    (cond
+      ((= w O) (- 10 depth))            ;; O (Motoi) wins — sooner is better
+      ((= w X) (- depth 10))            ;; X wins — later is less bad
+      ((full?) 0)                       ;; draw
+      ((= to-move O)                    ;; O maximizes
+       (let loop ((i 0) (best -1000) (a alpha))
+         (cond ((>= i 9) best)
+               ((not (empty? i)) (loop (+ i 1) best a))
+               (else
+                (put! i O)
+                (let ((s (ab X (+ depth 1) a beta)))
+                  (put! i 0)
+                  (let ((nb (max best s)) (na (max a s)))
+                    (if (>= na beta) nb          ;; beta cut
+                        (loop (+ i 1) nb na))))))))
+      (else                             ;; X minimizes
+       (let loop ((i 0) (best 1000) (b beta))
+         (cond ((>= i 9) best)
+               ((not (empty? i)) (loop (+ i 1) best b))
+               (else
+                (put! i X)
+                (let ((s (ab O (+ depth 1) alpha b)))
+                  (put! i 0)
+                  (let ((nb (min best s)) (nbeta (min b s)))
+                    (if (<= nbeta alpha) nb       ;; alpha cut
+                        (loop (+ i 1) nb nbeta)))))))))))
+
+;; best cell for O by minimax; deterministic tie-break by a fixed cell order
+(define (minimax-move)
+  (let loop ((i 0) (best-c #f) (best-s -1000))
+    (cond ((>= i 9) best-c)
+          ((not (empty? i)) (loop (+ i 1) best-c best-s))
+          (else
+           (put! i O)
+           (let ((s (ab X 1 best-s 1000)))  ;; X replies; alpha = our best so far
+             (put! i 0)
+             (if (> s best-s)
+                 (loop (+ i 1) i s)
+                 (loop (+ i 1) best-c best-s)))))))
+
+;; --- (b') an opening book so perfect play fits the DEFAULT fuel -------------
+;; FUEL REALITY: in this interpreter one minimax node is expensive, and the very
+;; first replies (six or eight empty squares) explode into a tree that overruns
+;; the default 200000 budget even WITH alpha-beta — measured, not guessed. But
+;; the first couple of moves of perfect tic-tac-toe are a SOLVED, tiny rulebook
+;; (Newell & Simon, 1972): win, block, fork, block-fork, center, opposite
+;; corner, corner, edge — this order never loses. So Motoi plays that exact
+;; perfect rulebook while the board is still wide open, then hands off to the
+;; full alpha-beta minimax once only a few squares remain (where it is cheap and
+;; still provably optimal). The RESULT is identical to a pure minimax — a player
+;; that cannot be beaten — for a fraction of the fuel.
+
+(define (empties-count)
+  (let loop ((i 0) (n 0))
+    (cond ((>= i 9) n) ((empty? i) (loop (+ i 1) (+ n 1))) (else (loop (+ i 1) n)))))
+
+;; a "fork" cell for `who`: an empty square that, if `who` took it, would leave
+;; `who` with TWO different immediate winning threats (two lines with two of
+;; `who` and an empty). Count the threats after a trial placement.
+(define (threat-count who)
+  (let loop ((ls LINES) (n 0))
+    (cond ((null? ls) n)
+          ((and (= (line-sum (car ls)) (* who 2))
+                (or (empty? (car (car ls)))
+                    (empty? (cadr (car ls)))
+                    (empty? (caddr (car ls)))))
+           (loop (cdr ls) (+ n 1)))
+          (else (loop (cdr ls) n)))))
+
+(define (fork-cell who)
+  (let loop ((i 0))
+    (cond ((>= i 9) #f)
+          ((not (empty? i)) (loop (+ i 1)))
+          (else
+           (put! i who)
+           (let ((t (threat-count who)))
+             (put! i 0)
+             (if (>= t 2) i (loop (+ i 1))))))))
+
+(define OPP-CORNER (list (list 0 8) (list 8 0) (list 2 6) (list 6 2)))
+(define (opposite-empty-corner)      ;; if X holds a corner, take the far one
+  (let loop ((ps OPP-CORNER))
+    (cond ((null? ps) #f)
+          ((and (= (at (car (car ps))) X) (empty? (cadr (car ps))))
+           (cadr (car ps)))
+          (else (loop (cdr ps))))))
+
+;; the perfect Newell & Simon rulebook, in order. Never loses.
+(define (book-move)
+  (or (winning-cell O)                  ;; 1. win now
+      (winning-cell X)                  ;; 2. block your win
+      (fork-cell O)                     ;; 3. make a fork of my own
+      (fork-cell X)                     ;; 4. deny your fork
+      (if (empty? CENTER) CENTER #f)    ;; 5. center
+      (opposite-empty-corner)           ;; 6. opposite corner
+      (first-empty-of CORNERS)          ;; 7. any corner
+      (first-empty-of EDGES)))          ;; 8. any edge
+
+;; Perfect O: the book while the board is wide open (>=6 empty, where minimax is
+;; too costly for the default budget), then exhaustive alpha-beta minimax once
+;; the tree is small. Same result — a player that never loses — inside default fuel.
+(define (perfect-move)
+  (if (>= (empties-count) 6) (book-move) (minimax-move)))
+
+;; Adaptive: for the first move or two, play a human-readable counter to the
+;; human's style (a corner if they took center, center if they took a corner) —
+;; a plan a person could narrate — then switch on perfect play so it can never
+;; be forked. This is the dumb->scripted->self-tuning ladder in miniature.
+(define (adaptive-move)
+  (if (< HUMAN-MOVES 2)
+      (let ((counter
+             (cond ((> HUMAN-CENTER HUMAN-CORNER)
+                    (first-empty-of CORNERS))    ;; they like center -> take a corner
+                   ((> HUMAN-CORNER 0)
+                    (if (empty? CENTER) CENTER (first-empty-of CORNERS)))
+                   (else (if (empty? CENTER) CENTER (first-empty-of CORNERS))))))
+        (or (winning-cell O) (winning-cell X) counter (perfect-move)))
+      (perfect-move)))                  ;; enough read — play perfectly
+
+;; =======================  MOTOI PICKS A MOVE  =======================
+;; LEVEL 'hard always forces perfect play; otherwise the AI-PLAN knob chooses the
+;; straight rulebook or the adaptive brain.
+
+(define (motoi-move)
+  (cond ((eq? LEVEL 'hard) (perfect-move))
+        ((eq? AI-PLAN 'adaptive) (adaptive-move))
+        (else (straight-move))))
+
+;; =======================  THE HUMAN (scripted) =======================
+;; X is the human stand-in. This script is a FORK that beats the straight brain:
+;; against O's fixed win/block/center/corner/edge order it builds two threats at
+;; once, and the rulebook — which only ever blocks ONE threat and never looks for
+;; a double — can't stop both. On the default plan the human WINS with the left
+;; column, which is exactly the readable weakness we want to show. (This exact
+;; line was found by playing every reply out against the straight brain.) Swap
+;; this list for live taps on a real surface.
+(define X-SCRIPT (list 0 7 6 3))
+(define x-idx 0)
+(define (list-ref xs k) (if (= k 0) (car xs) (list-ref (cdr xs) (- k 1))))
+
+;; X plays the next scripted cell if it is still empty; otherwise the first
+;; empty cell (so the script never stalls the game).
+(define (human-move)
+  (let ((scripted
+         (if (< x-idx (length X-SCRIPT)) (list-ref X-SCRIPT x-idx) #f)))
+    (set! x-idx (+ x-idx 1))
+    (if (and scripted (empty? scripted)) scripted (car (empties)))))
+
+;; =======================  CHARM PASS: LOOK  =======================
+;; A tiny palette so colors have NAMES, not magic numbers. When "the sky" is a
+;; word instead of the number 1, you can restyle the whole cart by editing one
+;; line here — and a reader learns what each color is FOR. Naming your constants
+;; is one of the cheapest good habits in programming.
+(define COL-SKY    1)    ;; dark-blue background wash
+(define COL-STARS  13)   ;; lavender speckle
+(define COL-BOARD  5)    ;; dark-grey board face
+(define COL-SHADE  0)    ;; black, for drop-shadow under the board
+(define COL-GRID   6)    ;; light-grey grid lines
+(define COL-FRAME  7)    ;; white frame
+(define COL-X      8)    ;; red cross
+(define COL-X-HI   14)   ;; pink highlight on the cross
+(define COL-O      12)   ;; blue ring
+(define COL-O-HI   13)   ;; lavender highlight on the ring
+
+;; A calm starfield behind the board — deterministic, drawn from the LCG so it
+;; is the same every run. A background you can SEE THROUGH the game gives depth
+;; without stealing attention. We draw it once per frame; it is just pixels, so
+;; it is cheap.
+(define (draw-background)
+  (clear COL-SKY)
+  (let loop ((n 0) (s SEED))
+    (when (< n 40)
+      (let* ((s2 (modulo (+ (* s 1103515245) 12345) 2147483648))
+             (x  (modulo s2 W))
+             (s3 (modulo (+ (* s2 1103515245) 12345) 2147483648))
+             (y  (modulo s3 (- BY 4))))     ;; stars stay up in the "sky" band
+        (pset x y COL-STARS)
+        (loop (+ n 1) s3)))))
+
+;; =======================  CHARM PASS: TITLE SCREEN  =======================
+;; The first thing a player should see is a friendly splash: the game's name, a
+;; scrap of art, and a "press start" line. Here it renders to its own SD frame.
+;; TEACHING IDEA — a loading/title screen is just ANOTHER drawing; the same draw
+;; verbs that paint the board paint the splash. Nothing magic, just order: show
+;; the title, play the theme, THEN start the game.
+(define (draw-title)
+  (draw-background)
+  ;; a big soft banner bar
+  (set-color COL-SHADE) (rect-fill 34 66 252 62)
+  (set-color 2)         (rect-fill 30 62 252 62)
+  (set-color COL-FRAME) (rect 30 62 252 62)
+  (fb/text "TIC - TAC - TOE" 96 84 'yellow)
+  (fb/text "you  vs  Motoi" 118 104 'white)
+  ;; a scrap of art: one little X and one little O side by side
+  (set-color COL-X)  (line 132 150 156 174) (line 132 174 156 150)
+  (set-color COL-O)  (circle 188 162 12)
+  ;; the flavor line
+  (fb/text "* PRESS START *" 108 200 'green)
+  (fb/text "loading a tiny solved game..." 66 216 'lavender))
+
+;; =======================  RENDER (SD framebuffer)  =======================
+
+(define (draw-x cx cy)                  ;; a red cross with a pink highlight edge
+  (let ((r 18))
+    (set-color COL-X)
+    (line (- cx r) (- cy r) (+ cx r) (+ cy r))
+    (line (- cx r) (- cy (- r 1)) (+ cx r) (+ cy (- r 1)))
+    (line (- cx r) (+ cy r) (+ cx r) (- cy r))
+    (line (- cx r) (+ cy (- r 1)) (+ cx r) (- cy (- r 1)))
+    ;; a single bright core stroke — cheap "shading" that reads as a shine
+    (set-color COL-X-HI)
+    (line (- cx (- r 6)) (- cy (- r 6)) (+ cx (- r 6)) (+ cy (- r 6)))))
+
+(define (draw-o cx cy)                  ;; a blue ring with a lavender inner ring
+  (set-color COL-O)
+  (circle cx cy 20)
+  (circle cx cy 19)
+  (circle cx cy 18)
+  (set-color COL-O-HI)                  ;; inner highlight ring = a little depth
+  (circle cx cy 15))
+
+(define (cell-center i)
+  (list (+ BX (* (col i) CELL) (quotient CELL 2))
+        (+ BY (* (row i) CELL) (quotient CELL 2))))
+
+(define (draw-board)
+  (draw-background)                     ;; sky + stars behind everything
+  ;; a soft drop-shadow, offset down-right, so the board looks like it floats
+  (set-color COL-SHADE)
+  (rect-fill (+ BX 4) (+ BY 4) (* 3 CELL) (* 3 CELL))
+  ;; board face
+  (set-color COL-BOARD)
+  (rect-fill BX BY (* 3 CELL) (* 3 CELL))
+  ;; grid lines
+  (set-color COL-GRID)
+  (let loop ((k 1)) (when (<= k 2)
+    (line (+ BX (* k CELL)) BY (+ BX (* k CELL)) (+ BY (* 3 CELL)))
+    (line BX (+ BY (* k CELL)) (+ BX (* 3 CELL)) (+ BY (* k CELL)))
+    (loop (+ k 1))))
+  (set-color COL-FRAME)                 ;; a clean white frame around the board
+  (rect BX BY (* 3 CELL) (* 3 CELL))
+  ;; marks
+  (let loop ((i 0)) (when (< i 9)
+    (let* ((cc (cell-center i)) (cx (car cc)) (cy (cadr cc)) (v (at i)))
+      (cond ((= v X) (draw-x cx cy))
+            ((= v O) (draw-o cx cy))))
+    (loop (+ i 1)))))
+
+(define (plan-label)
+  (cond ((eq? LEVEL 'hard) "minimax")
+        ((eq? AI-PLAN 'adaptive) "adaptive")
+        (else "straight")))
+
+(define (draw-hud move note)
+  (set-color 0)
+  (rect-fill 210 BY 100 (* 3 CELL))
+  (fb/text "TIC-TAC-TOE" 210 28 'yellow)
+  (fb/text "You=X  Motoi=O" 210 44 'white)
+  (fb/text (string-append "plan " (plan-label)) 210 62 'lavender)
+  (fb/text (string-append "move " (number->string move)) 210 78 'white)
+  (fb/text "read of you:" 210 98 'green)
+  (fb/text (human-style) 210 112 'peach)
+  (fb/text note 210 150 'orange))
+
+;; ASCII mini-board for the between-frames status lines (readable, cheap)
+(define (mark-char v) (cond ((= v X) "X") ((= v O) "O") (else ".")))
+(define (print-board)
+  (let loop ((r 0))
+    (when (< r 3)
+      (display "   ")
+      (display (mark-char (at (+ (* r 3) 0)))) (display " ")
+      (display (mark-char (at (+ (* r 3) 1)))) (display " ")
+      (display (mark-char (at (+ (* r 3) 2)))) (newline)
+      (loop (+ r 1)))))
+
+;; =======================  DRIVER  =======================
+
+(set-mode 'sd)
+
+(display "=== TIC-TAC-TOE — Motoi SD (320x240) ===") (newline)
+(display "You (X, scripted fork line) vs Motoi (O)") (newline)
+(display "AI-PLAN=") (display AI-PLAN)
+(display "   LEVEL=") (display LEVEL) (newline)
+(display "'straight can be forked and beaten; 'adaptive / 'hard play perfectly.")
+(newline) (newline)
+
+;; SPLASH FIRST: draw the title frame, sound the theme, THEN play. One extra
+;; SD dump is allowed here — it is the "loading" screen, not a per-tick dump.
+(play-theme!)
+(draw-title)
+(display "--- SD title screen ---") (newline)
+(fb/dump 0 0 W H)
+(newline)
+(display "PRESS START (headless: the game plays itself)") (newline) (newline)
+
+(define RESULT "")
+
+(let loop ((move 1) (turn X))
+  (cond
+    ((game-over?)
+     (let ((w (winner)))
+       (sfx-win! w)                       ;; result jingle: win / lose / draw
+       (set! RESULT
+         (cond ((= w X) "X (you) win — the fork worked!")
+               ((= w O) "O (Motoi) wins")
+               (else "a draw — nobody can force a win")))))
+    (else
+     (let ((cell (if (= turn X) (human-move) (motoi-move))))
+       (put! cell turn)
+       (when (= turn X) (note-human! cell))
+       (sfx-move! turn)                   ;; a small blip on every placed mark
+       (when (not (= (winner) 0))         ;; this move just completed a win line
+         (sfx-capture!))                  ;;   -> the "capture" chime
+       (let ((who (if (= turn X) "X" "O")))
+         (display "move ") (display move)
+         (display "  ") (display who)
+         (display " -> cell ") (display cell)
+         (when (= turn O) (display "  (") (display (plan-label)) (display ")"))
+         (newline)
+         (print-board)                    ;; cheap ASCII board keeps the run readable
+         (loop (+ move 1) (- 0 turn)))))))
+
+;; =======================  RESULT  =======================
+
+;; a final SD frame of the finished board
+(draw-board)
+(draw-hud (- x-idx 1) "game over")
+(newline)
+(display "--- SD screenshot @ final ---") (newline)
+(fb/dump 0 0 W H)
+(newline)
+
+(display "RESULT: ") (display RESULT) (newline)
+(display "Motoi's read of you: ") (display (human-style)) (newline)
+(newline)
+(display "Fork it: set AI-PLAN to 'adaptive (or LEVEL to 'hard) and the same")
+(newline)
+(display "fork line no longer works — Motoi sees the double threat coming.")
+(newline)

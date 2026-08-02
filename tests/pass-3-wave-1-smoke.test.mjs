@@ -110,19 +110,53 @@ test('lib/game/juggle — loads', async () => {
   assert.ok(m)
 })
 
-test('lib/game/game-instances — loads', async () => {
-  const m = await import('../lib/game/game-instances.js')
-  assert.ok(m)
+// ── REBASELINED 2026-08-01 (bucket 1, stale-by-design) ────────────────
+// The three modules below were archived on 2026-07-25 to
+// scratch/attic/curator-verbs-ripped-2026-07-25/game/, so a bare `import`
+// now throws ERR_MODULE_NOT_FOUND. Evidence — core/index.js:47-52:
+//   "The Curator game-object client verbs (installGame/installScene/... ) were
+//    ripped 2026-07-25 — they were dead stubs whose real bodies live in
+//    Curator's browser host. Archived to scratch/attic."
+//
+// A missing FILE is not a missing CAPABILITY. Each test below was rewritten
+// from "the module file imports" into "the capability the reference still
+// ratifies is bound" — the stronger check, and the one that would actually
+// catch a silent capability loss. Verb homes were probed individually with
+// `./bin/motoi eval "(procedure? VERB)"` before rewriting.
+
+test('game-instances — superseded by the single-world model', async () => {
+  const { makeExtendedBaseEnv } = await import('../src/lib-loader.js')
+  const env = makeExtendedBaseEnv()
+  // scheme/reference/01-core.slat :name "big-bang" :doc — "Motoi runs ONE
+  // world. ... There is no game id and no per-instance state cell: lifecycle
+  // is read with world/frame, world/running?, and world/state."
+  for (const v of ['big-bang', 'on-frame', 'world/frame', 'world/running?', 'world/state']) {
+    assert.equal(typeof env.vars.get(v), 'function', `${v} must stay bound`)
+  }
+  // The multi-instance API this module provided is intentionally gone.
+  for (const v of ['game/step', 'game/frame', 'game/state']) {
+    assert.equal(env.vars.get(v), undefined, `${v} was ripped 2026-07-25`)
+  }
 })
 
-test('lib/game/prefab — loads', async () => {
-  const m = await import('../lib/game/prefab.js')
-  assert.ok(m)
+test('prefab — verbs re-homed into lib/game/composer.js', async () => {
+  const { makeExtendedBaseEnv } = await import('../src/lib-loader.js')
+  const env = makeExtendedBaseEnv()
+  // Still documented in scheme/reference/53-prefab.slat; now defined at
+  // lib/game/composer.js:400.
+  for (const v of ['prefab/define', 'prefab/spawn']) {
+    assert.equal(typeof env.vars.get(v), 'function', `${v} must stay bound`)
+  }
 })
 
-test('lib/game/scene — loads', async () => {
-  const m = await import('../lib/game/scene.js')
-  assert.ok(m)
+test('scene — verbs re-homed into lib/game/composer.js', async () => {
+  const { makeExtendedBaseEnv } = await import('../src/lib-loader.js')
+  const env = makeExtendedBaseEnv()
+  // Still in core/core-verbs.js (the authoritative CORE registry) and in
+  // scheme/reference/55-scene.slat; now defined at lib/game/composer.js:349.
+  for (const v of ['scene/clear', 'scene/load']) {
+    assert.equal(typeof env.vars.get(v), 'function', `${v} must stay bound`)
+  }
 })
 
 test('lib/game/game — loads', async () => {

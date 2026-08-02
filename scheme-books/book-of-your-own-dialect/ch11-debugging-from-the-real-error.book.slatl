@@ -1,0 +1,605 @@
+;; ch11-debugging-from-the-real-error.slat
+;; Book of Your Own Dialect — Chapter 11 — Debugging From the Real Error
+
+(chapter
+  :audience             programmer-learning-motoi
+  :dialect              motoi
+  :voice                motoi-copilot
+  :training-eligible    #t
+  :confidentiality      public
+  :book             "Book of Your Own Dialect"
+  :chapter-number   11
+  :title            "Chapter 11 — Debugging From the Real Error"
+  :prose
+"# Chapter 11 — Debugging From the Real Error
+
+There is a failure mode in debugging that has nothing to do with the bug and everything to do with the debugger. It is *debugging the error you imagined instead of the error that happened.* You wrote some code, it broke, and before you even read the message you already have a theory about what went wrong — and you start fixing *that*, the imagined problem, while the real one sits right there in the output, unread. This chapter is about refusing that failure mode. The method is almost embarrassingly simple: run the smallest program that reproduces the trouble, read the *actual* error, find where it points, fix that, and run again. Trace-grounded, every step.
+
+The through-line is a single discipline: **the error message is data, not noise.** Motoi's errors are short and literal. When something is wrong, the interpreter tells you what, in plain words, and that sentence is the most reliable fact you have about the bug — more reliable than your memory, your theory, or your sense of what 'should' be happening. Read it first. Believe it. Localize with it. Only then fix.
+
+## Read the real error, not the imagined one
+
+Start with the commonest Motoi failure of all: reaching for a verb that isn't yours. Say you wrote a helper that averages a list and leaned on a name that felt right, `list/mean`. You run it. Here is exactly what Motoi says — not a paraphrase, the real thing:
+
+```
+motoi> (define (avg xs) (list/mean xs))
+motoi> (avg (list 1 2 3))
+error: unbound symbol: list/mean
+```
+
+Everything you need is in that last line. It doesn't say 'something went wrong.' It names the symbol — `list/mean` — and it names the *kind* of wrongness — unbound, meaning no such verb exists. The imagined-error trap here would be to assume your list was malformed, or your arithmetic was off, and to start rewriting the average logic. But the interpreter already told you the average logic never even ran; the program died at the name. So you localize to the name, and you fix the name. `list/mean` isn't a verb; a mean is a sum over a count, and `fold` and `length` are real:
+
+```scheme
+;; The real error was 'unbound symbol: list/mean'. Fix the NAME, not the math.
+(define (avg xs) (/ (fold + 0 xs) (length xs)))
+(avg (list 1 2 3))
+```
+
+Notice the shape of that repair. It targeted precisely what the error named and nothing else. You didn't touch anything the interpreter hadn't complained about, because touching un-accused code is how you turn one bug into two.
+
+## Run the smallest program that shows the bug
+
+When a failure is buried in a big program, the second discipline kicks in: shrink it. You don't debug the whole thing — you carve out the smallest piece that still fails, because a small failing program has almost nowhere for the bug to hide. Suppose a large routine builds a report and somewhere inside it calls `(map double 10)` where `double` is a fine little function but the second argument is a number, not a list. In the big program the symptom is confusing. Reduced to its smallest reproducing form, the truth is stark:
+
+```
+motoi> (map (lambda (n) (* n 2)) 10)
+error: lists[0].map is not a function
+```
+
+That message is the interpreter saying: *I tried to walk `10` as if it were a list, and it isn't one.* The bug is not in `double` and not in the report scaffolding — it's the argument you handed to `map`. Shrinking the program made that obvious; in the full routine you might have chased it for a while. The fix is to give `map` the list it expected:
+
+```scheme
+;; Smallest form told the truth: map needs a LIST, not the number 10.
+(map (lambda (n) (* n 2)) (list 10 20 30))
+```
+
+The lesson generalizes past this one case. When you're lost, make the program smaller, not bigger. A three-line reproduction that fails the same way as your three-hundred-line program has isolated the bug into a space you can actually see.
+
+## Expected versus actual — name the delta
+
+The heart of every debugging session is a single comparison: what you *expected* to happen, set against what *actually* happened. The gap between them — the delta — is the bug, and stating it out loud is often 90% of the fix. Vague dissatisfaction ('it's not working') localizes nothing. A precise delta ('I expected `6`, I got `\"1x\"`') points straight at the cause.
+
+Here's a delta worth naming. You expected `(+ 1 \"x\")` to be an error, because you can't add a number to a string. Motoi, being permissive about `+`, actually returns the string `\"1x\"` — it coerced and concatenated. Expected: an error, or a number. Actual: a string. The delta tells you the bug isn't in your arithmetic — it's that a *string slipped into a numeric position* upstream. So you don't fix `+`; you fix the upstream code that produced a string where a number belonged. Prove the corrected, all-numeric version does what you meant:
+
+```scheme
+;; Delta named: expected a number, got the string \"1x\" — a string leaked in upstream.
+;; Fix upstream so the addends are numbers; then the sum is real.
+(define (safe-add a b)
+  (if (and (number? a) (number? b)) (+ a b) 'not-numbers))
+(list (safe-add 1 2) (safe-add 1 \"x\"))
+```
+
+The `safe-add` guard makes the delta impossible to ignore: numbers add, and a non-number is reported as `not-numbers` rather than silently concatenating. You turned a confusing coercion into an explicit, inspectable outcome — which is exactly what naming the expected-vs-actual delta buys you.
+
+## Localize before you fix
+
+The single most common mistake in debugging is fixing before localizing — changing code in the general vicinity of a problem in the hope that one of the changes lands. It rarely does, and it corrupts the evidence. Localizing first means: pin the bug to the *smallest region you can prove contains it* before you change a single character.
+
+Consider a pipeline that reads a stored count, doubles it, and stamps it. It fails. Rather than rewrite the pipeline, you localize by testing each stage in isolation, smallest-first. Does the stored read work? Does the doubling work on a known input? Does the stamp shape come out right? Each stage that passes is *exonerated* — the bug is not there — and the search space collapses onto the stage that fails.
+
+```scheme
+;; Localize by testing each stage alone before touching anything.
+(define (stage-read) (or (cortex/read \"count-that-is-absent-9931\") 0))
+(define (stage-double n) (* n 2))
+(define (stage-stamp n) (list 'at (quotient (time/now) 1000) 'value n))
+(list (stage-read)                 ; absent key -> 0, exonerated
+      (stage-double 21)            ; 42, exonerated
+      (car (stage-stamp 42)))      ; 'at, shape is right
+```
+
+Each stage reports for itself. If all three pass in isolation but the whole pipeline fails, then the bug is in how you *wired them together*, not in any one stage — and you've localized it to the connections without having guessed once. Localization is patient, and patience is faster than flailing.
+
+## Fuel exhausted is a signal, not always a bug
+
+One Motoi error deserves special handling because it is routinely misread: `error: fuel exhausted`. Fuel is the interpreter's budget for how much work a run may do; when a computation burns through it, the run stops with that message. The instinct is to treat it as a bug in the code. Sometimes it *is* — a runaway recursion with no base case will exhaust fuel forever:
+
+```
+motoi> (define (count-up n) (count-up (+ n 1)))
+motoi> (count-up 0)
+error: fuel exhausted
+```
+
+That one really is a bug: `count-up` never stops, so no amount of fuel would ever be enough. The fix is to give the recursion a base case so it terminates:
+
+```scheme
+;; Fuel exhausted here meant real non-termination. Fix: add a base case.
+(define (count-up n limit)
+  (if (>= n limit) n (count-up (+ n 1) limit)))
+(count-up 0 1000)
+```
+
+But `fuel exhausted` can *also* mean the code is fine and simply *heavy* — a genuine, terminating computation that just needs a bigger budget. That is not a bug; it is a signal that the work is large. The tell is whether the computation has a reachable end. A bounded loop over a big range terminates given enough fuel; a base-case-free recursion never will. When you meet `fuel exhausted`, the diagnostic question is not 'what did I do wrong' but 'does this computation *have* an end?' If yes, it's a heavy job; if no, it's the missing base case. Here is a bounded, genuinely-terminating version that a debugger should recognize as heavy-but-correct rather than broken:
+
+```scheme
+;; A bounded, terminating loop — heavy, not buggy. It ends because n reaches limit.
+(define (sum-to n)
+  (let loop ((i 1) (acc 0))
+    (if (> i n) acc (loop (+ i 1) (+ acc i)))))
+(sum-to 100)
+```
+
+Reading `fuel exhausted` correctly is a small but real piece of debugging maturity: it forces you to distinguish 'wrong' from 'big,' and those need opposite responses — fix the one, feed the other.
+
+## The 'not a function' trace and name collisions
+
+Another error worth a full walk-through is `not a function`, because its cause is often a step removed from where it appears. You put something in the operator position — the front of a call — that isn't callable. The interpreter names the offending value:
+
+```
+motoi> (define total 100)
+motoi> (total 5)
+error: not a function: 100
+```
+
+**Read it:** the message names `100` — the value you tried to call. The bug is almost never 'I meant to call 100.' It's usually a *name collision*: you bound a name to a value (`total` is `100`) and then, later, tried to call `total` as if it were still a function. Localize to the name: something is both a value and being called. The fix is to keep the data and the procedure as distinct names, so calling one never accidentally reaches for the other:
+
+```scheme
+;; Fix for 'not a function': separate the data name from the procedure name.
+(define total-so-far 100)
+(define (add-to-total n) (+ total-so-far n))
+(list total-so-far (add-to-total 5))
+```
+
+The trace pointed at a value; the real bug was upstream, where a name got reused for two purposes. That's a recurring pattern in debugging — the error surfaces where the misused thing is *called*, but the cause is where it was *defined*. Reading the trace tells you the 'where it broke'; localizing tells you the 'where it went wrong,' and they're often not the same line.
+
+## The full loop on one bug
+
+Let me run the entire method on a single bug, end to end, so the beats connect. The task: average the distinct values in a list. First attempt reaches for a made-up `list/mean` again and also mis-orders things. It fails. **Read the real error** — it names `list/mean` as unbound, so the bug is a name, not the math. **Shrink** — the failure reproduces on a three-element list, no need for more. **Expected vs actual** — expected a number, got an unbound-symbol crash, delta says the program never ran. **Localize** — the crash is at the verb name; the dedup and division are innocent. **Fix exactly that** — replace the fake verb with real `fold`/`length`/`delete-duplicates`. **Re-run**:
+
+```scheme
+;; Whole loop: 'list/mean' was the unbound verb the error named. Fixed with real verbs.
+(define (mean-distinct xs)
+  (let ((u (delete-duplicates xs)))
+    (/ (fold + 0 u) (length u))))
+(mean-distinct (list 4 4 8 12 12))
+```
+
+Every step was grounded in something the interpreter actually said, not in a theory I brought to the code. That is the difference between debugging and guessing.
+
+## Bisecting a pipeline: exonerate half at a time
+
+When a bug hides in a longer chain and you can't see it by inspection, the fastest localizer is bisection: test the middle, and whichever half is clean, throw it away. You don't examine every stage in order — you halve the search space each check. Suppose a five-stage transform produces a wrong final result. Test after stage three. If the intermediate is correct, the bug is in stages four or five, and stages one through three are exonerated in a single test. Halve again.
+
+Here's the technique on a concrete three-step transform — read a base, scale it, and format it — where you check each intermediate so a failure can only hide in one place:
+
+```scheme
+;; Bisection by checking intermediates: a wrong final result localizes fast.
+(define base (or (cortex/read \"pipeline-base-absent-3312\") 10))
+(define scaled (* base 3))
+(define formatted (number->string scaled))
+(list 'base base 'scaled scaled 'formatted formatted)
+```
+
+Each intermediate is visible, so if `formatted` were wrong you'd see instantly whether `scaled` was already wrong (bug upstream) or `scaled` was right and only the formatting broke (bug downstream). Making intermediates visible is the whole trick — a pipeline that only shows its final answer forces you to guess where it went wrong; a pipeline whose middle you can inspect tells you. Prefer code you can bisect.
+
+## The cost of fixing before localizing
+
+It's worth stating plainly why localization has to come first, because the temptation to skip it is strong under pressure. When you fix before you've localized, you change code that the interpreter never accused — and every such change is a new place for a bug to live. You might 'fix' three lines, and if the real bug was in a fourth, you've now got the original bug *plus* three untested edits, and no idea which change did what. Fixing before localizing doesn't just fail to help; it actively corrupts the evidence you needed.
+
+Localizing first keeps the evidence clean. You change exactly one thing — the thing the trace and your isolation tests fingered — and then you re-run. If it's fixed, you're done and you know precisely why. If it's not, you've learned your localization was wrong and you narrow further, still with a clean slate. Here is a single, surgical fix — one change, targeting exactly what was localized, re-run to confirm:
+
+```scheme
+;; Surgical: one change to the localized spot, then re-run to confirm.
+(define (safe-div a b) (if (and (number? a) (number? b) (not (= b 0))) (/ a b) 'undefined))
+(list (safe-div 10 2) (safe-div 10 0))
+```
+
+One edit, confirmed by one run. That's what disciplined debugging looks like: never change more than you've localized, and always re-run to prove the change did what you claimed.
+
+## Reverse: from a fix back to the error it answered
+
+As with every skill in this book, run it backward. Given a fix, reconstruct the real error that must have prompted it.
+
+- A fix that replaces a fake verb name with `fold`/`length` answered an `error: unbound symbol:` — the message named the fake verb.
+- A fix that wraps a value in `(list ...)` before `map` answered `error: lists[0].map is not a function` — map got a non-list.
+- A fix that adds a base case to a recursion answered `error: fuel exhausted` where the computation had no end.
+- A fix that guards addends with `number?` answered a delta where a string leaked into a numeric slot and `+` quietly concatenated.
+
+And the constructive reverse — given only *\"re-run the fixed version and confirm\"* — produces a clean run of the repaired code, which is the proof the error was truly answered and not just hidden:
+
+```scheme
+;; Reverse: the fixed version re-run — the proof the real error is gone.
+(mean-distinct (list 1 1 2 3 3 3))
+```
+
+Carry the method out whole. When code breaks, do not fix the bug you imagined — read the one the interpreter names. Shrink the program until the failure has nowhere to hide. State the expected-versus-actual delta out loud. Localize before you touch anything, exonerating what passes. Treat `fuel exhausted` as a question about whether the work ends, not an automatic verdict of 'broken.' Then fix exactly what was accused, and run it again. Trace-grounded, start to finish — the real error is the one worth debugging.
+
+## More error patterns: the arity mismatch
+
+A verb was called with the wrong number of arguments. Motoi will tell you, though the message form varies. The key discipline is the same: don't guess what argument you got wrong — read what the error names and count the arguments in the call.
+
+```
+motoi> (define (add a b) (+ a b))
+motoi> (add 1)
+error: wrong number of arguments: expected 2, got 1
+```
+
+**Read it:** the message counts for you — expected 2, got 1. You don't need to scan the function body; the call site is the bug. Add the missing argument, or redefine the function to accept the correct arity. The direction of the fix is clear from the message:
+
+```scheme
+;; Arity mismatch fixed: supply both arguments add expects.
+(define (add a b) (+ a b))
+(add 3 4)
+```
+
+The arity mismatch comes in the other direction too — too many arguments instead of too few. Here the rule is the same: read the count in the message rather than guessing which argument to remove.
+
+## More error patterns: a procedure that returns the wrong type
+
+Some bugs show up not as a crash but as a type-mismatch downstream — you get a value of the wrong shape, and then something that consumed it produces a confusing error. The debug move is to trace backward from the consuming error to the producer.
+
+Say a `map` call blows up with 'not a function' even though your mapping lambda is clearly a function. The abduction: something upstream put a *value* in the function position of the call somehow — not in the lambda, but in how it was called. Localize by checking what `map`'s first argument actually evaluates to:
+
+```scheme
+;; Verify the mapping function is a procedure, not a value in disguise.
+(define (squarer x) (* x x))
+(and (procedure? squarer)
+     (map squarer (list 1 2 3 4)))
+```
+
+`procedure?` confirms the first argument is callable before you hand it to `map`. This is the localize-before-fix discipline applied to type errors: prove the component is what you think it is, rather than trusting the call site's appearance.
+
+## More error patterns: the wrong branch taken
+
+A particularly frustrating category is when the code runs without error but takes the wrong branch of a conditional. There's no trace to point at — the program completed successfully — but the result is wrong. This is a pure delta bug: expected one result, got another, interpreter says nothing.
+
+Debug strategy: narrow down which `cond` or `if` branch fires, by making the branch selection visible rather than inferred:
+
+```scheme
+;; Delta bug: wrong branch fires. Make the branch choice explicit in output.
+(define (classify n)
+  (cond ((< n 0)  'negative)
+        ((= n 0)  'zero)
+        ((< n 10) 'small)
+        (else      'large)))
+(list (classify -3)
+      (classify 0)
+      (classify 5)
+      (classify 100))
+```
+
+By testing all branches with known inputs that should fire each one, you confirm which branch fires for which input. If `(classify 0)` returned `'small` when you expected `'zero`, you'd see the mismatch instantly and localize it to the ordering of the `cond` clauses — perhaps the `(< n 0)` test was catching zero too because of a `(<=` written where `(<` was meant. The explicit listing makes the bug undeniable.
+
+## Debugging in the cortex namespace: unexpected persistence
+
+The persistent store creates a specific class of debugging challenge: bugs that involve state from *earlier in the session* or from *earlier runs entirely*. You fix the code, rerun it, and the behavior is still wrong — because the old state is still there.
+
+The debug discipline in this case: before blaming the code, check whether the store has stale data affecting the result. `cortex/read` the relevant keys, inspect what's there, and if it's stale — `cortex/forget` it before rerunning. Here's that discipline made concrete:
+
+```scheme
+;; Debugging a persistent-state issue: read the key, inspect, then forget to reset.
+(define k \"debugging-chapter-session-counter\")
+(define current-value (or (cortex/read k) 'absent))
+(begin
+  (cortex/forget k)
+  (list 'was current-value 'now (or (cortex/read k) 'absent-after-forget)))
+```
+
+The result shows what was there before (`current-value`) and that it's gone now (`absent-after-forget`). Once the stale state is cleared, rerunning the code works against a clean slate. The `cortex/forget` verb is the targeted erase — it removes exactly one key, leaving everything else in the store intact.
+
+## Reading a multi-level error: the 'in' chain
+
+Motoi sometimes reports multi-level errors when the failure is inside a nested call. The message typically indicates what failed and may hint at which call was in progress. Reading these correctly means tracking the innermost failure (which is the direct error) and the context that called it (which is where the *cause* usually lives).
+
+Here is a nested case where the inner failure is a type error:
+
+```scheme
+;; The inner computation must succeed for the outer one to run.
+;; Verify both layers individually before composing.
+(define (sum-squares xs)
+  (fold + 0 (map (lambda (x) (* x x)) xs)))
+(sum-squares (list 1 2 3 4 5))
+```
+
+If `xs` contained a non-number and `*` failed inside `map`, the error would name the multiply — the innermost operation. Localize by extracting the inner layer and running it alone with the same input:
+
+```scheme
+;; Isolate the inner map to confirm it works on its own.
+(map (lambda (x) (* x x)) (list 1 2 3 4 5))
+```
+
+If the isolated inner layer passes, the bug is in how the two layers were connected. If it fails, you've localized it to the map/squarer interaction. One layer at a time, exonerating as you go.
+
+## Seven registers: explaining a debugging session
+
+The debug method is also something you explain to people. Here is the same explanation — 'here's what the error means and how I localized it' — in all seven registers, for the common `unbound symbol: list/mean` error.
+
+**Apologetic.** \"I'm sorry, I see why that failed — `list/mean` isn't a real verb and I should have caught that. The error is telling us exactly what it couldn't find. Here's the fix using the real primitives.\"
+
+**Informative.** \"The error `unbound symbol: list/mean` means that name doesn't exist in Motoi's vocabulary. A mean is a sum divided by a count: `(/ (fold + 0 xs) (length xs))`. Here's the working version.\"
+
+**Friendly.** \"The error is actually helpful here — it named the problem right in the message: `list/mean` isn't one of my verbs. Mean is just fold-sum divided by length, so here it is for real.\"
+
+**Descriptive.** \"'Unbound symbol' indicates a reference to a name the interpreter has never seen defined — in this case, `list/mean`. The error names the symbol exactly, which is the localization done for you. The fix replaces it with a composition of `fold`, `+`, and `length`, all of which are real and verified.\"
+
+**Brief.** \"list/mean doesn't exist. Mean is (/ (fold + 0 xs) (length xs)). Fixed:\"
+
+**Terse.** \"Unbound. Fold+length.\"
+
+**Quick.** \"list/mean isn't a verb — here's the fold+length version:\"
+
+Behind every register, the same running fix:
+
+```scheme
+;; The fix behind all seven register explanations.
+(define (mean xs) (/ (fold + 0 xs) (length xs)))
+(mean (list 10 20 30 40 50))
+```
+
+## Building the debug reflex: a compressed drill set
+
+To make the debugging method reflexive, here is a compressed drill: five errors described in prose, each with the implied fix. For each, the move is always the same: read the error, localize the named thing, fix exactly that, re-run.
+
+1. **`error: unbound symbol: cortex/store`** — the verb doesn't exist; the real verb is `cortex/write`. Fix: replace `cortex/store` with `cortex/write`. Verify:
+
+```scheme
+;; Drill 1: cortex/store -> cortex/write.
+(cortex/write \"debug-drill-1\" 'fixed)
+```
+
+2. **`error: lists[0].map is not a function` with a bare number** — `map` got a number where it expected a list. Fix: wrap the argument in `list` or supply the real list. Verify:
+
+```scheme
+;; Drill 2: map needs a list. Give it one.
+(map (lambda (x) (* x 2)) (list 5 10 15))
+```
+
+3. **Wrong result: `(fold + 1 (list 1 2 3))` returns 7, not 6** — the seed was `1` instead of `0`. The fix is not in `fold` or `+` — it's in the seed. Verify with the corrected seed:
+
+```scheme
+;; Drill 3: wrong seed produces wrong result. Fix the seed, not the verb.
+(fold + 0 (list 1 2 3))
+```
+
+4. **`error: fuel exhausted` on a counting function** — check whether the function has a base case. If it doesn't terminate, add one. The verifiable, correctly-bounded version:
+
+```scheme
+;; Drill 4: bounded recursion terminates. Confirm with a small limit.
+(define (countdown n) (if (<= n 0) 'done (countdown (- n 1))))
+(countdown 50)
+```
+
+5. **`error: not a function: 99`** — a name bound to `99` was called as a function. Fix: separate the data name from the function name, or call the right procedure. Verify:
+
+```scheme
+;; Drill 5: data name and function name separated.
+(define count 99)
+(define (add-to-count n) (+ count n))
+(add-to-count 1)
+```
+
+Five drills, five clean fixes, five re-runs confirming the errors are truly gone. The drill is the reflex builder: run it enough times and 'read the actual error, localize, fix exactly that, re-run' becomes the automatic response, not a deliberate procedure.
+
+## The self-test battery as a debugging tool
+
+Once you've fixed a bug, the confirm step is not optional. A repair that 'looks right' is a hypothesis, not a fact — the only thing that converts it to a fact is a run that shows the error is gone and the behavior is correct. Building a small self-test battery as the last step of every debug session is the discipline that prevents 'I fixed the thing I guessed' from shipping as 'I fixed the actual bug.'
+
+A self-test battery has three layers: first, it runs the exact expression that failed before, confirming the error is gone. Second, it checks that the result has the right value, not just the absence of an error. Third, it exercises an edge case that the original failure hadn't necessarily covered.
+
+Here's the battery pattern applied to the `list/mean` fix from the chapter opening:
+
+```scheme
+;; Self-test battery for the list/mean fix.
+;; Layer 1: the fixed expression runs.
+(define (mean xs) (/ (fold + 0 xs) (length xs)))
+;; Layer 2: the result is the expected value.
+(define (battery)
+  (list (equal? (mean (list 10 20 30)) 20)
+        (equal? (mean (list 5 5 5 5)) 5)
+        (equal? (mean (list 1 2 3 4 5)) 3)))
+(battery)
+```
+
+All three `#t` results confirm the fix at three different inputs: a simple case, a uniform case, and the classic one-to-five range. Layer 3 (the edge case) is implicit in choosing inputs the original failing code never saw. A battery that only tests the one case that was broken proves almost nothing — the bug might have been replaced by a different bug that happens to pass the same case.
+
+## Debugging the reference itself: when you're not sure what a verb does
+
+There is a specific debugging context this chapter hasn't yet addressed: when the uncertainty is not 'what went wrong in my code' but 'what does this verb actually do?' You have a verb, it's running, but you're not sure whether the result is what you meant. This is pre-bug investigation: figuring out the verb's behavior before you've committed to relying on it.
+
+The method is mini-induction: run the verb on several inputs whose correct outputs you know, and observe the pattern. Don't read documentation and guess — run the verb and *watch*.
+
+```scheme
+;; Investigate what 'sort' does with equal elements (stability).
+;; Run it on inputs where the sort order is unambiguous.
+(list (sort (list 3 1 4 1 5 9 2 6) <)
+      (sort (list 3 1 4 1 5 9 2 6) >)
+      (sort (list) <))                 ; edge case: empty list
+```
+
+From those three runs you learn: `sort` returns a freshly ordered list, works correctly on an empty list (returning empty), and handles duplicates by keeping them both. You haven't guessed and you haven't needed documentation — you asked the interpreter three direct questions and got direct answers. That is debugging as investigation: when uncertain about a verb's behavior, run it on inputs you understand and let the outputs tell you how it works.
+
+## The mental model of a 'clean' debug session
+
+Let's name what a clean debugging session looks like end to end, because the contrast with a flailing one is instructive.
+
+In a flailing session, the sequence is: something is wrong → change some code → re-run → still wrong → change something else → repeat. No information is extracted from the error; changes are guesses; the error might disappear by accident, leaving you unsure whether the bug is actually fixed or just hiding.
+
+In a clean session, the sequence is: error appears → read the message → localize the named thing → check that thing in isolation → make exactly one change to exactly that thing → re-run → battery passes. Every step extracts information from the real error rather than from intuition. The session is shorter and the result is certain.
+
+```scheme
+;; A clean debug session in one fence: localize, fix one thing, battery confirms.
+(define (product xs) (fold * 1 xs))
+(list (product (list 1 2 3 4 5))
+      (product (list))
+      (product (list 7)))
+```
+
+The fence above is the *output* of a clean session, not the process — it's what you've arrived at after localizing that the original `fold-left` or wrong-seed was the problem, making exactly the right change, and running the battery. If all three values are right (`120`, `1`, `7`), the session is closed. The bug is gone, not hidden.
+
+## Debugging memory state: when the first run and the second run disagree
+
+One of the distinctive debugging scenarios in a persistent-store environment is when the first run of a program gives one result and the second gives a different one, even though the code didn't change. This happens because the second run sees the state that the first run wrote.
+
+The debug approach: identify which keys the program reads and writes, and check their values at the start of the run. If the values differ from what you assumed (because a previous run set them), either clear the relevant keys with `cortex/forget` or make your code robust to starting from non-default state.
+
+```scheme
+;; Debug a 'second run gives wrong result' issue:
+;; Check the initial state before the computation touches it.
+(define k \"debugging-shared-counter\")
+(define initial (or (cortex/read k) 0))
+;; The code that ran before left the counter at some value.
+;; Start by reading it so you know what you're working with.
+(list 'initial-value initial
+      'incremented (begin (cortex/write k (+ initial 1)) (cortex/read k)))
+```
+
+Seeing `initial-value` at the start of the run tells you exactly what the store contained when the computation began. If that value surprises you (because you expected `0` but the previous run left it at `3`), you've localized the bug: the state assumption was wrong, not the computation. The fix is either to reset the key before each run or to write the computation so it handles any initial value correctly.
+
+## Reverse once more: a complete debug reconstruction
+
+Run the full reverse of the chapter's method: given a clean, working program, reconstruct the specific bugs it recovered from.
+
+```scheme
+;; The clean, working program — what bugs did it recover from?
+(define (safe-average xs)
+  (if (null? xs) 0.0
+      (/ (fold + 0 xs) (length xs))))
+(list (safe-average (list 5 10 15))
+      (safe-average (list))
+      (safe-average (list 100)))
+```
+
+Reading backward: the `if (null? xs)` guard suggests an earlier version had a division-by-zero bug — `(/ 0 0)` or `(length '())` used as a divisor. The `fold + 0` form suggests an earlier `fold-left` or a `list/mean` hallucination was the original error. The guard's return value of `0.0` (not `'error` or `#f`) suggests a deliberate choice was made about the empty-list semantics.
+
+Three recoveries visible in the structure of the fixed code. That is the full reverse: clean code is the trace of its own debugging history, and a sharp eye can read the bugs a program used to have from the guards and choices that survived into its correct form.
+
+## More error patterns: comparing a string to a number
+
+A particularly silent bug is a comparison between a number and a string representation of a number. `(= 10 \"10\")` does not raise an error in Motoi — it silently produces `#f`, because `=` operates on numeric types and `\"10\"` is not one. A program with this bug will behave as if the condition is never true, even when the values 'match' in the human-visible sense.
+
+The debug approach: when a comparison-driven branch never fires with inputs that look correct, check the types on both sides with `number?` and `string?`. If one side is a string representation of a number, convert it before comparing:
+
+```scheme
+;; Debugging a type-mismatch comparison: convert before comparing.
+(define (score-matches? stored incoming)
+  (let ((n (if (string? incoming) (string->number incoming) incoming)))
+    (and (number? n) (= stored n))))
+(list (score-matches? 10 10)
+      (score-matches? 10 \"10\")
+      (score-matches? 10 \"eleven\"))
+```
+
+The third case returns `#f` — `(string->number \"eleven\")` returns `#f` (not a numeric string), and the `and` short-circuits. The fix is always upstream: find where the string entered the comparison slot and convert it at the boundary, not at every comparison site.
+
+## More error patterns: `assq` on string keys (the wrong equality predicate)
+
+This produces the silent version of a 'not found' bug. `assq` uses `eq?` for key comparison; for strings, `eq?` tests object identity, not string content. Two different string objects with the same characters compare as not-equal under `eq?`, so `assq` with string keys returns `#f` even when a key with matching content is in the alist.
+
+The error presents as an unexpected `#f` from a lookup you expected to succeed. The diagnostic: check which alist verb is in use. If the keys are strings, the verb should be `assoc` (which uses `equal?` and correctly compares string content):
+
+```scheme
+;; Debugging assq on string keys: wrong predicate gives false 'not found'.
+;; Fix: switch to assoc, which uses equal? and handles string content.
+(let ((al (list (list \"alpha\" 1) (list \"beta\" 2))))
+  (list (assoc \"beta\" al)   ; correct: equal? finds the key by content
+        (assq  'beta  al))) ; assq on a symbol would work; on a string literal assq is wrong
+```
+
+The fix is always the same: use `assoc` for string keys, `assq` for symbol keys, `assv` for numeric keys (which uses `eqv?`). Knowing which equality predicate each verb uses is the whole diagnostic.
+
+## Debugging a fuel-pattern that loops: the two-question check
+
+When `error: fuel exhausted` appears, the chapter's established rule is to ask 'does this computation have an end?' But there's a refinement worth adding: sometimes a computation *looks* like it terminates but doesn't, because the loop step moves in the wrong direction or not at all. The two questions are:
+
+1. Does the recursion or loop have a base case?
+2. Does the step actually approach the base case? (Or does it move away, stay the same, or cycle?)
+
+A loop with a correct base case but a wrong step direction will exhaust fuel just as surely as a loop with no base case. Here is the diagnosis applied to a concrete example:
+
+```scheme
+;; This loop has a base case (n = 0) but the step is wrong -- it ADDS 1.
+;; Diagnose: the step moves away from 0, so this never terminates.
+;; Fix: change (+ n 1) to (- n 1).
+(define (countdown-correct n)
+  (if (<= n 0) 'done (countdown-correct (- n 1))))
+(countdown-correct 10)
+```
+
+The diagnosis step: look at what changes between calls, and check whether it moves toward the stopping condition. `(- n 1)` decreases n on each call, so it approaches `n <= 0`. A wrong step `(+ n 1)` would increase n, moving it away. Reading the step is the second question, and it catches a class of bugs that 'has a base case' misses.
+
+## Debugging concatenate vs append-map confusion
+
+A program builds a list of lists and then tries to flatten it, but uses `map` with a list-wrapping lambda and ends up double-nested. The error is a wrong structure rather than a crash. Here the expected-vs-actual delta is essential.
+
+Expected: `(1 2 3 4 5 6)` — a flat list.
+Actual: `((1 2) (3) (4 5 6))` — a list of sublists.
+
+The delta says the flattening step is missing. Diagnose: the code uses `map` (which produces a list of outputs) but the outputs were themselves lists — so the result is a list of lists. The fix is `concatenate` (to merge a static list of lists) or `append-map` (to map-then-merge in one step):
+
+```scheme
+;; Delta debug: map produced a list of lists; concatenate produces the flat merge.
+(define data (list (list 1 2) (list 3) (list 4 5 6)))
+(list 'nested (map (lambda (xs) xs) data)
+      'flat   (concatenate data))
+```
+
+The second entry shows `concatenate` doing the flattening that was missing. The diagnosis came entirely from the expected-vs-actual delta: 'I expected flat, got nested' points immediately at the absence of a flattening step.
+
+## Debugging a zip length mismatch
+
+`zip` stops at the shorter of its input lists. When you zip two lists of different lengths, you silently lose elements from the longer one. The program doesn't error — it produces fewer pairs than you expected, and the missing entries are simply absent.
+
+The debug move: when `zip` gives fewer pairs than expected, check the lengths of the input lists first:
+
+```scheme
+;; Diagnosing a zip length mismatch: check lengths before zipping.
+(let ((names  (list \"alice\" \"bob\" \"carol\" \"dave\"))
+      (scores (list 85 92 78)))
+  (list 'names-count  (length names)
+        'scores-count (length scores)
+        'pairs-count  (length (zip names scores))
+        'pairs        (zip names scores)))
+```
+
+The output shows: 4 names, 3 scores, 3 pairs — one name was silently dropped. The fix depends on the intent: if all names must be included, pad the shorter list before zipping; if only matched pairs matter, document that the behavior is 'match-then-stop.' What matters is naming the behavior rather than discovering it by accident when one pair goes missing in production.
+
+## Trace-grounded debugging: the whole method restated
+
+After a chapter full of specific cases, it's worth restating the whole method in its most compressed form — not as a summary, but as the reflex you want to fire automatically when something breaks.
+
+**Step 1: Read the actual message.** The interpreter's text tells you exactly what it found wrong — a name, a type, a count, a fuel budget. Never assume you know the error before you've read it.
+
+**Step 2: Localize using what the message names.** An `unbound symbol` message names the exact symbol; find that name in your code, not the surrounding logic. A `not a function` message names the value that was in call position; find where that value came from. A `wrong number of arguments` message gives you the count mismatch; find the call site.
+
+**Step 3: Make the bad thing small.** Extract the failing expression into the smallest possible form that still fails. A five-line extract is easier to reason about than a two-hundred-line program.
+
+**Step 4: Fix exactly the localized thing.** Not what you think might also be wrong. Not the surrounding code that 'could use cleanup.' The thing the message pointed at, and only that.
+
+**Step 5: Re-run and verify the repair.** Not 'this looks better.' Re-run and confirm the specific error is gone and the result is correct.
+
+```scheme
+;; The method as a single session: five steps, one fence, a repair confirmed.
+;; The prior bug: fold called with wrong argument order.
+;; The fix: (fold + 0 xs) not (fold xs + 0).
+(define (safe-sum xs)
+  (fold + 0 xs))
+;; Verify: three inputs, three expected values.
+(list (equal? (safe-sum (list 1 2 3)) 6)
+      (equal? (safe-sum (list)) 0)
+      (equal? (safe-sum (list 100)) 100))
+```
+
+Three `#t` results. The method produced a specific, verified repair rather than a hopeful approximation. That is what trace-grounded debugging delivers: confidence that the error is genuinely gone, not just out of sight.
+
+## The off-by-one in `string-take` as a debugging case study
+
+Off-by-one errors in string operations are uniquely frustrating because they're often invisible in casual inspection — the string 'looks right' until you measure it. Here is the full debug session for an off-by-one in `string-take`.
+
+**The symptom:** a function that should extract the first word from a sentence returns a string that's one character short every time.
+
+**Step 1 — read the actual output:** the function returns `\"hel\"` instead of `\"hell\"` when the input is `\"hello world\"` and the expected word is `\"hello\"`.
+
+**Step 2 — localize:** the call is `(string-take s (string-index s char-whitespace?))`. The index of the space is `5` in `\"hello world\"`. But `string-index` finds the *position* of the space, which is `5` (zero-based, character at index 5 is the space). `(string-take s 5)` gives `\"hello\"` — five characters. Wait, that should work. Check whether the result really has length 4 or 5.
+
+**Step 3 — measure:** add an explicit length check:
+
+```scheme
+;; Debug step: confirm the index and the take result.
+(let* ((s \"hello world\")
+       (idx (string-index s char-whitespace?))
+       (word (string-take s idx)))
+  (list 'index idx 'word word 'word-length (string-length word)))
+```
+
+This makes the intermediate values visible. When the index and word match expectations, the bug was actually elsewhere. When the index is wrong (perhaps the predicate was off), the diagnostic points directly at the predicate.
+
+**The lesson:** making intermediates visible is the fastest localizer for off-by-one errors, because the wrong value becomes unmistakable rather than inferred. Bisect the computation, check each intermediate, and the off-by-one announces itself.")

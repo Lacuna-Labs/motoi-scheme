@@ -98,30 +98,72 @@ test('audio/tempo returns 120 default', () => {
   const env = fresh()
   assert.equal(env.vars.get('audio/tempo')(), 120)
 })
-test('audio/master-volume set + get', () => {
+// audio/master-volume is ratified "(audio/master-volume volume) -> zero-duration
+// AudioHandle" (scheme/reference/07-audio.slat:365). It is a SETTER only — the
+// entry's :drawbacks say outright: "There is no query verb to read the current
+// master volume; you must track it in your context if you need to know the
+// current level." The old "set + get" test called it nullary expecting 0.5 back;
+// that getter has never been ratified and does not exist. Updated 2026-08-01 to
+// assert the ratified return: an audio handle.
+test('audio/master-volume returns an audio handle', () => {
   const env = fresh()
-  env.vars.get('audio/master-volume')(0.5)
-  assert.equal(env.vars.get('audio/master-volume')(), 0.5)
+  const h = env.vars.get('audio/master-volume')(0.5)
+  assert.ok(h && h.__audioHandle, 'expected a zero-duration AudioHandle')
+  assert.equal(h.__audioHandle.name, 'master')
 })
-test('audio/halt returns ok', () => {
+// audio/halt is ratified "(audio/halt handle) → zero-duration AudioHandle"
+// (scheme/reference/07-audio.slat:101); its novice example is
+// "(let ((h (audio-play \"ambient\"))) (audio/halt h))" — a handle goes IN.
+// The old test called it with no handle at all and expected a symbol 'ok, which
+// the reference never mentions. Updated 2026-08-01 to the ratified round-trip.
+test('audio/halt returns an audio handle', () => {
   const env = fresh()
-  const r = env.vars.get('audio/halt')()
-  assert.equal(r.name, 'ok')
+  const playing = env.vars.get('audio/play')('ambient')
+  const r = env.vars.get('audio/halt')(playing)
+  assert.ok(r && r.__audioHandle, 'expected a zero-duration AudioHandle')
 })
-test('note/strike returns ok', () => {
+// note/strike is ratified "(note/strike pitch duration) -> null"
+// (scheme/reference/43-note.slat:113), pitch as a SYMBOL — its novice example
+// is "(note/strike 'c4 1.0)". The old test expected a symbol 'ok, which the
+// signature contradicts, and passed the pitch as a JS string. Updated
+// 2026-08-01 to the ratified call and the ratified null return.
+test('note/strike sounds a pitch and returns null', () => {
   const env = fresh()
-  const r = env.vars.get('note/strike')('C4', 0.1)
-  assert.equal(r.name, 'ok')
+  assert.equal(env.vars.get('note/strike')(new Sym('c4'), 1.0), undefined)
 })
-test('synth/chord returns ok', () => {
+// synth/chord is ratified "(synth/chord section pitches [duration [dynamic
+// [articulation]]]) -> handle | [status info-dict]" (scheme/reference/
+// 62-synth.slat:100). SECTION comes first — the novice example is
+// "(synth/chord 'strings '(C4 E4 G4))". The old test omitted the section
+// entirely (passing the pitch list as the section) and expected 'ok, which the
+// signature does not offer. Updated 2026-08-01 to assert the ratified info-dict
+// echoes back the section and duration it was given.
+test('synth/chord returns an info-dict for the section played', () => {
   const env = fresh()
-  const r = env.vars.get('synth/chord')(['C4', 'E4', 'G4'], 0.1)
-  assert.equal(r.name, 'ok')
+  const r = env.vars.get('synth/chord')(new Sym('strings'), [new Sym('C4'), new Sym('E4'), new Sym('G4')], 2.0)
+  assert.ok(Array.isArray(r))
+  const entry = k => r.find(e => String(e[0]) === k)
+  assert.equal(String(entry(':kind')[1]), 'chord')
+  assert.equal(String(entry(':section')[1]), 'strings')
+  assert.equal(entry(':duration')[1], 2.0)
 })
-test('synth/kit kick returns ok', () => {
+// synth/kit is ratified "(synth/kit name pattern [voice]) -> handle | [status
+// info-dict]" (scheme/reference/62-synth.slat:166): name is the KIT
+// ('electronic, 'acoustic), pattern is a binary string where "1 = strike, 0 =
+// rest", and the voice ('kick) is the optional THIRD argument. The old test
+// passed 'kick as the kit name and 0 as the pattern, and expected 'ok. Updated
+// 2026-08-01 to the reference's own novice example — "(synth/kit 'electronic
+// \"1000100010001000\" 'kick)", a four-on-the-floor kick — whose documented
+// meaning fixes the expected hits at steps 0, 4, 8, 12 of 16.
+test('synth/kit plays a pattern on a named kit', () => {
   const env = fresh()
-  const r = env.vars.get('synth/kit')(new Sym('kick'), 0)
-  assert.equal(r.name, 'ok')
+  const r = env.vars.get('synth/kit')(new Sym('electronic'), '1000100010001000', new Sym('kick'))
+  assert.ok(Array.isArray(r))
+  const entry = k => r.find(e => String(e[0]) === k)
+  assert.equal(String(entry(':name')[1]), 'electronic')
+  assert.equal(String(entry(':voice')[1]), 'kick')
+  assert.equal(entry(':steps')[1], 16)
+  assert.deepEqual(entry(':hits')[1], [0, 4, 8, 12])
 })
 
 // ── artifact/ (writes to ~/.motoi/artifacts) ────────────────────

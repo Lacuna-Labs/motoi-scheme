@@ -29,8 +29,25 @@ test('matrix/make — (rows cols) creates a zero matrix', () => {
   assert.deepEqual(out, [[0, 0, 0], [0, 0, 0]])
 })
 
-test('matrix/make — ragged rows throw', () => {
-  assert.throws(() => evalSrc('(matrix/make (list (list 1 2) (list 3 4 5)))'), /ragged/)
+// 2026-08-01: this asserted ragged input THROWS. It does not, by design.
+// Scheme/reference/41-matrix.slat locks the signature as
+// "(matrix/make (list row1 row2 ...)) -> matrix | 'ragged", and lib/math/matrix.js
+// says so at the return site: "Ragged input returns the symbol 'ragged (per
+// reference contract ...), never a thrown error." A returned sentinel is the
+// friendlier shape here — it is checkable with eq? and needs no escape
+// continuation to recover from. The reference is the language, so the
+// assertion was the thing that was wrong, not the implementation.
+test("matrix/make — ragged rows return the 'ragged sentinel, not a throw", () => {
+  let out
+  assert.doesNotThrow(() => { out = evalSrc('(matrix/make (list (list 1 2) (list 3 4 5)))').out })
+  assert.equal(out?.name, 'ragged')
+})
+
+test("matrix/make — the 'ragged sentinel is eq?-comparable from Scheme", () => {
+  // This is how the reference tells callers to check, so it has to hold.
+  assert.equal(evalSrc("(eq? (matrix/make (list (list 1 2) (list 3 4 5))) 'ragged)").out, true)
+  // A well-formed matrix must NOT trip the sentinel.
+  assert.equal(evalSrc("(eq? (matrix/make (list (list 1 2) (list 3 4))) 'ragged)").out, false)
 })
 
 test('matrix/rows + matrix/cols — shape reflection', () => {

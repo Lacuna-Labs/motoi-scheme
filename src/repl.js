@@ -12,7 +12,7 @@
 // the Book documents is registered here, so the introspection surface
 // is one source of truth.
 
-import { parse, sym } from './reader.js'
+import { parse, sym, Pair, pairToString } from './reader.js'
 import { evaluate, Env, noteError } from './interp.js'
 import { makeBaseEnv } from './base.js'
 import { expandProgram } from './macro.js'
@@ -577,6 +577,7 @@ function format(v) {
   if (v === true) return '#t'
   if (v === false) return '#f'
   if (typeof v === 'string') return JSON.stringify(v)
+  if (v instanceof Pair) return pairToString(v, format)
   if (Array.isArray(v)) return '(' + v.map(format).join(' ') + ')'
   return String(v)
 }

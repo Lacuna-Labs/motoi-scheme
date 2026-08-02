@@ -39,9 +39,10 @@ import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { parse } from './reader.js'
+import { parse, Pair, pairToString } from './reader.js'
 import { evaluate } from './interp.js'
 import { makeCoreEnv } from '../core/index.js'
+import { setStackRecording } from '../lib/system/stack.js'
 import { expandProgram } from './macro.js'
 import { snapshotRegistry } from './verbRegistry.js'
 import { getMediaState } from '../lib/media/media.js'
@@ -61,6 +62,7 @@ function format(v) {
     // Sym
     return v.name
   }
+  if (v instanceof Pair) return pairToString(v, format)
   if (Array.isArray(v)) return '(' + v.map(format).join(' ') + ')'
   return String(v)
 }
@@ -73,6 +75,9 @@ function format(v) {
 
 function makeSession(fuel = 200000) {
   const env = makeCoreEnv({ fuel: { n: fuel * 5 } })  // installer needs headroom
+  // /api/stack is one of this server's endpoints, so arm the frame ledger.
+  // It is off by default in the language — see lib/system/stack.js.
+  setStackRecording(true)
   const out = { stdout: '' }
   // Route (display …) and (newline) into the session's captured stdout
   // so eval output shows up in the REPL panel instead of the server's
@@ -96,6 +101,7 @@ function _displayFormat(v) {
   if (v === false) return '#f'
   if (typeof v === 'string') return v   // display prints strings UNQUOTED
   if (v && typeof v === 'object' && 'name' in v && typeof v.name === 'string') return v.name
+  if (v instanceof Pair) return pairToString(v, _displayFormat)
   if (Array.isArray(v)) return '(' + v.map(_displayFormat).join(' ') + ')'
   return String(v)
 }

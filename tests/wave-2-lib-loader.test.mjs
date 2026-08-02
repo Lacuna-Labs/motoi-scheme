@@ -47,8 +47,23 @@ test('lib-loader — makeExtendedBaseEnv returns env with __libSummary', () => {
   // reflects the authoritative live summary, verified via
   // `env.__libSummary` (modules.length === 85, failed.length === 0). The
   // companion "no module failed to load" test guards load integrity.
-  assert.equal(env.__libSummary.modules.length, 85,
-    '85 installer runs: 81 CORE + 4 MODULE (prefab, juggle, eng, ops), 0 failed — live registry count as of 2026-07-24')
+  //
+  // RE-RECONCILED 2026-08-01 (bucket 1, stale-by-design): 85 → 79.
+  // The 2026-07-25 Curator-verb rip removed 6 installers (5 CORE + 1 MODULE);
+  // the live count is now 76 CORE + 3 MODULE = 79, still with 0 failed.
+  // Evidence — core/index.js:47-52: "The Curator game-object client verbs
+  // (installGame/installScene/installEntity/installWorld/installCamera/
+  // installMotion/installPart/installGroup/installPrefab/installGameInstances)
+  // were ripped 2026-07-25 ... Archived to scratch/attic." The MODULE that
+  // went is game-entity-advanced/prefab — its verbs were re-homed into
+  // lib/game/composer.js and prefab/define + prefab/spawn are still bound.
+  //
+  // This number is a DRIFT TRIPWIRE, not a correctness claim. The companion
+  // "no module failed to load" test is what guards load integrity, and it is
+  // green (failed.length === 0). A drop here with 0 failed means installers
+  // were removed on purpose; a drop here WITH failures means something broke.
+  assert.equal(env.__libSummary.modules.length, 79,
+    '79 installer runs: 76 CORE + 3 MODULE (juggle, eng, ops), 0 failed — live registry count as of 2026-08-01, post the 2026-07-25 rip')
 })
 
 test('lib-loader — no module failed to load', () => {
@@ -84,10 +99,12 @@ const SPOT_CHECKS = [
   ['core/base/assert',       ['assert/check-with', 'assert/invariants', 'assert/audit-verify']],
   ['core/graphics/sprite',   ['sprite/define']],
   ['core/media/media',       ['tone', 'note', 'circle', 'clear', 'render']],
-  ['core/game/game',         ['sprite', 'sprites', 'entity/make']],
-  ['core/game/game-instances', ['big-bang']],
-  ['core/game/scene',        ['scene/clear']],
-  ['module/game-entity-advanced/prefab', ['prefab/define']],
+  // REBASELINED 2026-08-01 (bucket 1): core/game/game, core/game/game-instances,
+  // core/game/scene and module/game-entity-advanced/prefab were ripped
+  // 2026-07-25 (core/index.js:47-52) and no longer appear in __libSummary.
+  // Their entries moved to RIPPED_INSTALLERS below — kept, not deleted, so the
+  // record of what they used to install survives, and their still-live verbs
+  // are re-asserted at their new homes.
   ['module/game-juggle/juggle',          ['juggle/valid?', 'juggle/balls']],
   ['core/ai/ai',             ['cortex/remember', 'cortex/recall', 'llm/complete']],
   ['core/system/system',     ['input/may-i?']],
@@ -115,6 +132,38 @@ for (const [modName, verbs] of SPOT_CHECKS) {
       const anyPresent = verbs.some((v) => env.vars.has(v))
       assert.ok(anyPresent,
         `${modName}: none of [${verbs.join(',')}] found in env. Module added: ${mod.added.slice(0, 10).join(',')}...`)
+    }
+  })
+}
+
+// ── Installers ripped 2026-07-25 (bucket 1, stale-by-design) ──────────
+// Kept as a record rather than deleted (CLAUDE.md: "No deletes. Ever.").
+// Each entry: [installer-name, verbs-that-SURVIVED, verbs-that-are-GONE].
+// The surviving verbs were re-homed (mostly into lib/game/composer.js and
+// lib/game/world.js) and each was probed individually with
+// `./bin/motoi eval "(procedure? VERB)"` on 2026-08-01.
+const RIPPED_INSTALLERS = [
+  ['core/game/game',                     ['entity/make', 'entity/spawn'], ['entity/has-tag?', 'entity/hits-tag']],
+  ['core/game/game-instances',           ['big-bang'],                    ['game/step', 'game/frame', 'game/state']],
+  ['core/game/scene',                    ['scene/clear', 'scene/load'],   ['scene/switch']],
+  ['module/game-entity-advanced/prefab', ['prefab/define', 'prefab/spawn'], ['prefab/make']],
+]
+
+for (const [modName, survived, gone] of RIPPED_INSTALLERS) {
+  test(`ripped 2026-07-25: ${modName} — installer gone, live verbs re-homed`, () => {
+    const env = makeExtendedBaseEnv()
+    const mod = env.__libSummary.modules.find((m) => m.name === modName)
+    assert.equal(mod, undefined,
+      `${modName} was ripped 2026-07-25 (core/index.js:47-52); if it is back, the reference chapter must be written first`)
+    // The capability check that actually matters: a missing installer must
+    // NOT mean a missing verb. These are still in scheme/reference/.
+    for (const v of survived) {
+      assert.equal(typeof env.vars.get(v), 'function',
+        `${v} survived the rip and must stay bound`)
+    }
+    for (const v of gone) {
+      assert.equal(env.vars.get(v), undefined,
+        `${v} was ripped and is not documented in scheme/reference/`)
     }
   })
 }

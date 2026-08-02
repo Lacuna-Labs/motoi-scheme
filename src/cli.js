@@ -12,7 +12,7 @@
 //   motoi slat parse <f>    Parse a .slat file; print as JSON.
 //   motoi slat emit <f>     Convert a JSONL log to slat.
 
-import { parse } from './reader.js'
+import { parse, Pair, pairToString } from './reader.js'
 import { SchemeVector } from '../lib/base/r7rs-types.js'
 import { evaluate, noteError } from './interp.js'
 import { makeCoreEnv } from '../core/index.js'
@@ -111,6 +111,7 @@ function format(v) {
   if (v instanceof Uint8Array) return '#u8(' + Array.from(v).join(' ') + ')'
   // R7RS §6.8 vectors print as #(e0 e1 …).
   if (v instanceof SchemeVector) return '#(' + v.items.map(format).join(' ') + ')'
+  if (v instanceof Pair) return pairToString(v, format)
   if (Array.isArray(v)) return '(' + v.map(format).join(' ') + ')'
   // Symbol-tagged runtime values (Sym): print by name.
   if (v && typeof v === 'object' && 'name' in v && typeof v.name === 'string'
@@ -372,6 +373,13 @@ export async function main(rawArgv = process.argv.slice(2), meta = {}) {
   if (cmd === 'help') {
     const verb = argv[1]
     if (!verb) { process.stderr.write('usage: motoi help <verb>\n'); return 1 }
+    // The verb registry is populated BY the installers — a verb's metadata is
+    // recorded when its library is installed, not when its module is imported.
+    // Without this, `motoi help` only ever saw the handful of verbs that
+    // happened to register at import time, and answered "unknown verb" for
+    // every library verb in the language: `motoi help entity/make` failed
+    // while `motoi help car` worked, which reads as the verb not existing.
+    makeCoreEnv({ fuel: { n: fuelBudget } })
     const meta = help(verb)
     if (!meta) { process.stderr.write(`unknown verb: ${verb}\n`); return 1 }
     process.stdout.write(`${meta.name}  —  ${meta.doc || '(no doc)'}\n`)
@@ -382,14 +390,20 @@ export async function main(rawArgv = process.argv.slice(2), meta = {}) {
 
   if (cmd === 'docs') {
     const sub = argv[1]
+    // Same reason as `help` above — emitDocs reads the verb registry, which
+    // only the installers fill in.
+    makeCoreEnv({ fuel: { n: fuelBudget } })
     if (sub === 'regen') {
-      const outDir = argv[2] || 'docs/reference'
+      // `scheme/reference` is canonical (CLAUDE.md: "the reference IS the
+      // language"). The old default of `docs/reference` wrote a second,
+      // divergent copy to a path nothing reads.
+      const outDir = argv[2] || 'scheme/reference'
       const files = await emitDocs({ outDir })
       process.stdout.write(`emitted ${files.length} files under ${outDir}\n`)
       return 0
     }
     // default: print full MD to stdout
-    const md = emitDocs({ inline: true })
+    const md = await emitDocs({ inline: true })
     process.stdout.write(md)
     return 0
   }

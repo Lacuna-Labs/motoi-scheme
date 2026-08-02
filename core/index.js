@@ -83,6 +83,15 @@ import { installGeomExtended } from '../lib/graphics/geom-extended.js'
 import { installMatrix } from '../lib/math/matrix.js'
 import { installTick } from '../lib/audio/tick.js'
 import { installFramebufferVerbs } from '../lib/graphics/framebuffer-verbs.js'
+// Drawing-primitives stack (stages 1–5, 2026-07-29). CORE tier so the
+// CLI (makeCoreEnv) and REPL see the shape vocabulary out of the box.
+// Each builds on the media framebuffer + recordPrimitive; install AFTER
+// framebuffer-verbs.
+import { installShapesRaster } from '../lib/graphics/shapes-raster.js'
+import { installImageAlgebra } from '../lib/graphics/image-algebra.js'
+import { installSuperformula } from '../lib/graphics/superformula.js'
+import { installSdf } from '../lib/graphics/sdf.js'
+import { installSvgPath } from '../lib/graphics/svg-path.js'
 import { installScheduler } from '../lib/game/scheduler.js'
 import { installMisc } from '../lib/game/misc.js'
 import { installAnimationBudget } from '../lib/graphics/animation-budget.js'
@@ -279,10 +288,21 @@ export function installCore (env, opts = {}) {
   const fuel = opts.fuel ?? { n: 1_000_000 }
   const modules = []
 
-  const snap = () => new Set(env.vars.keys())
-
+  // Which verbs an installer added is a diagnostic — it is read only when
+  // something has already gone wrong (a failing spot-check's message, a
+  // coverage report). It used to be computed eagerly by building two Sets of
+  // every bound name around EVERY installer and diffing them: ~60 installers
+  // × two ~1,700-entry Sets, 12 ms on every single `makeCoreEnv`, which is
+  // every `motoi run`, every REPL start, and every test file.
+  //
+  // `env.vars` is a Map, so names keep insertion order and a redefinition
+  // reuses its slot rather than moving to the end. That makes the size before
+  // and after an installer enough: the names it added are exactly the keys in
+  // [before, after), and they stay at those positions afterwards. Recording
+  // two integers is O(1); the names are recovered on demand by the getter,
+  // which nothing on the success path calls.
   const runInstaller = (name, fn) => {
-    const before = snap()
+    const before = env.vars.size
     let ok = true
     let error = null
     try {
@@ -291,10 +311,24 @@ export function installCore (env, opts = {}) {
       ok = false
       error = e && e.message ? e.message : String(e)
     }
-    const after = snap()
-    const added = [...after].filter((k) => !before.has(k))
-    modules.push({ name, verbs: added.length, ok, error, added })
-    return { name, verbs: added.length, ok, error }
+    const after = env.vars.size
+    modules.push({
+      name,
+      verbs: after - before,
+      ok,
+      error,
+      get added () {
+        const out = []
+        let i = 0
+        for (const k of env.vars.keys()) {
+          if (i >= after) break
+          if (i >= before) out.push(k)
+          i++
+        }
+        return out
+      },
+    })
+    return { name, verbs: after - before, ok, error }
   }
 
   // base tier — CORE
@@ -376,6 +410,14 @@ export function installCore (env, opts = {}) {
   // framebuffer-verbs relies on fb/text being defined; it's installed by
   // installText above so we run this AFTER.
   runInstaller('core/graphics/framebuffer-verbs', () => installFramebufferVerbs(env, fuel))
+  // Drawing-primitives stack — must run AFTER framebuffer-verbs (owns
+  // recordPrimitive) and media (owns the fb). shapes-raster is the
+  // render floor; image-algebra composes; superformula/sdf/svg-path feed it.
+  runInstaller('core/graphics/shapes-raster',  () => installShapesRaster(env))
+  runInstaller('core/graphics/image-algebra',  () => installImageAlgebra(env))
+  runInstaller('core/graphics/superformula',   () => installSuperformula(env))
+  runInstaller('core/graphics/sdf',            () => installSdf(env))
+  runInstaller('core/graphics/svg-path',       () => installSvgPath(env))
   runInstaller('core/graphics/animation-budget', () => installAnimationBudget(env, fuel))
   runInstaller('core/game/scheduler',    () => installScheduler(env, fuel))
   runInstaller('core/game/misc',         () => installMisc(env, fuel))

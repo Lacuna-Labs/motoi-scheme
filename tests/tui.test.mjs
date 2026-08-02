@@ -11,7 +11,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { makePalette, SAKURA, SAKURA_256, detectColor } from '../tui/palette.js'
+// REBASELINED 2026-08-01 (bucket 1, stale-by-design). `SAKURA`/`SAKURA_256`
+// were renamed to `BLOSSOM`/`BLOSSOM_256`. Evidence: tui/palette.js:1 —
+// "Blossom (cherry-tree) palette for Motoi's TUI" — and CLAUDE.md
+// "What Motoi is NOT: Not Sakura. Sakura is a character and a dialect
+// (in `sakura-scheme` repo)." Zero `SAKURA` identifiers remain under tui/.
+// This is a pure de-branding rename: EVERY RGB tuple below is byte-identical
+// to the values still in tui/palette.js:26-52, so no assertion is weakened —
+// only the imported identifier changes.
+import { makePalette, BLOSSOM as SAKURA, BLOSSOM_256 as SAKURA_256, detectColor } from '../tui/palette.js'
 import { Screen, ATTR } from '../tui/screen.js'
 import { InputReader } from '../tui/input.js'
 import { Session } from '../tui/session.js'

@@ -150,18 +150,29 @@ test('entity/rotate! — with :duration animates, without snaps instantly', () =
   const rotate = env.vars.get('entity/rotate!')
   assert.ok(rotate, 'entity/rotate! registered')
 
-  entityMake(new Sym('hero'), 0, 0)
+  // 2026-08-01: this used to pass `new Sym('hero')` back into rotate — the
+  // ID-KEYED convention of lib/game/game.js, whose installer stopped being
+  // called 2026-07-25. The live provider (lib/game/world.js) is HANDLE-keyed:
+  // you rotate the value entity/make returned. The reference agrees — its
+  // entity examples all bind the result of world/spawn and pass that back.
+  // The LOCKED assertion (boolean return, snap and animated forms alike) is
+  // unchanged; only the way the target is named changed. The boolean itself
+  // was a real break and was fixed in world.js, not here.
+  const hero = entityMake(new Sym('hero'), 0, 0)
   // Instant snap.
-  const okSnap = rotate(new Sym('hero'), 90)
+  const okSnap = rotate(hero, 90)
   assert.equal(okSnap, true)
 
   // Animated (still returns true; a scratch tween is seeded).
   const okAnim = rotate(
-    new Sym('hero'), 180,
+    hero, 180,
     new Sym(':duration'), 400,
     new Sym(':easing'), new Sym('easing/spring'),
   )
   assert.equal(okAnim, true)
+
+  // An unresolvable target must report #f, not a truthy no-op.
+  assert.equal(rotate(new Sym('no-such-entity'), 90), false)
 })
 
 // ── 3. :easing accepts procedures (values from bezier-ease etc.) ──────
@@ -253,6 +264,40 @@ test('meta — registerPrimitive accepts meta-kind (non-function) registrations'
 })
 
 // ── 5. Physics verbs ──────────────────────────────────────────────────
+//
+// !! THE TWO TESTS BELOW ARE KNOWINGLY LEFT RED (2026-08-01). DO NOT "FIX"
+// !! THEM BY WEAKENING THE ASSERTIONS. They are reporting a real gap.
+//
+// Root cause, shared with the rest of this file: `installGame`
+// (lib/game/game.js) stopped being called from core/index.js in the
+// 2026-07-25 Curator rip. That installer was the sanctioned provider — the
+// reference entries for these verbs literally record
+// :provenance "motoi-scheme/lib/game/game.js". Dropping the whole installer
+// to remove a subset of Curator product concepts also took general
+// game-engine capability with it. The code is all still there in game.js; it
+// is simply never installed.
+//
+// What is unbound, and why each was left alone rather than papered over:
+//
+//   · on-collision      — implemented in game.js, DOCUMENTED in
+//                         Scheme/reference/28-game.slat, but that entry is
+//                         :status "needs-alfred", i.e. never ratified. Binding
+//                         a new verb into core on the strength of an
+//                         unratified entry is Alfred's call, not a test's.
+//   · physics/step      — undocumented name. The documented, live equivalent
+//     physics/gravity!    is world/step / world/gravity! / world/friction-ish.
+//     physics/friction!   Retargeting the tests onto world/* would make them
+//     entity/set-velocity! green while quietly retiring the physics/* namespace
+//                         these "locked calls" were written to protect, so the
+//                         namespace question is escalated instead.
+//
+// Separately, `motion/on-settle` IS bound and IS :status "landed", but its
+// entity form is dead: lib/graphics/animation.js looks the target up in
+// `gameState.entities` (the game.js id-keyed store, never populated now),
+// while entity/make writes to world.js's `W.entities`. So it always falls
+// through to `return false`. That is a genuine regression in a ratified verb;
+// fixing it means bridging animation.js to the world entity store, which is a
+// cross-module change outside this lane.
 
 test('physics — on-collision fires per overlapping pair each physics/step', () => {
   const env = fresh()
@@ -291,9 +336,14 @@ test('physics — entity/apply-force! adds impulse to entity velocity', () => {
   const state = env.vars.get('entity/state')
   assert.ok(applyForce, 'entity/apply-force! registered')
 
-  entityMake(new Sym('hero'), 0, 0)
-  applyForce(new Sym('hero'), 3, -2)
-  const s = state(new Sym('hero'))
+  // 2026-08-01: retargeted from the id-keyed to the handle-keyed convention
+  // (see the entity/rotate! note above). The LOCKED assertion — that the force
+  // lands as an impulse on the entity's velocity — is unchanged and still
+  // passes, which is the point: the physics itself never broke, only the way
+  // the target is addressed and the return contract did.
+  const hero = entityMake(new Sym('hero'), 0, 0)
+  assert.equal(applyForce(hero, 3, -2), true, 'reference locks a boolean return')
+  const s = state(hero)
   // (id x y vx vy w h)
   assert.equal(s[3], 3, 'vx += 3')
   assert.equal(s[4], -2, 'vy += -2')

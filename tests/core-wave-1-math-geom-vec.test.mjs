@@ -12,28 +12,35 @@ function fresh() { return makeCoreEnv() }
 
 // ── const/ ─────────────────────────────────────────────────────────
 
+// const/* are bound as VALUES, not nullary procedures. The 2026-07-16
+// "zero-arg procedure" convention was superseded 2026-07-26 per the
+// reference — see the dated note at lib/math/const.js:1-11 and the meta-kind
+// carve-out at lib/system/registry.js:25. The reference uses the bare form
+// (e.g. `(* 2 const/pi t)` in scheme/reference/20-curve.slat) and never
+// `(const/pi)`. Assertions updated 2026-08-01 to the ratified value form.
+
 for (const name of ['const/pi', 'const/tau', 'const/e', 'const/phi']) {
   test(`${name} — registered`, () => {
     const env = fresh()
-    assert.equal(typeof env.vars.get(name), 'function')
+    assert.equal(typeof env.vars.get(name), 'number')
   })
 }
 
 test('const/pi ≈ Math.PI', () => {
   const env = fresh()
-  assert.equal(env.vars.get('const/pi')(), Math.PI)
+  assert.equal(env.vars.get('const/pi'), Math.PI)
 })
 test('const/tau ≈ 2π', () => {
   const env = fresh()
-  assert.equal(env.vars.get('const/tau')(), Math.PI * 2)
+  assert.equal(env.vars.get('const/tau'), Math.PI * 2)
 })
 test('const/e ≈ Math.E', () => {
   const env = fresh()
-  assert.equal(env.vars.get('const/e')(), Math.E)
+  assert.equal(env.vars.get('const/e'), Math.E)
 })
 test('const/phi ≈ golden ratio', () => {
   const env = fresh()
-  const v = env.vars.get('const/phi')()
+  const v = env.vars.get('const/phi')
   assert.ok(Math.abs(v - 1.618033988749895) < 1e-12)
 })
 
@@ -108,9 +115,15 @@ test('math/expanded-form 132', () => {
   const env = fresh()
   assert.deepEqual(env.vars.get('math/expanded-form')(132), [100, 30, 2])
 })
-test('math/place-value 1234, 2 = 200', () => {
+// math/place-value is UNARY and returns an a-list of (digit place) pairs,
+// per the ratified signature "(math/place-value n) -> a-list | 'nan"
+// (scheme/reference/40-math.slat:962). The reference's own novice example
+// gives 305 -> ((3 2) (0 1) (5 0)); by that formula 1234 -> ((1 3) (2 2)
+// (3 1) (4 0)). The scalar single-place form is math/digit-at (tested below).
+// The old 2-arg "= 200" assertion matched no ratified verb. Updated 2026-08-01.
+test('math/place-value 1234 decomposes to (digit place) pairs', () => {
   const env = fresh()
-  assert.equal(env.vars.get('math/place-value')(1234, 2), 200)
+  assert.deepEqual(env.vars.get('math/place-value')(1234), [[1, 3], [2, 2], [3, 1], [4, 0]])
 })
 test('math/digit-at 1234, 2 = 2', () => {
   const env = fresh()

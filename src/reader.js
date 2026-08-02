@@ -35,6 +35,37 @@ export class Sym {
   toString() { return this.name }
 }
 
+// R7RS §6.4 — an IMPROPER pair, i.e. one whose cdr is not a list.
+//
+// Motoi represents proper lists as JS arrays, and that stays: it is what
+// makes the common path fast and what every cart already depends on. A
+// `Pair` is minted only by `(cons a b)` where b is not a list, so the
+// array path is untouched and nothing that works today changes shape.
+//
+// Before 2026-08-01 `(cons 'sku 42)` silently produced the two-element
+// list `(sku 42)`, so `(cdr (assq 'sku alist))` yielded `(42)` instead of
+// `42` — the printer disguised it, which is why it went unnoticed. With a
+// real Pair, `cdr` returns the value, as R7RS requires.
+export class Pair {
+  constructor(car, cdr) { this.car = car; this.cdr = cdr }
+}
+
+// A "list-ish" value: a proper list (array) or an improper Pair. Use this
+// wherever a verb must accept both, so the two representations stay
+// interchangeable to callers.
+export function isPair(v) { return v instanceof Pair || (Array.isArray(v) && v.length > 0) }
+
+// Render a dotted pair the way Scheme writes it. The cdr chain collapses,
+// so `(cons 1 (cons 2 3))` prints `(1 2 . 3)` rather than `(1 . (2 . 3))`.
+// `fmt` is the caller's element formatter — Motoi has several (repl, cli,
+// ide-server, display) and they all route here so they cannot drift apart.
+export function pairToString(p, fmt) {
+  const parts = []
+  let x = p
+  while (x instanceof Pair) { parts.push(fmt(x.car)); x = x.cdr }
+  return '(' + parts.join(' ') + ' . ' + fmt(x) + ')'
+}
+
 // R7RS §6.6 named character literals → their scalar values. Anything not
 // listed is a single-character literal (#\a) or a #\xHH hex escape.
 const CHAR_NAMES = {
@@ -233,6 +264,23 @@ function parseInner(src) {
       while (true) {
         if (pos >= toks.length) throw new ReadError('missing )', tk.line, tk.col)
         if (toks[pos].t === ')') break
+        if (toks[pos].t === '.') {
+          const dot = toks[pos]
+          pos++ // consume .
+          if (pos >= toks.length || toks[pos].t === ')') {
+            throw new ReadError('nothing after . in pair', dot.line, dot.col)
+          }
+          const tail = read()
+          if (pos >= toks.length || toks[pos].t !== ')') {
+            throw new ReadError('more than one form after . in pair', dot.line, dot.col)
+          }
+          pos++ // consume )
+          // `(1 . (2 3))` is the same object as `(1 2 3)` — a proper list.
+          if (Array.isArray(tail)) return tagPos([...list, ...tail], { line: tk.line, col: tk.col })
+          let acc = tail
+          for (let i = list.length - 1; i >= 0; i--) acc = new Pair(list[i], acc)
+          return tagPos(acc, { line: tk.line, col: tk.col })
+        }
         list.push(read())
       }
       pos++ // consume )

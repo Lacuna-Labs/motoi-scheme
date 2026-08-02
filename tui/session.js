@@ -17,6 +17,7 @@ import { makeCoreEnv } from '../core/index.js'
 import { expandProgram } from '../src/macro.js'
 import { snapshotRegistry } from '../src/verbRegistry.js'
 import { getMediaState } from '../lib/media/media.js'
+import { setStackRecording } from '../lib/system/stack.js'
 
 // ── formatting ─────────────────────────────────────────────────────
 
@@ -72,6 +73,11 @@ export class Session {
   constructor(opts = {}) {
     this.fuel = opts.fuel ?? 200000
     this.env = makeCoreEnv({ fuel: { n: this.fuel * 5 } })
+    // The frame ledger is off by default because it costs ~22% of evaluation
+    // time (see lib/system/stack.js). A TUI session is where the stack panel
+    // lives, so this is exactly the surface that should pay for it — and the
+    // cost is invisible next to a human typing.
+    setStackRecording(true)
     this.captured = ''
     // Route (display …) + (newline) into our captured buffer so eval
     // output ends up in the REPL panel, not the terminal.

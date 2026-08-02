@@ -69,6 +69,36 @@ $ motoi eval \"(cons 1 (cons 2 (cons 3 '())))\"
 
 Nobody actually writes lists that way — but it's illuminating to see. Every list `(a b c)` is secretly `(cons a (cons b (cons c '())))`. When you understand that, `car` and `cdr` (the operations that pull a list apart) suddenly make sense.
 
+## `cons` onto something that isn't a list
+
+Look at that chain again. Every `cons` puts a value in front of *another list*, and the innermost one puts a value in front of `'()`. So what happens if you `cons` onto something that is not a list at all?
+
+```
+$ motoi eval \"(cons 1 2)\"
+(1 . 2)
+```
+
+You get a **pair** — two values stuck together, printed with a dot between them. That dot is not decoration. It is the printer telling you: this is not a list, it is one cons cell whose rest is `2` instead of a list.
+
+```
+$ motoi eval \"(pair? (cons 1 2))\"
+#t
+
+$ motoi eval \"(list? (cons 1 2))\"
+#f
+```
+
+Both answers are right. It *is* a pair — one cons cell, which is all `pair?` asks about. It is *not* a list, because a list has to end in `'()` and this one ends in `2`.
+
+Pairs are how you glue a label to a value:
+
+```
+$ motoi eval \"(cdr (cons 'volume 7))\"
+7
+```
+
+`cdr` hands back `7` directly, because the pair holds the value right there in its rest. Compare that with a two-element **list** `(volume 7)`, where the value sits inside a one-element list and you need `cadr` to reach it. Two shapes, two accessors. Keep them straight — the next section shows what happens when you don't.
+
 ## `car` and `cdr` — first and rest
 
 These are the two accessors every Scheme programmer learns first.
@@ -158,6 +188,38 @@ $ motoi eval \"(assoc 'b '((a 1) (b 2) (c 3)))\"
 
 Given a list of key-value pairs, return the pair whose first element matches. Association lists are how you make simple lookup tables in Scheme. For big tables you'd want a real hash — but for small config-style lookups, `assoc` is exactly right.
 
+### The trap: two shapes of alist
+
+You can build an association list out of real pairs instead:
+
+```
+$ motoi eval \"(assoc 'b '((a . 1) (b . 2)))\"
+(b . 2)
+```
+
+Both shapes are ordinary Scheme, and `assoc` finds either one. That is convenient right up until it isn't, because **the two shapes are read with different accessors**:
+
+```
+$ motoi eval \"(cdr (assoc 'b '((a . 1) (b . 2))))\"
+2
+
+$ motoi eval \"(cadr (assoc 'b '((a 1) (b 2))))\"
+2
+```
+
+Pair alist → `cdr`. List alist → `cadr`. Now watch what happens when you use the wrong one:
+
+```
+$ motoi eval \"(cdr (assoc 'b '((a 1) (b 2))))\"
+(2)
+```
+
+No error. No warning. You asked for a number and got a one-element list containing that number. Then you hand it to `+` and the failure surfaces three functions away from the mistake, wearing a message about arithmetic.
+
+This is the most useful debugging habit in this chapter: **when a lookup hands back your value wrapped in one extra layer of parentheses, that layer is telling you which shape you actually built.** `(2)` means you built list-shaped entries and read them pair-style. Fix the accessor, not the arithmetic.
+
+Pick one shape per table and stay with it. Pairs are the more common convention in Scheme at large and they are what R7RS's own examples use; two-element lists win when the value is itself a list, because then one accessor works everywhere.
+
 ## Predicates: `null?`, `pair?`
 
 Two questions come up constantly: *is this list empty?* and *does this list have at least one element?*
@@ -176,7 +238,19 @@ $ motoi eval \"(pair? '())\"
 #f
 ```
 
-`null?` is true for the empty list. `pair?` is true for any non-empty list (technically, any list built from at least one `cons`). Together they cover the two cases every list-walking function has to handle: *we're done* and *there's more to do*.
+`null?` is true for the empty list. `pair?` is true for anything built from at least one `cons` — every non-empty list, and also the dotted pairs from earlier in this chapter. Together they cover the two cases every list-walking function has to handle: *we're done* and *there's more to do*.
+
+If you specifically need \"is this a proper list, ending in `'()`\", that is `list?`, and it is the one that tells the two shapes apart:
+
+```
+$ motoi eval \"(list? (cons 1 '(2 3)))\"
+#t
+
+$ motoi eval \"(list? (cons 1 2))\"
+#f
+```
+
+`pair?` asks *is there a cons cell here*. `list?` asks *does it end properly*. Most list-walking code wants `pair?`; code that has to reject a dotted tail wants `list?`.
 
 ## A list of coordinates: shapes
 
@@ -287,6 +361,68 @@ For each element, apply the predicate. Keep elements where the predicate returns
 ;; => (100 1000 10000)
 ```
 
+## `remove` — filter's other half
+
+Half the time what you actually want to say is *throw these out*. Written with `filter` that comes out backwards, with a `not` you have to read past:
+
+```
+;; the awkward way
+(filter (lambda (f) (not (or (< f 20) (> f 20000))))
+        '(10 100 1000 10000 100000))
+```
+
+`remove` is the same walk with the test read the other way round, so you can drop the `not`:
+
+```
+$ motoi eval \"(remove even? '(1 2 3 4))\"
+(1 3)
+```
+
+```
+;; Drop the frequencies nobody can hear:
+(remove (lambda (f) (or (< f 20) (> f 20000)))
+        '(10 100 1000 10000 100000))
+;; => (100 1000 10000)
+```
+
+Same answer as the `filter` above. Reach for whichever one lets you write the condition without a `not` in front of it — the code then says what you meant.
+
+`remove` comes from **SRFI-1**, the standard list library. `filter`, `map` and `for-each` are in the core language; SRFI-1 is a named part layered on top of it, and it carries a few more list verbs worth knowing early:
+
+```
+$ motoi eval \"(take-while positive? '(3 1 -2 5))\"
+(3 1)
+
+$ motoi eval \"(drop-while positive? '(3 1 -2 5))\"
+(-2 5)
+
+$ motoi eval \"(count even? '(1 2 3 4))\"
+2
+
+$ motoi eval \"(delete 3 '(1 3 2 3))\"
+(1 2)
+
+$ motoi eval \"(cons* 1 2 '(3 4))\"
+(1 2 3 4)
+
+$ motoi eval \"(last '(1 2 3))\"
+3
+```
+
+`take-while` and `drop-while` cut a list at the first element that fails the test — `take-while` keeps the front, `drop-while` keeps the back. `count` is `(length (filter ...))` in one pass. `delete` drops every copy of a value. `cons*` conses a whole run on at once, so `(cons* 1 2 lst)` beats `(cons 1 (cons 2 lst))`. `last` is the final element.
+
+Two more that answer a yes-or-no about a whole list:
+
+```
+$ motoi eval \"(any even? '(1 3 4))\"
+#t
+
+$ motoi eval \"(every odd? '(1 3 5))\"
+#t
+```
+
+`any` asks *is there at least one*; `every` asks *are they all*. Both stop walking as soon as they know the answer.
+
 ## Two dimensions: a list of rows
 
 To represent a 2D grid of numbers, use a list of lists.
@@ -337,13 +473,17 @@ That's the shape of most list-processing functions before you know the higher-or
 
 - Build lists two ways: `'(1 2 3)` (literal) and `(list 1 2 3)` (computed).
 - A list is a chain of pairs. `cons` makes a pair. `'()` is the empty list.
+- `cons` onto a non-list makes a **dotted pair**: `(cons 1 2)` is `(1 . 2)`. The dot is the printer telling you it is not a list.
 - `car` = first, `cdr` = rest. `cadr`, `caddr` are shortcuts to deeper elements.
 - `list-ref lst n` — nth element (zero-indexed).
 - `length`, `reverse`, `append` — do what they say.
 - `member` and `assoc` — search a list; return matching tail or `#f`.
-- `null?` — empty list? `pair?` — non-empty list?
+- An alist can be built from pairs `((a . 1))` or from two-element lists `((a 1))`. `assoc` finds either, so the wrong accessor does not raise — it hands back `(2)` where you wanted `2`. An extra layer of parentheses is the shape telling on you.
+- `null?` — empty list? `pair?` — is there a cons cell? `list?` — does it end in `'()`?
 - Lists of lists represent shapes (points), melodies (notes), boards (grids).
 - `map` transforms a list into a new list; `for-each` walks a list for effect; `filter` keeps only elements passing a predicate.
+- `remove` is `filter` with the test the other way round — use it when the condition would otherwise need a `not`.
+- SRFI-1 adds `take-while`, `drop-while`, `count`, `delete`, `cons*`, `last`, `any` and `every`.
 
 ## Try before you turn the page
 

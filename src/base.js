@@ -6,10 +6,11 @@
 // `apply`, so they share the same fuel budget — no way to escape the cap.
 
 import { Env, apply, Closure } from './interp.js'
-import { Sym } from './reader.js'
+import { Sym, Pair } from './reader.js'
 import { makeRational, isRational, liftRational } from '../lib/math/exact.js'
 import { SchemeVector, isVec } from '../lib/base/r7rs-types.js'
 import { registerVerbMeta } from './verbRegistry.js'
+import { seededRandom } from './rng.js'
 import { installSlatVerbs } from './slat-verbs.js'
 import { installR7RSCompletions } from './r7rs-completions.js'
 
@@ -71,15 +72,51 @@ export function makeBaseEnv(fuel) {
     ? Math.sign(_toFloat(x) - _toFloat(y))
     : _ratCmp(liftRational(x), liftRational(y))
 
-  def('+', (...a) => _hasRat(a) ? _numFold(a, _ratAdd, (x, y) => x + y, _ZERO) : a.reduce((x, y) => x + y, 0))
-  def('-', (...a) => _hasRat(a) ? _numFold(a, _ratSub, (x, y) => x - y, _ZERO) : (a.length === 1 ? -a[0] : a.reduce((x, y) => x - y)))
-  def('*', (...a) => _hasRat(a) ? _numFold(a, _ratMul, (x, y) => x * y, _ONE) : a.reduce((x, y) => x * y, 1))
-  def('/', (...a) => _hasRat(a) ? _numFold(a, _ratDiv, (x, y) => x / y, _ONE) : (a.length === 1 ? 1 / a[0] : a.reduce((x, y) => x / y)))
-  def('modulo', (x, y) => ((x % y) + y) % y)
-  def('quotient', (x, y) => Math.trunc(x / y))   // integer division — standard Scheme
-  def('remainder', (x, y) => x - Math.trunc(x / y) * y)
-  def('max', (...a) => Math.max(...a))
-  def('min', (...a) => Math.min(...a))
+  // The arithmetic verbs used to be the raw JS operators, so `(+ 1 "a")`
+  // answered "1a" and `(* 2 'x)` answered NaN — JS coercion leaking through
+  // the language. Wrong answers with no error are the failure a learner
+  // cannot debug, because nothing tells them anything went wrong. Every
+  // numeric verb now states what it got instead of a number.
+  const _isNum = (x) => typeof x === 'number' || isRational(x)
+  const _describe = (x) => {
+    if (x === undefined || x === null) return 'nothing'
+    if (typeof x === 'string') return `the string ${JSON.stringify(x)}`
+    if (typeof x === 'boolean') return x ? '#t' : '#f'
+    if (Array.isArray(x)) return x.length === 0 ? 'the empty list' : 'a list'
+    if (x instanceof Sym) return `the symbol ${x.name}`
+    if (x instanceof Pair) return 'a pair'
+    if (typeof x === 'function' || x instanceof Closure) return 'a procedure'
+    if (_isNum(x)) return `the number ${isRational(x) ? `${x.n}/${x.d}` : x}`
+    return 'a value of another kind'
+  }
+  const _ckNums = (op, a) => {
+    for (const x of a) {
+      if (!_isNum(x)) throw new Error(`${op}: expected a number, got ${_describe(x)}`)
+    }
+    return a
+  }
+  // R7RS §6.2.6: it is an error to divide by exact zero. Motoi errors on any
+  // zero divisor rather than handing back JS's Infinity, which reads as a
+  // legitimate answer and then poisons every arithmetic step downstream.
+  const _ckNonZero = (op, divisors) => {
+    for (const d of divisors) {
+      if (_toFloat(d) === 0) throw new Error(`${op}: division by zero`)
+    }
+  }
+
+  def('+', (...a) => _hasRat(_ckNums('+', a)) ? _numFold(a, _ratAdd, (x, y) => x + y, _ZERO) : a.reduce((x, y) => x + y, 0))
+  def('-', (...a) => _hasRat(_ckNums('-', a)) ? _numFold(a, _ratSub, (x, y) => x - y, _ZERO) : (a.length === 1 ? -a[0] : a.reduce((x, y) => x - y)))
+  def('*', (...a) => _hasRat(_ckNums('*', a)) ? _numFold(a, _ratMul, (x, y) => x * y, _ONE) : a.reduce((x, y) => x * y, 1))
+  def('/', (...a) => {
+    _ckNums('/', a)
+    _ckNonZero('/', a.length === 1 ? a : a.slice(1))
+    return _hasRat(a) ? _numFold(a, _ratDiv, (x, y) => x / y, _ONE) : (a.length === 1 ? 1 / a[0] : a.reduce((x, y) => x / y))
+  })
+  def('modulo', (x, y) => { _ckNums('modulo', [x, y]); _ckNonZero('modulo', [y]); return ((x % y) + y) % y })
+  def('quotient', (x, y) => { _ckNums('quotient', [x, y]); _ckNonZero('quotient', [y]); return Math.trunc(x / y) })   // integer division — standard Scheme
+  def('remainder', (x, y) => { _ckNums('remainder', [x, y]); _ckNonZero('remainder', [y]); return x - Math.trunc(x / y) * y })
+  def('max', (...a) => Math.max(..._ckNums('max', a).map(_toFloat)))
+  def('min', (...a) => Math.min(..._ckNums('min', a).map(_toFloat)))
   def('abs', (x) => isRational(x) ? (x.n < 0n ? makeRational(-x.n, x.d) : x) : Math.abs(x))
 
   def('=', (a, b) => (isRational(a) || isRational(b)) ? _numCmp(a, b) === 0 : a === b)
@@ -89,32 +126,69 @@ export function makeBaseEnv(fuel) {
   def('>=', (a, b) => (isRational(a) || isRational(b)) ? _numCmp(a, b) >= 0 : a >= b)
   def('not', (a) => a === false)
 
+  // Internal car/cdr that read either representation. Every derived
+  // accessor goes through these so the two shapes never drift apart.
+  //
+  // R7RS §6.4 makes `(car '())` and `(cdr '())` errors, and until 2026-08-02
+  // they returned JS `undefined` and an empty array instead. `undefined`
+  // prints as nothing, so a learner's REPL showed a blank line where the
+  // mistake was — and the value then travelled several more steps before
+  // surfacing somewhere unrelated. Failing at the point of the mistake is
+  // the whole reason the error exists.
+  const _asPair = (op, a) => {
+    if (a instanceof Pair) return a
+    if (Array.isArray(a) && a.length > 0) return a
+    throw new Error(`${op}: expected a pair or a non-empty list, got ${_describe(a)}`)
+  }
+  const _car = (a, op = 'car') => { const p = _asPair(op, a); return p instanceof Pair ? p.car : p[0] }
+  const _cdr = (a, op = 'cdr') => { const p = _asPair(op, a); return p instanceof Pair ? p.cdr : p.slice(1) }
+
   def('list', (...a) => a)
-  def('cons', (a, b) => [a, ...(Array.isArray(b) ? b : [b])])
-  def('car', (a) => a[0])
-  def('cdr', (a) => a.slice(1))
+  // R7RS §6.4. Consing onto a list extends the list (array fast path, the
+  // shape every cart already relies on); consing onto a non-list mints a
+  // real improper Pair, so `(cons 'sku 42)` is `(sku . 42)` and not the
+  // two-element list it silently produced before 2026-08-01.
+  def('cons', (a, b) => (Array.isArray(b) ? [a, ...b] : new Pair(a, b)))
+  def('car', (a) => _car(a))
+  def('cdr', (a) => _cdr(a))
   // Standard Scheme convenience accessors — second + third elements.
   // Saves the conway.sks additive-blend code from repeated `(car (cdr ...))`.
-  def('cadr', (a) => a[1])
-  def('caddr', (a) => a[2])
+  // They report their own name so a short list blames `cadr`, not `car`.
+  def('cadr', (a) => _car(_cdr(a, 'cadr'), 'cadr'))
+  def('caddr', (a) => _car(_cdr(_cdr(a, 'caddr'), 'caddr'), 'caddr'))
   def('null?', (a) => Array.isArray(a) && a.length === 0)
   // R7RS §6.4 / §6.3 / §6.5 — the load-bearing type predicates the spec
-  // expects every Scheme to bind. `pair?` is true on a NON-empty list
-  // (Curator represents cons cells as JS arrays, so a pair is any array
-  // with at least one element). `symbol?` is true on a `Sym` reader
-  // token. `procedure?` is true on anything callable — JS functions
-  // (primitives) or `Closure` instances (user lambdas).
-  def('pair?', (a) => Array.isArray(a) && a.length > 0)
+  // expects every Scheme to bind. `pair?` is true of a non-empty list
+  // (Motoi represents proper lists as JS arrays) or an improper `Pair`.
+  // `symbol?` is true on a `Sym` reader token. `procedure?` is true on
+  // anything callable — JS functions (primitives) or `Closure` instances.
+  def('pair?', (a) => a instanceof Pair || (Array.isArray(a) && a.length > 0))
   def('symbol?', (a) => a instanceof Sym)
   def('procedure?', (a) => typeof a === 'function' || a instanceof Closure)
-  def('length', (a) => a.length)
+  // R7RS §6.4: `length` is an error on an improper list. (`list?` already
+  // lives in lib/std/r7rs-completions-core.js and is correct as written —
+  // `Array.isArray` is false for a Pair.)
+  def('length', (a) => {
+    if (a instanceof Pair) throw new Error('length: improper list')
+    // `(length 5)` used to answer `undefined` — JS reads `.length` off
+    // anything, and a number simply has none.
+    if (!Array.isArray(a)) throw new Error(`length: expected a proper list, got ${_describe(a)}`)
+    return a.length
+  })
   def('range', (a, b) => { const r = []; for (let i = a; i < b; i++) r.push(i); return r })
 
   // (for-each fn xs [ys …]) — R7RS §6.10. Multi-list form iterates
   // pairwise; the callback receives one arg from each list per step.
   // Length is the shortest list; no error on ragged inputs (matches
   // R7RS behaviour that "the shortest list determines the length").
+  // Improper lists reach these as a Pair; without this guard the learner
+  // sees a JS message like "lists[0].map is not a function".
+  const _needList = (name, v) => {
+    if (!Array.isArray(v)) throw new Error(`${name}: expected a proper list`)
+    return v
+  }
   def('for-each', (fn, ...lists) => {
+    lists.forEach((l) => _needList('for-each', l))
     if (lists.length === 0) return undefined
     if (lists.length === 1) {
       for (const x of lists[0]) apply(fn, [x], fuelBox)
@@ -134,6 +208,7 @@ export function makeBaseEnv(fuel) {
   // unchanged. If the fn has a fixed lower arity the runtime error
   // surfaces from apply, not from map.
   def('map', (fn, ...lists) => {
+    lists.forEach((l) => _needList('map', l))
     if (lists.length === 0) return []
     if (lists.length === 1) return lists[0].map((x) => apply(fn, [x], fuelBox))
     const n = lists.reduce((m, l) => Math.min(m, l.length), Infinity)
@@ -144,7 +219,7 @@ export function makeBaseEnv(fuel) {
     }
     return out
   })
-  def('filter', (fn, lst) => lst.filter((x) => apply(fn, [x], fuelBox) !== false))
+  def('filter', (fn, lst) => _needList('filter', lst).filter((x) => apply(fn, [x], fuelBox) !== false))
   // SRFI-1 `reduce`: (reduce f ridentity list). For a NON-empty list the
   // ridentity is IGNORED and the fold is (fold f (car list) (cdr list)) with
   // f called element-first, (f elem acc). Conformed 2026-07-25 (was acc-first
@@ -156,9 +231,20 @@ export function makeBaseEnv(fuel) {
     for (let i = 1; i < lst.length; i++) acc = apply(fn, [lst[i], acc], fuelBox)
     return acc
   })
-  // (apply fn args) — invoke `fn` with the list `args` as the argument
-  // list. Same fuel budget as a direct call.
-  def('apply', (fn, args) => apply(fn, Array.isArray(args) ? args : [args], fuelBox))
+  // (apply fn arg1 … args) — R7RS §6.10. The LAST argument is a list; every
+  // argument before it is passed through as a leading argument. Before
+  // 2026-08-02 this was `(fn, args)`, so the extra arguments were silently
+  // dropped and `(apply + 1 2 (list 3 4))` answered 1 instead of 10 — a wrong
+  // answer with no error, which is the worst failure a teaching language has.
+  // Same fuel budget as a direct call.
+  def('apply', (fn, ...rest) => {
+    if (rest.length === 0) throw new Error('apply: expected a procedure and an argument list')
+    const tail = rest[rest.length - 1]
+    if (!Array.isArray(tail)) {
+      throw new Error('apply: the last argument must be a list of arguments')
+    }
+    return apply(fn, [...rest.slice(0, -1), ...tail], fuelBox)
+  })
 
   // (=? a b) — smart equality. The PICO-8-style "do what I mean" verb:
   //   * numbers compare by value (===)
@@ -175,7 +261,7 @@ export function makeBaseEnv(fuel) {
     if (a === b) return true
     if (a == null || b == null) return false
     // Sym comparison by .name (reader interns these consistently).
-    if (a && b && typeof a === 'object'
+    if (a && b && typeof a === 'object' && typeof b === 'object'
         && 'name' in a && 'name' in b
         && Object.getPrototypeOf(a) === Object.getPrototypeOf(b)
         && typeof a.name === 'string') {
@@ -186,20 +272,66 @@ export function makeBaseEnv(fuel) {
       for (let i = 0; i < a.length; i++) if (!_eqQ(a[i], b[i])) return false
       return true
     }
+    if (a instanceof Pair || b instanceof Pair) {
+      return a instanceof Pair && b instanceof Pair
+        && _eqQ(a.car, b.car) && _eqQ(a.cdr, b.cdr)
+    }
     // R7RS §6.8: two vectors are `equal?` when same length + element-wise equal.
     if (isVec(a) && isVec(b)) {
       if (a.items.length !== b.items.length) return false
       for (let i = 0; i < a.items.length; i++) if (!_eqQ(a.items[i], b.items[i])) return false
       return true
     }
+    // R7RS §6.9: two bytevectors are `equal?` when same length + byte-wise equal.
+    if (a instanceof Uint8Array && b instanceof Uint8Array) {
+      if (a.length !== b.length) return false
+      for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+      return true
+    }
     return false
   }
   def('=?', _eqQ)
-  // Legacy spellings — Scheme tradition; same behaviour as `=?` so
-  // operators coming from Racket/Chez/Chicken aren't surprised.
+  // `equal?` IS the deep one — R7RS §6.1 defines it recursively over pairs,
+  // vectors, strings and bytevectors. `=?` is its friendly spelling.
   def('equal?', _eqQ)
-  def('eq?', _eqQ)
-  def('eqv?', _eqQ)
+
+  // `eqv?` / `eq?` are NOT deep, and until 2026-08-02 all four names were
+  // bound to `_eqQ`, so `(eq? (list 1 2) (list 1 2))` answered #t. That is
+  // the single most load-bearing distinction in Scheme — the whole reason
+  // `equal?` exists — and a learner who is taught it here and then meets any
+  // other Scheme finds their mental model inverted.
+  //
+  // R7RS §6.1 requires `eqv?` to be #t for two objects that are the same
+  // location, and for the immutable atoms (numbers of the same exactness and
+  // value, characters, symbols, the empty list) that "cannot be distinguished
+  // by any operation". It requires #f for two separately-allocated aggregates.
+  // Motoi's atoms are already value-shaped in the host: symbols carry `.name`,
+  // characters are interned by `ch()`, numbers are JS numbers or exact
+  // rationals. So `eqv?` is identity plus a value check on those, and nothing
+  // else — an aggregate is `eqv?` only to itself.
+  //
+  // `eq?` is bound to the same function. R7RS leaves `eq?` weaker than `eqv?`
+  // only on numbers and characters, and leaves those cases UNSPECIFIED rather
+  // than requiring #f — so making them agree is conformant, and it spares the
+  // learner a distinction that has no observable meaning in this runtime.
+  // (Motoi's strings are host primitives and therefore compare by value here;
+  // R7RS also leaves `(eq? "a" "a")` unspecified. See the reference caveat.)
+  function _eqvQ(a, b) {
+    if (a === b) return true
+    if (a == null || b == null) return false
+    if (a instanceof Sym && b instanceof Sym) return a.name === b.name
+    // Exact rationals are heap objects, so `===` misses two equal ones.
+    // Exactness must still separate them: R7RS says 1/2 and 0.5 are not eqv?.
+    if (isRational(a) || isRational(b)) {
+      const numeric = (x) => isRational(x) || typeof x === 'number'
+      if (!numeric(a) || !numeric(b)) return false
+      if (_inexact(a) !== _inexact(b)) return false
+      return _numCmp(a, b) === 0
+    }
+    return false
+  }
+  def('eqv?', _eqvQ)
+  def('eq?', _eqvQ)
 
   // (inspect x) — walk any value and return a flat, readable string
   // suitable for `(text ...)` or `(display)`. The runtime
@@ -263,6 +395,7 @@ export function makeBaseEnv(fuel) {
       if (Number.isNaN(v)) return '+nan.0'
       return String(v)
     }
+    if (v instanceof Pair) return pairToString(v, _displayFormat)
     if (Array.isArray(v)) return '(' + v.map(_displayFormat).join(' ') + ')'
     if (typeof v === 'function') return '<fn>'
     if (v instanceof Closure) return '<fn>'
@@ -339,8 +472,22 @@ export function makeBaseEnv(fuel) {
     for (let i = 0; i < n; i++) out[i] = [a[i], b[i]]
     return out
   })
-  def('append', (...ls) => [].concat(...ls))
-  def('reverse', (a) => a.slice().reverse())
+  // R7RS §6.4: every argument but the last must be a proper list; the last
+  // may be any object, and becomes the tail — so `(append '(1) '(2 . 3))`
+  // is `(1 2 . 3)`, not a list holding a pair.
+  def('append', (...ls) => {
+    if (ls.length === 0) return []
+    const last = ls[ls.length - 1]
+    const front = [].concat(...ls.slice(0, -1))
+    if (Array.isArray(last)) return front.concat(last)
+    let acc = last
+    for (let i = front.length - 1; i >= 0; i--) acc = new Pair(front[i], acc)
+    return acc
+  })
+  def('reverse', (a) => {
+    if (a instanceof Pair) throw new Error('reverse: improper list')
+    return a.slice().reverse()
+  })
   def('first', (a) => a[0])
   def('last', (a) => a[a.length - 1])
   def('nth', (a, i) => a[i])
@@ -382,20 +529,19 @@ export function makeBaseEnv(fuel) {
   def('sign', (x) => Math.sign(x))
   def('clamp', (x, lo, hi) => Math.min(hi, Math.max(lo, x)))
   def('lerp', (a, b, t) => a + (b - a) * t)
-  // `rng-uniform` is the BASE, non-deterministic uniform in [0,1). It is
-  // intentionally NOT named `random`: the cards runtime (runWithCards)
-  // binds a SEEDED `random` on top so cart replay is byte-identical.
-  // run()/runSurface() don't install the seeded rng, so they reach the
-  // uniform under this name. See [[curator-publish-architecture]] /
-  // cartReplayer determinism note. (A1 fix, 2026-06-11)
-  def('rng-uniform', () => Math.random())
-  def('randint', (a, b) => a + Math.floor(Math.random() * (b - a)))
+  // `rng-uniform` is the plain uniform in [0,1). It is intentionally NOT
+  // named `random`. Every draw below goes through seededRandom so one seed
+  // governs the whole random surface no matter which verb a cart reaches
+  // for — these used to call Math.random directly and so escaped
+  // `(with-seed …)`, which cost three separate fixes to find.
+  def('rng-uniform', () => seededRandom())
+  def('randint', (a, b) => a + Math.floor(seededRandom() * (b - a)))
   // Racket-style aliases — friendlier names that Scheme-ers reach for.
   // `(random-int n)` → 0..n-1.  `(random-range lo hi)` → uniform float
   // in [lo, hi).  `(random-pick lst)` → an element of the list.
-  def('random-int', (n) => Math.floor(Math.random() * Math.max(1, n | 0)))
-  def('random-range', (lo, hi) => lo + Math.random() * (hi - lo))
-  def('random-pick', (lst) => (lst && lst.length ? lst[Math.floor(Math.random() * lst.length)] : null))
+  def('random-int', (n) => Math.floor(seededRandom() * Math.max(1, n | 0)))
+  def('random-range', (lo, hi) => lo + seededRandom() * (hi - lo))
+  def('random-pick', (lst) => (lst && lst.length ? lst[Math.floor(seededRandom() * lst.length)] : null))
   def('sum', (lst) => lst.reduce((x, y) => x + y, 0))
   def('mean', (lst) => (lst.length ? lst.reduce((x, y) => x + y, 0) / lst.length : 0))
 
@@ -487,7 +633,10 @@ export function makeBaseEnv(fuel) {
   })
   def('list-ref', (a, i) => a[i])
   def('member', (x, lst) => { const i = lst.findIndex((y) => deepEqual(x, y)); return i < 0 ? false : lst.slice(i) })
-  def('assoc', (key, alist) => alist.find((pair) => Array.isArray(pair) && deepEqual(pair[0], key)) || false)
+  // Entries may be `(k v)` lists or `(k . v)` dotted pairs — match both.
+  def('assoc', (key, alist) => alist.find((pair) =>
+    (pair instanceof Pair ? deepEqual(pair.car, key)
+      : Array.isArray(pair) && deepEqual(pair[0], key))) || false)
 
   // ── list-builders the layout carts reach for ────────────────────────
   //
@@ -887,7 +1036,7 @@ function registerBaseMetadata() {
     ['string-ref',     2,             '(string-ref s i) — the i-th character.',              '(string-ref "abc" 1) => "b"',           'string'],
     ['string=?',       2,             'String equality.',                                    '(string=? "a" "a") => #t',              'string'],
     ['string-eq?',     2,             'String equality — same as string=?.',                 '(string-eq? "a" "a") => #t',            'string'],
-    ['substring',     [2, 3],         '(substring s a [b]) — a substring of s.',             '(substring "hello" 1 4) => "ell"',      'string'],
+    ['substring',     [2, 3],         '(substring s a [b]) — a substring of s. DIVERGES from R7RS §6.7, which requires 0 <= a <= b <= (string-length s): indices past the end CLAMP instead of raising, so (substring "ab" 0 3) is "ab"; negative indices clamp to 0; and a > b SWAPS the two, so (substring "hello" 4 1) is "ell". All three are silent. Portable code must not rely on them, and a reversed-index bug will not announce itself.', '(substring "hello" 1 4) => "ell"',      'string'],
     ['number->string',[1, 2],         '(number->string n [radix]) — number to string.',      '(number->string 255 16) => "ff"',       'string'],
     ['string->number',[1, 2],         '(string->number s [radix]) — parse a number.',        '(string->number "42") => 42',           'string'],
 
@@ -1007,6 +1156,13 @@ function deepEqual(a, b) {
   // reader, one built in JS via `new Sym`). Without this, assoc/member/equal?
   // silently miss symbol keys.
   if (a instanceof Sym && b instanceof Sym) return a.name === b.name
+  // A dotted pair is equal? to another dotted pair, component-wise. It is
+  // never equal? to a list — `(a . 1)` and `(a 1)` are distinct values,
+  // which is exactly the distinction that was missing before 2026-08-01.
+  if (a instanceof Pair || b instanceof Pair) {
+    return a instanceof Pair && b instanceof Pair &&
+      deepEqual(a.car, b.car) && deepEqual(a.cdr, b.cdr)
+  }
   if (Array.isArray(a) && Array.isArray(b)) {
     return a.length === b.length && a.every((x, i) => deepEqual(x, b[i]))
   }

@@ -24,13 +24,45 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { makeCoreEnv } from '../core/index.js'
-import { resetMediaState } from '../lib/media/media.js'
-import { Sym, sym } from '../src/reader.js'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+// ISOLATION fix (2026-08-01): the cortex is a PERSISTENT user-global store at
+// $MOTOI_HOME/copilot/cortex.slatl (src/paths.js). Without this, every run of
+// this file wrote its fixture keys (a, b, temp, planet, kx, ky, user/name)
+// straight into Alfred's real cortex, and `cortex/size` assertions measured
+// whatever happened to be in his home directory. That also made the size test
+// pass once and fail forever after, because cortex/remember upserts by key —
+// the second run found the keys already there and the count never moved.
+// MOTOI_HOME must be set BEFORE core/index.js is imported, since paths.js
+// resolves it at module load.
+process.env.MOTOI_HOME = mkdtempSync(join(tmpdir(), 'motoi-p0-cortex-'))
+
+const { makeCoreEnv } = await import('../core/index.js')
+const { resetMediaState } = await import('../lib/media/media.js')
+const { Sym, sym } = await import('../src/reader.js')
 
 function fresh() {
   resetMediaState()
   return makeCoreEnv()
+}
+
+// The unified cortex (lib/ai/cortex.js, Alfred 2026-07-25) stores extensible
+// records, not bare values: cortex/recall returns the record as an alist of
+// (key value) pairs — :kind :id :key :data :salience :ts :provenance — and the
+// remembered value rides in :data. Pull it back out for round-trip assertions.
+// A string payload is stored as the record's searchable :text (that is what
+// RAG matches on); any other value rides in the extensible :data slot.
+const recallData = (recall, key) => {
+  const rec = recall(key)
+  if (!Array.isArray(rec)) return rec
+  const field = (name) => {
+    const hit = rec.find((p) => Array.isArray(p) && p[0] instanceof Sym && p[0].name === name)
+    return hit ? hit[1] : undefined
+  }
+  const data = field(':data')
+  return data === undefined ? field(':text') : data
 }
 
 // Small helpers.
@@ -46,7 +78,8 @@ test('cortex/remember + recall — round-trip', () => {
   const remember = get(env, 'cortex/remember')
   const recall   = get(env, 'cortex/recall')
   remember(sym('planet'), 'earth')
-  assert.equal(recall(sym('planet')), 'earth')
+  // Unified cortex (2026-07-25) returns the whole record; the value is :data.
+  assert.equal(recallData(recall, sym('planet')), 'earth')
 })
 
 test('cortex/recall — missing key returns null-ish', () => {
@@ -87,10 +120,30 @@ test('cortex/forget — removes a stored key', () => {
   const forget   = get(env, 'cortex/forget')
   const recall   = get(env, 'cortex/recall')
   remember(sym('temp'), 999)
-  assert.equal(recall(sym('temp')), 999)
-  forget(sym('temp'))
+  assert.equal(recallData(recall, sym('temp')), 999)
+  assert.equal(forget(sym('temp')), true, 'forget reports it dropped a record')
+
+  // 2026-08-01: this used to assert recall goes null-ish after forget. That is
+  // not what the unified cortex promises. The episodic memory tier is prunable,
+  // but the four world-knowledge graphs are READ-ONLY and are merged into
+  // recall as virtual :kind :knowledge records (lib/ai/cortex.js). The key
+  // 'temp' collides with the knowledge node "intuition/temp", so recall keeps
+  // answering — with knowledge, not memory. The contract cortex/forget actually
+  // makes is "the MEMORY record is gone", so that is what we assert.
   const v = recall(sym('temp'))
-  assert.ok(v === undefined || v === null || v === false)
+  const kind = Array.isArray(v)
+    ? v.find((p) => Array.isArray(p) && p[0] instanceof Sym && p[0].name === ':kind')?.[1]
+    : undefined
+  assert.ok(
+    v === undefined || v === null || v === false || (kind instanceof Sym && kind.name === ':knowledge'),
+    'after forget, no :memory record survives (world knowledge may still answer)',
+  )
+
+  // A key with no knowledge-graph twin goes fully quiet, confirming the drop.
+  remember(sym('zzz-no-graph-twin'), 1)
+  forget(sym('zzz-no-graph-twin'))
+  const gone = recall(sym('zzz-no-graph-twin'))
+  assert.ok(gone === undefined || gone === null || gone === false)
 })
 
 test('cortex/query — accepts a pattern and returns something iterable', () => {
@@ -129,10 +182,17 @@ test('entity/set! — safe on missing entity (no-op signal)', () => {
   const env = fresh()
   const set = get(env, 'entity/set!')
   const v = set(sym('ghost'), sym('hp'), 5)
-  // Unknown entity → does not throw, stores nothing, returns undefined.
-  // House convention: unknown-entity ops return a falsy no-op signal
-  // (cf. `entity/tag! — false on unknown entity`), NOT the input value.
-  assert.equal(v, undefined)
+  // 2026-08-01: this used to assert `undefined`, citing a "house convention"
+  // that the reference does not support. Scheme/reference/24-entity.slat locks
+  // entity/set! as "(entity/set! id key val) -> val" with no miss-path carve-out,
+  // and BOTH implementations (lib/game/world.js and lib/game/game.js) return val
+  // unconditionally. The reference is the language, so the assertion was the
+  // thing that was wrong. The real contract under test here is "does not throw
+  // on an unknown entity, and stores nothing".
+  assert.equal(v, 5)
+  const ref = get(env, 'entity/ref')
+  // Nothing was stored, so the key is still missing → the 'nan sentinel.
+  assert.equal(ref(sym('ghost'), sym('hp')).name, 'nan')
 })
 
 test('entity/tag! — false on unknown entity', () => {
@@ -205,7 +265,16 @@ test('time/across — author-blocked placeholder returns marker', () => {
 
 // ── easing/* — Sym constants ─────────────────────────────────────────
 
-test('easing/* — the 10 named-easing constants are all Syms', () => {
+// 2026-08-01: this asserted the 10 easings were inert Sym constants. They are
+// deliberately curve PROCEDURES now — lib/graphics/easing.js states the reason
+// at the definition site: "Each `easing/<name>` is a curve procedure (t) ->
+// eased-t, so the reference proof programs can call it directly — `(define e
+// easing/emphasized) (e 0.42)` — AND it can still be handed to any `:easing`
+// keyword, since easeFnFromArg accepts a procedure. Same binding object each
+// lookup, so `(eq? easing/x easing/x)` holds." Same direction as const/* going
+// from nullary functions to plain values: the usable form won. Retargeted to
+// the properties that design actually promises.
+test('easing/* — the 10 named easings are callable curves, eq-stable', () => {
   const env = fresh()
   const names = [
     'linear', 'ease', 'ease-in', 'ease-out', 'ease-in-out',
@@ -214,9 +283,19 @@ test('easing/* — the 10 named-easing constants are all Syms', () => {
   for (const n of names) {
     const full = 'easing/' + n
     const v = get(env, full)
-    assert.ok(v instanceof Sym, `${full} should be a Sym`)
-    assert.equal(v.name, full)
+    assert.equal(typeof v, 'function', `${full} should be a curve procedure`)
+    assert.equal(v.__easing, n, `${full} should carry its easing name`)
+    // A timing curve starts at rest. It also lands on 1 at t=1 — except
+    // easing/spring, which is a damped oscillator and is still settling at
+    // t=1 (measured 0.9609), so it only has to be close.
+    assert.equal(v(0), 0, `${full} should be 0 at t=0`)
+    if (n === 'spring') assert.ok(Math.abs(v(1) - 1) < 0.05, `${full} should be settling toward 1`)
+    else assert.equal(v(1), 1, `${full} should be 1 at t=1`)
+    // The documented eq? guarantee: same binding object every lookup.
+    assert.equal(get(env, full), v, `${full} should be eq-stable`)
   }
+  // linear is the identity curve; that is what makes it the boring one.
+  assert.equal(get(env, 'easing/linear')(0.42), 0.42)
 })
 
 // ── font/* — Sym constants ───────────────────────────────────────────
@@ -273,22 +352,30 @@ test('input/may-i? — boolean; default is truthy in a fresh env', () => {
 
 // ── sprite/* ─────────────────────────────────────────────────────────
 
-test('sprite — no-throw registration of a sprite draw', () => {
+// 2026-08-01: the two tests below targeted the bare `sprite` / `sprites`
+// verbs — a per-frame DRAW-LIST registration model (call `sprite` to enqueue a
+// draw, call `sprites` to read back the queue). That was a Curator product
+// concept and went out with the 2026-07-25 rip; both are unbound today.
+//
+// Motoi keeps the sprite CAPABILITY under the `sprite/*` namespace —
+// sprite/rasterize, sprite/address and sprite/landmarks are all live and are
+// covered by the tests immediately below this pair. Rather than delete these,
+// they are retargeted to assert the boundary explicitly: the draw-list model
+// is gone, and the namespace that replaced it is present. That keeps the rip
+// itself under test, so a silent re-introduction would be noticed.
+
+test('sprite / sprites — the Curator draw-list model is gone (ripped 2026-07-25)', () => {
   const env = fresh()
-  const sprite = get(env, 'sprite')
-  // Signature: (name x y color?)
-  assert.doesNotThrow(() => sprite(sym('hero'), 10, 20))
+  assert.equal(env.vars.has('sprite'), false, 'bare `sprite` should not be bound')
+  assert.equal(env.vars.has('sprites'), false, 'bare `sprites` should not be bound')
 })
 
-test('sprites — returns list after sprite() calls', () => {
+test('sprite/* — the retained sprite namespace is present', () => {
   const env = fresh()
-  const sprite = get(env, 'sprite')
-  const sprites = get(env, 'sprites')
-  sprite(sym('a'), 0, 0)
-  sprite(sym('b'), 5, 5)
-  const list = sprites()
-  assert.ok(Array.isArray(list))
-  assert.ok(list.length >= 2, 'both draws recorded')
+  for (const v of ['sprite/rasterize', 'sprite/address', 'sprite/landmarks']) {
+    assert.ok(env.vars.has(v), `${v} should still be bound`)
+    assert.equal(typeof env.vars.get(v), 'function')
+  }
 })
 
 test('sprite/rasterize — returns a numeric cell count for unknown sprite', () => {
@@ -351,39 +438,59 @@ test('scene/load — no-throw with an empty spec', () => {
 
 // ── game/* (instance verbs) ──────────────────────────────────────────
 
-test('game/frame — unknown id returns nan-sym (no throw)', () => {
+// ── game/* → world/* ─────────────────────────────────────────────────
+// 2026-08-01: the four tests below targeted `game/frame`, `game/state`,
+// `game/running?`, `game/step`, `game/stop` — the ID-KEYED, MULTI-INSTANCE
+// game object model, where you passed an instance handle to every call. That
+// model was a Curator product concept and was ripped 2026-07-25 (the installer
+// lived in lib/game/game-instances.js, archived under
+// scratch/attic/curator-verbs-ripped-2026-07-25/game/). All five verbs are
+// unbound; `./bin/motoi eval "(procedure? game/step)"` errors.
+//
+// The CAPABILITY was not removed, only the instance keying: Motoi keeps a
+// singleton game loop under `world/*` — world/frame, world/state,
+// world/running?, world/step, world/stop, world/start are all live. So these
+// are rewritten against the retained model rather than dropped, per the
+// no-deletes rule. If the multi-instance model is ever wanted back, this
+// comment is the pointer to what it was.
+
+test('world/frame + world/state — readable with no game set up (no throw)', () => {
   const env = fresh()
-  const gf = get(env, 'game/frame')
-  const v = gf(sym('no-such-instance'))
-  assert.ok(v !== undefined)
+  const frame = get(env, 'world/frame')
+  const state = get(env, 'world/state')
+  // The singleton world always exists, so these answer at boot.
+  assert.equal(typeof frame(), 'number')
+  const s = state()
+  assert.ok(Array.isArray(s), 'world/state returns an alist')
 })
 
-test('game/state — unknown id returns nan-sym (no throw)', () => {
+test('world/running? + world/stop + world/start — loop lifecycle', () => {
   const env = fresh()
-  const gs = get(env, 'game/state')
-  const v = gs(sym('no-such-instance'))
-  assert.ok(v !== undefined)
+  const running = get(env, 'world/running?')
+  const stop = get(env, 'world/stop')
+  const start = get(env, 'world/start')
+  // A fresh world is ticking.
+  assert.equal(running(), true)
+  stop()
+  assert.equal(running(), false, 'world/stop halts the loop')
+  start()
+  assert.equal(running(), true, 'world/start resumes it')
 })
 
-test('game/running? — false on unknown id', () => {
+test('world/step — advances the frame counter', () => {
   const env = fresh()
-  const gr = get(env, 'game/running?')
-  assert.equal(gr(sym('no-such-instance')), false)
+  const step = get(env, 'world/step')
+  const frame = get(env, 'world/frame')
+  const before = frame()
+  assert.doesNotThrow(() => step())
+  assert.ok(frame() > before, 'a step moves the frame counter forward')
 })
 
-test('big-bang + game/step + game/stop — instance lifecycle', () => {
+test('big-bang — accepts an initial state + step fn without throwing', () => {
   const env = fresh()
   const bigBang = get(env, 'big-bang')
-  const gStep = get(env, 'game/step')
-  const gStop = get(env, 'game/stop')
-  const gRunning = get(env, 'game/running?')
-  const inst = bigBang(0, (s) => s + 1)
-  // big-bang returns an id-shaped value we can pass back.
-  assert.ok(inst !== undefined)
-  assert.doesNotThrow(() => gStep(inst))
-  assert.doesNotThrow(() => gStop(inst))
-  // After stop, running? should be false.
-  assert.equal(gRunning(inst), false)
+  // big-bang survived the rip and is still the entry point for a game loop.
+  assert.doesNotThrow(() => bigBang(0, (s) => s + 1))
 })
 
 // ── system/* ─────────────────────────────────────────────────────────

@@ -1,0 +1,478 @@
+;; appendix-f-debugging-playbook.slat
+;; Book of Your Own Dialect — Appendix F — Debugging Playbook
+
+(chapter
+  :audience             programmer-learning-motoi
+  :dialect              motoi
+  :voice                motoi-copilot
+  :training-eligible    #t
+  :confidentiality      public
+  :book             "Book of Your Own Dialect"
+  :chapter-number   0
+  :title            "Appendix F — Debugging Playbook"
+  :prose
+"# Appendix F — Debugging Playbook
+
+This appendix is a reference card for the errors you'll actually meet in Motoi. Each entry follows the same three-part shape: the **trace** exactly as the interpreter prints it, a short read of **what it means and how to localize**, and a runnable **fix** that really passes. The traces are shown in REPL blocks so they stand as illustration; the fixes are live fences that run clean. Keep this near you — most debugging is just matching a real message to the right entry and applying the fix.
+
+## Entry 1 — unbound symbol
+
+The most common Motoi error by a wide margin. It means you named a verb (or variable) the interpreter has never heard of — almost always a hallucinated or swapped verb name.
+
+```
+motoi> (define (avg xs) (list/mean xs))
+motoi> (avg (list 1 2 3))
+error: unbound symbol: list/mean
+```
+
+**Read it:** the message names the exact offending symbol, `list/mean`. That's your localization, done for free — the bug is that name, not the surrounding logic. Don't rewrite the math; the math never ran. Replace the fake verb with real primitives. A mean is a sum over a count, and `fold`/`length` are real:
+
+```scheme
+;; Fix for 'unbound symbol: list/mean' — real verbs, name corrected.
+(define (avg xs) (/ (fold + 0 xs) (length xs)))
+(avg (list 2 4 6 8))
+```
+
+The same entry covers swapped memory verbs. `cortex/recall-value` and `cortex/recall-default` both produce this error because neither exists; the real verb is `cortex/recall`, and a default is `(or (cortex/recall k) d)`:
+
+```scheme
+;; Same class of fix: the real memory verb is cortex/recall, plus 'or' for a default.
+(define (recall-default k d) (or (cortex/recall k) d))
+(recall-default \"absent-key-appendix-f-e1\" 0.0)
+```
+
+## Entry 2 — the excluded fold (an unbound symbol with a lesson)
+
+A special case of Entry 1 worth its own card because the name is *real somewhere else*. `fold-left` is a genuine R6RS verb, accumulator-first — but Motoi excludes it on purpose. Reaching for it gives an unbound symbol just like any fake name, because in Motoi it truly is unbound.
+
+```
+motoi> (fold-left + 0 (list 1 2 3))
+error: unbound symbol: fold-left
+```
+
+**Read it:** this isn't a typo — it's a *standards* mismatch. You reached across the boundary into R6RS. The fix is SRFI-1's `fold`, element-first. Same total, correct verb and argument order:
+
+```scheme
+;; Fix for the excluded fold-left: SRFI-1 fold (element-first) is the Motoi verb.
+(fold + 0 (list 1 2 3))
+```
+
+## Entry 3 — a non-list handed to a list operation
+
+Motoi's list verbs expect lists. Give `map` (or a kin) something that isn't one and it fails while trying to walk it.
+
+```
+motoi> (map (lambda (n) (* n 2)) 10)
+error: lists[0].map is not a function
+```
+
+**Read it:** the interpreter tried to treat `10` as a list and couldn't. Localize to the *argument*, not the mapping function — the lambda is fine; the second argument is the bug. The fix is to hand `map` an actual list:
+
+```scheme
+;; Fix for the non-list argument: give map a real list.
+(map (lambda (n) (* n 2)) (list 10 20 30))
+```
+
+When you meet this in a big program, the fast localization is to check what feeds the list operation — often a value that *should* have been a list arrived bare, or a function returned a single item where a list was expected.
+
+## Entry 4 — 'not a function' (calling a non-procedure)
+
+You put something in the operator position — the front of a call — that isn't callable. Usually a value got where a function was meant.
+
+```
+motoi> (define x 5)
+motoi> (x 1 2)
+error: not a function: 5
+```
+
+**Read it:** the message names the value that was called, `5`. Localize to whatever put a plain value in call position. Often it's a name collision — a variable shadowing a verb you meant to call, or a data value used as if it were a procedure. The fix is to call the thing you actually meant to call:
+
+```scheme
+;; Fix for 'not a function': use the value as data, and call the real procedure.
+(define x 5)
+(define (double n) (* n 2))
+(list x (double x))
+```
+
+## Entry 5 — fuel exhausted (heavy compute, not always a bug)
+
+Fuel is the interpreter's work budget. When a run uses it all up, it stops here. This message needs the most care to read, because it means two very different things depending on whether the computation *ends*.
+
+```
+motoi> (define (count-up n) (count-up (+ n 1)))
+motoi> (count-up 0)
+error: fuel exhausted
+```
+
+**Read it — case one, real bug:** this recursion has no base case, so it never terminates; no fuel budget would ever be enough. The fix is to give it a stopping condition:
+
+```scheme
+;; Fix for runaway recursion: add a base case so it terminates.
+(define (count-up n limit)
+  (if (>= n limit) n (count-up (+ n 1) limit)))
+(count-up 0 500)
+```
+
+**Read it — case two, not a bug:** the same message can mean the code is correct but the job is simply *large*. A bounded computation that has a reachable end is heavy, not broken; it wanted a bigger budget, not a code fix. The diagnostic question is always 'does this computation have an end?' If yes, it's heavy compute; if no, it's the missing base case. Here is a bounded, genuinely-terminating loop — the kind you should recognize as correct-but-heavy rather than buggy:
+
+```scheme
+;; A bounded, terminating loop: heavy, not broken. It ends when i passes n.
+(define (sum-to n)
+  (let loop ((i 1) (acc 0))
+    (if (> i n) acc (loop (+ i 1) (+ acc i)))))
+(sum-to 200)
+```
+
+Distinguishing 'wrong' from 'big' is the whole skill here, and the two demand opposite responses: fix the non-terminating one, feed the heavy one.
+
+## Entry 6 — the silent coercion (a delta, not a crash)
+
+Some Motoi operations are permissive and *don't* raise an error — they just do something you didn't expect. `+` on a number and a string concatenates rather than complaining. There's no trace to read here; the bug shows up only as a wrong result, which makes naming the expected-vs-actual delta essential.
+
+```
+motoi> (+ 1 \"x\")
+\"1x\"
+```
+
+**Read it:** expected a number (or an error); actual is the string `\"1x\"`. The delta says a string leaked into a numeric position upstream. Don't 'fix' `+` — fix whatever produced a string where a number belonged, and guard the boundary so the coercion can't hide again:
+
+```scheme
+;; Fix for the silent coercion: guard the addends so a non-number is caught, not hidden.
+(define (safe-add a b)
+  (if (and (number? a) (number? b)) (+ a b) 'not-a-number))
+(list (safe-add 1 2) (safe-add 1 \"x\"))
+```
+
+The guard converts an invisible coercion into an explicit, inspectable outcome. That is what you want from a fix to a no-trace bug: make the wrongness visible next time.
+
+## Using the playbook
+
+The playbook is a lookup, and the workflow around it is fixed. When something breaks, read the actual trace and match it to an entry: a named symbol means Entry 1 or 2; a `.map is not a function` means Entry 3; a `not a function: <value>` means Entry 4; `fuel exhausted` means Entry 5 and the end-question; a wrong result with no trace at all means Entry 6 and a delta. Apply the entry's fix, then re-run to confirm the error is gone rather than merely hidden. Here is the confirm step for the very first entry, closing the loop the way every debugging session should close:
+
+```scheme
+;; Confirm step: re-run the Entry 1 fix and prove the error is truly gone.
+(equal? (avg (list 10 20 30)) 20)
+```
+
+Every entry ends the same way it began — grounded in a real message, closed by a real run. Match the trace, apply the fix, re-run. That's the playbook.
+
+## Entry 7 — wrong number of arguments
+
+Calling a verb with the wrong number of arguments produces a direct count mismatch error.
+
+```
+motoi> (define (add a b) (+ a b))
+motoi> (add 1)
+error: wrong number of arguments: expected 2, got 1
+```
+
+**Read it:** the message gives you both the expected count and the actual count. Localize to the *call site*, not the function definition — the function is fine; the call is missing an argument. Either supply the missing argument, or if this was an intentional one-argument form, redefine the function's arity:
+
+```scheme
+;; Fix for wrong-number-of-arguments: supply the correct count.
+(define (add a b) (+ a b))
+(add 10 20)
+```
+
+If you want a version that accepts one or two arguments, the fix is an optional second argument with a default:
+
+```scheme
+;; Optional second argument via a default.
+(define (add-opt a . rest)
+  (+ a (if (null? rest) 0 (car rest))))
+(list (add-opt 5) (add-opt 5 10))
+```
+
+## Entry 8 — the `null?` case: empty list handling
+
+A common bug is forgetting to handle the empty list case before applying a list operation that assumes at least one element. The error usually appears as a downstream type failure when something expected a value from the list but got nothing.
+
+```
+motoi> (define (first-element xs) (car xs))
+motoi> (first-element (list))
+error: (car '()): pair expected
+```
+
+**Read it:** `car` requires a pair (a non-empty list). The localization: the function wasn't guarding the empty case. The fix is to add the guard:
+
+```scheme
+;; Fix for car on empty list: guard with null? first.
+(define (first-or-default xs d)
+  (if (null? xs) d (car xs)))
+(list (first-or-default (list 10 20 30) 'missing)
+      (first-or-default (list) 'missing))
+```
+
+Empty-list handling is a systematic concern: whenever you use `car`, `cdr`, `cadr`, or similar accessors, check whether the input can possibly be empty and add the guard if it can.
+
+## Entry 9 — type mismatch in arithmetic
+
+When a non-numeric value enters a numeric operation, the result may be a silent coercion (as with `+`) or a more explicit type error depending on the operation. Either way, the fix is always upstream: find where the wrong-type value came from, not where arithmetic noticed it.
+
+```
+motoi> (/ 10 \"2\")
+error: division by non-number
+```
+
+**Read it:** the message names the operation that caught the type mismatch. Localize upstream: what produced `\"2\"` where a number was needed? Perhaps a string was read from storage without conversion. The fix is to convert at the source:
+
+```scheme
+;; Fix for type mismatch in division: convert to number where it enters.
+(define (safe-div a b)
+  (let ((bnum (if (string? b) (string->number b) b)))
+    (if (and (number? bnum) (not (= bnum 0)))
+        (/ a bnum)
+        'invalid)))
+(list (safe-div 10 \"2\")
+      (safe-div 10 0)
+      (safe-div 10 2))
+```
+
+## Entry 10 — the persistent-state surprise
+
+A program that read a key 'clean' yesterday now reads a stale value because a previous run wrote to that key and the store persisted.
+
+```
+motoi> (cortex/read \"my-counter\")
+;; Returns 17 when you expected 0
+```
+
+**Read it:** there's no error — the value is just surprising. The diagnostic: check what's actually in the store before blaming the code. Use `cortex/forget` to reset the key, then rerun from a known state:
+
+```scheme
+;; Fix for persistent-state surprise: forget the key, then rerun.
+(begin
+  (cortex/forget \"f-entry10-counter\")
+  (or (cortex/read \"f-entry10-counter\") 'now-absent))
+```
+
+After forgetting, the key is absent and the computation starts from its intended default. The rule: if a second run produces different results from the first, the store is the first suspect. `cortex/read` the relevant keys, inspect the values, and `cortex/forget` anything stale.
+
+## Entry 11 — the sorted output in the wrong direction
+
+A sort produces the list in the wrong order — descending when you expected ascending, or the reverse. No error; just a wrong result.
+
+```
+motoi> (sort (list 3 1 4 1 5) >)
+;; Returns (5 4 3 1 1) when you expected (1 1 3 4 5)
+```
+
+**Read it:** the comparator is the bug. `>` means 'sort with largest first'; you wanted `<`. Swap the comparator and confirm:
+
+```scheme
+;; Fix for wrong sort direction: swap the comparator.
+(sort (list 3 1 4 1 5) <)
+```
+
+The sort-direction bug is a pure delta bug — no error, just unexpected order — which means the localization must come from stating the expected-vs-actual delta out loud: 'I expected ascending, I got descending.' Once stated, the cause is obvious and the fix is a single symbol change.
+
+## Entry 12 — `cortex/topk` returning fewer items than expected
+
+`cortex/topk n` returns *at most* n items, not exactly n. When the store holds fewer than n entries, you get back fewer than n.
+
+```
+motoi> (cortex/topk 10)
+;; Returns only 3 items when store has 3 entries
+```
+
+**Read it:** this is expected behavior, not a bug. The fix is to accept that `topk` may return fewer than n and write your code to handle that case gracefully:
+
+```scheme
+;; topk returns at most n, not exactly n. Handle both cases.
+(let ((results (cortex/topk 100)))
+  (list 'got (length results) 'items results))
+```
+
+The surrounding code should use `length` on the result rather than assuming the count, because the store's actual size determines the return count.
+
+## Cross-reference: which entry to reach for
+
+When a failure arrives and you're matching it to an entry, here is a quick key:
+
+- Saw `error: unbound symbol: <name>` → Entry 1 (hallucinated/missing verb) or Entry 2 (excluded standard like `fold-left`).
+- Saw `error: lists[0].map is not a function` → Entry 3 (non-list handed to `map`).
+- Saw `error: not a function: <value>` → Entry 4 (value in call position).
+- Saw `error: fuel exhausted` → Entry 5 (no base case) or heavy-but-terminating job.
+- Saw no error but wrong result → Entry 6 (silent coercion, delta needed) or Entry 11 (wrong sort direction) or Entry 12 (topk returning fewer items).
+- Saw `error: wrong number of arguments` → Entry 7 (arity mismatch at call site).
+- Saw `error: (car '()): pair expected` → Entry 8 (missing null? guard).
+- Saw arithmetic type error → Entry 9 (non-numeric value upstream).
+- Saw unexpected value in a read → Entry 10 (persistent-state surprise).
+
+The classification takes seconds once you've matched a few real errors to real entries. The longer the playbook gets, the faster the matching becomes — because each entry is a pattern, and patterns recognize themselves.
+
+## Entry 13 — string-to-number comparison that's always false
+
+A program checks `(= score \"10\")` and the condition never fires even when score appears to be `10`. No error; the comparison just always returns `#f`.
+
+```
+motoi> (= 10 \"10\")
+;; Returns #f — silent type mismatch, not an error.
+```
+
+**Read it:** `=` requires numeric arguments; `\"10\"` is a string. The comparison is type-safe but always wrong. Localize upstream: find where the value entered the system as a string rather than a number. Convert at the boundary:
+
+```scheme
+;; Fix for string-to-number comparison: convert before comparing.
+(define (num= a b)
+  (let ((bn (if (string? b) (string->number b) b)))
+    (and (number? bn) (= a bn))))
+(list (num= 10 10)
+      (num= 10 \"10\")
+      (num= 10 \"eleven\"))
+```
+
+The third case returns `#f` because `(string->number \"eleven\")` gives `#f`, which fails the `number?` guard. Convert at the point of entry, not at every comparison site.
+
+## Entry 14 — `assq` on string keys returns `#f` (wrong equality predicate)
+
+A lookup in an alist comes back `#f` even though the key is definitely present. No error — the verb ran and politely found nothing.
+
+```
+motoi> (let ((al (list (list \"foo\" 1))))
+         (assq \"foo\" al))
+;; Returns #f — assq uses eq?, not equal?; string literals aren't eq?
+```
+
+**Read it:** `assq` uses `eq?` for key matching. For strings, `eq?` tests object identity (are these the same string object in memory?), not content equality. Two different string literals with the same content are not `eq?`. The fix is `assoc`, which uses `equal?` and correctly compares string content:
+
+```scheme
+;; Fix for assq on string keys: use assoc instead.
+(let ((al (list (list \"red\" 1) (list \"green\" 2) (list \"blue\" 3))))
+  (cadr (assoc \"green\" al)))
+```
+
+The rule: `assq` for symbol keys (interned, safe with `eq?`); `assoc` for string keys; `assv` for numeric keys. Mixing them is silent and consistently wrong.
+
+## Entry 15 — `zip` silently drops elements from the longer list
+
+A `zip` call produces fewer pairs than expected. No error — the extra elements were silently discarded.
+
+```
+motoi> (length (zip (list 1 2 3 4) (list 'a 'b)))
+;; Returns 2, not 4. Two elements from the first list are gone.
+```
+
+**Read it:** `zip` stops at the shorter list. This is specified behavior, not a bug, but it surprises people who expect the longer list to pad or extend. The diagnostic: check the lengths of the input lists. If they differ and you needed all elements, either pad the shorter list or document that the truncation is intentional:
+
+```scheme
+;; Fix strategy 1: verify lengths before zipping when all elements must pair.
+(let ((names  (list \"a\" \"b\" \"c\" \"d\"))
+      (scores (list 10 20)))
+  (list 'names-count  (length names)
+        'scores-count (length scores)
+        'zip-result   (zip names scores)))
+```
+
+If truncation is wrong, the fix is to make the lists the same length before calling `zip`, by padding the shorter one with a sentinel value.
+
+## Entry 16 — off-by-one in `string-take`
+
+`string-take` returns a string that's one character too short or too long. No error; just the wrong length.
+
+```
+motoi> (string-take \"hello\" 4)
+;; Returns "hell" — 4 characters, not 5.
+;; If you wanted the whole word, the count should have been 5.
+```
+
+**Read it:** `string-take s n` returns exactly n characters. If n was off by one, the result is one character off. The count argument is the character count, not an index into the character after the last one. The fix is to adjust n — usually by checking `(string-index s predicate)` to get the correct boundary and using that directly:
+
+```scheme
+;; Fix for off-by-one in string-take: use the index from string-index directly.
+(let* ((s \"hello world\")
+       (space (string-index s char-whitespace?)))
+  (list 'first-word (string-take s space)
+        'rest       (string-drop s (+ space 1))))
+```
+
+`string-index` returns the position of the space (5 in `\"hello world\"`); `string-take s 5` gives `\"hello\"` — exactly the first word, no off-by-one.
+
+## Entry 17 — `string-contains` returns `0` (truthy, not absent)
+
+A boolean check on `string-contains` always behaves as if the substring is found, even when it looks like it shouldn't be.
+
+```
+motoi> (if (string-contains \"hello\" \"he\") 'found 'not-found)
+;; Returns 'found — correct. But if your language background treats 0 as falsy,
+;; you might expect 'not-found here.
+```
+
+**Read it:** `string-contains` returns the start index of the match, not a boolean. An index of `0` means 'matched at the beginning' — it is a truthy value in Motoi (Motoi treats all values except `#f` as truthy, including `0`). The no-match signal is `#f`. If code was ported from a language where `0` is falsy, the `0` case will branch incorrectly. The fix: use the return value as-is for truthy/falsy testing, or compare explicitly to `#f`:
+
+```scheme
+;; Fix: treat string-contains as truthy-or-#f, never compare to 0.
+(define (contains? haystack needle)
+  (if (string-contains haystack needle) #t #f))
+(list (contains? \"hello\" \"he\")
+      (contains? \"hello\" \"xyz\"))
+```
+
+## Entry 18 — `iota` count versus upper-bound confusion
+
+A call `(iota 10 0 1)` was expected to produce integers 0 through 9, but a caller who confused the count argument with an upper bound called `(iota 10)` expecting the range 0–9 (which is actually what it gives — just by coincidence, since count=10, start=0, step=1 produces 0..9). The confusion surfaces when a step other than 1 is used.
+
+```
+motoi> (iota 5 0 3)
+;; Returns (0 3 6 9 12) — 5 elements, NOT values up to 5.
+```
+
+**Read it:** the first argument to `iota` is the *count of elements*, not the upper bound. `(iota 5 0 3)` generates five elements starting at 0 with step 3: `(0 3 6 9 12)`. If you wanted all multiples of 3 up to and including 12, the count is indeed 5 — but if you wanted values up to 5 (so `0, 3`), the count should be 2. Always reason from 'how many elements' not 'what is the upper bound':
+
+```scheme
+;; Fix: reason from count, not upper bound.
+;; To generate 6 multiples of 2 starting from 0:
+(iota 6 0 2)
+```
+
+## Entry 19 — `unfold` stop predicate fires too early
+
+`unfold` generates a shorter list than expected because the stop predicate fired on a value that should have been included.
+
+```
+motoi> (unfold (lambda (x) (>= x 5)) (lambda (x) x) (lambda (x) (+ x 1)) 1)
+;; Returns (1 2 3 4) — stops when x reaches 5, so 5 is not included.
+```
+
+**Read it:** `unfold` calls the stop predicate *before* calling the body. When the seed satisfies the stop predicate, no element is produced for that seed — generation halts. So `(>= x 5)` means 'stop when x is 5 or more,' and `5` is never included in the output. If the intent is to include `5`, the stop predicate should use `>` instead of `>=`:
+
+```scheme
+;; Fix for too-early stop: change >= to > so the boundary value is included.
+(unfold (lambda (x) (> x 5))
+        (lambda (x) x)
+        (lambda (x) (+ x 1))
+        1)
+```
+
+## Entry 20 — `concatenate` on non-list elements
+
+`concatenate` expects a list of lists. If any element of the outer list is not itself a list, the behavior is wrong and may produce a confusing error.
+
+```
+motoi> (concatenate (list 1 2 3))
+;; Error or wrong result — the elements are numbers, not lists.
+```
+
+**Read it:** `concatenate` merges sublists; it's not a generic flattener. The input must be a list of lists. The fix is to ensure each element is wrapped in a list before concatenating, or to use `map list` to wrap:
+
+```scheme
+;; Fix for concatenate on non-lists: wrap elements, or use a different approach.
+;; If you have a flat list and want it unchanged, just use the list directly.
+;; If you have computed sublists, ensure each is a list:
+(concatenate (list (list 1 2) (list 3) (list 4 5)))
+```
+
+## Updated cross-reference: entries 13–20
+
+Extending the cross-reference table with the new entries:
+
+- `= 10 \"10\"` always returns `#f` → Entry 13 (string-to-number comparison, convert first).
+- `assq` on string keys returns `#f` unexpectedly → Entry 14 (use `assoc` for string keys).
+- `zip` returns fewer pairs than expected → Entry 15 (zip stops at shorter list, check lengths).
+- `string-take` returns wrong length → Entry 16 (count not index, use `string-index` for boundaries).
+- `string-contains` at position 0 looks like 'not found' → Entry 17 (0 is truthy, `#f` is absent).
+- `iota` generates unexpected number of elements → Entry 18 (first arg is count, not upper bound).
+- `unfold` generates one too few elements → Entry 19 (stop predicate fires before body — use `>` not `>=`).
+- `concatenate` on non-list elements → Entry 20 (input must be a list of lists).
+
+The playbook now covers twenty distinct error patterns. Match trace to entry, apply entry's fix, re-run to confirm — that is the whole workflow, unchanged by the number of entries.")

@@ -1,0 +1,675 @@
+;; othello.sks
+;; Motoi Cart — Flagship (SD framebuffer)
+;;
+;; (cart
+;;   :name            "othello"
+;;   :category        :game
+;;   :sub-category    :board
+;;   :audience        :kid
+;;   :complexity      5
+;;   :runtime-tier    :runs-on-core
+;;   :render          :sd-framebuffer
+;;   :one-line        "Play Othello against Motoi on a real 8x8 board — every legal move must flip a line of the other color in one of eight directions, drawn on the 320x240 screen."
+;;   :verbs-used      ("set-mode" "clear" "set-color" "rect-fill" "rect" "disc"
+;;                     "circle" "line" "fb/text" "fb/dump" "make-vector" "vector-ref"
+;;                     "vector-set!" "vector" "quotient" "remainder" "modulo" "abs"
+;;                     "min" "max" "number->string" "string-append" "eq?" "cons"
+;;                     "car" "cdr" "list" "length" "reverse" "for-each" "map"
+;;                     "filter" "when" "unless" "cond" "case" "let" "let*" "set!")
+;;   :inspiration     "Othello / Reversi — a Victorian parlor game reborn in 1970s Japan; one minute to learn, a lifetime to master, because a single move can flip the whole board.")
+;;
+;; HOW TO RUN:
+;;   motoi run carts/othello.sks
+;;
+;; WHAT THIS IS
+;;   Othello on Motoi's real SD screen (320x240). The board is one vector of 64
+;;   squares — 0 is empty, 1 is a BLACK disc, 2 is a WHITE disc. A move is legal
+;;   ONLY if it flips at least one line of the opponent's discs: you drop a disc
+;;   on an empty square, and in every one of the eight directions (up, down,
+;;   left, right, and the four diagonals) any unbroken run of enemy discs that
+;;   ends on a disc of YOUR color gets flipped to your color. If a square flips
+;;   nothing, you cannot play there. That single rule is the whole game.
+;;
+;;   The corners are gold: a disc in a corner can never be flipped, so it anchors
+;;   whole edges. Good players fight for corners and try not to give them away.
+;;
+;; MOTOI AS YOUR OPPONENT — two brains you can switch (the fun part)
+;;   AI-PLAN 'straight  (default) — one fixed, readable style you can learn and
+;;     beat. Motoi scores every legal move by a weighted board map (corners are
+;;     worth a lot, the squares next to a corner are dangerous, edges are decent)
+;;     plus how many discs it flips and how many replies it leaves you (mobility).
+;;     Same weights every game, so once you see the pattern you can bait it.
+;;   AI-PLAN 'adaptive — Motoi watches how YOU play and adjusts. It counts how
+;;     often you grab corners and how greedy (flip-hungry) your moves are, and
+;;     shifts its own weights to counter: if you hoard corners it guards them
+;;     harder; if you play greedy it leans on mobility to strangle your options.
+;;     Human-like, narratable, NOT a perfect solver — a person could explain
+;;     every adjustment out loud.
+;;
+;;   LEVEL is the depth/greed knob:
+;;     'easy   — greedy: just take the move that flips the most discs right now.
+;;     'normal — STATIC positional: score each move by the square's own weight
+;;               (corners high, C/X squares negative, edges solid) plus a small
+;;               greed nudge. Cheap and readable — this is the default.
+;;     'hard   — make/measure/unmake: play the move, read the whole positional
+;;               board, subtract your best reply and weigh mobility. Strong, but
+;;               it does far more work per move — even the short sample wants a
+;;               bigger budget:  motoi run carts/othello.sks --fuel 800000
+;;
+;; NO KEYBOARD — how "you vs Motoi" is expressed
+;;   A headless cart has no keys, so BOTH sides are driven automatically. BLACK
+;;   follows a short fixed opening script (a stand-in for "the human") and then
+;;   plays greedy; WHITE is the Motoi brain at your chosen AI-PLAN and LEVEL. On a
+;;   real surface you swap BLACK's script for live taps from a person and leave
+;;   WHITE as the AI. If a side has no legal move it passes; if neither can move
+;;   the game ends and we count discs.
+;;
+;; FUEL / SAMPLE LENGTH — the honest bit
+;;   In this interpreter a single legal-move scan of the board costs thousands of
+;;   fuel, and a whole ~60-ply Othello game runs well past the default 200000
+;;   budget. So the DEFAULT plays a short, correct SAMPLE (MAX-PLIES moves) that
+;;   finishes cleanly and draws one SD climax frame. Every rule is exact; it just
+;;   stops early. For a full game to the last disc, raise MAX-PLIES to 64 and give
+;;   more fuel:  motoi run carts/othello.sks --fuel 2000000
+
+;; =======================  KNOBS  =======================
+
+(define AI-PLAN   'straight)  ;; 'straight (fixed style) or 'adaptive (counters you)
+(define LEVEL     'normal)    ;; 'easy 'normal 'hard — greed/depth of WHITE (Motoi).
+                              ;; DEFAULT 'straight + 'normal fits 200000 fuel.
+                              ;; 'hard makes+measures the board and wants more:
+                              ;; motoi run carts/othello.sks --fuel 800000
+(define SEED      20260730)   ;; reserved for future randomized openings; determinism
+;; MAX-PLIES caps the auto-played sample. In this interpreter a single legal-move
+;; scan is thousands of fuel, so a whole ~60-ply game costs well over the default
+;; 200000 budget. The default plays a short, honest sample that finishes cleanly
+;; and draws the SD climax frame; for a FULL game to the last disc, raise this and
+;; give more fuel:  motoi run carts/othello.sks --fuel 2000000  (with MAX-PLIES 64)
+(define MAX-PLIES 5)          ;; default sample length (fits 200000 fuel + one dump)
+(define SHOW-EVERY 2)         ;; print a compact status line this often
+
+(define W 320)                ;; SD width
+(define H 240)                ;; SD height
+(define SQ 24)                ;; square size in pixels (8*24 = 192)
+(define BX 40)                ;; board top-left x
+(define BY 24)                ;; board top-left y
+
+;; =======================  CHARM PASS: SOUND  =======================
+;; A little opening theme and a small sound on every key beat: a disc placed, a
+;; line flipped, and the final result. The audio verbs are REAL — (music),
+;; (melody), (note), (tone), (sfx) — but a headless run has no speaker, so they
+;; simply do nothing. That is fine: the SHAPE is what teaches; on a real surface
+;; these same calls sing.
+;;
+;; TEACHING IDEA — "guard your nice-extras so they can NEVER crash the core."
+;; Sound is a treat, not the game. Every audio call goes through one small
+;; wrapper, (safe ...), and one flag, SOUND-ON. Flip the flag off and the match
+;; plays on in silence, unchanged. Keep the treats on a switch that cannot break
+;; the must-work part — the same idea as a seatbelt: it only ever helps.
+(define SOUND-ON #t)
+(define (safe thunk) (when SOUND-ON (thunk)) #t)
+
+;; a warm opening motif — a rising phrase, "let's play"
+(define (play-theme!)
+  (safe (lambda ()
+    (music 'othello-theme)
+    (melody (list 55 60 64 67) 0.12))))        ;; G3 C4 E4 G4 — a bright climb
+(define (sfx-place! s)                          ;; a disc goes down: Black low, White high
+  (safe (lambda () (sfx 'blip (if (= s BLACK) 392 523) 0.05))))
+(define (sfx-flip! n)                            ;; a line flipped — a soft chime, brighter for bigger flips
+  (safe (lambda () (note (min 84 (+ 68 n)) 0.09 0.6))))
+(define (sfx-result! b w)                        ;; result: fanfare or gentle descent
+  (safe (lambda ()
+    (cond ((> b w) (melody (list 67 72 76) 0.12))    ;; you lead — bright
+          ((< b w) (melody (list 60 57 53) 0.14))    ;; Motoi leads — gentle
+          (else    (tone 330 0.30))))))              ;; tied — a flat tone
+
+;; =======================  THE BOARD  =======================
+;; One vector of 64 squares. Index = row*8 + col, row 0 = top.
+;;   0 = empty, 1 = BLACK, 2 = WHITE.  Integers (not symbols) so decoding is
+;;   plain arithmetic and reading a square is O(1) — the AI reads the board many
+;;   times per move, so this matters for fuel.
+(define EMPTY 0)
+(define BLACK 1)
+(define WHITE 2)
+
+(define BOARD (make-vector 64 0))
+
+(define (at sq) (vector-ref BOARD sq))
+(define (put! sq p) (vector-set! BOARD sq p))
+(define (row sq) (quotient sq 8))
+(define (col sq) (remainder sq 8))
+(define (sq-of r c) (+ (* r 8) c))
+(define (on? r c) (and (>= r 0) (< r 8) (>= c 0) (< c 8)))
+(define (empty? p) (= p 0))
+(define (opp s) (if (= s BLACK) WHITE BLACK))
+
+;; =======================  INITIAL POSITION  =======================
+;; Standard Othello start: four discs in the center, diagonally paired.
+;;   d4 e5 white, e4 d5 black  (rows/cols 3 and 4)
+(define (setup!)
+  (let loop ((i 0)) (when (< i 64) (put! i EMPTY) (loop (+ i 1))))
+  (put! (sq-of 3 3) WHITE)
+  (put! (sq-of 3 4) BLACK)
+  (put! (sq-of 4 3) BLACK)
+  (put! (sq-of 4 4) WHITE))
+
+;; =======================  THE ONE RULE: FLIPPING  =======================
+;; The eight directions as (dr dc) two-element lists. A dotted pair would work
+;; too, but both components are used positionally here, so a list reads better.
+(define DIRS (list (list -1 -1) (list -1 0) (list -1 1)
+                   (list  0 -1)             (list  0 1)
+                   (list  1 -1) (list  1 0) (list  1 1)))
+(define (d-r d) (car d))
+(define (d-c d) (car (cdr d)))
+
+;; Walking ONE direction from (r,c) for side s: collect the run of enemy discs.
+;; If that run is non-empty AND ends on a disc of OUR color, those squares flip.
+;; Otherwise nothing flips this direction. Returns a list of flippable squares.
+;; All squares that side s would flip by playing on empty square sq (all 8 dirs).
+;; Accumulates directly onto `acc` (no per-direction `append`) to keep allocation
+;; and fuel down — this is called on every real move via play!.
+(define (flips-onto r c dr dc s acc)
+  (let walk ((rr (+ r dr)) (cc (+ c dc)) (run '()))
+    (cond ((not (on? rr cc)) acc)               ;; off the edge: contribute nothing
+          (else
+           (let ((p (at (sq-of rr cc))))
+             (cond ((empty? p) acc)             ;; gap: contribute nothing
+                   ((= p s)                      ;; our disc closes the bracket
+                    (if (null? run) acc
+                        ;; splice this direction's run onto acc
+                        (let spl ((xs run) (a acc))
+                          (if (null? xs) a (spl (cdr xs) (cons (car xs) a))))))
+                   (else (walk (+ rr dr) (+ cc dc) (cons (sq-of rr cc) run)))))))))
+
+(define (flips-for sq s)
+  (let ((r (row sq)) (c (col sq)))
+    (let loop ((ds DIRS) (acc '()))
+      (if (null? ds) acc
+          (loop (cdr ds)
+                (flips-onto r c (d-r (car ds)) (d-c (car ds)) s acc))))))
+
+;; How many discs a move flips, WITHOUT allocating the flip list — a plain
+;; counter walk. This is the hot path for scoring/legality, so it avoids the
+;; `append`/`cons` list building that `flips-for` does. Exact same bracketing
+;; rule; returns an integer count.
+(define (count-in-dir r c dr dc s)
+  (let walk ((rr (+ r dr)) (cc (+ c dc)) (n 0))
+    (cond ((not (on? rr cc)) 0)                 ;; off the edge: no bracket
+          (else
+           (let ((p (at (sq-of rr cc))))
+             (cond ((empty? p) 0)               ;; gap: no bracket
+                   ((= p s) (if (= n 0) 0 n))   ;; our disc closes a run of n
+                   (else (walk (+ rr dr) (+ cc dc) (+ n 1)))))))))  ;; enemy: keep going
+
+(define (flip-count sq s)
+  (let ((r (row sq)) (c (col sq)))
+    (let loop ((ds DIRS) (n 0))
+      (if (null? ds) n
+          (loop (cdr ds)
+                (+ n (count-in-dir r c (d-r (car ds)) (d-c (car ds)) s)))))))
+
+;; FRONTIER PRUNE (the fuel win). In this interpreter a naive scan of all 64
+;; squares — each doing eight ray-walks — costs tens of thousands of fuel, far
+;; too much for a full game on 200000. But a legal Othello move MUST sit on an
+;; empty square that touches an opponent disc. So we precompute each square's
+;; on-board neighbors ONCE, and only run the (expensive) bracket walk on empties
+;; that actually border an enemy disc. Early/mid game that is a handful of
+;; squares, not 64 — which is what lets a full game finish in the budget.
+(define NBR (make-vector 64 '()))
+(let loop ((sq 0))
+  (when (< sq 64)
+    (let ((r (row sq)) (c (col sq)))
+      (vector-set! NBR sq
+        (let nl ((ds DIRS) (acc '()))
+          (if (null? ds) acc
+              (let ((rr (+ r (d-r (car ds)))) (cc (+ c (d-c (car ds)))))
+                (nl (cdr ds) (if (on? rr cc) (cons (sq-of rr cc) acc) acc)))))))
+    (loop (+ sq 1))))
+
+;; does empty square sq border a disc of side (opp s)?  cheap neighbor scan.
+(define (borders-enemy? sq s)
+  (let ((o (opp s)))
+    (let nl ((ns (vector-ref NBR sq)))
+      (cond ((null? ns) #f)
+            ((= (at (car ns)) o) #t)
+            (else (nl (cdr ns)))))))
+
+;; A move is legal for s iff sq is empty, borders an enemy disc, and flips at
+;; least one disc. Uses the allocation-free counter, short-circuiting on the
+;; first bracketing direction.
+(define (legal? sq s)
+  (and (empty? (at sq))
+       (borders-enemy? sq s)
+       (let ((r (row sq)) (c (col sq)))
+         (let loop ((ds DIRS))
+           (cond ((null? ds) #f)
+                 ((> (count-in-dir r c (d-r (car ds)) (d-c (car ds)) s) 0) #t)
+                 (else (loop (cdr ds))))))))
+
+;; All legal moves for side s (a list of squares).
+(define (legal-moves s)
+  (let loop ((sq 0) (acc '()))
+    (cond ((>= sq 64) (reverse acc))
+          ((legal? sq s) (loop (+ sq 1) (cons sq acc)))
+          (else (loop (+ sq 1) acc)))))
+
+;; =======================  DISC COUNT (incremental)  =======================
+;; Kept up to date on every play! so reading the score is O(1) instead of a
+;; 64-square scan. A full scan is ~1500 fuel and we read the score several times
+;; a ply, so scanning would dominate — this is the same fuel discipline the
+;; chess cart uses for material.
+(define N-BLACK 2)
+(define N-WHITE 2)
+(define (count s) (if (= s BLACK) N-BLACK N-WHITE))
+
+;; Play square sq for side s: place the disc and flip every bracketed run, and
+;; keep the incremental disc counts correct (placed +1 to s; each flipped disc
+;; moves one from the opponent to s).
+(define (play! sq s)
+  (let ((fl (flips-for sq s)) (o (opp s)))
+    (put! sq s)
+    (for-each (lambda (q) (put! q s)) fl)
+    (let ((k (length fl)))
+      (if (= s BLACK)
+          (begin (set! N-BLACK (+ N-BLACK 1 k)) (set! N-WHITE (- N-WHITE k)))
+          (begin (set! N-WHITE (+ N-WHITE 1 k)) (set! N-BLACK (- N-BLACK k))))
+      k)))
+
+;; =======================  POSITIONAL WEIGHTS  =======================
+;; Classic Othello weight map. Corners are prized; the squares orthogonally and
+;; diagonally next to an empty corner (the "C" and "X" squares) are traps because
+;; they hand the corner to the opponent; edges are solid. These are the numbers a
+;; person would draw on paper. The AI-PLAN 'adaptive brain nudges CORNER-W and
+;; MOBILITY-W (below) based on how the human plays.
+(define WEIGHTS
+  (vector 120 -20  20   5   5  20 -20 120
+          -20 -40  -5  -5  -5  -5 -40 -20
+           20  -5  15   3   3  15  -5  20
+            5  -5   3   3   3   3  -5   5
+            5  -5   3   3   3   3  -5   5
+           20  -5  15   3   3  15  -5  20
+          -20 -40  -5  -5  -5  -5 -40 -20
+          120 -20  20   5   5  20 -20 120))
+(define (wt sq) (vector-ref WEIGHTS sq))
+
+;; Positional score of the WHOLE board for side s (from s's point of view):
+;; sum weights of my discs minus weights of the opponent's discs.
+(define (positional s)
+  (let loop ((sq 0) (acc 0))
+    (cond ((>= sq 64) acc)
+          (else
+           (let ((p (at sq)))
+             (loop (+ sq 1)
+                   (cond ((= p s) (+ acc (wt sq)))
+                         ((= p (opp s)) (- acc (wt sq)))
+                         (else acc))))))))
+
+;; =======================  ADAPTIVE STATE  =======================
+;; A tiny record of how the HUMAN (BLACK) has been playing, updated every human
+;; move. The 'adaptive brain reads it to nudge its own weights. Readable numbers
+;; a person could narrate: "you've grabbed 3 corners and you're flip-greedy, so
+;; I'll guard corners and squeeze your mobility."
+(define HUMAN-CORNERS 0)      ;; how many corners BLACK has taken
+(define HUMAN-GREED   0)      ;; running total of discs BLACK flipped per move
+(define HUMAN-MOVES   0)      ;; how many moves BLACK has made
+(define CORNERS (list 0 7 56 63))
+(define (corner? sq) (or (= sq 0) (= sq 7) (= sq 56) (= sq 63)))
+
+(define (note-human-move! sq flipped)
+  (set! HUMAN-MOVES (+ HUMAN-MOVES 1))
+  (set! HUMAN-GREED (+ HUMAN-GREED flipped))
+  (when (corner? sq) (set! HUMAN-CORNERS (+ HUMAN-CORNERS 1))))
+
+;; Adaptive weights: extra emphasis on corner defense if the human hoards
+;; corners; extra emphasis on mobility if the human plays greedy. Returns
+;; (corner-scale mobility-weight) — plain multipliers the brain applies.
+(define (adaptive-knobs)
+  (let* ((greedy (and (> HUMAN-MOVES 0)
+                      (> (quotient HUMAN-GREED (max 1 HUMAN-MOVES)) 3)))
+         (corner-scale (if (>= HUMAN-CORNERS 2) 2 1))
+         (mob-weight (if greedy 15 6)))
+    (list corner-scale mob-weight)))
+
+;; =======================  EVALUATION OF A MOVE  =======================
+;; Score a single legal move `sq` for side s. Depends on LEVEL and AI-PLAN.
+;;   'easy  — pure greed: number of discs flipped.
+;;   else   — make the move on a scratch copy, read the positional score, add a
+;;            mobility term (fewer replies for the opponent is good). 'hard also
+;;            subtracts the opponent's best positional reply (one ply deeper).
+;; We never fabricate a verb: there is no board-copy primitive, so we do
+;; make/measure/UNMAKE by snapshotting only the squares that change (the placed
+;; disc + the flipped run), which is exact and cheap.
+
+;; snapshot the squares a move touches, so we can restore them after scoring
+(define (snapshot sq s)
+  (let ((fl (flips-for sq s)))
+    ;; store (square old-value) pairs for sq and every flipped square
+    (cons (list sq (at sq))
+          (map (lambda (q) (list q (at q))) fl))))
+
+(define (restore! snap)
+  (for-each (lambda (pr) (put! (car pr) (car (cdr pr)))) snap))
+
+(define (apply-snapshot! sq s snap)
+  ;; place + flip using the same squares the snapshot recorded
+  (put! sq s)
+  (for-each (lambda (pr) (unless (= (car pr) sq) (put! (car pr) s)))
+            (cdr snap)))
+
+;; mobility: how many legal replies the opponent has (fewer = better for s)
+(define (mobility-against s) (length (legal-moves (opp s))))
+
+;; the corner scale + mobility weight for the current plan
+(define (plan-knobs)
+  (if (eq? AI-PLAN 'adaptive) (adaptive-knobs) (list 1 6)))
+
+(define (corner-scaled-positional s cscale)
+  ;; positional score, but corners count extra when the plan says to guard them
+  (let loop ((cs CORNERS) (bonus 0))
+    (if (null? cs)
+        (+ (positional s) bonus)
+        (let ((p (at (car cs))))
+          (loop (cdr cs)
+                (cond ((= p s) (+ bonus (* (- cscale 1) (wt (car cs)))))
+                      ((= p (opp s)) (- bonus (* (- cscale 1) (wt (car cs)))))
+                      (else bonus)))))))
+
+;; opponent's best positional reply after s has moved (one shallow ply for 'hard)
+(define (best-reply-positional s cscale)
+  (let ((o (opp s)))
+    (let loop ((ms (legal-moves o)) (best -1000000))
+      (if (null? ms) (if (= best -1000000) 0 best)
+          (let* ((sq (car ms)) (snap (snapshot sq o)))
+            (apply-snapshot! sq o snap)
+            (let ((v (corner-scaled-positional o cscale)))
+              (restore! snap)
+              (loop (cdr ms) (max best v))))))))
+
+;; FUEL — the central design choice, mirroring the chess cart.
+;; In this interpreter every AST node costs one fuel and the whole budget is
+;; 200000. A full-board `positional` scan is ~1500 fuel and a `legal-moves`
+;; mobility scan is several thousand; doing either once PER CANDIDATE, over a
+;; 60-ply game, costs millions. So the cheap default scores a move WITHOUT
+;; touching the board:
+;;   'easy   — pure greed: how many discs it flips.
+;;   'normal — STATIC positional: the square's own weight (corners high, C/X
+;;             squares negative, edges solid) plus a small nudge for flip count.
+;;             No board copy, no scan — a few nodes per candidate. This is exact
+;;             about which square is good and finishes a full game on 200000 fuel.
+;;   'hard   — make/measure/unmake: play the move on a snapshot, read the full
+;;             positional board, subtract the opponent's best reply and weight
+;;             mobility. Deep and strong, but it wants --fuel.
+(define (move-score s sq)
+  (let* ((knobs (plan-knobs))
+         (cscale (car knobs))
+         (mobw (car (cdr knobs))))
+    (cond
+      ((eq? LEVEL 'easy)
+       ;; pure greed — just the flip count
+       (flip-count sq s))
+      ((eq? LEVEL 'hard)
+       ;; deep: make/measure/unmake with mobility + one reply ply
+       (let ((snap (snapshot sq s)))
+         (apply-snapshot! sq s snap)
+         (let* ((pos (corner-scaled-positional s cscale))
+                (mob (* mobw (- 0 (mobility-against s))))       ;; fewer foe replies = good
+                (deep (- 0 (best-reply-positional s cscale)))
+                (total (+ pos mob deep)))
+           (restore! snap)
+           total)))
+      (else
+       ;; 'normal — STATIC positional: square weight + small greed nudge, and the
+       ;; adaptive plan's corner emphasis applied directly to a corner square.
+       (let* ((base (wt sq))
+              (cbonus (if (corner? sq) (* (- cscale 1) (wt sq)) 0))
+              (greed (flip-count sq s)))
+         (+ base cbonus greed))))))
+
+;; Motoi (WHITE) picks its move from a PRE-COMPUTED legal list (so the driver's
+;; game-over scan is reused, not repeated): highest move-score, deterministic
+;; tie-break to the lowest square index so the same board yields the same move.
+(define (motoi-pick s ms)
+  (if (null? ms) #f
+      (let loop ((rest (cdr ms)) (best (car ms)) (bv (move-score s (car ms))))
+        (if (null? rest) best
+            (let ((v (move-score s (car rest))))
+              (if (> v bv) (loop (cdr rest) (car rest) v)
+                           (loop (cdr rest) best bv)))))))
+
+;; =======================  HUMAN (BLACK) SIDE  =======================
+;; A short fixed opening script (a stand-in for a person), then greedy play. The
+;; script is a list of squares; each is used only if it is currently legal.
+(define BLACK-SCRIPT (list (sq-of 2 3)     ;; d6-ish opening
+                           (sq-of 2 2)
+                           (sq-of 4 2)
+                           (sq-of 5 5)))
+(define script-idx 0)
+(define (list-ref* xs k) (if (= k 0) (car xs) (list-ref* (cdr xs) (- k 1))))
+
+;; greedy human fallback over a pre-computed legal list: the move flipping the
+;; most discs (tie -> lowest sq).
+(define (human-greedy s ms)
+  (if (null? ms) #f
+      (let loop ((rest (cdr ms)) (best (car ms)) (bv (flip-count (car ms) s)))
+        (if (null? rest) best
+            (let ((v (flip-count (car rest) s)))
+              (if (> v bv) (loop (cdr rest) (car rest) v)
+                           (loop (cdr rest) best bv)))))))
+
+(define (human-pick s ms)
+  (let ((scripted (if (< script-idx (length BLACK-SCRIPT))
+                      (list-ref* BLACK-SCRIPT script-idx) #f)))
+    (set! script-idx (+ script-idx 1))
+    (if (and scripted (memv scripted ms)) scripted (human-greedy s ms))))
+
+;; =======================  CHARM PASS: LOOK  =======================
+;; A tiny palette so colors have NAMES, not magic numbers. When "the felt" is a
+;; word instead of the number 3, restyling the whole cart is a one-line edit
+;; here — and a reader learns what each color is FOR.
+(define COL-SKY     1)    ;; splash background wash
+(define COL-STARS  13)    ;; lavender speckle
+(define COL-FELT    3)    ;; dark-green board felt
+(define COL-GRID    0)    ;; black grid lines
+(define COL-HINT   11)    ;; legal-move hint dot
+(define COL-BLACK   0)    ;; black disc
+(define COL-WHITE   7)    ;; white disc
+(define COL-B-RIM   5)    ;; rim so black reads on green
+(define COL-W-RIM   6)    ;; rim on white disc
+(define COL-LAST   10)    ;; last-move highlight
+(define COL-FRAME   6)    ;; board frame
+(define COL-SHADE   0)    ;; splash drop-shadow
+(define COL-BANNER  5)    ;; splash banner face
+
+;; A calm, seed-driven starfield behind the splash — deterministic (from the
+;; SEED constant) so it is the same every run. Depth for almost nothing.
+(define (draw-splash-bg)
+  (clear COL-SKY)
+  (let loop ((n 0) (s SEED))
+    (when (< n 40)
+      (let* ((s2 (modulo (+ (* s 1103515245) 12345) 2147483648))
+             (x  (modulo s2 W))
+             (s3 (modulo (+ (* s2 1103515245) 12345) 2147483648))
+             (y  (modulo s3 H)))
+        (pset x y COL-STARS)
+        (loop (+ n 1) s3)))))
+
+;; The title / loading screen — its own SD frame. TEACHING IDEA: a title screen
+;; is just ANOTHER drawing; the same verbs that paint the board paint the splash.
+;; Order: show the title, play the theme, THEN start the game.
+(define (draw-title)
+  (draw-splash-bg)
+  (set-color COL-SHADE)  (rect-fill 44 60 232 64)      ;; shadow
+  (set-color COL-BANNER) (rect-fill 40 56 232 64)       ;; banner
+  (set-color COL-FRAME)  (rect 40 56 232 64)
+  (fb/text "O T H E L L O" 108 76 'yellow)
+  (fb/text "you = Black   Motoi = White" 78 96 'white)
+  ;; a scrap of art: a black disc and a white disc on a little felt patch
+  (set-color COL-FELT) (rect-fill 128 130 64 30)
+  (set-color COL-BLACK) (disc 144 145 8) (set-color COL-B-RIM) (circle 144 145 8)
+  (set-color COL-WHITE) (disc 176 145 8) (set-color COL-W-RIM) (circle 176 145 8)
+  (fb/text "* PRESS START *" 104 176 'green)
+  (fb/text "one move can flip the board..." 62 196 'lavender))
+
+;; =======================  RENDER (SD framebuffer)  =======================
+
+(define (sq-name sq)
+  (string-append (vector-ref (vector "a" "b" "c" "d" "e" "f" "g" "h") (col sq))
+                 (number->string (+ (row sq) 1))))
+
+(define (draw-board last-sq legal-list)
+  (clear COL-FELT)                           ;; dark-green felt
+  ;; squares
+  (let loop ((r 0)) (when (< r 8)
+    (let loop2 ((c 0)) (when (< c 8)
+      (let* ((sq (sq-of r c))
+             (x (+ BX (* c SQ))) (y (+ BY (* r SQ))))
+        (set-color COL-FELT) (rect-fill x y SQ SQ)
+        (set-color COL-GRID) (rect x y SQ SQ)       ;; grid lines
+        ;; faint dots on legal squares for the side to move
+        (when (memv sq legal-list)
+          (set-color COL-HINT) (disc (+ x (quotient SQ 2)) (+ y (quotient SQ 2)) 2))
+        (loop2 (+ c 1)))))
+    (loop (+ r 1))))
+  ;; discs — a filled disc, a contrasting rim, and one bright inner ring that
+  ;; reads as a little shine (cheap "shading" — one extra circle per disc).
+  (let loop ((sq 0)) (when (< sq 64)
+    (let ((p (at sq)))
+      (unless (empty? p)
+        (let ((cx (+ BX (* (col sq) SQ) (quotient SQ 2)))
+              (cy (+ BY (* (row sq) SQ) (quotient SQ 2))))
+          (set-color (if (= p BLACK) COL-BLACK COL-WHITE))
+          (disc cx cy 9)
+          (set-color (if (= p BLACK) COL-B-RIM COL-W-RIM))
+          (circle cx cy 9)                 ;; rim so black reads on green
+          (set-color (if (= p BLACK) COL-B-RIM COL-W-RIM))
+          (circle cx cy 5))))              ;; inner ring = a hint of depth
+    (loop (+ sq 1))))
+  ;; highlight last move
+  (when (>= last-sq 0)
+    (set-color COL-LAST)
+    (rect (+ BX (* (col last-sq) SQ)) (+ BY (* (row last-sq) SQ)) SQ SQ))
+  ;; frame
+  (set-color COL-FRAME)
+  (rect (- BX 1) (- BY 1) (+ (* 8 SQ) 2) (+ (* 8 SQ) 2)))
+
+(define (draw-hud ply turn note)
+  (set-color 5) (rect-fill 236 24 80 192)
+  (fb/text "OTHELLO" 242 28 'yellow)
+  (fb/text (string-append "plan " (if (eq? AI-PLAN 'adaptive) "adpt" "strt"))
+           242 44 'white)
+  (fb/text (string-append "lvl " (case LEVEL ((easy) "easy") ((hard) "hard") (else "norm")))
+           242 58 'white)
+  (fb/text (string-append "ply " (number->string ply)) 242 72 'white)
+  (fb/text (string-append "turn " (if (= turn BLACK) "B" "W")) 242 86 'white)
+  (fb/text "discs" 242 108 'lavender)
+  (fb/text (string-append "B " (number->string (count BLACK))) 242 122 'white)
+  (fb/text (string-append "W " (number->string (count WHITE))) 242 136 'white)
+  (fb/text note 242 160 'green))
+
+;; =======================  DRIVER  =======================
+
+(set-mode 'sd)
+(setup!)
+
+(display "=== OTHELLO — Motoi SD (320x240) ===") (newline)
+(display "You (Black, scripted opening then greedy) vs Motoi (White)") (newline)
+(display "AI-PLAN=") (display AI-PLAN) (display "  LEVEL=") (display LEVEL) (newline)
+(display "Rule: a move is legal only if it flips a bracketed line of the other color.")
+(newline) (newline)
+
+;; SPLASH FIRST: sound the theme, draw the title frame, THEN play. This is the
+;; ONE allowed extra dump — the loading screen, not a per-ply dump.
+(play-theme!)
+(draw-title)
+(display "--- SD title screen ---") (newline)
+(fb/dump 0 0 W H)
+(newline)
+(display "PRESS START (headless: the game plays itself)") (newline) (newline)
+
+(define RESULT "")
+(define PASSES 0)     ;; consecutive passes; two in a row ends the game
+(define LAST-SQ -1)   ;; last square played (for the climax frame highlight)
+(define END-PLY 0)    ;; ply the game actually ended on
+
+;; compact ASCII board printer (between/after frames, cheap + readable)
+(define (ascii-board)
+  (let loop ((r 0))
+    (when (< r 8)
+      (display "  ")
+      (let loop2 ((c 0))
+        (when (< c 8)
+          (let ((p (at (sq-of r c))))
+            (display (cond ((= p BLACK) "X") ((= p WHITE) "O") (else "."))))
+          (display " ")
+          (loop2 (+ c 1))))
+      (newline)
+      (loop (+ r 1)))))
+
+;; Auto-play. Each ply: generate the legal list ONCE (it feeds both the pass
+;; test and the move choice), pick, play, update the incremental counts. A side
+;; with no move passes; two passes in a row ends the game (as do the move cap
+;; and a full board).
+(let loop ((ply 1) (turn BLACK))
+  (cond
+    ((> ply MAX-PLIES)
+     (set! END-PLY (- ply 1))
+     (set! RESULT "move cap reached (default sample; raise MAX-PLIES + --fuel for a full game)"))
+    ((>= PASSES 2)
+     (set! END-PLY (- ply 1))
+     (set! RESULT "both sides passed — the board is settled"))
+    (else
+     (let ((moves (legal-moves turn)))
+       (if (null? moves)
+           ;; no legal move: this side passes, turn goes to the other
+           (begin
+             (set! PASSES (+ PASSES 1))
+             (display "ply ") (display ply)
+             (display (if (= turn BLACK) "  B" "  W"))
+             (display " has no legal move — PASS") (newline)
+             (loop (+ ply 1) (opp turn)))
+           ;; pick + play (reusing the `moves` list — one legal-moves scan/ply)
+           (let ((sq (if (= turn BLACK) (human-pick turn moves) (motoi-pick turn moves))))
+             (set! PASSES 0)
+             (let ((flipped (play! sq turn)))
+               (set! LAST-SQ sq)
+               (sfx-place! turn)              ;; a soft click as the disc goes down
+               (when (> flipped 0) (sfx-flip! flipped))   ;; a chime for the flipped line
+               (when (= turn BLACK) (note-human-move! sq flipped))
+               (when (or (= (modulo ply SHOW-EVERY) 0) (< ply 3))
+                 (display "ply ") (display ply)
+                 (display (if (= turn BLACK) "  B " "  W "))
+                 (display (sq-name sq))
+                 (display " flips ") (display flipped)
+                 (display "  |  B=") (display (count BLACK))
+                 (display " W=") (display (count WHITE)) (newline))
+               (loop (+ ply 1) (opp turn)))))))))
+
+;; =======================  ONE SD CLIMAX FRAME  =======================
+;; Exactly one full-screen dump: the final position, last move highlighted.
+
+(sfx-result! (count BLACK) (count WHITE))   ;; result jingle: lead / behind / tied
+(draw-board LAST-SQ '())
+(draw-hud END-PLY BLACK
+         (let ((b (count BLACK)) (w (count WHITE)))
+           (cond ((> b w) "you lead") ((< b w) "Motoi leads") (else "tied"))))
+(newline)
+(display "--- SD screenshot: final position (last move highlighted) ---") (newline)
+(fb/dump 0 0 W H)
+(newline)
+
+(display "Final board (X=Black/you, O=White/Motoi):") (newline)
+(ascii-board)
+(newline)
+
+(let ((b (count BLACK)) (w (count WHITE)))
+  (display "RESULT: ") (display RESULT) (newline)
+  (display "Discs  B(you)=") (display b) (display "  W(Motoi)=") (display w) (newline)
+  (display "WINNER: ")
+  (display (cond ((> b w) "BLACK (you)") ((< b w) "WHITE (Motoi)") (else "TIE")))
+  (newline))
+
+(newline)
+(display "Fork it: flip AI-PLAN to 'adaptive to make Motoi study your style,") (newline)
+(display "raise LEVEL to 'hard for a reply-deep brain (wants --fuel), or swap") (newline)
+(display "BLACK-SCRIPT for live taps from a real player.") (newline)

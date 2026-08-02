@@ -556,7 +556,7 @@
                  :math-program "(define (antisymmetric-witness a b)\n  ;; a = b iff a ≤ b AND b ≤ a\n  (let ((le1 (game/surreal-le? a b))\n        (le2 (game/surreal-le? b a))\n        (eq (game/surreal-eq? a b)))\n    (list 'le1 le1 'le2 le2 'eq eq 'consistent? (eq? eq (and le1 le2)))))\n(antisymmetric-witness (game/surreal-lit 1) (game/surreal-lit 1))"
                  :cs-program "(define (eq-cache)\n  (let ((cache '()))\n    (lambda (a b)\n      (let ((key (list a b)))\n        (cond ((assoc key cache) => cdr)\n              (else (let ((r (game/surreal-eq? a b))) (set! cache (cons (cons key r) cache)) r)))))))\n(define check-eq (eq-cache))\n(check-eq (game/surreal-lit 1) (game/surreal-lit 1))"
                  :explanation "eng: deduplicate a list by surreal value. math: antisymmetry witness — equality iff both ≤ hold. cs: cache expensive equality checks."
-                 :meta "Reach for surreal-eq? over eq?; eq? checks pointer identity, not surreal value identity.")
+                 :meta "Reach for surreal-eq? over eq?; eq? compares by structural form, not surreal value — two surreals built different ways denote the same value but differ in structure.")
                 (:eng "Equality checks can be expensive; guard hot loops."
                  :math "a = b iff a ≤ b and b ≤ a."
                  :cs "Recursive; O(depth²)."))
@@ -1305,67 +1305,72 @@
   :name "on-collision" :std "Motoi"
   :library "game"
   :kind "io"
-  :signature "(on-collision handler | #f) -> void"
-  :status "needs-alfred"
-  :status-note "DRIFT (verified 2026-07-26): `on-collision` is NOT wired in the `run` env — `printf '(on-collision (lambda (a b) a))\\n' | ./bin/motoi run /dev/stdin` reports 'unbound symbol: on-collision'. It IS def'd in lib/game/game.js, but that installer (makeGameState / the game-object client verbs) was ripped from installCore on 2026-07-25 (see core/index.js:47-52), so it is not present in `makeCoreEnv`. By contrast on-tick/on-key survive because they come from lib/game/scheduler.js, which is still wired. The prior `:status \"landed\"` is now false. DECISION NEEDED: (a) re-wire on-collision into installCore, or (b) retire this record / move it to a consumer repo that installs the game-object tier. Do NOT fabricate a passing example. See scratch/ref-audit-2026-07-26.md."
-  :since "2026-07-16"
   :dialect "motoi"
   :audience "adult"
-  :provenance "motoi-scheme/lib/game/game.js"
+  :doc "Installs a single callback that the integrator invokes once per unordered overlapping pair, from inside physics/step (equivalently world/step), after positions have been integrated and solid overlaps resolved. The handler receives the two entity KINDS as symbols, in unspecified order. Single-slot per Motoi convention, like on-frame: installing again replaces the previous handler, and passing #f (or null) clears the slot. Returns nothing."
+  :section "28-game · the world-loop callback"
+  :signature "(on-collision handler | #f) -> void"
+  :arity "1"
+  :contract "handler is a procedure of two arguments (or #f to clear) -> installed into the single collision slot; fires once per overlapping pair inside physics/step"
+  :status "landed"
+  :status-note "Bound in lib/game/world.js over the one live entity store on 2026-08-02. The name was implemented in lib/game/game.js against a second, id-keyed store and went unbound when that installer was dropped from installCore in the 2026-07-25 Curator rip; Alfred ruled the physics should work, so it was re-wired over the live world rather than by re-installing the dead duplicate store."
+  :since "2026-08-02"
+  :provenance "motoi-scheme/lib/game/world.js"
   :training-eligible #t
   :confidentiality "public"
   :summary "Install a per-step collision handler; fires for every overlapping pair inside physics/step."
-  :explanation "on-collision registers a single callback the physics engine fires from within physics/step for every unordered pair of entities whose AABBs overlap. Handler is called with (a-id b-id) — both as Syms — so the callback can look up entity state, apply damage, spawn particles, or issue impulses. Single-slot per Motoi convention (matches on-frame, on-key): calling on-collision again replaces the previous handler. Pass #f (or false) to clear. Adapter-safe: the collision math is pure geometry (see aabbOverlap in lib/game/game.js)."
+  :explanation "on-collision is how a game reacts to contact without polling. Each physics/step builds the list of overlapping pairs — the same list world/collisions reports — and, if a handler is installed, calls it once per pair with the two kinds as symbols. Because the pair order is unspecified, a handler must treat (a b) and (b a) alike; the idiom is an or of two and-clauses, or a test that only names one side. The slot is single, which keeps the shape identical to on-frame and on-key; fan out to several listeners in Scheme rather than expecting the engine to keep a list. The handler runs inside the frame, so heavy work should be deferred with world/after rather than done inline. To ask about one specific pair instead of being told about all of them, use entity/collides?."
   :examples (
-    (:dialect "motoi" :tier "novice" :code ";; on-collision is a game-runtime verb (requires physics/step loop).\n;; Demonstrate the callback pattern purely:\n(define (simulate-collision handler a b) (handler a b))\n(simulate-collision (lambda (a b) (display 'hit) (newline)) 'ball 'wall)" :note "Simulate a collision callback in pure Scheme; on-collision registers this inside physics/step")
-    (:dialect "motoi" :tier "intermediate" :code ";; on-collision requires the physics runtime. Demonstrate the dispatch logic:\n(define (handle-bounce a b)\n  (cond ((eq? a 'ball) (list 'apply-force a -2 -5))\n        ((eq? b 'ball) (list 'apply-force b -2 -5))\n        (else 'no-op)))\n(handle-bounce 'ball 'wall)" :note "The handler logic that on-collision would install; demonstrates symmetric dispatch")
-    (:dialect "motoi" :tier "expert" :code ";; on-collision requires the physics runtime. Demonstrate the pickup logic:\n(define scored 0)\n(define (pickup-handler a b)\n  (cond ((and (eq? a 'player) (eq? b 'coin))\n         (set! scored (+ scored 1)) 'coin-collected)\n        ((and (eq? a 'coin) (eq? b 'player))\n         (set! scored (+ scored 1)) 'coin-collected)\n        (else 'no-op)))\n(pickup-handler 'player 'coin)\nscored" :note "Pickup logic in pure Scheme; on-collision would install this as a callback inside physics/step")
+    (:dialect "motoi" :tier "novice" :code "(begin (world/reset!)\n  (entity/make 'player 0 0)\n  (entity/make 'coin 4 0)\n  (on-collision (lambda (a b) (display 'hit) (newline)))\n  (physics/step))" :note "Install a handler and step: the overlapping player and coin fire it once.")
+    (:dialect "motoi" :tier "intermediate" :code "(begin (world/reset!)\n  (define ball (entity/make 'player 0 0))\n  (entity/make 'wall 8 0)\n  (on-collision\n    (lambda (a b)\n      (when (or (eq? a 'wall) (eq? b 'wall))\n        (physics/apply-impulse ball -2 0))))\n  (physics/step)\n  (entity/vel ball))" :note "React to the pair by kicking the ball away from the wall — the handler runs inside the step, so the impulse lands on the same frame.")
+    (:dialect "motoi" :tier "expert" :code "(begin (world/reset!)\n  (define scored 0)\n  (entity/make 'player 0 0)\n  (entity/make 'coin 4 0)\n  (on-collision\n    (lambda (a b)\n      (when (or (and (eq? a 'player) (eq? b 'coin))\n                (and (eq? a 'coin) (eq? b 'player)))\n        (set! scored (+ scored 1)))))\n  (physics/step)\n  (physics/step)\n  (on-collision #f)\n  (physics/step)\n  scored)" :note "A pickup counter that treats both pair orders alike, then clears the slot with #f and shows that no further steps score.")
   )
-  :caveats ("Pair order is unspecified — handle (a, b) and (b, a) symmetrically." "Handler fires from inside physics/step; keep it small. Heavy work should defer via after-frame." "Single-slot per canonical Motoi shape: setting a new handler replaces the previous one. Compose in Scheme if you need multiple listeners." "Collision detection is AABB only; use entity/shape! + custom checks for pixel-perfect or convex-polygon collisions.")
-  :drawbacks ("O(n²) per step — every pair is tested. For large N, filter with entity/tag! + entity/hits-tag first." "No collision metadata (contact point, normal, penetration depth) — only the two ids." "Doesn't fire for tween/tween or tween/entity overlaps; scope is entity-entity only.")
-  :usecases ("Damage on hit." "Item pickup." "Trigger zones and switches." "Enemy AI: react to touching the player." "Physics reactions (bounce, break, stick).")
-  :related ("physics/step" "entity/collisions" "entity/apply-force!" "entity/hits-tag" "motion/on-settle")
-  :learn (:concept "Callback-driven collision reporting inside the physics loop." :prerequisites ("entity/make" "physics/step") :progression "Combine on-collision with entity/tag! for team logic, then with entity/apply-force! for reactive physics.")
+  :caveats ("Pair order is unspecified — handle (a, b) and (b, a) symmetrically." "The handler receives entity KINDS as symbols, not handles. Several bodies of the same kind are indistinguishable in the callback; read world/collisions for the handles." "It fires once per overlapping pair PER STEP, so a pair that stays overlapped fires every frame. Deduplicate in the handler if you need enter-events." "The handler runs inside physics/step; keep it small and defer heavy work with world/after." "Single-slot: installing a new handler replaces the previous one. Compose in Scheme for multiple listeners." "Collision detection is strict AABB; entity/shape! does not change what counts as an overlap." "Do not call physics/step from inside the handler.")
+  :drawbacks ("O(n squared) per step — every live pair is tested. For large N, filter with entity/tag! and world/find rather than in the handler." "No collision metadata: no contact point, no normal, no penetration depth, only the two kinds." "Entity-entity only; tween overlaps are not reported." "Kinds rather than handles means the callback cannot tell two coins apart without consulting world/collisions.")
+  :usecases ("Damage on hit." "Item pickup." "Trigger zones and switches." "Enemy AI reacting to touching the player." "Physics reactions: bounce, break, stick.")
+  :related ("physics/step" "world/step" "world/collisions" "entity/collides?" "entity/tag!" "motion/on-settle")
+  :learn (:concept "Callback-driven collision reporting: the loop tells you, instead of you asking every frame." :prerequisites ("entity/make" "physics/step") :progression "Install a handler and count the fires, then dispatch on the kinds, then fan out to several listeners in Scheme since the slot is single.")
   :row-2-audit (
-    (:problem "A game needs to react whenever two entities overlap — must install a callback that fires inside physics/step for each colliding pair."
-     :eng-program ";; on-collision requires the physics runtime; demonstrate the registration pattern:\n(define collision-handler #f)\n(define (on-collision-sim h) (set! collision-handler h))\n(define (physics-step-sim) (if collision-handler (collision-handler 'a 'b) 'no-handler))\n(on-collision-sim (lambda (a b) (display 'hit)))\n(physics-step-sim)"
-     :math-program (:honest-null "on-collision is callback dispatch — installs a handler into a slot. No algebra: the verb's job is registration, not computation.")
-     :cs-program ";; on-collision requires the physics runtime; model the type-guard in pure Scheme:\n(define (safe-install h)\n  (if (or (procedure? h) (eq? h #f))\n      'installed\n      (error 'need-procedure-or-false h)))\n(safe-install (lambda (a b) 'ok))"
-     :explanation "eng: install a print-on-hit handler. math: HONEST-NULL — dispatch, not algebra. cs: type-guarded install."
-     :meta "Reach for on-collision over polling entity/collisions each frame; the callback fires at the right point in physics/step.")
-    (:eng "Handler runs inside physics/step — keep it small."
+    (:problem "A game must react whenever two bodies overlap, without testing every pair by hand each frame. The operator needs a callback the integrator fires at the one point in the step where the pair list is already built."
+     :eng-program "(begin (world/reset!)\n  (entity/make 'player 0 0)\n  (entity/make 'coin 4 0)\n  (define log '())\n  (on-collision (lambda (a b) (set! log (cons (list a b) log))))\n  (physics/step)\n  log)"
+     :math-program (:honest-null "on-collision is callback dispatch — it installs a handler into a slot. There is no algebra: the verb's job is registration, not computation.")
+     :cs-program "(begin (world/reset!)\n  ;; #f is the clear value; a procedure is the install value. Nothing else\n  ;; is meaningful, so guard before handing the slot over.\n  (define (safe-install! h)\n    (if (or (procedure? h) (eq? h #f))\n        (begin (on-collision h) 'installed)\n        'refused))\n  (list (safe-install! (lambda (a b) 'ok))\n        (safe-install! #f)\n        (safe-install! 42)))"
+     :explanation "eng: log every pair the step reports. math: HONEST-NULL — the verb installs a handler into a slot; there is no algebra in registration. cs: guard the slot so only a procedure or #f ever reaches it."
+     :meta "Reach for on-collision over polling entity/collides? each frame; the callback fires at the right point in physics/step, after integration and solid resolution, with the pair list already computed.")
+    (:eng "The handler runs inside physics/step — keep it small."
      :math "Honest-null — handler registration is dispatch, not algebra."
-     :cs "Single-slot per Motoi convention."))
+     :cs "Single-slot per Motoi convention; guard what you install."))
   :row-3-dimension (
-    (:setup "Callback registration for pair-wise events — same shape appears in games, event listeners, signal handlers."
+    (:setup "Hand a callback to a loop and let the loop decide when it runs."
      :rungs (
-       (:domain "game"   :code "(define (on-click handler) (list 'click-handler handler))\n(on-click (lambda (e) e))")
-       (:domain "event"  :code "(define (on-click handler) (list 'click-handler handler))\n(on-click (lambda (e) e))")
-       (:domain "signal" :code "(define (on-signal sig handler) (list sig handler))\n(on-signal 'sigterm (lambda () 'stopped))"))
-     :explanation "Rung 1: collision callback. Rung 2: click callback. Rung 3: signal handler. All three install a per-slot callback for asynchronous events."
-     :meta "'Single-slot event callback' is universal.")
-    (:eng "UI, OS signals, and physics share this registration pattern."
+       (:domain "collision" :code "(begin (world/reset!)\n  (entity/make 'player 0 0)\n  (entity/make 'coin 4 0)\n  (define hits 0)\n  (on-collision (lambda (a b) (set! hits (+ hits 1))))\n  (physics/step)\n  hits)")
+       (:domain "schedule" :code "(begin (world/reset!)\n  ;; The sibling registration on the same loop: hand the world a callback,\n  ;; the integrator decides when it runs.\n  (define fired 0)\n  (world/after 1 (lambda () (set! fired 1)))\n  (physics/step)\n  fired)")
+       (:domain "signal" :code "(begin\n  ;; An OS signal handler: one slot, replace on set.\n  (define (on-signal sig handler) (list sig handler))\n  (car (on-signal 'sigterm (lambda () 'stopped))))")
+     )
+     :explanation "Rung 1 registers a collision handler and steps. Rung 2 registers a scheduled callback on the same loop and steps. Rung 3 registers an OS signal handler. All three hand over a procedure and give up control of when it runs."
+     :meta "Inversion of control is the shape: you supply the what, the loop supplies the when.")
+    (:eng "Game loops, schedulers and signal handlers all invert control the same way."
      :math "Honest-null — slot assignment, not algebraic."
-     :cs "Replace-on-set semantics."))
+     :cs "Replace-on-set semantics; one slot per event source."))
   :row-4-proof (
-    (:claim "Slot discipline: registering #f clears the handler; registering a procedure replaces the previous one."
-     :eng-program ";; on-collision requires the physics runtime; model slot discipline in pure Scheme:\n(define *slot* #f)\n(define (on-collision-sim h) (set! *slot* h))\n(on-collision-sim (lambda (a b) 'x))\n(on-collision-sim #f)\n(eq? *slot* #f)"
-     :math-program (:honest-null "The claim is a slot-management post-condition — not an algebraic law. Handler slot is a mutable cell; assignment overwrites.")
-     :cs-program ";; on-collision requires the physics runtime; demonstrate replace-on-set semantics:\n(define (replace-semantics?)\n  (define slot #f)\n  (define (on-collision-sim h) (set! slot h))\n  (on-collision-sim (lambda (a b) 'first))\n  (on-collision-sim (lambda (a b) 'second))\n  ;; Only the second handler should remain.\n  (eq? (slot 'a 'b) 'second))\n(replace-semantics?)"
-     :invariant "handler-slot(on-collision(h)) = h ∧ on-collision(#f) clears the slot"
-     :meta "Handler-clear + replace-on-set. Falsified by residual firing after clear or multiple handlers active.")
-    (:eng "Regression: clearing prevents further fires."
-     :math "Honest-null — slot post-condition on IO cell."
-     :cs "One assertion."))
+    (:claim "Clearing the slot with #f really stops the fires, and installing a second handler replaces the first rather than adding to it."
+     :eng-program "(begin (world/reset!)\n  ;; Clearing the slot really stops the fires.\n  (entity/make 'player 0 0)\n  (entity/make 'coin 4 0)\n  (define hits 0)\n  (on-collision (lambda (a b) (set! hits (+ hits 1))))\n  (physics/step)\n  (define after-one hits)\n  (on-collision #f)\n  (physics/step) (physics/step)\n  (list ':fired after-one ':after-clear hits))"
+     :math-program (:honest-null "The claim is a slot-management post-condition on a mutable cell, not an algebraic law over a numeric domain. Assignment overwrites; there is nothing to quantify over.")
+     :cs-program "(begin (world/reset!)\n  ;; Replace-on-set: only the newest handler runs.\n  (entity/make 'player 0 0)\n  (entity/make 'coin 4 0)\n  (define seen '())\n  (on-collision (lambda (a b) (set! seen (cons 'first seen))))\n  (on-collision (lambda (a b) (set! seen (cons 'second seen))))\n  (physics/step)\n  seen)"
+     :invariant "slot(on-collision(h)) = h AND on-collision(#f) clears the slot AND after a clear, no further step fires anything"
+     :meta "Handler-clear and replace-on-set, both witnessed against real steps with a real overlapping pair. Falsified by residual firing after a clear, or by both handlers running.")
+    (:eng "Regression: clearing prevents further fires, proven across two extra steps."
+     :math "Honest-null — slot post-condition on an IO cell."
+     :cs "Only the newest handler runs; the log holds one entry, not two."))
   :row-5-emergence (
-    (:base "on-collision installs a per-step pair callback."
-     :eng-composition ";; on-collision requires the physics runtime; demonstrate the composition pattern:\n(define score 0)\n(define (handle-pickup a b)\n  (when (and (eq? a 'player) (eq? b 'coin))\n    (set! score (+ score 1))))\n(handle-pickup 'player 'coin)\n(handle-pickup 'wall 'wall)\nscore"
-     :math-composition (:honest-null "Compositions with on-collision are handler-chain patterns (dispatch on tag, delegate to sub-handlers) — not algebraic operations on values.")
-     :cs-composition ";; on-collision requires the physics runtime; demonstrate the multi-listener pattern:\n(define (multi-listener handlers)\n  ;; Fan out to N listeners from one callback.\n  (lambda (a b)\n    (for-each (lambda (h) (h a b)) handlers)))\n(define combined (multi-listener (list (lambda (a b) 'log)\n                                       (lambda (a b) 'damage))))\n(combined 'player 'coin)\n'done"
-     :emergent "A pickup + multi-listener + tag-dispatch triad: chaining on-collision with tag inspection + fanout + FSM yields coin pickup + damage-on-hit + trigger-zone family."
-     :meta "Physics-driven game rules; cross-ref book-of-composition on physics-callbacks.")
-    (:eng "Coin pickup, damage-on-hit, and trigger zones use this composition."
-     :math "Honest-null — score is stateful mutation inside a dispatch, not a value function."
-     :cs "Handler + mutation + fanout."))
+    (:base "on-collision installs the one per-step pair callback."
+     :eng-composition "(begin (world/reset!)\n  (define score 0)\n  (entity/make 'player 0 0)\n  (entity/make 'coin 4 0)\n  (on-collision\n    (lambda (a b)\n      (when (or (eq? a 'coin) (eq? b 'coin)) (set! score (+ score 1)))))\n  (physics/step)\n  score)"
+     :math-composition (:honest-null "Compositions with on-collision are handler-chain patterns — dispatch on kind, delegate to sub-handlers — not algebraic operations on values.")
+     :cs-composition "(begin (world/reset!)\n  ;; One slot, many listeners: fan out in Scheme.\n  (entity/make 'player 0 0)\n  (entity/make 'coin 4 0)\n  (define log '())\n  (define (multi . handlers)\n    (lambda (a b) (for-each (lambda (h) (h a b)) handlers)))\n  (on-collision (multi (lambda (a b) (set! log (cons 'logged log)))\n                       (lambda (a b) (set! log (cons 'scored log)))))\n  (physics/step)\n  (reverse log))"
+     :emergent "A pickup scorer and a multi-listener fan-out: the callback chains with mutation for game rules and with a Scheme combinator for the several-listeners case the single slot does not provide. Emergent: coin pickup, damage-on-hit and trigger zones, all from one slot and a dispatch on the kinds."
+     :meta "Physics-driven game rules. The fan-out is the standard workaround for a single-slot registration.")
+    (:eng "Coin pickup, damage-on-hit and trigger zones are one composition with different bodies."
+     :math "Honest-null — score is stateful mutation inside a dispatch, not a function of values."
+     :cs "One slot plus a fan-out combinator gives you as many listeners as you like."))
 )
 

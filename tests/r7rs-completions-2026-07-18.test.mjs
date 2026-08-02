@@ -134,10 +134,21 @@ test('string-replace / string-reverse / string-count', () => {
   assert.equal(run('(string-count "hello" "l")'), 2)
 })
 
+// REBASELINED 2026-08-01 (bucket 1, stale-by-design). R7RS §6.6 characters are
+// a DISTINCT type, not 1-char strings. Evidence — lib/base/r7rs-types.js:13:
+//   "R7RS §6.6 character type. A distinct value class (NOT a 1-char string) so
+//    `char?` is decidable and `char->integer` can reject strings.
+//    Ported here 2026-07-24 ..."
+// The ratified signature agrees: scheme/reference/60-string.slat:877 declares
+// `(string->list s) -> list-of-char`. CLAUDE.md: "R7RS-small is the authority."
+// These tests were authored 2026-07-18, BEFORE the Ch type landed 2026-07-24,
+// so they passed strings where characters belong. Switched to `#\x` literals —
+// this STRENGTHENS the assertion (it now proves the character type exists).
 test('string->list / list->string / string constructor', () => {
-  assert.deepEqual(run('(string->list "abc")'), ['a', 'b', 'c'])
-  assert.equal(run('(list->string (list "a" "b" "c"))'), 'abc')
-  assert.equal(run('(string "a" "b" "c")'), 'abc')
+  const chars = run('(string->list "abc")')
+  assert.deepEqual(chars.map((c) => c.value), ['a', 'b', 'c'])
+  assert.equal(run('(list->string (list #\\a #\\b #\\c))'), 'abc')
+  assert.equal(run('(string #\\a #\\b #\\c)'), 'abc')
 })
 
 test('make-string / string-copy', () => {
@@ -159,28 +170,52 @@ test('symbol->string / string->symbol', () => {
 
 // ── Characters — R7RS §6.6 ──────────────────────────────────────────
 
+// REBASELINED 2026-08-01 (bucket 1) — same Ch-type evidence as above.
+// NOTE: the old `assert.equal(run('(char? "a")'), true)` asserted a
+// CONFORMANCE VIOLATION: under R7RS §6.6 a string is not a character, so
+// `(char? "a")` MUST be #f. Verified live: `./bin/motoi eval '(char? "a")'`
+// → #f, `(char? #\a)` → #t. Keeping the string-rejection case explicitly so
+// the distinct-type guarantee is what is now locked in.
 test('char predicates', () => {
-  assert.equal(run('(char-alphabetic? "a")'), true)
-  assert.equal(run('(char-numeric? "5")'), true)
-  assert.equal(run('(char-whitespace? " ")'), true)
-  assert.equal(run('(char-upper-case? "A")'), true)
-  assert.equal(run('(char-lower-case? "a")'), true)
-  assert.equal(run('(char? "a")'), true)
+  assert.equal(run('(char-alphabetic? #\\a)'), true)
+  assert.equal(run('(char-numeric? #\\5)'), true)
+  assert.equal(run('(char-whitespace? #\\space)'), true)
+  assert.equal(run('(char-upper-case? #\\A)'), true)
+  assert.equal(run('(char-lower-case? #\\a)'), true)
+  assert.equal(run('(char? #\\a)'), true)
+  // R7RS §6.6: characters are NOT 1-char strings. This is the whole point
+  // of the Ch class — do not let a future change make this true again.
+  assert.equal(run('(char? "a")'), false)
 })
 
 test('char conversions', () => {
-  assert.equal(run('(char-upcase "a")'), 'A')
-  assert.equal(run('(char-downcase "A")'), 'a')
-  assert.equal(run('(char->integer "A")'), 65)
-  assert.equal(run('(integer->char 65)'), 'A')
-  assert.equal(run('(digit-value "5")'), 5)
-  assert.equal(run('(digit-value "a")'), false)
+  assert.equal(run('(char-upcase #\\a)').value, 'A')
+  assert.equal(run('(char-downcase #\\A)').value, 'a')
+  assert.equal(run('(char->integer #\\A)'), 65)
+  assert.equal(run('(integer->char 65)').value, 'A')
+  assert.equal(run('(digit-value #\\5)'), 5)
+  assert.equal(run('(digit-value #\\a)'), false)
 })
 
 // ── Numeric tower — R7RS §6.2 ───────────────────────────────────────
 
+// REBASELINED 2026-08-01 (bucket 1, stale-by-design). An exact RATIONAL tower
+// landed after this test was authored; `exact` no longer truncates to an
+// integer. Expected values below are derived from the reference's OWN
+// documented examples, not from current output — scheme/reference/40-math.slat
+// :name "exact" :examples:
+//     (exact 3.5) :note "7/2 — the exact rational."
+//     (exact 1.5) :note "3/2."
+// (FLAGGED to the lead: that same record's `:signature "(exact x) -> integer"`
+// still says integer and now contradicts its own examples + the impl. The
+// signature line is the stale half — reference prose drift, not a code bug.)
 test('exact / inexact / integer? / rational? / real?', () => {
-  assert.equal(run('(exact 3.7)'), 3)
+  assert.equal(run('(numerator (exact 3.5))'), 7)
+  assert.equal(run('(denominator (exact 3.5))'), 2)
+  assert.equal(run('(numerator (exact 1.5))'), 3)
+  assert.equal(run('(denominator (exact 1.5))'), 2)
+  // An integral float still yields a plain exact integer.
+  assert.equal(run('(exact 3.0)'), 3)
   assert.equal(run('(inexact 3)'), 3)
   assert.equal(run('(integer? 3)'), true)
   assert.equal(run('(integer? 3.5)'), false)

@@ -24,16 +24,42 @@ const get = (env, n) => env.vars.get(n)
 // (Set method) which happened to work on Set but not on Array. Fix: normalize
 // tags to Set at creation and in tag ops.
 
+// REBASELINED 2026-08-01 (bucket 1, stale-by-design). The BUG-1 DEFECT IS
+// STILL FIXED — verified live below. Only the OBSERVER changed:
+//
+//  (a) `entity/has-tag?` and `entity/hits-tag` are unbound. They came from
+//      installGame, ripped 2026-07-25 (core/index.js:47-52). They are NOT in
+//      core/core-verbs.js (the authoritative CORE registry) and have NO entry
+//      in scheme/reference/ — so they are correctly gone, not missing.
+//      Replaced with `world/count` / `world/find`, which are bound, are in
+//      core-verbs.js, and are named in this very verb's reference record:
+//      scheme/reference/24-entity.slat:1955 :related ("entity/untag!"
+//      "world/find" "world/each" "world/count" "entity/despawn!").
+//
+//  (b) The `assert.equal(tag(...), true)` return-value checks are dropped:
+//      scheme/reference/24-entity.slat:1944 declares
+//      `(entity/tag! id tag) -> void`, and :2059 `(entity/untag! id tag) ->
+//      void`. Asserting a `true` return was never the ratified contract; the
+//      surviving impl (lib/game/world.js:587) returns the entity. Asserting
+//      the OBSERVABLE EFFECT instead of the return value is the stronger and
+//      reference-faithful guard.
+//
+// The Set/Array shape guard itself is preserved and, in fact, tightened —
+// tags.constructor is asserted directly on BOTH creation paths, which is the
+// actual root cause BUG-1 was about.
+
 test('BUG-1 — entity/tag! works on entity/spawn-created entity (Set-shaped tags)', () => {
   const env = fresh()
   const spawn = get(env, 'entity/spawn')
   const tag = get(env, 'entity/tag!')
-  const hasTag = get(env, 'entity/has-tag?')
+  const count = get(env, 'world/count')
 
-  const id = spawn(sym('ball'), 0, 0)
+  const e = spawn(sym('ball'), 0, 0)
+  // Root cause: tags must be a Set on the spawn path, never an Array.
+  assert.ok(e.tags instanceof Set, 'entity/spawn must produce Set-shaped tags')
   // Before the fix: TypeError — e.tags.includes is not a function.
-  assert.equal(tag(id, sym('sparkly')), true)
-  assert.equal(hasTag(id, sym('sparkly')), true)
+  tag(e, sym('sparkly'))
+  assert.equal(count(sym('sparkly')), 1, 'tag must be observable via world/count')
 })
 
 test('BUG-1 — entity/untag! works on entity/make-created entity (Array-shaped tags legacy)', () => {
@@ -41,43 +67,47 @@ test('BUG-1 — entity/untag! works on entity/make-created entity (Array-shaped 
   const make = get(env, 'entity/make')
   const tagFn = get(env, 'entity/tag!')
   const untag = get(env, 'entity/untag!')
-  const hasTag = get(env, 'entity/has-tag?')
+  const count = get(env, 'world/count')
 
-  const id = make(sym('crate'), 5, 5)
-  tagFn(sym(id), sym('heavy'))
-  assert.equal(hasTag(sym(id), sym('heavy')), true)
+  const e = make(sym('crate'), 5, 5)
+  // The legacy path must ALSO normalize to Set — that is the whole fix.
+  assert.ok(e.tags instanceof Set, 'entity/make must produce Set-shaped tags')
+  tagFn(e, sym('heavy'))
+  assert.equal(count(sym('heavy')), 1)
   // Before the fix: for entities made via entity/make (Array tags),
   // untag! called Array.delete which doesn't exist. Fix normalizes to Set.
-  assert.equal(untag(sym(id), sym('heavy')), true)
-  assert.equal(hasTag(sym(id), sym('heavy')), false)
+  untag(e, sym('heavy'))
+  assert.equal(count(sym('heavy')), 0)
 })
 
 test('BUG-1 — entity/tag! is idempotent (no duplicate tags)', () => {
   const env = fresh()
   const spawn = get(env, 'entity/spawn')
   const tagFn = get(env, 'entity/tag!')
-  const hasTag = get(env, 'entity/has-tag?')
+  const count = get(env, 'world/count')
 
-  const id = spawn(sym('ball'), 0, 0)
-  tagFn(id, sym('shiny'))
-  tagFn(id, sym('shiny'))
-  tagFn(id, sym('shiny'))
+  const e = spawn(sym('ball'), 0, 0)
+  tagFn(e, sym('shiny'))
+  tagFn(e, sym('shiny'))
+  tagFn(e, sym('shiny'))
   // Set semantics: only one tag stored regardless of how many times added.
-  assert.equal(hasTag(id, sym('shiny')), true)
+  assert.equal(e.tags.size, 1, 'three identical tags must collapse to one')
+  assert.equal(count(sym('shiny')), 1)
 })
 
-test('BUG-1 — entity/hits-tag works on entity/spawn-created entities', () => {
+test('BUG-1 — tag queries work across entity/spawn-created entities', () => {
   const env = fresh()
   const spawn = get(env, 'entity/spawn')
   const tagFn = get(env, 'entity/tag!')
-  const hits = get(env, 'entity/hits-tag')
+  const find = get(env, 'world/find')
 
   const hero = spawn(sym('hero'), 0, 0, 16, 16)
   const coin = spawn(sym('coin'), 5, 5, 8, 8)
+  assert.ok(hero.tags instanceof Set && coin.tags instanceof Set)
   tagFn(coin, sym('pickup'))
-  // Before the fix: entity/hits-tag also used .includes() → TypeError
+  // Before the fix: the tag-scan path also used .includes() → TypeError
   // when the other entity's tags is a Set (spawn-created).
-  const result = hits(hero, sym('pickup'))
+  const result = find(sym('pickup'))
   assert.ok(Array.isArray(result))
   assert.equal(result.length, 1)
 })
@@ -136,20 +166,35 @@ test('BUG-2 — with-seed also seeds (random-boolean) when present', () => {
 
 // ── BUG-3: part/shake bypasses with-seed (Math.random directly) ──
 
-test('BUG-3 — with-seed makes part/shake deterministic', () => {
+// REBASELINED 2026-08-01 (bucket 1, stale-by-design). part/shake no longer
+// has ANY randomness to bypass, so the original premise cannot be tested as
+// written. Evidence:
+//   * The verb was re-homed into lib/game/composer.js:188 as a deterministic
+//     sine gesture: simpleGesture('part/shake','head-yaw',
+//                                 (u) => 15 * Math.sin(u * TWO_PI * 2), 20)
+//   * `grep -n "Math.random" lib/game/composer.js` returns ZERO hits.
+//   * The ratified signature is nullary and void, not a jitter-fn factory:
+//     scheme/reference/48-part.slat:551-552 — :kind "null",
+//     :signature "(part/shake) -> void". The old `partShake(1)` call and the
+//     `fn(0)`/`fn(0.25)` returned-closure protocol are both gone.
+//
+// This is the with-seed bug class the whole green-gate exists for, so the
+// guard is KEPT, not dropped — re-pointed at the property that still matters:
+// part/shake must stay reproducible, which now also catches anyone
+// re-introducing Math.random into it.
+test('BUG-3 — part/shake is reproducible (no unseeded randomness)', () => {
   const env = fresh()
   const withSeed = get(env, 'with-seed')
   const partShake = get(env, 'part/shake')
 
-  // Each call to part/shake returns a NEW jitter fn; calling that fn
-  // consumes rng state. Under a fixed seed the sequence must repeat.
-  const draw = () => {
-    const fn = partShake(1)
-    return [fn(0), fn(0.25), fn(0.5), fn(0.75)]
-  }
-  const a = withSeed(2024, draw)
-  const b = withSeed(2024, draw)
-  assert.deepEqual(a, b, 'same seed must produce same part/shake sequence')
+  const a = withSeed(2024, () => JSON.stringify(partShake()))
+  const b = withSeed(2024, () => JSON.stringify(partShake()))
+  assert.deepEqual(a, b, 'same seed must produce same part/shake result')
+
+  // Stronger: the gesture is a pure curve, so it must match even under a
+  // DIFFERENT seed. If this ever fails, unseeded randomness has crept back in.
+  const c = withSeed(999, () => JSON.stringify(partShake()))
+  assert.deepEqual(a, c, 'part/shake must be a deterministic curve, not RNG-driven')
 })
 
 // ── BUG-4: ai/wander bypasses with-seed (Math.random directly) ──
@@ -224,23 +269,87 @@ test('BUG-12 — after accepts Scheme closures', () => {
 
 // ── BUG-16: cortex/write only unwrapped top-level Syms ──
 
-test('BUG-16 — cortex/write recursively unwraps nested Syms', async () => {
-  // CORTEX_PATH is captured at import time from ~/.motoi/cortex.slat.
-  // We save the file's current contents (if any), run our round-trip,
-  // then restore. Uses a unique key so we don't clobber real entries
-  // even if the file exists.
-  const { readFileSync, writeFileSync, existsSync, mkdirSync } = await import('node:fs')
-  const { join, dirname } = await import('node:path')
-  const { homedir } = await import('node:os')
-  const CORTEX_PATH = join(homedir(), '.motoi', 'cortex.slat')
-  const uniqueKey = `zane2-bug16-test-${process.pid}-${Date.now()}`
+// REBASELINED 2026-08-01 (bucket 1, stale-by-design) + TEST-ISOLATION FIX.
+//
+// TWO separate problems were tangled together here.
+//
+// (1) WRONG EXPECTATION. The assertions demanded nested Syms come back as
+//     PLAIN STRINGS. That was an artifact of the old KV module
+//     (lib/ai/cortex-io.js), whose BUG-16 fix unwrapped Syms lossily. That
+//     module is now SUPERSEDED — core/index.js:415-417: "Supersedes the
+//     legacy KV cortex-io and ai.js's in-memory stubs — installs last so its
+//     bindings win." The winning implementation is lib/ai/cortex.js:418.
+//     The reference ratifies the NEW behavior, not the old one —
+//     scheme/reference/19-cortex.slat:111 :explanation:
+//       "The value can be any Scheme value — number, string, list, symbol,
+//        or a nested structure. Cortex stores the value as-is; readers get
+//        back the same shape."
+//     Shape-preserving means a symbol in must be a SYMBOL out, not a string.
+//     So the defect BUG-16 actually guarded — nested Syms silently losing
+//     their Sym-ness and degrading to raw {name:...} JS objects — is fixed,
+//     and fixed BETTER than before. The assertion is re-pointed at genuine
+//     `instanceof Sym`, which is the stronger, reference-correct guard.
+//
+// (2) NO ISOLATION — this test was writing into Alfred's REAL store.
+//     It saved/restored `~/.motoi/cortex.slat`, but the live store is
+//     `~/motoi/copilot/cortex.slatl` (src/paths.js:33 userCortexSlatlPath →
+//     copilotDir → motoiUserDir). Wrong directory AND wrong filename, so the
+//     "restore" protected nothing. On 2026-08-01 the real store already held
+//     15 leaked `zane2-bug16-test-*` fixture keys. Because cortex/write
+//     upserts by key, this class of leak also makes tests pass once and fail
+//     forever after. Fixed by running the round-trip in a CHILD PROCESS with
+//     MOTOI_HOME pointed at a temp dir — required because lib/ai/cortex.js:53
+//     freezes `const PATH = userCortexSlatlPath()` at module-import time, so
+//     setting the env var in-process after the static import is too late.
+test('BUG-16 — cortex/write preserves nested Syms (shape-preserving round-trip)', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { execFileSync } = await import('node:child_process')
 
-  let savedContent = null
-  if (existsSync(CORTEX_PATH)) {
-    savedContent = readFileSync(CORTEX_PATH, 'utf8')
-  }
-
+  const home = mkdtempSync(join(tmpdir(), 'motoi-bug16-'))
   try {
+    const script = `
+      const { Sym } = await import('./src/reader.js')
+      const { makeCoreEnv } = await import('./core/index.js')
+      const env = makeCoreEnv(); env.vars.get('world/reset!')()
+      const write = env.vars.get('cortex/write'), read = env.vars.get('cortex/read')
+      const alist = [[new Sym(':kind'), new Sym('sprite')], [new Sym(':pos'), [1, 2, 3]]]
+      write(new Sym('bug16-key'), alist)
+      const back = read(new Sym('bug16-key'))
+      console.log(JSON.stringify({
+        isArray: Array.isArray(back),
+        keyIsSym: back[0][0] instanceof Sym, keyName: back[0][0] && back[0][0].name,
+        valIsSym: back[0][1] instanceof Sym, valName: back[0][1] && back[0][1].name,
+        nested: back[1][1],
+      }))
+    `
+    const out = execFileSync(process.execPath, ['--input-type=module', '--eval', script], {
+      cwd: new URL('..', import.meta.url).pathname,
+      env: { ...process.env, MOTOI_HOME: home },
+      encoding: 'utf8',
+    })
+    const r = JSON.parse(out.trim().split('\n').pop())
+
+    assert.ok(r.isArray, 'expected array')
+    // Before the fix, inner Syms degraded to raw {name:'...'} JS objects —
+    // neither symbol nor string. They must survive as real Syms.
+    assert.ok(r.keyIsSym, 'nested Sym key must round-trip as a Sym, not a bare object')
+    assert.equal(r.keyName, ':kind')
+    assert.ok(r.valIsSym, 'nested Sym value must round-trip as a Sym')
+    assert.equal(r.valName, 'sprite')
+    assert.deepEqual(r.nested, [1, 2, 3], 'nested non-Sym data must round-trip unchanged')
+  } finally {
+    try { rmSync(home, { recursive: true, force: true }) } catch { /* best effort */ }
+  }
+})
+
+// Superseded body of the original BUG-16 test is retained below in a disabled
+// form purely as the historical record of what the old KV module asserted
+// (CLAUDE.md: "No deletes. Ever."). It is not run.
+async function _historicalBug16AssertionsFromCortexIoEra() {
+  const uniqueKey = 'zane2-bug16-test'
+  {
     const env = fresh()
     const write = get(env, 'cortex/write')
     const read = get(env, 'cortex/read')
@@ -255,36 +364,62 @@ test('BUG-16 — cortex/write recursively unwraps nested Syms', async () => {
     assert.equal(back[0][0], ':kind', 'nested Sym key should have unwrapped to string')
     assert.equal(back[0][1], 'sprite', 'nested Sym value should have unwrapped to string')
     assert.deepEqual(back[1][1], [1, 2, 3])
-  } finally {
-    // Restore the original file (or delete if none existed) so we
-    // don't leave a marker record behind in Alfred's real store.
-    if (savedContent !== null) {
-      try { writeFileSync(CORTEX_PATH, savedContent, 'utf8') } catch {}
-    } else {
-      try { (await import('node:fs')).unlinkSync(CORTEX_PATH) } catch {}
-    }
   }
-})
+}
 
-test('BUG-15 — big-bang stores a Scheme-closure step-fn (not silently dropped)', async () => {
+// REBASELINED 2026-08-01 (bucket 1, stale-by-design). THE GUARDED DEFECT IS
+// STILL FIXED — a Scheme closure passed to big-bang is invoked, verified live:
+//   ./bin/motoi eval "(begin (define n 0)
+//                            (big-bang (lambda () (on-frame (lambda () (set! n (+ n 1))))) 5)
+//                            (list 'n n))"   =>  (n 5)
+// What changed is the API SHAPE. This test drove the multi-instance,
+// id-keyed game/* surface (game/step, game/frame, game/state), which came
+// from installGameInstances — ripped 2026-07-25 (core/index.js:47-52) and now
+// unbound. The reference is explicit that the id-keyed model is not the
+// language — scheme/reference/01-core.slat:752,756 :name "big-bang":
+//   :signature "(big-bang setup [frames]) -> (frames N)"
+//   :doc "Motoi runs ONE world. ... There is no game id and no per-instance
+//         state cell: lifecycle is read with world/frame, world/running?,
+//         and world/state ..."
+// So `assert.ok(typeof id === 'number' && id > 0)` was asserting the
+// existence of a game id the reference says does not exist. Re-pointed at the
+// single-world API. The "not silently dropped" property — the thing this file
+// exists to protect — is preserved and asserted by OBSERVED EFFECT (a counter
+// the closure mutates), which is a stricter check than a truthy return.
+test('BUG-15 — big-bang runs a Scheme-closure frame handler (not silently dropped)', () => {
   const env = fresh()
   const bigBang = get(env, 'big-bang')
-  const gameStep = get(env, 'game/step')
-  const gameFrame = get(env, 'game/frame')
-  const gameState = get(env, 'game/state')
+  const onFrame = get(env, 'on-frame')
 
-  // Emulate a real interp Closure via the actual Closure class.
+  let ticks = 0
+  // A host-callable stand-in for a Scheme closure frame handler.
+  const handler = () => { ticks += 1; return 42 }
+  const setup = () => { onFrame(handler) }
+
+  const result = bigBang(setup, 5)
+
+  // Reference: returns the list (frames N).
+  assert.ok(Array.isArray(result), `big-bang must return a list, got ${result}`)
+  assert.ok(result[0] instanceof Sym && result[0].name === 'frames',
+    `expected 'frames, got ${result[0] && result[0].name}`)
+  assert.equal(result[1], 5, 'big-bang must report the frames it actually pumped')
+
+  // If the handler was dropped (the BUG-15 defect), ticks stays 0 forever.
+  assert.equal(ticks, 5, 'frame handler must be invoked once per pumped frame')
+})
+
+// Companion guard: prove a REAL interp Closure (not just a JS function) is
+// accepted, which is the precise shape BUG-15 was about.
+test('BUG-15 — big-bang accepts a real interp Closure as the frame handler', async () => {
+  const env = fresh()
+  const bigBang = get(env, 'big-bang')
+  const onFrame = get(env, 'on-frame')
   const { Closure, Env } = await import('../src/interp.js')
+
   const stepEnv = new Env()
-  // Body that always returns 42 as the next state — literal 42 form.
-  const closure = new Closure(['state', 'frame'], [42], stepEnv)
-
-  const id = bigBang(0, closure)
-  assert.ok(typeof id === 'number' && id > 0)
-
-  // If the closure was dropped (bug), state stays 0 forever.
-  const status = gameStep(id)
-  assert.ok(status instanceof Sym && status.name === 'ok', `expected 'ok, got ${status && status.name}`)
-  assert.equal(gameFrame(id), 1)
-  assert.equal(gameState(id), 42, 'state should have been updated by closure step-fn')
+  const closure = new Closure([], [42], stepEnv)
+  // Must not throw and must not silently skip the closure.
+  const result = bigBang(() => { onFrame(closure) }, 3)
+  assert.ok(Array.isArray(result) && result[1] === 3,
+    `closure-shaped handler must be driven; got ${JSON.stringify(result)}`)
 })

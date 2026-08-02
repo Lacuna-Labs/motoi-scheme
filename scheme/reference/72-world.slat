@@ -1,6 +1,6 @@
 ;;; 72-world.slat — Motoi Scheme Reference · Chapter 72 · library world
 ;;;
-;;; 43 verbs in this library. Read chapter 00-intro.slat first.
+;;; 52 verbs in this library. Read chapter 00-intro.slat first.
 
 ;;;
 ;;; ─── THE ROW RULES (summary — full doctrine in 00-intro.slat) ───
@@ -25,11 +25,11 @@
 ;;; Before folding, run: python3 scripts/compliance-check-runnable.py
 ;;;
 
-(dialect :applies ("motoi") :note "Library world — 43 verbs.")
+(dialect :applies ("motoi") :note "Library world — 52 verbs (44 world/* + the 8-verb physics/* vocabulary over the same integrator).")
 
-(chapter :number "72" :library "world" :verb-count 43 :training-eligible #t)
+(chapter :number "72" :library "world" :verb-count 52 :training-eligible #t)
 
-;; ═══ 43 verbs in library world ═══
+;; ═══ 44 verbs in library world ═══
 
 (verb
   :name "world/after" :std "Motoi"
@@ -1521,12 +1521,12 @@
     (:base "world/spawn creates a fresh entity in the registry."
      :eng-composition "(define (wave n kind x y)\n  (let loop ((i 0))\n    (when (< i n)\n      (world/spawn kind (+ x (* i 30)) y)\n      (loop (+ i 1)))))\n(wave 10 'orc 100 100)"
      :math-composition "(define (grid-population w h dx dy kind)\n  ;; Cartesian product spawn: |w|·|h| entities on a lattice.\n  (let loop-x ((x 0))\n    (when (< x w)\n      (let loop-y ((y 0))\n        (when (< y h)\n          (world/spawn kind (* x dx) (* y dy))\n          (loop-y (+ y 1))))\n      (loop-x (+ x 1)))))\n(grid-population 5 3 40 40 'block)"
-     :cs-composition "(define (spawn-with-budget kind x y)\n  ;; Respect the animation budget — degrade gracefully under load.\n  (if (> (cadr (animation/budget)) 0)\n      (world/spawn kind x y)\n      'budget-exhausted))\n(spawn-with-budget 'particle 0 0)"
-     :emergent "A spawn-wave + grid-population + budgeted-spawn triad: linear cohort, Cartesian lattice, and back-pressure-aware factory. Emergent: level population with degradation."
+     :cs-composition "(define (spawn-when-idle kind x y limit)\n  ;; Back-pressure: only spawn while the live tween set is below a cap.\n  (if (< (length (animation/tweens)) limit)\n      (world/spawn kind x y)\n      'too-busy))\n(spawn-when-idle 'particle 0 0 8)"
+     :emergent "A spawn-wave + grid-population + idle-gated-spawn triad: linear cohort, Cartesian lattice, and back-pressure-aware factory. Emergent: level population that yields when motion is saturated."
      :meta "Population-generator family; standard level population. Book-of-composition ch 10 (cohort ops) grounds.")
     (:eng "SRE: population functions are audit-friendly; grep for spawn sites."
      :math "Family of spawns parameterized by index; grid-populate = 2D unfold."
-     :cs "Loop of spawns; budget-aware variant is back-pressure-safe."))
+     :cs "Loop of spawns; idle-gated variant reads the live tween count for back-pressure."))
 )
 
 (verb
@@ -2494,3 +2494,661 @@
      :cs "assq field selection; status read across stop/start."))
 )
 
+
+(verb
+  :name "world/camera-pan-to" :std "Motoi"
+  :library "world"
+  :kind "mut"
+  :signature "(world/camera-pan-to x y) -> void"
+  :summary "Pan the world camera so it centers on world coordinates (x, y). A side-effecting move that returns nothing."
+  :impl-status "wired"
+  :impl-file "src/wired-verbs.js"
+  :impl-notes "Sets the world camera target to (x, y); the current position is readable with (world/camera). The verb is a mutation and returns void — wrap it in a begin that yields a checkable value when you need a result to assert. Square brackets don't parse in this dialect — use parens."
+  :explanation "The world camera is the window through which the framebuffer shows the world. world/camera-pan-to moves that window so its focus lands on the given world coordinates. It is the imperative camera-move verb: hand it an x and a y in world space and the camera goes there. Because it exists only for its effect on the camera, it returns nothing; read the camera back with world/camera to observe the result."
+  :examples (
+    (:dialect "motoi" :tier "novice"       :code "(begin (world/camera-pan-to 10 20) 'panned)" :note "Pan to (10,20). The verb returns void, so begin yields a checkable 'panned.")
+    (:dialect "motoi" :tier "apprentice"   :code "(begin (world/camera-pan-to 0 0) (world/camera))" :note "Pan to the origin, then read the camera back. Returns (0 0).")
+    (:dialect "motoi" :tier "intermediate" :code "(begin (world/camera-pan-to 5 5) (world/camera-pan-to 0 0) (world/camera))" :note "Last pan wins — the camera reflects the most recent target. Returns (0 0).")
+    (:dialect "motoi" :tier "expert"       :code "(define (pan-and-report x y)\n  (world/camera-pan-to x y)\n  (list 'camera-at x y))\n(pan-and-report 0 0)" :note "Wrap the void mutation in a helper that returns a descriptive record. Returns (camera-at 0 0).")
+    (:dialect "motoi" :tier "master"       :code "(define (tour waypoints)\n  (for-each (lambda (p) (world/camera-pan-to (car p) (cadr p))) waypoints)\n  (world/camera))\n(tour '((5 5) (9 3) (0 0)))" :note "Drive the camera through a list of waypoints; the final one is where it rests. Returns (0 0).")
+  )
+  :caveats ("Returns void — do not use its result directly; wrap in begin or a helper that returns a value." "Successive calls do not accumulate; each sets an absolute target, so the last call wins." "Coordinates are in world space, not screen pixels; the framebuffer maps world to screen.")
+  :drawbacks ("An instantaneous snap — there is no built-in tweened pan; ease it yourself with motion verbs if you want smooth travel." "No bounds clamping here; panning past the world edge is the caller's concern." "It moves the camera but does not follow a moving target; re-pan each frame to track.")
+  :usecases ("Snapping the camera to a point of interest at a scene start." "Cutting between fixed vantage points in a sequence." "Recentering on the player or an event location on demand.")
+  :related ("world/camera" "world/camera-snap!" "world/camera-follow!" "world/start" "world/state" "motion/move-to")
+  :learn (:concept "An imperative absolute camera move: set the camera's focus to given world coordinates, observed via world/camera." :prerequisites ("world/camera") :progression "After world/camera-pan-to, read back with world/camera and combine with motion verbs to ease pans smoothly.")
+  :row-2-audit (
+    (:problem "A new scene begins and the camera is still parked on the previous location. The operator needs to recenter it on the scene's focal point, then confirm the camera actually moved."
+     :program "(begin (world/camera-pan-to 0 0) (world/camera))"
+     :eng-program "(define (recenter x y)\n  ;; Snap the camera, then hand back the observed position for logging.\n  (world/camera-pan-to x y)\n  (world/camera))\n(recenter 0 0)"
+     :math-program "(define (idempotent-pan? x y)\n  (world/camera-pan-to x y)\n  (let ((a (world/camera)))\n    (world/camera-pan-to x y)\n    (equal? a (world/camera))))\n(idempotent-pan? 0 0)"
+     :cs-program "(define (returns-void? )\n  ;; The mutation yields no useful value; we wrap it to get one.\n  (eq? 'ok (begin (world/camera-pan-to 0 0) 'ok)))\n(returns-void?)"
+     :explanation "eng: recenter and report the observed camera. math: panning to the same target twice is idempotent. cs: the call returns void, so a begin supplies a checkable value."
+     :meta "Reach for world/camera-pan-to and NOT world/camera when the intent is to MOVE the camera; world/camera only reads its position.")
+    (:eng "Recenter at scene boundaries, then observe to confirm." :math "An absolute set is idempotent under repetition." :cs "Void return demands a begin-wrapper to test."))
+  :row-3-dimension (
+    (:setup "An absolute set of a viewpoint's target, observed by a separate reader."
+     :rungs (
+       (:domain "world / camera" :code "(begin (world/camera-pan-to 0 0) (world/camera))")
+       (:domain "navigation"     :code "(begin (world/camera-pan-to 5 5) (world/camera-pan-to 0 0) (world/camera))")
+       (:domain "state machines" :code "(begin (world/camera-pan-to 0 0) (world/camera-pan-to 0 0) (world/camera))"))
+     :explanation "Rung 1: set-then-observe. Rung 2: a two-step route where the last target wins. Rung 3: repeating the same target is a no-op on the resulting position."
+     :meta "Shape transfers to any absolute-goto over a positioned resource with a separate reader.")
+    (:eng "Every hard-cut vantage change is one absolute pan." :math "Assignment to a coordinate, last-write-wins." :cs "Command/query separation: pan mutates, camera reads."))
+  :row-4-proof (
+    (:claim "After (world/camera-pan-to x y), the camera reports (x y); repeating the same target is idempotent."
+     :program "(begin (world/camera-pan-to 0 0) (equal? '(0 0) (world/camera)))"
+     :eng-program "(define (lands-at? x y)\n  ;; A camera cut must end exactly on the requested focus.\n  (world/camera-pan-to x y)\n  (equal? (list x y) (world/camera)))\n(lands-at? 0 0)"
+     :math-program "(define (last-write-wins ax ay bx by)\n  (world/camera-pan-to ax ay)\n  (world/camera-pan-to bx by)\n  (equal? (list bx by) (world/camera)))\n(last-write-wins 5 5 0 0)"
+     :cs-program "(define (idempotent x y)\n  (world/camera-pan-to x y)\n  (let ((once (world/camera)))\n    (world/camera-pan-to x y)\n    (equal? once (world/camera))))\n(idempotent 0 0)"
+     :invariant "∀ x y. pan(x,y); camera() = (x,y)  ∧  pan(a); pan(b); camera() = target(b)"
+     :meta "Pattern: absolute assignment with a query to confirm. Falsifier: a camera reading that differs from the last pan target. Positions here are the exact integers passed in.")
+    (:eng "The cut lands precisely on the requested focus." :math "The reader is a left inverse of the absolute set." :cs "Idempotent goto; last write determines the state."))
+  :row-5-emergence (
+    (:base "world/camera-pan-to sets the camera's focus to (x,y)."
+     :composition "(define (pan-and-read x y)\n  (world/camera-pan-to x y)\n  (world/camera))\n(pan-and-read 0 0)"
+     :eng-composition "(define (tour waypoints)\n  ;; Cut the camera through a route; it rests on the last stop.\n  (for-each (lambda (p) (world/camera-pan-to (car p) (cadr p))) waypoints)\n  (world/camera))\n(tour '((5 5) (9 9) (0 0)))"
+     :math-composition "(define (fold-to-last ps)\n  ;; Folding a list of pans collapses to the final target.\n  (fold (lambda (p _) (world/camera-pan-to (car p) (cadr p))) 'ignored ps)\n  (world/camera))\n(fold-to-last '((2 2) (0 0)))"
+     :cs-composition "(define (with-restored-camera x y thunk)\n  (let ((saved (world/camera)))\n    (world/camera-pan-to x y)\n    (let ((r (thunk)))\n      (world/camera-pan-to (car saved) (cadr saved))\n      r)))\n(with-restored-camera 5 5 (lambda () (world/camera)))"
+     :emergent "A camera tour emerges from repeated pans: the camera visits each waypoint and rests on the last. eng: for-each over a route. math: folding the route collapses to the final target. cs: save the camera, pan, run, restore — a scoped viewpoint."
+     :meta "Family: goto-sequence / scoped-viewpoint — the shape of a save/restore around a temporary camera move or a scripted camera path."
+     )
+    (:eng "Scripted camera paths are just sequenced pans." :math "A sequence of absolute sets is determined by its last element." :cs "Save/restore makes a temporary camera move reversible.")))
+
+
+;; ═══ the physics/* vocabulary — 8 verbs ═══
+;;
+;; physics/* is the kid-facing NAME for the world/* integrator, not a
+;; second physics. physics/step delegates to world/step; physics/gravity!
+;; is the scalar form of world/gravity!. They live in this chapter
+;; because lib/game/world.js is what provides them and world/step is what
+;; runs them; chapter 50 (library phys) is symbolic physics — quantities,
+;; dimensions, Lagrangians — and is a different subject entirely.
+;;
+;; Ripped 2026-07-25 with installGame, re-wired 2026-08-02 over the one
+;; live entity store. See tests/text-easing-motion.test.mjs for the gate
+;; that keeps binding and documentation in step.
+
+(verb
+  :name "physics/step" :std "Motoi"
+  :library "world"
+  :kind "mut"
+  :dialect "motoi"
+  :audience "kid"
+  :doc "Runs one fixed timestep of the single Motoi world: apply gravity and friction to every dynamic body, integrate velocity into position, clamp to the floor, resolve solid overlaps, record the collision pairs, fire the on-collision handler once per pair, fire any motion/on-settle callbacks that just came to rest, run the world/after schedule, move the camera, and record a tape frame. Increments world/frame by one. physics/step and world/step are the same call under two names, so mixing them cannot desynchronise a game."
+  :section "72-world · the physics/* vocabulary"
+  :signature "(physics/step) -> void"
+  :arity "0"
+  :contract "no args -> advances the one world by exactly one fixed frame; returns nothing"
+  :status "landed"
+  :status-note "Bound in lib/game/world.js over the one live entity store on 2026-08-02. The name was implemented in lib/game/game.js against a second, id-keyed store and went unbound when that installer was dropped from installCore in the 2026-07-25 Curator rip; Alfred ruled the physics should work, so it was re-wired over the live world rather than by re-installing the dead duplicate store."
+  :since "2026-08-02"
+  :provenance "motoi-scheme/lib/game/world.js"
+  :training-eligible #t
+  :confidentiality "public"
+  :summary "Advance the world one frame — the kid-facing name for world/step."
+  :explanation "physics/step is the heartbeat. Nothing in the world moves on its own; time only passes when you step it. One step is one fixed frame — there is no delta-time argument and no fractional step, which is what makes a Motoi replay reproducible. The order inside a step matters and is fixed: gravity and friction change velocity, velocity changes position, then collisions are found and reported. That ordering is why a body pushed with physics/apply-force in one frame does not move until the next step, and why an on-collision handler always sees positions that have already been integrated. physics/step delegates to world/step: same integrator, same frame counter, same world. Reach for physics/step when the surrounding code speaks the physics/* vocabulary, and world/step when it speaks world/*."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(begin (world/reset!)\n  (define hero (entity/make 'player 0 0))\n  (physics/gravity! 1)\n  (physics/step)\n  (entity/y hero))" :note "One step under gravity 1: the hero picks up 1 of downward speed and moves 1 down.")
+    (:dialect "motoi" :tier "intermediate" :code "(begin (world/reset!)\n  (define hero (entity/make 'player 0 0))\n  (physics/gravity! 1)\n  (physics/step) (physics/step) (physics/step)\n  (list ':y (entity/y hero) ':frame (world/frame)))" :note "Three steps at gravity 1 — the falling-body sum 1+2+3 = 6, and the frame counter reads 3.")
+    (:dialect "motoi" :tier "expert" :code "(begin (world/reset!)\n  (define hero (entity/make 'player 0 0))\n  (define landed #f)\n  (physics/gravity! 2)\n  (world/floor! 40)\n  (on-collision (lambda (a b) 'touched))\n  (let loop ((i 0))\n    (when (< i 30)\n      (physics/step)\n      (when (and (not landed) (= (entity/y hero) 24)) (set! landed #t))\n      (loop (+ i 1))))\n  (list ':landed landed ':y (entity/y hero)))" :note "A floor at y = 40 catches a 16-tall body at y = 24 and holds it; on-collision is installed and the loop keeps stepping.")
+  )
+  :caveats ("Time only passes when you step. A world with a handler installed and no step never fires anything." "The timestep is fixed at one frame; there is no delta-time argument, and no way to take half a step." "Velocity is applied before collisions are found, so a fast body can pass through a thin one in a single frame." "Only dynamic bodies integrate. A body made with a kind other than 'player starts static — push it once (physics/apply-force, entity/move, entity/set-velocity!) to wake it." "Do not call physics/step from inside an on-collision or motion/on-settle handler; the frame is already mid-flight.")
+  :drawbacks ("Collision detection is O(n squared) in the live entity count — every pair is tested every frame." "There is no interpolation between frames, so rendering at a different rate than stepping will judder." "One step does everything; you cannot ask for integration without collision reporting, or vice versa.")
+  :usecases ("The body of a game loop." "Advancing a physics puzzle one frame at a time to inspect it." "Driving a deterministic replay from a recorded tape." "Settling a pile of bodies before a level starts.")
+  :related ("world/step" "physics/gravity!" "physics/friction!" "on-collision" "world/frame" "motion/on-settle")
+  :learn (:concept "Discrete time: the world is frozen until you step it, and one step is one whole frame of physics." :prerequisites ("entity/make" "physics/gravity!") :progression "Step by hand until the ordering inside a frame is obvious, then install on-collision and let the step report for you.")
+  :row-2-audit (
+    (:problem "A game has bodies, gravity and a handler installed, and nothing is happening. Nothing in Motoi moves on its own — the operator needs the one call that makes time pass, and needs it to be the same call the rest of the engine counts."
+     :eng-program "(begin (world/reset!)\n  (define (advance-frames n)\n    (let loop ((i 0)) (when (< i n) (physics/step) (loop (+ i 1))))\n    (world/frame))\n  (advance-frames 5))"
+     :math-program "(begin (world/reset!)\n  ;; Semi-implicit Euler under constant acceleration g:\n  ;; v(n) = n*g and y(n) = g*n*(n+1)/2. Three steps at g=2 give y = 12.\n  (define hero (entity/make 'player 0 0))\n  (physics/gravity! 2)\n  (physics/step) (physics/step) (physics/step)\n  (list ':y (entity/y hero) ':closed-form (/ (* 2 3 4) 2)))"
+     :cs-program "(begin (world/reset!)\n  ;; physics/step is a delegating alias: one call advances the same counter\n  ;; world/step advances. Mixing the two names cannot desynchronise a game.\n  (physics/step)\n  (world/step)\n  (= (world/frame) 2))"
+     :explanation "eng: a helper that advances n frames and reports the counter. math: the closed form of a falling body, checked against the integrator. cs: physics/step and world/step share one counter, so mixing names is safe."
+     :meta "Reach for physics/step over hand-rolling per-entity Euler: the step also does collisions, settle callbacks, the world/after schedule and the camera, in a fixed order.")
+    (:eng "One call owns the whole frame budget; profile it, do not split it."
+     :math "A fixed timestep makes the trajectory a discrete orbit with a closed form."
+     :cs "An alias, not a fork: one counter, one integrator, two names."))
+  :row-3-dimension (
+    (:setup "Advance a system by exactly one discrete unit of time."
+     :rungs (
+       (:domain "world" :code "(begin (world/reset!) (physics/step) (world/frame))")
+       (:domain "clock" :code "(begin\n  (define (tick clock) (+ clock 1))\n  (tick (tick 0)))")
+       (:domain "numeric" :code "(begin\n  ;; Euler integration of dy/dt = 1 by repeated single steps.\n  (define (euler y v n) (if (= n 0) y (euler (+ y v) v (- n 1))))\n  (euler 0 1 3))")
+     )
+     :explanation "Rung 1 steps the world. Rung 2 steps a bare counter. Rung 3 steps an Euler integration by hand. All three are the same move: apply the transition once, do not ask for half."
+     :meta "The shape is single-step advance; it is what makes a simulation inspectable at all.")
+    (:eng "Frame, tick and iteration are the same budget unit under three names."
+     :math "Iterating a map one application at a time; the trajectory is its orbit."
+     :cs "A discrete transition function applied exactly once."))
+  :row-4-proof (
+    (:claim "One step is exactly one frame, the fall obeys the closed form, and the whole thing is deterministic from a fresh world."
+     :eng-program "(begin (world/reset!)\n  (define f0 (world/frame))\n  (physics/step)\n  (= (world/frame) (+ f0 1)))"
+     :math-program "(begin (world/reset!)\n  ;; Falling-body law: after n steps at acceleration g, y = g*n*(n+1)/2.\n  (define hero (entity/make 'player 0 0))\n  (physics/gravity! 1)\n  (let loop ((i 0)) (when (< i 4) (physics/step) (loop (+ i 1))))\n  (= (entity/y hero) (/ (* 1 4 5) 2)))"
+     :cs-program "(begin (world/reset!)\n  ;; Determinism: the same script from a fresh world gives the same hash.\n  (define (run-once)\n    (world/reset!)\n    (entity/make 'player 0 0)\n    (physics/gravity! 3)\n    (physics/step) (physics/step)\n    (world/hash))\n  (= (run-once) (run-once)))"
+     :invariant "frame(step(w)) = frame(w) + 1 AND y(n) = g*n*(n+1)/2 under constant g from rest AND hash(script) = hash(script) from world/reset!"
+     :meta "Increment, closed form and determinism are the three things a stepper must not get wrong. Falsified by a skipped frame, a fall that does not match the sum, or two runs that disagree.")
+    (:eng "Regression: the counter is trustworthy and replays reproduce."
+     :math "Semi-implicit Euler under constant acceleration sums to the triangular number times g."
+     :cs "Same input, same output — the precondition for tape replay."))
+  :row-5-emergence (
+    (:base "physics/step advances one whole frame of the one world."
+     :eng-composition "(begin (world/reset!)\n  (define hits 0)\n  (entity/make 'player 0 0)\n  (entity/make 'coin 4 0)\n  (on-collision (lambda (a b) (set! hits (+ hits 1))))\n  (physics/step)\n  (list ':frame (world/frame) ':hits hits))"
+     :math-composition "(begin (world/reset!)\n  ;; Step until a predicate holds: the trajectory is the orbit of the step map.\n  (define hero (entity/make 'player 0 0))\n  (physics/gravity! 1)\n  (define (step-until pred)\n    (let loop ((n 0))\n      (if (or (pred) (> n 100)) n (begin (physics/step) (loop (+ n 1))))))\n  (step-until (lambda () (>= (entity/y hero) 10))))"
+     :cs-composition "(begin (world/reset!)\n  ;; Bounded stepping: a frame budget keeps a replay finite.\n  (define (step-with-budget n)\n    (let ((start (world/frame)))\n      (let loop ()\n        (when (< (- (world/frame) start) n) (physics/step) (loop)))\n      (- (world/frame) start)))\n  (step-with-budget 8))"
+     :emergent "A frame-advancing driver, a step-until-predicate probe and a budgeted replay: the step composes with a counter for bounded runs, with a predicate for convergence, and with on-collision for event-driven rules. Emergent: every loop discipline a game needs, from one primitive."
+     :meta "The game-loop family. Same shape as any fixed-cadence simulation driver.")
+    (:eng "Step plus a handler is a whole game rule; step plus a counter is a whole replay."
+     :math "Stepping until a predicate holds computes a hitting time of the trajectory."
+     :cs "A budget on the loop is what keeps a replay finite."))
+)
+
+(verb
+  :name "physics/gravity!" :std "Motoi"
+  :library "world"
+  :kind "mut"
+  :dialect "motoi"
+  :audience "kid"
+  :doc "Sets the world gravity to the vector (0, g): straight down when g is positive, straight up when g is negative, off when g is zero. This is the scalar form of world/gravity!, which takes both components; physics/gravity! pins the horizontal component at zero because down is the only direction a learner means by gravity. The field is one cell, not an accumulator — the last write wins. A fresh world (world/reset!) has gravity 0."
+  :section "72-world · the physics/* vocabulary"
+  :signature "(physics/gravity! g) -> void"
+  :arity "1"
+  :contract "g is a number -> the world field becomes (0, g); a non-number reads as 0"
+  :status "landed"
+  :status-note "Bound in lib/game/world.js over the one live entity store on 2026-08-02. The name was implemented in lib/game/game.js against a second, id-keyed store and went unbound when that installer was dropped from installCore in the 2026-07-25 Curator rip; Alfred ruled the physics should work, so it was re-wired over the live world rather than by re-installing the dead duplicate store."
+  :since "2026-08-02"
+  :provenance "motoi-scheme/lib/game/world.js"
+  :training-eligible #t
+  :confidentiality "public"
+  :summary "Set how hard the world pulls down, as one number."
+  :explanation "Gravity in Motoi is not a property of an entity; it is a property of the world, applied to every dynamic body at the top of every physics/step. One number sets it, and that number is added to each dynamic body's vertical velocity once per frame. Positive is down, because screen y grows downward. Negative flips it, which is how you get a bubble world. Zero switches it off, which is how you get space. Per-body variation goes through entity/gravity-scale! (a multiplier on this field) or physics/apply-gravity (a one-off pull); the field itself is global. Writing gravity does not move anything — it changes what the next step will do."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(begin (world/reset!) (physics/gravity! 1) (physics/gravity))" :note "Set the field to 1 and read it back.")
+    (:dialect "motoi" :tier "intermediate" :code "(begin (world/reset!)\n  (define hero (entity/make 'player 0 0))\n  (physics/gravity! 3)\n  (physics/step)\n  (entity/y hero))" :note "Gravity 3, one step: the hero gains 3 of downward speed and moves 3 down.")
+    (:dialect "motoi" :tier "expert" :code "(begin (world/reset!)\n  (define hero (entity/make 'player 0 0))\n  (physics/gravity! 1)\n  (physics/step) (physics/step)\n  (define fast (entity/y hero))\n  (physics/gravity! -1)\n  (physics/step) (physics/step)\n  (list ':down fast ':after-flip (entity/y hero)))" :note "Flip the field mid-flight. The body keeps the speed it already had, so it coasts up to 4 and stalls rather than snapping back.")
+  )
+  :caveats ("Positive g is DOWN. Screen y grows downward, so a negative g makes things rise." "A fresh world has gravity 0 — world/reset! clears the field along with everything else." "Only dynamic bodies feel it. A body that has never been pushed is static and ignores the field entirely." "It is a set, not an add. Calling it twice does not double the pull." "A non-numeric argument becomes 0 rather than raising; check the read-back if the value came from user input.")
+  :drawbacks ("The horizontal component is unreachable through this name — use world/gravity! for a sideways field." "There is no per-region gravity; the field is the whole world's. Use entity/gravity-scale! for per-body variation." "Nothing records what the field was, so a stunt that changes it must save and restore by hand.")
+  :usecases ("Give a platformer its weight in one line." "Switch a level to low gravity for a moon or underwater section." "Turn gravity off for a top-down or space game." "Flip gravity as a puzzle mechanic.")
+  :related ("world/gravity!" "physics/gravity" "physics/apply-gravity" "entity/gravity-scale!" "physics/step")
+  :learn (:concept "A constant force field belongs to the world, not to any one thing in it." :prerequisites ("entity/make" "physics/step") :progression "Set the field and step; then vary it per body with entity/gravity-scale!, and pull one body by hand with physics/apply-gravity.")
+  :row-2-audit (
+    (:problem "A platformer feels weightless. The operator wants one dial for the whole level's heaviness, and wants a name an eleven-year-old can read — (physics/gravity! 1) rather than (world/gravity! 0 1) with a silent zero to explain."
+     :eng-program "(begin (world/reset!)\n  (define (moon-gravity!) (physics/gravity! 0.17))\n  (moon-gravity!)\n  (physics/gravity))"
+     :math-program "(begin (world/reset!)\n  ;; physics/gravity! g is the scalar form of the vector world/gravity! 0 g:\n  ;; it pins the x component at zero, so the field is (0, g).\n  (physics/gravity! 4)\n  (define hero (entity/make 'player 0 0))\n  (physics/step)\n  (list ':dx (entity/x hero) ':dy (entity/y hero)))"
+     :cs-program "(begin (world/reset!)\n  ;; Last write wins: gravity is one cell, not an accumulator.\n  (physics/gravity! 2)\n  (physics/gravity! 9)\n  (physics/gravity))"
+     :explanation "eng: a named preset for a low-gravity level. math: the scalar setter pins x at zero, so the field is (0, g) and only y moves. cs: one cell, last write wins."
+     :meta "Reach for physics/gravity! when the field is vertical, which it almost always is; drop to world/gravity! only when you genuinely need a sideways component.")
+    (:eng "One dial per level; presets read better than magic numbers."
+     :math "The scalar form is the vector form restricted to the y axis."
+     :cs "A single mutable cell: idempotent, last-write-wins, no accumulation."))
+  :row-3-dimension (
+    (:setup "Write one ambient value that everything downstream reads."
+     :rungs (
+       (:domain "world" :code "(begin (world/reset!) (physics/gravity! 2) (physics/gravity))")
+       (:domain "settings" :code "(begin\n  (define (set-volume! box v) (list 'volume v))\n  (set-volume! 'radio 7))")
+       (:domain "field" :code "(begin\n  ;; A constant field is a function ignoring position: F(x, y) = (0, g).\n  (define (field g) (lambda (x y) (list 0 g)))\n  ((field 5) 12 34))")
+     )
+     :explanation "Rung 1 sets the world's pull. Rung 2 sets a device's volume. Rung 3 builds a constant vector field as a function of position that ignores position. All three write one ambient value that every consumer then reads."
+     :meta "Ambient configuration is the shape; gravity is the physical instance of it.")
+    (:eng "Level settings, device settings and world settings are one pattern."
+     :math "A constant field is the function that ignores its argument."
+     :cs "Global state with a single writer and many readers."))
+  :row-4-proof (
+    (:claim "Read-after-write is exact, zero is the identity of the field, and writing the same value twice changes nothing."
+     :eng-program "(begin (world/reset!)\n  (physics/gravity! 6)\n  (= (physics/gravity) 6))"
+     :math-program "(begin (world/reset!)\n  ;; Zero gravity is the additive identity of the field: nothing accelerates.\n  (define hero (entity/make 'player 0 0))\n  (physics/gravity! 0)\n  (physics/step) (physics/step)\n  (equal? (entity/vel hero) '(0 0)))"
+     :cs-program "(begin (world/reset!)\n  ;; Idempotent: writing the same value twice leaves one state.\n  (physics/gravity! 5)\n  (define once (physics/gravity))\n  (physics/gravity! 5)\n  (= once (physics/gravity)))"
+     :invariant "gravity(gravity!(g)) = g AND step under g = 0 leaves every velocity fixed AND gravity!(g); gravity!(g) is equivalent to gravity!(g)"
+     :meta "Round trip, identity element and idempotence. Falsified by a lossy write, by drift under a zero field, or by a second write that compounds instead of replacing.")
+    (:eng "Regression: the dial reads back what you set it to."
+     :math "g = 0 is the additive identity of the force field: nothing accelerates."
+     :cs "Idempotent write — safe to call every frame from a settings loop."))
+  :row-5-emergence (
+    (:base "physics/gravity! writes the one ambient field the integrator reads."
+     :eng-composition "(begin (world/reset!)\n  (define hero (entity/make 'player 0 0))\n  (define (planet! name g) (physics/gravity! g) name)\n  (planet! 'moon 0.17)\n  (physics/step)\n  (list ':planet 'moon ':vy (cadr (entity/vel hero))))"
+     :math-composition "(begin (world/reset!)\n  ;; Sweep the field strength and read the drop after one step: linear in g.\n  (define (drop-after-one-step g)\n    (world/reset!)\n    (let ((e (entity/make 'player 0 0)))\n      (physics/gravity! g)\n      (physics/step)\n      (entity/y e)))\n  (map drop-after-one-step '(1 2 3 4)))"
+     :cs-composition "(begin (world/reset!)\n  ;; Save/restore the field around a stunt, so the stunt cannot leak.\n  (define (with-gravity g thunk)\n    (let ((saved (physics/gravity)))\n      (physics/gravity! g)\n      (let ((r (thunk)))\n        (physics/gravity! saved)\n        r)))\n  (physics/gravity! 1)\n  (list ':inside (with-gravity 9 physics/gravity) ':after (physics/gravity)))"
+     :emergent "A planet-preset table, a linearity sweep and a save-and-restore wrapper: the setter chains with a name for level presets, with a loop for measuring the field's effect, and with the reader for scoped stunts that cannot leak. Emergent: gravity becomes a parameter you can experiment on, not a constant you hardcode."
+     :meta "The scoped-mutation family — save, set, run, restore. Same shape as any dynamic-binding wrapper.")
+    (:eng "Presets by name; scoped changes that always put the world back."
+     :math "Drop after one step is exactly g, so the sweep is a straight line through the origin."
+     :cs "Save and restore around a thunk is how a global stays honest."))
+)
+
+(verb
+  :name "physics/gravity" :std "Motoi"
+  :library "world"
+  :kind "pure"
+  :dialect "motoi"
+  :audience "kid"
+  :doc "Returns the vertical component of the world gravity field — exactly the number last given to physics/gravity!, or 0 on a fresh world. A pure read: it does not advance the frame counter and does not move anything. The horizontal component is not reported here; it is 0 whenever the field was set through physics/gravity!, and readable through world/state or by tracking your own world/gravity! calls."
+  :section "72-world · the physics/* vocabulary"
+  :signature "(physics/gravity) -> number"
+  :arity "0"
+  :contract "no args -> the world field's vertical component; 0 on a fresh world"
+  :status "landed"
+  :status-note "Bound in lib/game/world.js over the one live entity store on 2026-08-02. The name was implemented in lib/game/game.js against a second, id-keyed store and went unbound when that installer was dropped from installCore in the 2026-07-25 Curator rip; Alfred ruled the physics should work, so it was re-wired over the live world rather than by re-installing the dead duplicate store."
+  :since "2026-08-02"
+  :provenance "motoi-scheme/lib/game/world.js"
+  :training-eligible #t
+  :confidentiality "public"
+  :summary "Read how hard the world is pulling down."
+  :explanation "The reader completes the pair. Together with physics/gravity! it makes the field a value you can compute with rather than a constant you have to remember: read it to decide whether a fall needs simulating at all, to scale it (heavier, lighter, flipped), or to save it before a stunt and put it back afterwards. Because it is a pure read, calling it twice with nothing in between must give the same answer, and calling it inside a loop costs nothing but the call. It reports the field, not what any particular body feels — a body with entity/gravity-scale! set, or a static body that ignores the field, will not match this number."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(begin (world/reset!) (physics/gravity))" :note "A fresh world is not pulling: the read is 0.")
+    (:dialect "motoi" :tier "intermediate" :code "(begin (world/reset!) (physics/gravity! 2) (physics/gravity))" :note "Write then read: the field comes back exactly as it was set.")
+    (:dialect "motoi" :tier "expert" :code "(begin (world/reset!)\n  (define (falling?) (> (physics/gravity) 0))\n  (list ':fresh (falling?)\n        ':after (begin (physics/gravity! 1) (falling?))))" :note "Turn the read into a question — is anything falling? — and watch the answer change when the field is switched on.")
+  )
+  :caveats ("It reports the field, not what a body feels; entity/gravity-scale! and static bodies both break that correspondence." "Only the vertical component is reported. A sideways field set through world/gravity! is invisible here." "A fresh world reads 0, not the last value from a previous run — world/reset! clears it.")
+  :drawbacks ("There is no history: the reader cannot tell you what the field was last frame." "No units. The number is pixels per frame per frame, and nothing in the value says so.")
+  :usecases ("Skip a simulation when nothing is falling." "Scale the field relative to itself — twice as heavy, half as heavy." "Save the field before a temporary change and restore it after." "Report the level's settings on a debug overlay.")
+  :related ("physics/gravity!" "world/gravity!" "world/state" "physics/friction" "physics/apply-gravity")
+  :learn (:concept "Every setter deserves a reader; a value you can read is a value you can compute with." :prerequisites ("physics/gravity!") :progression "Read the field to scale it relative to itself, then wrap set-run-restore around a stunt so the change cannot leak.")
+  :row-2-audit (
+    (:problem "A stunt needs to change gravity for a few frames and then put it back exactly as it was. Without a reader the operator has to remember the old value in a separate variable and hope nothing else wrote the field in between."
+     :eng-program "(begin (world/reset!)\n  (physics/gravity! 1)\n  (define (gravity-report)\n    (list ':g (physics/gravity) ':direction (if (> (physics/gravity) 0) 'down 'up)))\n  (gravity-report))"
+     :math-program "(begin (world/reset!)\n  ;; The read returns the y component only: the scalar setter pins x at 0,\n  ;; so one number is the whole field.\n  (physics/gravity! 7)\n  (= (physics/gravity) 7))"
+     :cs-program "(begin (world/reset!)\n  ;; Pure read: two reads with no write between them must agree.\n  (physics/gravity! 3)\n  (= (physics/gravity) (physics/gravity)))"
+     :explanation "eng: a small report pairing the number with its direction. math: the read returns the y component, which is the whole field for the scalar setter. cs: a pure read, so two reads with no write between them agree."
+     :meta "Reach for physics/gravity over keeping a shadow copy of the setting; the world already knows, and a shadow copy is one more thing that can drift.")
+    (:eng "A debug overlay wants the number and the direction, not just the number."
+     :math "One component is the whole field when the setter pins the other at zero."
+     :cs "Pure read: no frame advance, no mutation, referentially transparent within a frame."))
+  :row-3-dimension (
+    (:setup "Read an ambient value back out of the thing that holds it."
+     :rungs (
+       (:domain "world" :code "(begin (world/reset!) (physics/gravity! 2) (physics/gravity))")
+       (:domain "config" :code "(begin\n  (define (get-setting cfg key) (cdr (assq key cfg)))\n  (get-setting '((volume . 7) (bright . 3)) 'volume))")
+       (:domain "sensor" :code "(begin\n  ;; A sensor read: sample the ambient value without disturbing it.\n  (define (sample cell) (car cell))\n  (sample (list 9.8 'metres-per-second-squared)))")
+     )
+     :explanation "Rung 1 reads the world's pull. Rung 2 reads a setting out of a config list. Rung 3 samples a sensor cell. All three take an ambient value without disturbing it."
+     :meta "Non-disturbing read is the shape; it is what makes save-and-restore possible anywhere.")
+    (:eng "Config, telemetry and world state are all read the same way."
+     :math "Projection onto a component of the stored state."
+     :cs "Read purity is the property that lets you cache the answer within a frame."))
+  :row-4-proof (
+    (:claim "The reader round-trips every value the setter accepts, and the read never advances time."
+     :eng-program "(begin (world/reset!)\n  (physics/gravity! 4)\n  (= (physics/gravity) 4))"
+     :math-program "(begin (world/reset!)\n  ;; Round-trip law: read after write returns exactly what was written,\n  ;; for every value tried.\n  (define (round-trips? g) (physics/gravity! g) (= (physics/gravity) g))\n  (and (round-trips? 0) (round-trips? 1) (round-trips? -2) (round-trips? 0.5)))"
+     :cs-program "(begin (world/reset!)\n  ;; The read does not advance time.\n  (physics/gravity! 2)\n  (define f0 (world/frame))\n  (physics/gravity) (physics/gravity)\n  (= (world/frame) f0))"
+     :invariant "for all numeric g: gravity(gravity!(g)) = g AND frame(gravity()) = frame"
+     :meta "Round trip over a range of values (zero, positive, negative, fractional) plus non-interference with the clock. Falsified by a lossy or rounded write, or by a read that ticks the world.")
+    (:eng "Regression: negatives and fractions survive the round trip too."
+     :math "The setter and reader are mutually inverse on the numbers."
+     :cs "A read that mutates is not a read; the frame counter is the witness."))
+  :row-5-emergence (
+    (:base "physics/gravity reads the one ambient field back out."
+     :eng-composition "(begin (world/reset!)\n  (physics/gravity! 1)\n  (define (heavier! k) (physics/gravity! (* k (physics/gravity))) (physics/gravity))\n  (heavier! 3))"
+     :math-composition "(begin (world/reset!)\n  ;; Read-modify-write builds a geometric ramp of field strengths.\n  (physics/gravity! 1)\n  (define (ramp n)\n    (if (= n 0) '()\n        (begin (physics/gravity! (* 2 (physics/gravity)))\n               (cons (physics/gravity) (ramp (- n 1))))))\n  (ramp 4))"
+     :cs-composition "(begin (world/reset!)\n  ;; Read the field to decide whether a fall needs simulating at all.\n  (define hero (entity/make 'player 0 0))\n  (define (settle-or-skip)\n    (if (= (physics/gravity) 0) 'nothing-to-simulate\n        (begin (physics/step) (entity/y hero))))\n  (list ':fresh (settle-or-skip)\n        ':pulled (begin (physics/gravity! 2) (settle-or-skip))))"
+     :emergent "A relative-scaling helper, a geometric ramp and a skip-the-work guard: the reader chains with the setter for read-modify-write, with recursion for parameter ladders, and with a conditional to avoid simulating a world where nothing falls. Emergent: the field becomes a variable in the program rather than a constant in the author's head."
+     :meta "The read-modify-write family. Same shape as any accumulator over ambient state.")
+    (:eng "Relative changes survive later edits to the base value; absolute ones do not."
+     :math "Repeated doubling of the field is a geometric sequence."
+     :cs "Reading before working is the cheapest optimisation there is."))
+)
+
+(verb
+  :name "physics/friction!" :std "Motoi"
+  :library "world"
+  :kind "mut"
+  :dialect "motoi"
+  :audience "kid"
+  :doc "Sets a world-wide velocity multiplier applied to every dynamic body inside physics/step: 1 means nothing slows down, 0.98 is a gentle drag, 0.5 halves the speed every frame, and 0 stops everything dead in one frame. A fresh world has no friction set, and physics/friction reads 1 there. Per-entity entity/drag! still applies on top for a body that needs to be stickier than the world. A non-numeric argument falls back to 0.98 rather than poisoning the integrator."
+  :section "72-world · the physics/* vocabulary"
+  :signature "(physics/friction! f) -> void"
+  :arity "1"
+  :contract "f is a number -> every dynamic body's velocity is multiplied by f each frame; a non-number falls back to 0.98"
+  :status "landed"
+  :status-note "Bound in lib/game/world.js over the one live entity store on 2026-08-02. The name was implemented in lib/game/game.js against a second, id-keyed store and went unbound when that installer was dropped from installCore in the 2026-07-25 Curator rip; Alfred ruled the physics should work, so it was re-wired over the live world rather than by re-installing the dead duplicate store."
+  :since "2026-08-02"
+  :provenance "motoi-scheme/lib/game/world.js"
+  :training-eligible #t
+  :confidentiality "public"
+  :summary "Set how much the world slows moving things down each frame."
+  :explanation "Friction here is a retention factor, not a force: each frame the integrator multiplies velocity by f. That makes the speed decay geometrically — v(n) = v(0) times f to the n — which is why 0.98 feels like ice and 0.5 feels like mud, and why no value of f between 0 and 1 ever quite reaches zero. The order inside a step matters: gravity is added first, then drag, then friction, then the speed cap, and only then does position move. So under gravity a body reaches a terminal speed where the pull and the multiplier balance. Set f to 1 to switch friction off; set it to 0 for an instant stop."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(begin (world/reset!) (physics/friction! 0.5) (physics/friction))" :note "Set the multiplier to a half and read it back.")
+    (:dialect "motoi" :tier "intermediate" :code "(begin (world/reset!)\n  (define puck (entity/make 'player 0 0))\n  (entity/set-velocity! puck 8 0)\n  (physics/friction! 0.5)\n  (physics/step)\n  (car (entity/vel puck)))" :note "A puck moving at 8 keeps half its speed after one frame at f = 0.5.")
+    (:dialect "motoi" :tier "expert" :code "(begin (world/reset!)\n  (define puck (entity/make 'player 0 0))\n  (entity/set-velocity! puck 16 0)\n  (physics/friction! 0.5)\n  (let loop ((i 0) (out '()))\n    (if (= i 4) (reverse out)\n        (begin (physics/step) (loop (+ i 1) (cons (car (entity/vel puck)) out))))))" :note "Four frames of halving: 8, 4, 2, 1 — the geometric decay, visible as a list.")
+  )
+  :caveats ("It is a multiplier, not a subtraction, so speed decays geometrically and never reaches exactly zero for 0 < f < 1." "f = 1 means NO friction. It is easy to read 1 as 'full friction' and get it backwards." "Values above 1 accelerate everything every frame; that is a runaway, not a feature." "A non-numeric argument silently becomes 0.98. Read it back if the value came from user input." "Only dynamic bodies are affected; static world geometry is untouched because it never integrates." "Per-entity entity/drag! stacks on top of this rather than overriding it.")
+  :drawbacks ("One multiplier for the whole world; there is no per-surface friction, so an ice patch needs entity/drag! or a hand-rolled region test." "The decay is frame-rate dependent by construction — halving per frame means something different at 30 and 60 frames per second." "It damps gravity-driven falls too, which is physically wrong for air resistance at low speed but usually reads fine in a game.")
+  :usecases ("Make a top-down character coast to a stop instead of stopping dead." "Ice, mud and honey levels from one dial." "Damp a spring or pendulum so it settles instead of ringing forever." "Stop everything in one frame with f = 0 for a freeze effect.")
+  :related ("physics/friction" "entity/drag!" "entity/max-speed!" "physics/step" "physics/gravity!")
+  :learn (:concept "Multiplicative decay: repeatedly keeping a fraction of a value is how a simulation settles." :prerequisites ("entity/set-velocity!" "physics/step") :progression "Watch the halving sequence by hand, then reason about the limit of the distance travelled, then reach for entity/drag! when one body needs to differ from the world.")
+  :row-2-audit (
+    (:problem "A top-down character slides forever because nothing takes speed away. The operator wants one dial for how slippery the level is, and wants it to behave the way a surface does — proportionally, so fast things lose more than slow things."
+     :eng-program "(begin (world/reset!)\n  (define (ice!) (physics/friction! 0.995))\n  (define (mud!) (physics/friction! 0.5))\n  (ice!)\n  (list ':ice (physics/friction) ':mud (begin (mud!) (physics/friction))))"
+     :math-program "(begin (world/reset!)\n  ;; Friction is a per-frame multiplier, so speed decays geometrically:\n  ;; v(n) = v(0) * f^n. Two frames at f = 0.5 quarter the speed.\n  (define puck (entity/make 'player 0 0))\n  (entity/set-velocity! puck 12 0)\n  (physics/friction! 0.5)\n  (physics/step) (physics/step)\n  (list ':vx (car (entity/vel puck)) ':closed-form (* 12 0.5 0.5)))"
+     :cs-program "(begin (world/reset!)\n  ;; A non-numeric argument falls back to the house default 0.98 rather\n  ;; than poisoning the integrator with a NaN.\n  (physics/friction! 'sticky)\n  (physics/friction))"
+     :explanation "eng: named presets for ice and mud. math: the geometric closed form v(0) times f to the n, checked against two frames of the integrator. cs: a bad argument lands on the house default rather than a NaN."
+     :meta "Reach for physics/friction! for the whole world and entity/drag! for one body; reach for entity/max-speed! when the problem is a ceiling rather than a decay.")
+    (:eng "Surfaces are presets; magic numbers in a step loop are not."
+     :math "Per-frame multiplication makes the decay geometric, not linear."
+     :cs "Defensive default: an unparseable dial must not poison every body's velocity."))
+  :row-3-dimension (
+    (:setup "Keep a fixed fraction of a value on every pass."
+     :rungs (
+       (:domain "world" :code "(begin (world/reset!) (physics/friction! 0.9) (physics/friction))")
+       (:domain "audio" :code "(begin\n  ;; A per-frame gain multiplier on a signal: the same decay shape.\n  (define (decay v f n) (if (= n 0) v (decay (* v f) f (- n 1))))\n  (decay 1 0.5 3))")
+       (:domain "money" :code "(begin\n  ;; Geometric depreciation: value retained after n years at rate f.\n  (define (depreciate value f years)\n    (if (= years 0) value (depreciate (* value f) f (- years 1))))\n  (depreciate 1000 0.9 2))")
+     )
+     :explanation "Rung 1 sets the world's retention factor. Rung 2 decays a signal by a per-frame gain. Rung 3 depreciates a value year by year. All three are the same multiplication applied repeatedly."
+     :meta "Geometric decay is the shape; friction, gain and depreciation are three names for it.")
+    (:eng "Envelope decay, damping and depreciation share one implementation."
+     :math "Iterated multiplication by a constant is exponential in the number of passes."
+     :cs "A single multiply per element per pass; the cheapest possible damping."))
+  :row-4-proof (
+    (:claim "Read-after-write is exact; f = 1 is the multiplicative identity and leaves motion untouched; f = 0 is absorbing and stops everything in one frame."
+     :eng-program "(begin (world/reset!)\n  (physics/friction! 0.25)\n  (= (physics/friction) 0.25))"
+     :math-program "(begin (world/reset!)\n  ;; f = 1 is the multiplicative identity: motion is untouched.\n  (define puck (entity/make 'player 0 0))\n  (entity/set-velocity! puck 5 0)\n  (physics/friction! 1)\n  (physics/step) (physics/step) (physics/step)\n  (= (car (entity/vel puck)) 5))"
+     :cs-program "(begin (world/reset!)\n  ;; f = 0 is the absorbing element: one frame stops everything dead.\n  (define puck (entity/make 'player 0 0))\n  (entity/set-velocity! puck 99 -99)\n  (physics/friction! 0)\n  (physics/step)\n  (equal? (entity/vel puck) '(0 0)))"
+     :invariant "friction(friction!(f)) = f AND v(n) = v(0) under f = 1 AND v(1) = 0 under f = 0"
+     :meta "Round trip plus the two boundary elements of multiplication. Falsified by drift under f = 1, by a body that keeps moving under f = 0, or by a lossy write.")
+    (:eng "Regression: the two ends of the dial do exactly what their names say."
+     :math "1 is the identity and 0 is the absorbing element of the multiplicative monoid."
+     :cs "Boundary values are where a multiplier-based damper goes wrong; pin them with tests."))
+  :row-5-emergence (
+    (:base "physics/friction! writes the one retention factor the integrator multiplies by."
+     :eng-composition "(begin (world/reset!)\n  (define puck (entity/make 'player 0 0))\n  (define (slide-until-slow)\n    (let loop ((n 0))\n      (if (or (< (abs (car (entity/vel puck))) 0.5) (> n 200)) n\n          (begin (physics/step) (loop (+ n 1))))))\n  (entity/set-velocity! puck 10 0)\n  (physics/friction! 0.8)\n  (slide-until-slow))"
+     :math-composition "(begin (world/reset!)\n  ;; Total distance under geometric decay converges to v0 * f / (1 - f).\n  (define puck (entity/make 'player 0 0))\n  (entity/set-velocity! puck 10 0)\n  (physics/friction! 0.5)\n  (let loop ((i 0)) (when (< i 40) (physics/step) (loop (+ i 1))))\n  (list ':travelled (entity/x puck) ':limit (/ (* 10 0.5) 0.5)))"
+     :cs-composition "(begin (world/reset!)\n  ;; Swap the surface under a moving body mid-run and watch the profile bend.\n  (define puck (entity/make 'player 0 0))\n  (entity/set-velocity! puck 16 0)\n  (physics/friction! 1)\n  (physics/step) (physics/step)\n  (define on-ice (car (entity/vel puck)))\n  (physics/friction! 0.5)\n  (physics/step)\n  (list ':ice on-ice ':then-mud (car (entity/vel puck))))"
+     :emergent "A slide-until-slow probe, a total-distance limit and a mid-run surface swap: friction chains with a loop for settle times, with the geometric series for the distance a body will ever travel, and with a second write for changing surfaces underfoot. Emergent: level feel becomes a number you can predict rather than tune blind."
+     :meta "The damped-motion family. Same shape as any exponentially-weighted moving average.")
+    (:eng "Settle time and stopping distance are both computable before you playtest."
+     :math "The distance under geometric decay converges to v(0)*f/(1-f); the run reaches it to floating-point noise."
+     :cs "Changing the multiplier mid-run bends the curve without restarting the simulation."))
+)
+
+(verb
+  :name "physics/friction" :std "Motoi"
+  :library "world"
+  :kind "pure"
+  :dialect "motoi"
+  :audience "kid"
+  :doc "Returns the world-wide per-frame velocity multiplier last given to physics/friction!. On a fresh world, where no friction has been set, it returns 1 — the multiplicative identity — because 'no friction' must mean 'velocity unchanged', not 'velocity zeroed'. A pure read: it neither advances the frame counter nor moves anything."
+  :section "72-world · the physics/* vocabulary"
+  :signature "(physics/friction) -> number"
+  :arity "0"
+  :contract "no args -> the world velocity multiplier; 1 on a fresh world (no friction)"
+  :status "landed"
+  :status-note "Bound in lib/game/world.js over the one live entity store on 2026-08-02. The name was implemented in lib/game/game.js against a second, id-keyed store and went unbound when that installer was dropped from installCore in the 2026-07-25 Curator rip; Alfred ruled the physics should work, so it was re-wired over the live world rather than by re-installing the dead duplicate store."
+  :since "2026-08-02"
+  :provenance "motoi-scheme/lib/game/world.js"
+  :training-eligible #t
+  :confidentiality "public"
+  :summary "Read how slippery the world is."
+  :explanation "The reader is what makes friction a value rather than a hidden setting. Read it to classify the surface, to scale it relative to itself, to guard a decay simulation that would be a no-op, or to save and restore it around a temporary change. The unset default is the interesting part: 1 rather than 0, because the number is a multiplier. A reader that returned 0 for 'unset' would say the world stops everything instantly, which is the opposite of what an unset world does. Note that this reports the world's factor only — a body with entity/drag! set decays faster than this number alone predicts."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(begin (world/reset!) (physics/friction))" :note "A fresh world reads 1: nothing is being slowed down.")
+    (:dialect "motoi" :tier "intermediate" :code "(begin (world/reset!) (physics/friction! 0.75) (physics/friction))" :note "Write then read: 0.75 comes back exactly.")
+    (:dialect "motoi" :tier "expert" :code "(begin (world/reset!)\n  (define (surface)\n    (let ((f (physics/friction)))\n      (cond ((= f 1) 'frictionless)\n            ((> f 0.9) 'ice)\n            ((> f 0.5) 'ground)\n            (else 'mud))))\n  (list ':fresh (surface)\n        ':ice (begin (physics/friction! 0.95) (surface))\n        ':mud (begin (physics/friction! 0.3) (surface))))" :note "Turn the number into a name — frictionless, ice, ground, mud — and watch the classification follow the dial.")
+  )
+  :caveats ("An unset world reads 1, not 0. One is the identity for a multiplier." "It reports the world factor only; entity/drag! on a body stacks on top and is invisible here." "world/reset! restores the default, so the read is 1 again after a reset.")
+  :drawbacks ("No units and no history — the number says nothing about frame rate, and the reader cannot tell you the previous value." "It cannot distinguish 'never set' from 'explicitly set to 1'; both read 1.")
+  :usecases ("Classify the current surface for a debug overlay or a sound cue." "Scale the friction relative to itself — grippier, slippier." "Skip a decay simulation when nothing is decaying." "Save and restore the surface around a temporary effect.")
+  :related ("physics/friction!" "entity/drag!" "physics/gravity" "world/state" "physics/step")
+  :learn (:concept "The identity element of an operation is the right default for 'not set' — for a multiplier that is 1, not 0." :prerequisites ("physics/friction!") :progression "Read the factor to name the surface, then use read-modify-write to change it relative to itself.")
+  :row-2-audit (
+    (:problem "A debug overlay must say what surface the level is on, and a sound system must pick a footstep sample. Both need the number the integrator is actually using, including the case where nobody ever set it."
+     :eng-program "(begin (world/reset!)\n  (physics/friction! 0.9)\n  (define (friction-report)\n    (list ':f (physics/friction) ':slowing (< (physics/friction) 1)))\n  (friction-report))"
+     :math-program "(begin (world/reset!)\n  ;; An unset world reads 1 — the multiplicative identity — not 0, because\n  ;; \"no friction\" must leave velocity unchanged.\n  (= (physics/friction) 1))"
+     :cs-program "(begin (world/reset!)\n  ;; Pure read: no write between two reads means one answer.\n  (physics/friction! 0.4)\n  (= (physics/friction) (physics/friction)))"
+     :explanation "eng: a report pairing the factor with whether it is slowing anything. math: the unset default is 1 because the number is a multiplier. cs: a pure read, so two reads with no write between them agree."
+     :meta "Reach for physics/friction over tracking your own copy of the setting; the unset case is exactly where a shadow copy gets the default wrong.")
+    (:eng "A surface name is more useful on an overlay than a bare float."
+     :math "Identity element as the default: 'no effect' must compose as no effect."
+     :cs "Pure read; safe to call every frame and inside a hot loop."))
+  :row-3-dimension (
+    (:setup "Read a value that may never have been set, and get a default that composes as no-op."
+     :rungs (
+       (:domain "world" :code "(begin (world/reset!) (physics/friction! 0.6) (physics/friction))")
+       (:domain "config" :code "(begin\n  (define (get-or cfg key fallback)\n    (let ((hit (assq key cfg))) (if hit (cdr hit) fallback)))\n  (get-or '((bright . 3)) 'volume 1))")
+       (:domain "signal" :code "(begin\n  ;; Read a filter's retention coefficient before applying it.\n  (define (retention filter) (cadr filter))\n  (retention (list 'lowpass 0.6)))")
+     )
+     :explanation "Rung 1 reads the world's retention factor, defaulting to 1. Rung 2 reads a missing config key with an explicit no-op fallback. Rung 3 reads a filter's retention coefficient. All three answer 'what factor applies?' including when nobody set one."
+     :meta "Default-to-identity is the shape; getting it wrong is how an unset setting silently zeroes a system.")
+    (:eng "Absent configuration must mean no change, never full effect."
+     :math "The neutral element is the only safe default for a fold."
+     :cs "Get-or-default where the default is chosen by algebra, not by taste."))
+  :row-4-proof (
+    (:claim "A fresh world reads the identity, every written value round-trips exactly, and world/reset! restores the default."
+     :eng-program "(begin (world/reset!)\n  (physics/friction! 0.2)\n  (= (physics/friction) 0.2))"
+     :math-program "(begin (world/reset!)\n  ;; Round-trip law plus the unset default: read-after-write is exact, and\n  ;; a fresh world reads the identity.\n  (define (round-trips? f) (physics/friction! f) (= (physics/friction) f))\n  (and (= (physics/friction) 1)\n       (round-trips? 0) (round-trips? 0.5) (round-trips? 1)))"
+     :cs-program "(begin (world/reset!)\n  ;; world/reset! restores the default; the read proves the world is fresh.\n  (physics/friction! 0.1)\n  (world/reset!)\n  (= (physics/friction) 1))"
+     :invariant "friction(fresh) = 1 AND for all numeric f: friction(friction!(f)) = f AND friction(reset!) = 1"
+     :meta "Default, round trip and reset. Falsified by a fresh world that damps, a lossy write, or a reset that leaves the old factor behind.")
+    (:eng "Regression: a reset world is genuinely fresh, not merely emptied of entities."
+     :math "Identity default plus exact round trip on the numbers."
+     :cs "Reset must clear settings, not just the entity list; the read is the witness."))
+  :row-5-emergence (
+    (:base "physics/friction reads the one retention factor back out."
+     :eng-composition "(begin (world/reset!)\n  (define (grippier! k) (physics/friction! (* k (physics/friction))) (physics/friction))\n  (grippier! 0.5))"
+     :math-composition "(begin (world/reset!)\n  ;; Read-modify-write halves the retention each pass: a geometric ladder.\n  (define (ladder n)\n    (if (= n 0) '()\n        (begin (physics/friction! (/ (physics/friction) 2))\n               (cons (physics/friction) (ladder (- n 1))))))\n  (ladder 4))"
+     :cs-composition "(begin (world/reset!)\n  ;; Guard: skip the whole decay simulation when nothing is decaying.\n  (define puck (entity/make 'player 0 0))\n  (entity/set-velocity! puck 4 0)\n  (define (maybe-decay)\n    (if (= (physics/friction) 1) 'no-decay\n        (begin (physics/step) (car (entity/vel puck)))))\n  (list ':fresh (maybe-decay)\n        ':muddy (begin (physics/friction! 0.5) (maybe-decay))))"
+     :emergent "A relative-grip helper, a halving ladder and a skip-the-decay guard: the reader chains with the setter for read-modify-write, with recursion for parameter ladders, and with a conditional to avoid stepping a world where nothing decays. Emergent: the surface becomes a program variable rather than a tuning constant."
+     :meta "The read-modify-write family again, over a multiplicative rather than additive parameter.")
+    (:eng "Relative adjustments survive later changes to the base value."
+     :math "Repeated halving of the factor is a geometric sequence in its own right."
+     :cs "Guarding on the identity value turns a whole simulation pass into a constant-time check."))
+)
+
+(verb
+  :name "physics/apply-force" :std "Motoi"
+  :library "world"
+  :kind "mut"
+  :dialect "motoi"
+  :audience "kid"
+  :doc "Adds (fx, fy) to the target's velocity and marks it dynamic so the integrator will move it. The target may be an entity handle, an entity NAME (a symbol or string matched against the entity kind, first live match wins), or a tween record — for a tween the push shifts the whole from/to path rather than a velocity. Returns #t when a target was found and pushed, #f when nothing matched. Non-numeric components read as 0. Nothing moves until the next physics/step."
+  :section "72-world · the physics/* vocabulary"
+  :signature "(physics/apply-force target fx fy) -> boolean"
+  :arity "3"
+  :contract "target is an entity handle, an entity name (symbol or string matched against the kind), or a tween -> velocity gains (fx, fy) and the body wakes; #t on a hit, #f when nothing matched"
+  :status "landed"
+  :status-note "Bound in lib/game/world.js over the one live entity store on 2026-08-02. The name was implemented in lib/game/game.js against a second, id-keyed store and went unbound when that installer was dropped from installCore in the 2026-07-25 Curator rip; Alfred ruled the physics should work, so it was re-wired over the live world rather than by re-installing the dead duplicate store."
+  :since "2026-08-02"
+  :provenance "motoi-scheme/lib/game/world.js"
+  :training-eligible #t
+  :confidentiality "public"
+  :summary "Push something: add to its speed in x and y."
+  :explanation "Force in Motoi is applied per frame, not continuously: one call adds once. To model a rocket you call it every frame inside the loop; to model a kick you call it once. Because it adds rather than sets, pushes compose — two calls are the same as one call with the sums — and an equal-and-opposite pair cancels exactly. Applying a force also WAKES a body: an entity made with any kind other than 'player starts static, and pushing it is what makes the integrator start moving it. That is the usual reason a crate suddenly starts obeying gravity after its first push. A hand-applied force stacks on top of the world field rather than replacing it, so a body you push down every frame in a gravity world falls at twice the rate."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(begin (world/reset!)\n  (define hero (entity/make 'player 0 0))\n  (physics/apply-force hero 3 0)\n  (entity/vel hero))" :note "Push the hero right by 3: velocity becomes (3 0). Nothing has moved yet.")
+    (:dialect "motoi" :tier "intermediate" :code "(begin (world/reset!)\n  (define hero (entity/make 'player 0 0))\n  (physics/apply-force 'player 0 -5)\n  (physics/step)\n  (entity/y hero))" :note "Push up by 5 using the entity NAME rather than the handle, then step: the hero is 5 above where it started.")
+    (:dialect "motoi" :tier "expert" :code "(begin (world/reset!)\n  (define hero (entity/make 'player 0 0))\n  (physics/gravity! 1)\n  (physics/apply-force 'player 0 -6)\n  (let loop ((i 0) (peak 0))\n    (if (= i 8) (list ':peak peak ':y (entity/y hero))\n        (begin (physics/step)\n               (loop (+ i 1) (min peak (entity/y hero)))))))" :note "A jump: one upward push against a downward field, watched for eight frames — it rises to -15 and is on its way back down at -12.")
+  )
+  :caveats ("It adds to velocity and marks the body dynamic; a static crate starts falling after its first push." "Nothing moves until physics/step. A push in the same expression as a position read shows the old position." "It is per-call, not continuous. A thruster must be called every frame." "A name matches on entity KIND and takes the first live match, so several bodies of the same kind are ambiguous — pass a handle to be sure." "A name that matches nothing returns #f rather than raising; check the result if a despawn is possible." "The force ignores mass. entity/mass! affects collision pushing, not this call." "For a tween target the push shifts the animation path, not a velocity — a different thing under the same name.")
+  :drawbacks ("No mass in the acceleration, so this is really an impulse: heavy and light bodies respond identically." "There is no accumulate-and-clear force buffer; the change lands on velocity immediately, so ordering within a frame is visible." "The boolean return is the only failure signal; a typo'd name is a silent no-op unless you check it.")
+  :usecases ("A jump, a kick, a knockback." "A thruster or wind, called once per frame." "Waking a static body so it starts obeying gravity." "Reacting inside an on-collision handler by pushing the two bodies apart.")
+  :related ("physics/apply-impulse" "physics/apply-gravity" "entity/set-velocity!" "entity/apply-force!" "physics/step")
+  :learn (:concept "Forces add. Anything that accumulates rather than replaces composes by addition and cancels by negation." :prerequisites ("entity/make" "physics/step") :progression "Push once for a kick, every frame for a thruster; then compare with entity/set-velocity!, which replaces instead of adding.")
+  :row-2-audit (
+    (:problem "A ship needs a thruster: hold the key, gain speed; let go, coast. Setting velocity directly would throw away the speed already there and would fight gravity every frame. The operator needs a call that ADDS."
+     :eng-program "(begin (world/reset!)\n  (define ship (entity/make 'player 0 0))\n  (define (thrust! dx dy) (physics/apply-force ship dx dy))\n  (thrust! 1 0)\n  (thrust! 1 0)\n  (entity/vel ship))"
+     :math-program "(begin (world/reset!)\n  ;; Forces add: applying (a b) then (c d) is applying (a+c b+d) once.\n  (define one (entity/make 'player 0 0))\n  (physics/apply-force one 2 3)\n  (physics/apply-force one 4 5)\n  (list ':stacked (entity/vel one) ':sum (list (+ 2 4) (+ 3 5))))"
+     :cs-program "(begin (world/reset!)\n  ;; A name that matches nothing returns #f rather than erroring, so a\n  ;; script can push on an entity that may already be despawned.\n  (entity/make 'player 0 0)\n  (list ':hit (physics/apply-force 'player 1 0)\n        ':miss (physics/apply-force 'ghost 1 0)))"
+     :explanation "eng: a thrust helper called twice, accumulating to 2. math: forces add componentwise, so stacking equals summing. cs: a missing name reports #f instead of raising, which keeps a despawn from crashing a loop."
+     :meta "Reach for physics/apply-force to change motion by an amount, and entity/set-velocity! to change it to an amount. Confusing the two is the most common physics bug there is.")
+    (:eng "Thrusters accumulate; setters clobber. Pick by which one the controls mean."
+     :math "Velocity deltas form a group under addition: associative, with identity (0 0) and inverses."
+     :cs "Total function over targets: hit returns #t, miss returns #f, neither raises."))
+  :row-3-dimension (
+    (:setup "Accumulate a delta into a running total."
+     :rungs (
+       (:domain "world" :code "(begin (world/reset!)\n  (define e (entity/make 'player 0 0))\n  (physics/apply-force e 2 0)\n  (entity/vel e))")
+       (:domain "vector" :code "(begin\n  ;; The same accumulation on a bare pair of numbers.\n  (define (push v dx dy) (list (+ (car v) dx) (+ (cadr v) dy)))\n  (push (push '(0 0) 2 0) 0 3))")
+       (:domain "budget" :code "(begin\n  ;; Any running total takes deltas the same way.\n  (define (credit balance amount) (+ balance amount))\n  (credit (credit 0 40) 2))")
+     )
+     :explanation "Rung 1 pushes an entity. Rung 2 translates a bare pair of numbers. Rung 3 credits a balance. All three add a delta to a value that already had one."
+     :meta "Accumulation is the shape; force is the physical instance and a running balance is the everyday one.")
+    (:eng "Any running total takes deltas the same way, and has the same off-by-one risks."
+     :math "Componentwise addition in a vector space."
+     :cs "Read-add-write; the ordering hazard is identical in all three."))
+  :row-4-proof (
+    (:claim "A push lands exactly on velocity; (0 0) is the identity and every push has an inverse; a push wakes a static body."
+     :eng-program "(begin (world/reset!)\n  (define e (entity/make 'player 0 0))\n  (physics/apply-force e 3 -4)\n  (equal? (entity/vel e) '(3 -4)))"
+     :math-program "(begin (world/reset!)\n  ;; Zero is the identity of the force group, and every push has an inverse.\n  (define e (entity/make 'player 0 0))\n  (physics/apply-force e 0 0)\n  (define untouched (equal? (entity/vel e) '(0 0)))\n  (physics/apply-force e 7 -2)\n  (physics/apply-force e -7 2)\n  (and untouched (equal? (entity/vel e) '(0 0))))"
+     :cs-program "(begin (world/reset!)\n  ;; Pushing a static body wakes it: a force makes it dynamic.\n  (define rock (entity/make 'rock 0 0))\n  (define before (entity/static? rock))\n  (physics/apply-force rock 1 0)\n  (and before (not (entity/static? rock))))"
+     :invariant "vel(apply-force(e, fx, fy)) = vel(e) + (fx, fy) AND apply-force(e, 0, 0) is a no-op AND static?(e) implies not static?(apply-force(e, fx, fy)) for nonzero f"
+     :meta "Exactness, group structure and the wake side-effect. Falsified by a scaled or clamped push, by a non-cancelling inverse, or by a body that stays asleep after being pushed.")
+    (:eng "Regression: what you push is what the body gets, sign and all."
+     :math "Identity and inverses: the pushes form a group, so a plan can be undone."
+     :cs "The wake is a documented side-effect, not an accident; it is why crates fall after their first shove."))
+  :row-5-emergence (
+    (:base "physics/apply-force adds a velocity delta to one body."
+     :eng-composition "(begin (world/reset!)\n  (define ship (entity/make 'player 0 0))\n  (define (burn! n)\n    (let loop ((i 0)) (when (< i n) (physics/apply-force ship 1 0) (physics/step) (loop (+ i 1)))))\n  (burn! 3)\n  (list ':x (entity/x ship) ':vx (car (entity/vel ship))))"
+     :math-composition "(begin (world/reset!)\n  ;; With the world field switched off, a constant per-frame force IS\n  ;; gravity: the same falling-body law y(n) = g*n*(n+1)/2 comes out.\n  (define a (entity/make 'a 0 0))\n  (physics/gravity! 0)\n  (let loop ((i 0))\n    (when (< i 4)\n      (physics/apply-force a 0 1)\n      (physics/step)\n      (loop (+ i 1))))\n  (list ':by-force (entity/y a) ':closed-form (/ (* 1 4 5) 2)))"
+     :cs-composition "(begin (world/reset!)\n  ;; Fan a single push out over a whole team by name.\n  (entity/make 'bird 0 0)\n  (entity/make 'bird 40 0)\n  (define (gust! kind dx dy)\n    (map (lambda (e) (physics/apply-force e dx dy)) (world/find kind)))\n  (gust! 'bird 2 0)\n  (map (lambda (e) (entity/vel e)) (world/find 'bird)))"
+     :emergent "A burn loop, a hand-built gravity and a named gust: force chains with the step for thrusters, with a constant per-frame call to reproduce a field exactly, and with world/find to push a whole team at once. Emergent: gravity is not a special case, it is a constant force the engine applies for you."
+     :meta "The per-frame-accumulation family. Same shape as any integrator driven by an external input signal.")
+    (:eng "A burn is a loop; a gust is a map. Both are the same call."
+     :math "With the world field off, a constant per-frame push reproduces y = g*n*(n+1)/2 exactly."
+     :cs "Fan-out over world/find turns one push into a broadcast."))
+)
+
+(verb
+  :name "physics/apply-gravity" :std "Motoi"
+  :library "world"
+  :kind "mut"
+  :dialect "motoi"
+  :audience "kid"
+  :doc "Adds g to the target's vertical velocity, leaving horizontal velocity untouched, and marks the body dynamic. When g is omitted it defaults to the current world field, so (physics/apply-gravity e) pulls exactly as hard as physics/gravity says. The target may be a handle, an entity name matched against the kind, or a tween. Returns #t on a hit and #f when nothing matched. The pull STACKS on the world field rather than replacing it — a body pulled by hand each frame in a gravity world accelerates twice as fast."
+  :section "72-world · the physics/* vocabulary"
+  :signature "(physics/apply-gravity target [g]) -> boolean"
+  :arity "1..2"
+  :contract "target is a handle, a name, or a tween; g defaults to the world field -> vertical velocity gains g and the body wakes; #t on a hit, #f when nothing matched"
+  :status "landed"
+  :status-note "Bound in lib/game/world.js over the one live entity store on 2026-08-02. The name was implemented in lib/game/game.js against a second, id-keyed store and went unbound when that installer was dropped from installCore in the 2026-07-25 Curator rip; Alfred ruled the physics should work, so it was re-wired over the live world rather than by re-installing the dead duplicate store."
+  :since "2026-08-02"
+  :provenance "motoi-scheme/lib/game/world.js"
+  :training-eligible #t
+  :confidentiality "public"
+  :summary "Pull one thing down, by its own amount or by the world's."
+  :explanation "This is the per-body counterpart to the world field: one thing, one pull, right now. Its reason to exist is that a world has exactly one gravity but a game often wants a feather and a stone. With an explicit g you get per-body strengths without touching the world at all; with g omitted you get 'same as everything else', which is the right default when you are hand-driving a body the integrator has not adopted yet. The pull is purely vertical by construction, which is what separates it from physics/apply-force — you cannot accidentally introduce sideways drift. Note that it wakes the body even at g = 0, because the wake is unconditional: it marks the target dynamic before adding anything."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(begin (world/reset!)\n  (define hero (entity/make 'player 0 0))\n  (physics/apply-gravity hero 2)\n  (entity/vel hero))" :note "Pull a body down by 2: vertical velocity becomes 2, horizontal stays 0.")
+    (:dialect "motoi" :tier "intermediate" :code "(begin (world/reset!)\n  (define leaf (entity/make 'leaf 0 0))\n  (physics/gravity! 1)\n  (physics/apply-gravity 'leaf)\n  (entity/vel leaf))" :note "With the field at 1 and no strength given, the pull matches the world exactly.")
+    (:dialect "motoi" :tier "expert" :code "(begin (world/reset!)\n  ;; The hand pull STACKS on the world field rather than replacing it: the\n  ;; pulled leaf takes g twice a frame and falls exactly twice as far.\n  (define pulled (entity/make 'leaf 0 0))\n  (define fielded (entity/make 'player 0 0))\n  (physics/gravity! 1)\n  (let loop ((i 0))\n    (when (< i 3)\n      (physics/apply-gravity pulled)\n      (physics/step)\n      (loop (+ i 1))))\n  (list ':pulled (entity/y pulled) ':fielded (entity/y fielded)))" :note "The pull stacks on the field: the hand-pulled leaf takes gravity twice a frame and falls exactly twice as far as the body that only feels the field.")
+  )
+  :caveats ("The pull STACKS on the world field; it does not replace it. In a gravity world a hand-pulled body falls twice as fast." "Omitting g reads the world field at the moment of the call, not at the moment of the step." "It wakes the body even at g = 0 — the dynamic flag is set before the addition." "Horizontal velocity is never touched; use physics/apply-force for a sideways push." "A name matches on kind and takes the first live match; pass a handle when several bodies share a kind." "A miss returns #f rather than raising.")
+  :drawbacks ("No mass and no per-body scale factor built in; for a persistent per-body multiplier use entity/gravity-scale! instead of calling this every frame." "Calling it every frame duplicates work the integrator already does for dynamic bodies, and the doubling surprises people." "For a tween target it shifts the animation path rather than a velocity, which is a different meaning under the same name.")
+  :usecases ("Give one body its own weight without changing the world." "Drop a feather and a stone side by side in a zero-gravity world." "Pull only the bodies carrying a tag." "Hand-drive a fall for an object the integrator is not stepping.")
+  :related ("physics/gravity!" "physics/gravity" "entity/gravity-scale!" "physics/apply-force" "physics/step")
+  :learn (:concept "A default argument that reads ambient state: 'as hard as everything else' is a useful thing for a call to mean." :prerequisites ("physics/gravity!" "physics/step") :progression "Pull one body by hand, then notice the doubling in a gravity world, then switch to entity/gravity-scale! when you want a persistent per-body weight.")
+  :row-2-audit (
+    (:problem "A level needs a feather and a stone, but the world has exactly one gravity. The operator needs a per-body pull that can either match the world or deliberately differ from it."
+     :eng-program "(begin (world/reset!)\n  (define leaf (entity/make 'leaf 0 0))\n  (define (make-it-fall! e) (physics/apply-gravity e 1) (physics/step) (entity/y e))\n  (make-it-fall! leaf))"
+     :math-program "(begin (world/reset!)\n  ;; With no argument the pull IS the world field: one hand call adds\n  ;; exactly (physics/gravity) to the body's vertical velocity.\n  (define hand (entity/make 'leaf 0 0))\n  (physics/gravity! 3)\n  (physics/apply-gravity hand)\n  (list ':vy (cadr (entity/vel hand)) ':field (physics/gravity)))"
+     :cs-program "(begin (world/reset!)\n  ;; A missing target reports #f; it never raises.\n  (entity/make 'leaf 0 0)\n  (list ':hit (physics/apply-gravity 'leaf 1)\n        ':miss (physics/apply-gravity 'nothing 1)))"
+     :explanation "eng: a one-line 'make it fall' helper. math: with no argument the pull equals the world field exactly. cs: a missing target reports #f and never raises."
+     :meta "Reach for physics/apply-gravity for a one-off or hand-driven pull, and entity/gravity-scale! when the body should permanently weigh more or less than the world.")
+    (:eng "Per-body weight without a per-body field."
+     :math "The default argument is the ambient value, so the call is the identity relative to the world."
+     :cs "Total over targets; the boolean is the only failure channel."))
+  :row-3-dimension (
+    (:setup "Apply an amount that defaults to the ambient one when the caller does not say."
+     :rungs (
+       (:domain "world" :code "(begin (world/reset!)\n  (define e (entity/make 'leaf 0 0))\n  (physics/apply-gravity e 2)\n  (entity/vel e))")
+       (:domain "kinematics" :code "(begin\n  ;; Velocity accumulating acceleration, with no world at all.\n  (define (accelerate v a) (+ v a))\n  (accelerate (accelerate 0 2) 2))")
+       (:domain "default" :code "(begin\n  ;; Any default-when-absent read has this shape: use the ambient value\n  ;; unless the caller supplies one.\n  (define (charge amount ambient) (if amount amount ambient))\n  (list (charge 5 2) (charge #f 2)))")
+     )
+     :explanation "Rung 1 pulls a body by an explicit amount. Rung 2 accumulates acceleration into a velocity with no world at all. Rung 3 is the bare default-when-absent shape: use the caller's value if given, otherwise the ambient one."
+     :meta "Optional-argument-defaults-to-ambient is the shape; it is how a call can mean both 'this much' and 'the usual'.")
+    (:eng "Sensible defaults are what let one verb serve two intentions."
+     :math "Velocity as the running sum of accelerations."
+     :cs "Argument defaulting resolved at call time, not at definition time."))
+  :row-4-proof (
+    (:claim "The pull lands exactly on vertical velocity, leaves horizontal velocity invariant, and wakes the body even at zero strength."
+     :eng-program "(begin (world/reset!)\n  (define e (entity/make 'leaf 0 0))\n  (physics/apply-gravity e 4)\n  (equal? (entity/vel e) '(0 4)))"
+     :math-program "(begin (world/reset!)\n  ;; The pull is purely vertical: x velocity is invariant under it.\n  (define e (entity/make 'leaf 0 0))\n  (physics/apply-force e 5 0)\n  (physics/apply-gravity e 3)\n  (equal? (entity/vel e) '(5 3)))"
+     :cs-program "(begin (world/reset!)\n  ;; A pulled body is always dynamic afterwards, even at zero strength.\n  (define rock (entity/make 'rock 0 0))\n  (define before (entity/static? rock))\n  (physics/apply-gravity rock 0)\n  (and before (not (entity/static? rock))))"
+     :invariant "vel(apply-gravity(e, g)) = (vx(e), vy(e) + g) AND static?(e) implies not static?(apply-gravity(e, g)) for every g including 0"
+     :meta "Exactness on one axis, invariance on the other, and the unconditional wake. Falsified by sideways drift, by a scaled pull, or by a zero-strength call that leaves the body asleep.")
+    (:eng "Regression: a downward pull cannot introduce sideways drift."
+     :math "The pull is a translation along the y axis of velocity space; x is invariant."
+     :cs "The wake is unconditional — worth knowing, because a zero pull is not a no-op."))
+  :row-5-emergence (
+    (:base "physics/apply-gravity adds one vertical pull to one body."
+     :eng-composition "(begin (world/reset!)\n  (define leaf (entity/make 'leaf 0 0))\n  (define (drift! frames strength)\n    (let loop ((i 0))\n      (when (< i frames) (physics/apply-gravity leaf strength) (physics/step) (loop (+ i 1))))\n    (entity/y leaf))\n  (drift! 4 0.5))"
+     :math-composition "(begin (world/reset!)\n  ;; Per-body pull strengths make a feather and a stone without ever\n  ;; touching the world field — the ratio of the falls is the ratio of g.\n  (define feather (entity/make 'feather 0 0))\n  (define stone (entity/make 'stone 0 0))\n  (let loop ((i 0))\n    (when (< i 3)\n      (physics/apply-gravity feather 0.25)\n      (physics/apply-gravity stone 2)\n      (physics/step)\n      (loop (+ i 1))))\n  (list ':feather (entity/y feather) ':stone (entity/y stone)))"
+     :cs-composition "(begin (world/reset!)\n  ;; Selective gravity: pull only the bodies carrying a tag.\n  (define a (entity/make 'crate 0 0))\n  (define b (entity/make 'balloon 40 0))\n  (entity/tag! a 'heavy)\n  (define (pull-tagged! tag g)\n    (map (lambda (e) (physics/apply-gravity e g)) (world/find tag)))\n  (pull-tagged! 'heavy 3)\n  (physics/step)\n  (list ':crate (entity/y a) ':balloon (entity/y b)))"
+     :emergent "A hand-driven drift, a feather-and-stone pair and a tag-selective pull: the call chains with a loop for per-body falls, with two strengths for differential weight in a field-free world, and with world/find to pull only what carries a tag. Emergent: selective gravity, which the single world field cannot express on its own."
+     :meta "The selective-application family. Same shape as any per-element rule applied over a filtered set.")
+    (:eng "Filter then apply is how one rule serves many bodies unevenly."
+     :math "The ratio of the falls is exactly the ratio of the strengths."
+     :cs "Tag-driven selection keeps the rule declarative instead of hardcoding names."))
+)
+
+(verb
+  :name "physics/apply-impulse" :std "Motoi"
+  :library "world"
+  :kind "mut"
+  :dialect "motoi"
+  :audience "kid"
+  :doc "Adds (dvx, dvy) to the target's velocity, exactly as physics/apply-force does, and marks the body dynamic when the result is non-zero. It exists as a separate name because 'impulse' reads correctly for a one-shot kick where 'force' reads like something sustained. On an entity the two are interchangeable; on a TWEEN target the impulse scales up by five, on the grounds that a nudge to an animation should be visible. Returns #t on a hit and #f when nothing matched."
+  :section "72-world · the physics/* vocabulary"
+  :signature "(physics/apply-impulse target dvx dvy) -> boolean"
+  :arity "3"
+  :contract "target is a handle, a name, or a tween -> velocity gains (dvx, dvy); #t on a hit, #f when nothing matched"
+  :status "landed"
+  :status-note "Bound in lib/game/world.js over the one live entity store on 2026-08-02. The name was implemented in lib/game/game.js against a second, id-keyed store and went unbound when that installer was dropped from installCore in the 2026-07-25 Curator rip; Alfred ruled the physics should work, so it was re-wired over the live world rather than by re-installing the dead duplicate store."
+  :since "2026-08-02"
+  :provenance "motoi-scheme/lib/game/world.js"
+  :training-eligible #t
+  :confidentiality "public"
+  :summary "Give something a sudden kick — a one-shot change of speed."
+  :explanation "An impulse is an instantaneous change of momentum: no duration, no integration, just a new velocity. That is exactly what a jump, a bounce, a knockback and a recoil are, and it is why the name matters even though the arithmetic is identical to physics/apply-force. Impulses compose by addition and commute — the order of two kicks does not matter — which is what makes a double jump straightforward: check that the body is still rising, kick again, and the two deltas simply add. The classic use is one impulse against a constant field, which produces the ballistic arc: velocity crosses zero at the apex, and the arc is symmetric in time about it."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(begin (world/reset!)\n  (define hero (entity/make 'player 0 0))\n  (physics/apply-impulse hero 0 -4)\n  (entity/vel hero))" :note "Kick the hero upward by 4: velocity becomes (0 -4). Screen y grows downward, so up is negative.")
+    (:dialect "motoi" :tier "intermediate" :code "(begin (world/reset!)\n  (define hero (entity/make 'player 0 0))\n  (physics/gravity! 1)\n  (physics/apply-impulse 'player 0 -3)\n  (physics/step)\n  (entity/y hero))" :note "Kick up by 3 against a downward field of 1, then step: the hero has risen 2, having already given 1 back to gravity.")
+    (:dialect "motoi" :tier "expert" :code "(begin (world/reset!)\n  ;; A double jump: two impulses, the second only while still rising.\n  (define hero (entity/make 'player 0 0))\n  (physics/gravity! 1)\n  (physics/apply-impulse hero 0 -5)\n  (physics/step) (physics/step)\n  (when (< (cadr (entity/vel hero)) 0) (physics/apply-impulse hero 0 -4))\n  (physics/step)\n  (list ':y (entity/y hero) ':vy (cadr (entity/vel hero))))" :note "A double jump — kick, step twice, and kick again only while still rising.")
+  )
+  :caveats ("Up is NEGATIVE. Screen y grows downward, so a jump is a negative dvy." "It adds to velocity; it does not set it. Two kicks are the sum of two kicks." "A zero impulse does not wake a static body — the wake is conditional on the resulting velocity being non-zero. This differs from physics/apply-gravity, which wakes unconditionally." "Nothing moves until physics/step." "For a TWEEN target the components are multiplied by five; the entity and tween meanings are not the same call." "A name matches on kind and takes the first live match; a miss returns #f.")
+  :drawbacks ("Arithmetically identical to physics/apply-force on entities, so the two names can drift apart in a reader's mind without the engine noticing." "No mass, so a heavy body and a light one respond to the same kick identically." "The tween scaling factor of five is a taste decision baked into the verb, not something a caller can adjust.")
+  :usecases ("A jump, a double jump, a wall kick." "Knockback inside an on-collision handler." "A bounce off a wall, applied by reversing part of the velocity." "Recoil from firing.")
+  :related ("physics/apply-force" "entity/set-velocity!" "on-collision" "physics/gravity!" "physics/step")
+  :learn (:concept "An impulse is an instantaneous change of momentum; the ballistic arc is one impulse plus one constant field." :prerequisites ("physics/apply-force" "physics/gravity!") :progression "Kick once and watch the arc, then gate a second kick on the sign of the velocity to get a double jump.")
+  :row-2-audit (
+    (:problem "A platformer needs a jump. Setting the velocity outright would erase whatever sideways run speed the player had; the operator wants a single vertical kick that leaves the rest of the motion alone and reads, in the code, like the one-shot event it is."
+     :eng-program "(begin (world/reset!)\n  (define hero (entity/make 'player 0 0))\n  (define (jump! h) (physics/apply-impulse hero 0 (- h)))\n  (jump! 6)\n  (entity/vel hero))"
+     :math-program "(begin (world/reset!)\n  ;; An impulse is a velocity delta, so impulses compose by addition and\n  ;; an equal-and-opposite pair cancels exactly.\n  (define e (entity/make 'player 0 0))\n  (physics/apply-impulse e 3 -3)\n  (physics/apply-impulse e -3 3)\n  (entity/vel e))"
+     :cs-program "(begin (world/reset!)\n  ;; physics/apply-impulse and physics/apply-force agree on entities; the\n  ;; name is the difference, and the name is what a reader sees.\n  (define a (entity/make 'a 0 0))\n  (define b (entity/make 'b 0 0))\n  (physics/apply-impulse a 2 -1)\n  (physics/apply-force b 2 -1)\n  (equal? (entity/vel a) (entity/vel b)))"
+     :explanation "eng: a jump helper that takes a height and negates it. math: impulses add, so an equal-and-opposite pair cancels to (0 0). cs: on entities apply-impulse and apply-force are the same arithmetic — the difference is the name a reader sees."
+     :meta "Reach for physics/apply-impulse for events (a jump, a hit) and physics/apply-force for sustained input (a thruster, wind). The engine will not correct you; the reader will.")
+    (:eng "Name the intent: events are impulses, sustained input is force."
+     :math "Velocity deltas add and cancel; the group structure is what makes plans reversible."
+     :cs "Two names, one implementation — documented deliberately so nobody 'discovers' it as a bug."))
+  :row-3-dimension (
+    (:setup "Apply a one-shot delta to a running quantity."
+     :rungs (
+       (:domain "world" :code "(begin (world/reset!)\n  (define e (entity/make 'player 0 0))\n  (physics/apply-impulse e 0 -4)\n  (entity/vel e))")
+       (:domain "mechanics" :code "(begin\n  ;; Impulse-momentum: dv = J / m.\n  (define (impulse v j m) (+ v (/ j m)))\n  (impulse 0 10 2))")
+       (:domain "editing" :code "(begin\n  ;; Any one-shot nudge to a running value has this shape.\n  (define (nudge value delta) (+ value delta))\n  (nudge 100 -4))")
+     )
+     :explanation "Rung 1 kicks an entity. Rung 2 is the textbook impulse-momentum relation dv = J/m on bare numbers. Rung 3 nudges any running value. All three change a quantity once, by an amount, without duration."
+     :meta "One-shot delta is the shape; impulse is the physical instance and an edit is the everyday one.")
+    (:eng "Events change state once; do not model them as loops."
+     :math "Impulse-momentum: the change in velocity is the impulse divided by the mass."
+     :cs "An atomic adjustment with no intermediate state to observe."))
+  :row-4-proof (
+    (:claim "A kick lands exactly on velocity, kicks commute, and a zero kick does not wake a sleeping body while a real one does."
+     :eng-program "(begin (world/reset!)\n  (define e (entity/make 'player 0 0))\n  (physics/apply-impulse e 1 2)\n  (equal? (entity/vel e) '(1 2)))"
+     :math-program "(begin (world/reset!)\n  ;; Order does not matter: impulse addition is commutative.\n  (define a (entity/make 'a 0 0))\n  (define b (entity/make 'b 0 0))\n  (physics/apply-impulse a 2 0) (physics/apply-impulse a 0 5)\n  (physics/apply-impulse b 0 5) (physics/apply-impulse b 2 0)\n  (equal? (entity/vel a) (entity/vel b)))"
+     :cs-program "(begin (world/reset!)\n  ;; A zero impulse does not wake a sleeping body, but a real one does.\n  (define rock (entity/make 'rock 0 0))\n  (physics/apply-impulse rock 0 0)\n  (define still-static (entity/static? rock))\n  (physics/apply-impulse rock 0 -1)\n  (and still-static (not (entity/static? rock))))"
+     :invariant "vel(impulse(e, a, b)) = vel(e) + (a, b) AND impulse then impulse is order-independent AND static?(e) is preserved by impulse(e, 0, 0) but broken by any nonzero impulse"
+     :meta "Exactness, commutativity and the conditional wake. Falsified by a scaled kick, by order-dependent results, or by a zero kick that wakes a body.")
+    (:eng "Regression: the kick is what you asked for, and order never matters."
+     :math "Addition is commutative, so a sequence of impulses is determined by its sum."
+     :cs "The wake is conditional here and unconditional in apply-gravity; the asymmetry is real and worth pinning."))
+  :row-5-emergence (
+    (:base "physics/apply-impulse adds one instantaneous velocity delta."
+     :eng-composition "(begin (world/reset!)\n  (define hero (entity/make 'player 0 0))\n  (physics/gravity! 1)\n  (define (jump-and-land)\n    (physics/apply-impulse hero 0 -4)\n    (let loop ((i 0))\n      (if (or (= i 20) (and (> i 0) (>= (entity/y hero) 0))) (entity/y hero)\n          (begin (physics/step) (loop (+ i 1))))))\n  (jump-and-land))"
+     :math-composition "(begin (world/reset!)\n  ;; Impulse then constant field: the classic ballistic arc, apex where\n  ;; velocity crosses zero.\n  (define ball (entity/make 'player 0 0))\n  (physics/gravity! 1)\n  (physics/apply-impulse ball 2 -5)\n  (let loop ((i 0) (apex 0))\n    (if (= i 10) (list ':apex apex ':x (entity/x ball))\n        (begin (physics/step) (loop (+ i 1) (min apex (entity/y ball)))))))"
+     :cs-composition "(begin (world/reset!)\n  ;; Collision-driven impulse: the handler reacts to the pair by kicking.\n  (define ball (entity/make 'player 0 0))\n  (entity/make 'wall 8 0)\n  (define kicks 0)\n  (on-collision\n    (lambda (a b)\n      (when (or (eq? a 'wall) (eq? b 'wall))\n        (set! kicks (+ kicks 1))\n        (physics/apply-impulse ball -2 0))))\n  (physics/step)\n  (list ':kicks kicks ':vel (entity/vel ball)))"
+     :emergent "A jump-and-land loop, a ballistic arc and a collision-driven kick: the impulse chains with the step for a whole jump, with a constant field for the classic arc and its apex, and with on-collision for knockback that reacts to the pair. Emergent: platformer feel, from one delta and one field."
+     :meta "The event-driven-dynamics family. Same shape as any system where discrete events perturb a continuous process.")
+    (:eng "A jump is a kick plus a loop plus a landing test."
+     :math "One impulse against a constant field is the ballistic arc; the apex is where velocity crosses zero."
+     :cs "Reacting inside the collision callback closes the loop between detection and response."))
+)

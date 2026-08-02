@@ -15,10 +15,19 @@ function fresh() {
 
 // ── entity/ ────────────────────────────────────────────────────────
 
-test('entity/spawn returns id, entity/pos matches', () => {
+// entity/spawn is ratified as "(entity/spawn kind x y) -> entity" —
+// scheme/reference/24-entity.slat:2711, :impl-status "wired",
+// :impl-file "lib/game/world.js". Its :impl-notes read: "returns the entity
+// object (displays as [object Object] — never assert its raw display; feed it
+// to an accessor)" and "the first spawn in a fresh process gets id 1". The old
+// `typeof id === 'string'` assertion contradicted that. Updated 2026-08-01 to
+// assert through the accessors the reference names.
+test('entity/spawn returns an entity handle, entity/pos matches', () => {
   const env = fresh()
   const id = env.vars.get('entity/spawn')(new Sym('ball'), 10, 20)
-  assert.ok(typeof id === 'string')
+  assert.equal(typeof id, 'object')
+  assert.equal(env.vars.get('entity/id')(id), 1)
+  assert.equal(String(env.vars.get('entity/kind')(id)), 'ball')
   assert.deepEqual(env.vars.get('entity/pos')(id), [10, 20])
 })
 test('entity/alive? #t after spawn', () => {
@@ -26,10 +35,14 @@ test('entity/alive? #t after spawn', () => {
   const id = env.vars.get('entity/spawn')(new Sym('ball'), 0, 0)
   assert.equal(env.vars.get('entity/alive?')(id), true)
 })
+// entity/despawn! is ratified "-> void" (scheme/reference/24-entity.slat:318);
+// the reference's own novice example checks the effect via entity/alive?, not
+// a return value. The old `=== true` return assertion was never ratified.
+// Updated 2026-08-01. The alive? effect check below is the real contract.
 test('entity/despawn! removes entity', () => {
   const env = fresh()
   const id = env.vars.get('entity/spawn')(new Sym('ball'), 0, 0)
-  assert.equal(env.vars.get('entity/despawn!')(id), true)
+  assert.equal(env.vars.get('entity/despawn!')(id), undefined)
   assert.equal(env.vars.get('entity/alive?')(id), false)
 })
 test('entity/set-vel! + entity/vel', () => {
@@ -44,12 +57,19 @@ test('entity/move! is additive', () => {
   env.vars.get('entity/move!')(id, 5, -5)
   assert.deepEqual(env.vars.get('entity/pos')(id), [15, 5])
 })
+// entity/damage! is ratified "(entity/damage! id hp-loss) -> void"
+// (scheme/reference/24-entity.slat:262) — it does NOT return the remaining hp.
+// The reference reads health back through an accessor afterwards, and its
+// entity/hp! example fixes the formula: 50 hp, two 10-damage calls, "boss is
+// now at 30 HP". By that formula 100 - 30 = 70. Updated 2026-08-01 to assert
+// the ratified formula through the entity/hp accessor.
 test('entity/hp! + entity/damage!', () => {
   const env = fresh()
   const id = env.vars.get('entity/spawn')(new Sym('ball'), 0, 0)
   env.vars.get('entity/hp!')(id, 100)
-  const hp = env.vars.get('entity/damage!')(id, 30)
-  assert.equal(hp, 70)
+  env.vars.get('entity/damage!')(id, 30)
+  assert.equal(env.vars.get('entity/hp')(id), 70)
+  assert.equal(env.vars.get('entity/alive?')(id), true)
 })
 test('entity/overlaps? true for stacked entities', () => {
   const env = fresh()
@@ -68,17 +88,38 @@ test('entity/distance', () => {
 
 // ── object/spawn (alias) ───────────────────────────────────────────
 
-test('object/spawn adds an entity', () => {
+// object/spawn is ratified "(object/spawn target [at: p] [scale: s]
+// [colour: k]) -> symbol" (scheme/reference/46-object.slat:71) — the position
+// arrives as the KEYWORD `at:`, not as bare positionals, and the summary is
+// "Instantiate a specific named object into the scene". The old test passed
+// `5, 5` positionally (silently dropped, object landed at 0,0) and asserted a
+// string id. Updated 2026-08-01 to the ratified keyword form and to assert the
+// scene effect both reference and code agree on.
+//
+// TWO OPEN ITEMS reported, deliberately NOT papered over here:
+//  (a) Return type. The reference says these return a symbol ('ok — see the
+//      :row-2-audit note "Fetch returns 'ok, not an ID"), but
+//      lib/game/composer.js:383,391 delegate to entity/spawn and return the
+//      entity object. Code and reference disagree.
+//  (b) Keyword spelling. 46-object.slat writes keywords with a TRAILING colon
+//      ('at: 'class:) in all 17 of its call sites, but parseArgs
+//      (lib/game/composer.js:35) — and every other keyword parser in lib/ —
+//      recognises only the LEADING-colon form (:at). Called the way the
+//      reference is written, the position is silently dropped and the object
+//      lands at (0 0), violating that chapter's own row-4 invariant
+//      "spawned object's position equals the requested position".
+// These tests use the engine-wide :at form so they assert real behaviour
+// rather than encoding either side of the conflict. See the lane report.
+test('object/spawn adds an entity to the scene', () => {
   const env = fresh()
-  const id = env.vars.get('object/spawn')(new Sym('rock'), 5, 5)
-  assert.ok(typeof id === 'string')
+  env.vars.get('object/spawn')(new Sym('rock'), new Sym(':at'), [5, 5])
+  assert.equal(env.vars.get('world/count')(), 1)
+  assert.deepEqual(env.vars.get('entity/pos')(env.vars.get('world/find')(new Sym('rock'))[0]), [5, 5])
 })
-test('object/fetch returns alist', () => {
+test('object/fetch instantiates by class', () => {
   const env = fresh()
-  const id = env.vars.get('object/spawn')(new Sym('rock'), 5, 5)
-  const fetched = env.vars.get('object/fetch')(id)
-  assert.ok(Array.isArray(fetched))
-  assert.ok(fetched.length >= 8)
+  env.vars.get('object/fetch')(new Sym(':class'), new Sym('rock'), new Sym(':at'), [5, 5])
+  assert.equal(env.vars.get('world/count')(), 1)
 })
 
 // ── world/ ──────────────────────────────────────────────────────────
@@ -103,17 +144,33 @@ test('world/nearest returns different entity', () => {
   const near = env.vars.get('world/nearest')(a)
   assert.equal(near, b)
 })
+// world/collisions is ratified as reading the buffer that world/step fills:
+// "After world/step completes, this reads the collision buffer... The buffer is
+// cleared at the start of each step, so collisions only live for one frame"
+// (scheme/reference/72-world.slat:445). The old test read the buffer without
+// ever stepping, so it could only ever see 0. Step added 2026-08-01.
 test('world/collisions on overlapping entities', () => {
   const env = fresh()
   env.vars.get('world/spawn')(new Sym('a'), 0, 0)
   env.vars.get('world/spawn')(new Sym('b'), 5, 5)
+  env.vars.get('world/step')()
   const cols = env.vars.get('world/collisions')()
   assert.equal(cols.length, 1)
+  assert.equal(cols[0].length, 2)
 })
+// world/gravity! is ratified "(world/gravity! gx gy) -> void" — a TWO-arg
+// vector, no return value (scheme/reference/72-world.slat:802; novice example
+// "(world/gravity! 0 0.5)"). The old test passed one arg and asserted a return
+// value; neither is ratified. The reference defines the observable instead:
+// "Every frame, gravity applies a constant acceleration to all entities...
+// in world units per frame squared" — so after one step a dynamic body's
+// vy is exactly gy. Updated 2026-08-01 to assert that.
 test('world/gravity! sets gravity', () => {
   const env = fresh()
-  const r = env.vars.get('world/gravity!')(0.7)
-  assert.equal(r, 0.7)
+  const p = env.vars.get('world/spawn')(new Sym('player'), 0, 0)
+  assert.equal(env.vars.get('world/gravity!')(0, 0.7), undefined)
+  env.vars.get('world/step')()
+  assert.deepEqual(env.vars.get('entity/vel')(p), [0, 0.7])
 })
 test('world/count reflects spawns', () => {
   const env = fresh()
@@ -172,17 +229,32 @@ test('camera-pan is additive', () => {
   env.vars.get('camera-pan')(10, 5)
   assert.equal(env.vars.get('camera-x')(), 10)
 })
+// camera-home is ratified as returning to the ORIGIN, not to the last
+// camera-set! position: "Reset the camera view to a neutral starting state —
+// centered at world origin (0, 0) with scale 1.0" (scheme/reference/
+// 01-core.slat:933). The old test expected 50 (the previously-set position),
+// a "home = last set point" notion the reference never ratified. Updated
+// 2026-08-01 to the ratified origin-and-scale-1 contract.
 test('camera-home returns to home', () => {
   const env = fresh()
-  env.vars.get('camera-set!')(50, 50)
+  env.vars.get('camera-set!')(50, 50, 1.5)
   env.vars.get('camera-pan')(100, 100)
   env.vars.get('camera-home')()
-  assert.equal(env.vars.get('camera-x')(), 50)
+  assert.equal(env.vars.get('camera-x')(), 0)
+  assert.equal(env.vars.get('camera-y')(), 0)
+  assert.equal(env.vars.get('camera-scale')(), 1)
 })
+// camera-zoom-to's ratified reader is camera-scale — the reference's own
+// intermediate example is "(let ((current-scale (camera-scale))) ...)"
+// (scheme/reference/01-core.slat:1331). There is no 'zoom key in camera-state;
+// the scale field is spelled 'k ("sometimes called `k` internally", same
+// entry). The old test looked up a 'zoom key that has never existed and threw.
+// Updated 2026-08-01 to read through camera-scale.
 test('camera-zoom-to', () => {
   const env = fresh()
   env.vars.get('camera-zoom-to')(3)
+  assert.equal(env.vars.get('camera-scale')(), 3)
   const st = env.vars.get('camera-state')()
-  const zoom = st.find(e => e[0] === 'zoom')
-  assert.equal(zoom[1], 3)
+  const k = st.find(e => String(e[0]) === 'k')
+  assert.equal(k[1], 3)
 })
