@@ -1,0 +1,713 @@
+;; go-nine.sks
+;; Motoi Cart — Flagship (SD framebuffer)
+;;
+;; (cart
+;;   :name            "go-nine"
+;;   :category        :game
+;;   :sub-category    :board
+;;   :audience        :kid
+;;   :complexity      5
+;;   :runtime-tier    :runs-on-core
+;;   :render          :sd-framebuffer
+;;   :sd-framebuffer  (320 240)
+;;   :one-line        "Play Go on a 9x9 board against Motoi — real stones, liberties, group capture and simple-ko, with a straight brain you can learn to beat and an adaptive one that studies your habits, drawn on the 320x240 screen."
+;;   :verbs-used      ("set-mode" "clear" "set-color" "disc" "circle" "line"
+;;                     "rect" "rect-fill" "fb/text" "fb/dump" "make-vector"
+;;                     "vector-ref" "vector-set!" "vector-length" "vector"
+;;                     "quotient" "remainder" "modulo" "abs" "min" "max"
+;;                     "number->string" "string-append" "eq?" "cons" "car" "cdr"
+;;                     "list" "length" "reverse" "append" "for-each" "filter"
+;;                     "when" "unless" "cond" "case" "let" "let*" "set!")
+;;   :inspiration     "Go / Weiqi / Baduk — four thousand years old, the deepest board game we know: two colors of stone, one rule about breathing, and a whole universe of shape. The last classical board game where a human mind still holds real ground.")
+;;
+;; HOW TO RUN:
+;;   motoi run carts/go-nine.sks
+;;
+;; WHAT THIS IS
+;;   Go on Motoi's real SD screen (320x240). The board is one vector of 81
+;;   points (a 9x9 grid). Each point holds a tiny number: 0 empty, 1 for a BLACK
+;;   stone, 2 for a WHITE stone. Numbers, not symbols, so reading a point is
+;;   instant arithmetic — and the machine reads the board a LOT, because the one
+;;   real rule of Go is about counting.
+;;
+;;   THE RULE OF BREATHING. A stone (with every friendly stone it touches, up,
+;;   down, left, right) forms a group. The empty points touching that group are
+;;   its "liberties" — its breaths. Play a stone that fills the last breath of an
+;;   enemy group and that whole group is captured and lifted off the board. You
+;;   may not play a stone that would leave your OWN group with no breaths (that
+;;   is self-suicide), unless the same move captures something first. This cart
+;;   does all of that correctly with a flood-fill that walks a group and counts
+;;   its liberties.
+;;
+;;   SIMPLE KO. If capturing a single stone would let the opponent immediately
+;;   recapture your single stone and return the board to exactly where it just
+;;   was, that instant recapture is forbidden for one move (the "ko" rule that
+;;   stops an endless loop). We track the single-stone ko point and honor it.
+;;   FULL positional superko (no repeat of ANY past whole-board position, ever)
+;;   is left out on purpose — it is rare in a short game and expensive to check.
+;;
+;;   SCORING. At the move cap we score the simple way: your points are your
+;;   stones on the board PLUS the empty points that touch only your color
+;;   (your surrounded territory). Empty regions that touch both colors are
+;;   neutral and count for nobody. White gets a small komi (a fixed bonus for
+;;   moving second). Highest score wins.
+;;
+;; MOTOI AS YOUR OPPONENT — two brains you can switch (the fun part)
+;;   Set AI-PLAN to pick how Motoi thinks:
+;;
+;;   'straight  (default) — a FIXED, learnable style. Motoi always: (1) captures
+;;              if it can, (2) saves its own group when you put it in atari (down
+;;              to its last breath), (3) otherwise plays solid, contact-and-corner
+;;              moves near the action, biased to its own side of the board. It
+;;              never changes. Watch it a few games and you can read it and beat
+;;              it — which is exactly the point of the straight brain.
+;;
+;;   'adaptive  — Motoi WATCHES YOU. Across the match it keeps a little scouting
+;;              record: how often you play aggressive contact moves, and which
+;;              side of the board (left / center / right) you crowd. Then it
+;;              adjusts: if you play sharp and aggressive it turns solid and
+;;              defensive; if you play quietly it turns pushy and takes territory;
+;;              and it leans toward whichever side you've been ignoring. It is
+;;              readable and human — a person could narrate every choice — NOT a
+;;              perfect solver. Adaptive looks a little wider, so on the top
+;;              LEVEL it may want more fuel.
+;;
+;;   LEVEL — how far Motoi looks:
+;;     'easy    — nearest-action heuristic only. Fast. Fits DEFAULT 200000 fuel.
+;;     'normal  — also weighs how many enemy stones a move puts in atari.
+;;     'hard    — also avoids self-ataris and prefers moves that gain the most
+;;                net liberties; looks at more candidate points, so it wants
+;;                more fuel:  motoi run carts/go-nine.sks --fuel 500000
+;;
+;; NO KEYBOARD — how "you vs Motoi" is expressed
+;;   A headless cart has no keys, so BOTH sides are driven by the engine and the
+;;   game auto-plays a full sample game to a result. BLACK follows a short fixed
+;;   opening script (a stand-in for "the human") then plays a simple contact
+;;   move; WHITE is Motoi's brain (AI-PLAN + LEVEL). On a real surface you swap
+;;   BLACK's script for live taps from a person and leave WHITE as the AI.
+
+;; =======================  KNOBS  =======================
+
+(define AI-PLAN 'straight)   ;; 'straight (fixed, learnable) | 'adaptive (studies you)
+(define LEVEL   'easy)       ;; 'easy 'normal 'hard — how far WHITE (Motoi) looks.
+                            ;; 'easy fits the DEFAULT 200000 fuel and finishes the
+                            ;; sample game. 'hard looks wider and wants more fuel:
+                            ;;   motoi run carts/go-nine.sks --fuel 500000
+(define SEED    20260730)   ;; deterministic tie-breaks; change for a new game
+(define MAX-MOVES 8)        ;; hard cap on total moves (both sides). A liberty
+                            ;; flood-fill per candidate plus the ONE full-screen
+                            ;; (fb/dump) are both fuel-hungry here; 8 moves + a
+                            ;; dump + final territory scoring is what fits the
+                            ;; DEFAULT 200000 budget. Raise it with more fuel:
+                            ;;   motoi run carts/go-nine.sks --fuel 500000
+(define KOMI    5)          ;; White's bonus points for moving second (simple)
+(define SHOW-EVERY 1)       ;; print a status line this often (in moves)
+(define DUMP-MOVE 6)        ;; render the ONE SD screenshot after this move
+
+(define W 320)              ;; SD width
+(define H 240)              ;; SD height
+(define N 9)                ;; board is N x N
+(define NP (* N N))         ;; number of points (81)
+
+;; board pixel geometry: intersections on a grid inside the play area
+(define GX 30)              ;; x of the first (leftmost) line
+(define GY 24)              ;; y of the first (top) line
+(define GS 22)              ;; pixels between grid lines
+
+;; =======================  DETERMINISTIC PRNG  =======================
+;; A tiny linear-congruential generator so tie-breaks are stable every run
+;; without touching the host clock.  rnd -> [0,1).
+
+(define _seed SEED)
+(define (rnd)
+  (set! _seed (modulo (+ (* _seed 1103515245) 12345) 2147483648))
+  (/ _seed 2147483648))
+
+;; =======================  CHARM PASS: SOUND  =======================
+;; A little theme at the start, plus a small sound on each key event: a stone
+;; placed, a capture, the final result. The audio verbs are REAL — (music)
+;; (melody) (sfx) (note) (tone) — but on a headless run there is no speaker, so
+;; they simply do nothing. The SHAPE is what teaches; on a real surface they sing.
+;;
+;; TEACHING IDEA — guard a nice-extra so it can NEVER crash the game. Sound is a
+;; bonus, not the point; if one audio call ever misbehaved it must not take the
+;; whole match down. So every sound goes through one flag (SOUND-ON) and one tiny
+;; wrapper (safe). Flip the flag off and the game plays on in silence, unchanged.
+(define SOUND-ON #t)
+(define (safe thunk) (when SOUND-ON (thunk)) #t)
+
+(define (play-theme!)                         ;; a rising "here we go!" phrase
+  (safe (lambda ()
+    (music 'go-theme)
+    (melody (list 62 66 69 74) 0.12))))       ;; D4 F#4 A4 D5 — up the major chord
+(define (sfx-place! who)                      ;; a soft click as a stone lands
+  (safe (lambda () (sfx 'blip (if (= who BLACK) 392 520) 0.04))))
+(define (sfx-capture!)                          ;; a bright chime on a capture
+  (safe (lambda () (note 79 0.10 0.7))))
+(define (sfx-end! b w)                           ;; result: rising / low / flat
+  (safe (lambda ()
+    (cond ((> b w) (melody (list 67 72 76) 0.12))
+          ((< b w) (melody (list 55 52 48) 0.14))
+          (else    (tone 330 0.30))))))
+
+;; =======================  THE BOARD  =======================
+;; One vector of 81 points.  index = row*9 + col, row 0 = top.
+;;   0 = empty   1 = BLACK   2 = WHITE
+(define EMPTY 0)
+(define BLACK 1)
+(define WHITE 2)
+
+(define BOARD (make-vector NP 0))
+
+(define (at pt) (vector-ref BOARD pt))
+(define (put! pt v) (vector-set! BOARD pt v))
+(define (row pt) (quotient pt N))
+(define (col pt) (remainder pt N))
+(define (pt-of r c) (+ (* r N) c))
+(define (on-board? r c) (and (>= r 0) (< r N) (>= c 0) (< c N)))
+(define (empty-pt? pt) (= (at pt) EMPTY))
+(define (other-color s) (if (= s BLACK) WHITE BLACK))
+
+;; the up-to-4 orthogonal neighbors of a point, as a list of point indices.
+;; PRECOMPUTED: `neighbors` is called thousands of times, so we build every
+;; point's neighbor list ONCE into a vector at load time and just read it back.
+;; (Re-allocating a direction list on every call was the biggest fuel leak.)
+(define DIRS (list (list -1 0) (list 1 0) (list 0 -1) (list 0 1)))
+(define NBR (make-vector NP '()))
+(let build ((pt 0))
+  (when (< pt NP)
+    (let ((r (quotient pt N)) (c (remainder pt N)))
+      (vector-set! NBR pt
+        (let loop ((ds DIRS) (acc '()))
+          (if (null? ds) acc
+              (let ((rr (+ r (car (car ds)))) (cc (+ c (car (cdr (car ds))))))
+                (if (and (>= rr 0) (< rr N) (>= cc 0) (< cc N))
+                    (loop (cdr ds) (cons (+ (* rr N) cc) acc))
+                    (loop (cdr ds) acc)))))))
+    (build (+ pt 1))))
+
+(define (neighbors pt) (vector-ref NBR pt))
+
+;; =======================  GROUPS + LIBERTIES  =======================
+;; The crux of Go.  Flood-fill from a stone across same-color neighbors to find
+;; the whole GROUP, and count the empty points that touch it (its LIBERTIES).
+;; We use a small "seen" vector to avoid revisiting points; both are O(NP).
+
+;; membership marker vectors reused across scans (cleared by the caller's fresh
+;; make-vector each call — NP is only 81, so a fresh vector per query is cheap
+;; and keeps the code honest / re-entrant).
+;;
+;; group-at: return (stones . libs) where stones is the list of point indices in
+;; the group containing `pt`, and libs is the count of distinct liberties.
+(define (group-of pt)
+  (let ((color (at pt))
+        (in-group (make-vector NP #f))    ;; is this point part of the group?
+        (lib-seen (make-vector NP #f)))   ;; counted this liberty already?
+    (let loop ((stack (list pt)) (stones '()) (libs 0))
+      (if (null? stack)
+          (list stones libs)
+          (let ((p (car stack)) (rest (cdr stack)))
+            (if (vector-ref in-group p)
+                (loop rest stones libs)
+                (begin
+                  (vector-set! in-group p #t)
+                  ;; walk this stone's neighbors: same color -> extend group,
+                  ;; empty -> a liberty (count once), enemy -> ignore.
+                  (let nloop ((ns (neighbors p)) (stk rest) (lb libs))
+                    (if (null? ns)
+                        (loop stk (cons p stones) lb)
+                        (let* ((q (car ns)) (qv (at q)))
+                          (cond
+                            ((= qv EMPTY)
+                             (if (vector-ref lib-seen q)
+                                 (nloop (cdr ns) stk lb)
+                                 (begin (vector-set! lib-seen q #t)
+                                        (nloop (cdr ns) stk (+ lb 1)))))
+                            ((= qv color)
+                             (if (vector-ref in-group q)
+                                 (nloop (cdr ns) stk lb)
+                                 (nloop (cdr ns) (cons q stk) lb)))
+                            (else (nloop (cdr ns) stk lb)))))))))))))
+
+(define (group-stones g) (car g))
+(define (group-libs g)   (car (cdr g)))
+
+;; liberties of the group containing pt (pt must hold a stone)
+(define (liberties pt) (group-libs (group-of pt)))
+
+;; =======================  PLAYING A MOVE (with capture + ko)  =======================
+;; KO tracking: KO-PT is the single point forbidden to the NEXT mover, or -1.
+(define KO-PT -1)
+
+;; Would placing `color` at empty point `pt` be a LEGAL move?  Legal if:
+;;   * pt is empty and not the ko point,
+;;   * AND either it captures an enemy group (frees a breath) OR the placed
+;;     stone's own group would still have at least one liberty (no suicide).
+;; We test by trial: place, check enemy captures, check own liberty, restore.
+;; Returns #t/#f.  Does NOT mutate the real board on exit.
+(define (captured-enemy? pt color)
+  ;; does placing color at pt fill the last liberty of some adjacent enemy grp?
+  (let ((opp (other-color color)))
+    (let loop ((ns (neighbors pt)))
+      (cond ((null? ns) #f)
+            ((and (= (at (car ns)) opp)
+                  (= (group-libs (group-of (car ns))) 1)) #t)
+            (else (loop (cdr ns)))))))
+
+;; cheap: does pt have at least one EMPTY neighbor? (an immediate liberty)
+;; No flood-fill — pure neighbor read.
+(define (has-empty-neighbor? pt)
+  (let loop ((ns (neighbors pt)))
+    (cond ((null? ns) #f)
+          ((= (at (car ns)) EMPTY) #t)
+          (else (loop (cdr ns))))))
+
+(define (legal? pt color)
+  (and (= (at pt) EMPTY)
+       (not (= pt KO-PT))
+       ;; FAST PATH: a stone with an empty neighbor obviously has a breath, so
+       ;; it is legal without any flood-fill.  This covers almost every move on
+       ;; a sparse board and is the key fuel win.
+       (if (has-empty-neighbor? pt)
+           #t
+           ;; SLOW PATH (fully surrounded point): must either capture an enemy
+           ;; group or connect into a friendly group that still breathes.
+           (begin
+             (put! pt color)
+             (let* ((caps (captured-enemy? pt color))
+                    (self (group-libs (group-of pt)))
+                    (ok (or caps (> self 0))))
+               (put! pt EMPTY)
+               ok)))))
+
+;; remove every enemy group adjacent to pt that now has zero liberties.
+;; returns the list of removed point indices (for ko bookkeeping + HUD).
+(define (remove-dead-enemies! pt color)
+  (let ((opp (other-color color)))
+    (let loop ((ns (neighbors pt)) (removed '()))
+      (if (null? ns) removed
+          (let ((q (car ns)))
+            (if (and (= (at q) opp) (= (group-libs (group-of q)) 0))
+                (let* ((g (group-of q)) (stones (group-stones g)))
+                  (for-each (lambda (s) (put! s EMPTY)) stones)
+                  (loop (cdr ns) (append stones removed)))
+                (loop (cdr ns) removed)))))))
+
+;; PLAY a (assumed legal) move for `color` at `pt`.  Places the stone, lifts any
+;; captured enemy groups, and updates the ko point (single-stone recapture ban).
+;; returns the number of stones captured.
+(define (play! pt color)
+  (put! pt color)
+  (let ((removed (remove-dead-enemies! pt color)))
+    ;; simple ko: if exactly ONE stone was captured AND the stone we just placed
+    ;; is itself now a lone stone with exactly one liberty (the captured point),
+    ;; forbid recapture there next move.  Otherwise clear the ko.
+    (if (and (= (length removed) 1)
+             (= (length (group-stones (group-of pt))) 1)
+             (= (group-libs (group-of pt)) 1))
+        (set! KO-PT (car removed))
+        (set! KO-PT -1))
+    (length removed)))
+
+;; =======================  MOVE ENUMERATION  =======================
+
+;; all legal points for `color` right now
+;; does point pt sit next to any stone at all? (a "contact" / active point)
+;; CHEAP — pure neighbor read, no flood-fill.
+(define (contact? pt)
+  (let loop ((ns (neighbors pt)))
+    (cond ((null? ns) #f)
+          ((not (= (at (car ns)) EMPTY)) #t)
+          (else (loop (cdr ns))))))
+
+;; FUEL NOTE — candidate generation is the hot path.  A liberty flood-fill
+;; (group-of) is the single most expensive op in this cart, and `legal?` runs it
+;; twice.  So we NEVER test legality over all 81 points.  Instead we build a
+;; small candidate set with the CHEAP neighbor-only `contact?` test (empty points
+;; touching a stone — where all the real action is), and only THEN pay the
+;; flood-fill to confirm legality on that short list.  On an empty board (no
+;; contacts yet) we seed a handful of fixed opening points.  This is what keeps a
+;; whole game inside the default fuel.
+(define OPENING-SEEDS
+  (list (pt-of 2 2) (pt-of 2 6) (pt-of 6 2) (pt-of 6 6) (pt-of 4 4)
+        (pt-of 2 4) (pt-of 4 2) (pt-of 4 6) (pt-of 6 4)))
+
+;; empty points adjacent to any stone (the active frontier) — no flood-fill.
+(define (empty-contacts)
+  (let loop ((pt 0) (acc '()))
+    (if (>= pt NP) acc
+        (loop (+ pt 1)
+              (if (and (= (at pt) EMPTY) (contact? pt)) (cons pt acc) acc)))))
+
+;; the short candidate list for `color`: legal frontier points, or (empty board)
+;; the legal opening seeds.  Bounded by the perimeter of the current stones.
+(define (candidates color)
+  (let* ((frontier (empty-contacts))
+         (pool (if (null? frontier)
+                   (filter (lambda (pt) (= (at pt) EMPTY)) OPENING-SEEDS)
+                   frontier)))
+    (filter (lambda (pt) (legal? pt color)) pool)))
+
+;; how many enemy stones would this move put in ATARI (down to one liberty)?
+;; measured by trial-placing the stone, then scanning adjacent enemy groups.
+(define (atari-gain pt color)
+  (let ((opp (other-color color)))
+    (put! pt color)
+    (let* ((caps (remove-dead-enemies! pt color)) ;; count real captures big
+           (n (let loop ((ns (neighbors pt)) (cnt 0))
+                (cond ((null? ns) cnt)
+                      ((and (= (at (car ns)) opp)
+                            (= (group-libs (group-of (car ns))) 1))
+                       (loop (cdr ns) (+ cnt (length (group-stones (group-of (car ns)))))))
+                      (else (loop (cdr ns) cnt))))))
+      ;; put captured stones back and lift our trial stone: restore the board
+      (for-each (lambda (s) (put! s opp)) caps)
+      (put! pt EMPTY)
+      (+ (* 100 (length caps)) (* 5 n)))))     ;; real capture >> mere atari
+
+;; net liberties the placed stone's own group ends with (higher = safer)
+(define (self-safety pt color)
+  (put! pt color)
+  (let ((libs (group-libs (group-of pt))))
+    (put! pt EMPTY)
+    libs))
+
+;; =======================  MOTOI'S BRAIN  =======================
+;; A readable heuristic scorer.  Higher score = Motoi likes the move more.  The
+;; adaptive plan MODIFIES the weights from a scouting record of how BLACK plays.
+
+;; scouting record of the human (BLACK): aggression count + column pressure.
+(define HUMAN-AGGRO 0)          ;; times BLACK played a contact/atari move
+(define HUMAN-LEFT 0)           ;; BLACK stones in cols 0..2
+(define HUMAN-MID 0)            ;; cols 3..5
+(define HUMAN-RIGHT 0)         ;; cols 6..8
+(define HUMAN-MOVES 0)
+
+(define (scout-human! pt)
+  (set! HUMAN-MOVES (+ HUMAN-MOVES 1))
+  (when (contact? pt) (set! HUMAN-AGGRO (+ HUMAN-AGGRO 1)))
+  (let ((c (col pt)))
+    (cond ((< c 3) (set! HUMAN-LEFT (+ HUMAN-LEFT 1)))
+          ((< c 6) (set! HUMAN-MID (+ HUMAN-MID 1)))
+          (else (set! HUMAN-RIGHT (+ HUMAN-RIGHT 1))))))
+
+;; the human's favored side ('left 'mid 'right) — the one they crowd MOST.
+(define (human-favored-side)
+  (cond ((and (>= HUMAN-LEFT HUMAN-MID) (>= HUMAN-LEFT HUMAN-RIGHT)) 'left)
+        ((and (>= HUMAN-RIGHT HUMAN-LEFT) (>= HUMAN-RIGHT HUMAN-MID)) 'right)
+        (else 'mid)))
+
+;; is the human playing aggressively? (>= half their moves were contact moves)
+(define (human-aggressive?)
+  (and (> HUMAN-MOVES 0) (>= (* 2 HUMAN-AGGRO) HUMAN-MOVES)))
+
+;; distance-to-center-ish bonus: near the middle lines is worth a touch more.
+(define (center-pull pt)
+  (let ((r (row pt)) (c (col pt)) (mid (quotient N 2)))
+    (- 8 (+ (abs (- r mid)) (abs (- c mid))))))
+
+;; how far Motoi looks, by LEVEL
+(define (level-depth) (case LEVEL ((easy) 0) ((hard) 2) (else 1)))
+
+;; score a candidate move for WHITE (Motoi).  Deterministic; rnd only breaks ties.
+(define (score-move pt)
+  (let* ((depth (level-depth))
+         (base (+ (if (contact? pt) 6 0)        ;; play near the action
+                  (center-pull pt)))
+         ;; LEVEL 1+: reward putting enemy in atari / capturing
+         (aggr (if (>= depth 1) (atari-gain pt WHITE) 0))
+         ;; LEVEL 2: avoid self-atari, reward net own liberties
+         (safe (if (>= depth 2)
+                   (let ((s (self-safety pt WHITE)))
+                     (cond ((<= s 1) -20)         ;; walking into self-atari: bad
+                           (else (* 2 s))))
+                   0))
+         (plan
+          (if (eq? AI-PLAN 'adaptive)
+              ;; ADAPTIVE: bend the weights to counter the human.
+              (let* ((c (col pt))
+                     (side (cond ((< c 3) 'left) ((< c 6) 'mid) (else 'right)))
+                     (fav (human-favored-side))
+                     ;; take the side the human has been IGNORING
+                     (open-side-bonus
+                      (cond ((and (eq? fav 'left) (eq? side 'right)) 8)
+                            ((and (eq? fav 'right) (eq? side 'left)) 8)
+                            ((and (eq? fav 'mid)
+                                  (or (eq? side 'left) (eq? side 'right))) 5)
+                            (else 0)))
+                     ;; if they play sharp -> value SAFETY; if quiet -> value REACH
+                     (temper
+                      (if (human-aggressive?)
+                          (* 3 (self-safety pt WHITE))   ;; hunker down, stay solid
+                          (* 2 (center-pull pt)))))      ;; push out for territory
+                (+ open-side-bonus temper))
+              0)))
+    (+ base aggr safe plan (rnd))))     ;; rnd in [0,1): stable tie-break
+
+;; Motoi picks its move: the highest-scoring legal candidate (frontier/opening).
+(define (motoi-pick)
+  (let ((cands (candidates WHITE)))
+    (if (null? cands) #f
+        (let loop ((cs cands) (best (car cands)) (bv -1000000))
+          (if (null? cs) best
+              (let ((v (score-move (car cs))))
+                (if (> v bv) (loop (cdr cs) (car cs) v)
+                             (loop (cdr cs) best bv))))))))
+
+;; BLACK, the "human" stand-in: a short fixed opening script, then a simple
+;; contact-and-capture pick (capture if possible, else a contact move, else any).
+(define BLACK-SCRIPT
+  (list (pt-of 2 2) (pt-of 2 6) (pt-of 6 2) (pt-of 6 6) (pt-of 4 4)))
+(define black-idx 0)
+(define (list-ref* xs k) (if (= k 0) (car xs) (list-ref* (cdr xs) (- k 1))))
+
+(define (black-pick)
+  (let ((scripted
+         (if (< black-idx (length BLACK-SCRIPT))
+             (list-ref* BLACK-SCRIPT black-idx)
+             -1)))
+    (set! black-idx (+ black-idx 1))
+    (if (and (>= scripted 0) (legal? scripted BLACK))
+        scripted
+        ;; off-script: prefer a capture, then a contact move, from the frontier.
+        (let ((cands (candidates BLACK)))
+          (if (null? cands) #f
+              (let loop ((ls cands) (best (car cands)) (bv -1))
+                (if (null? ls) best
+                    (let* ((pt (car ls))
+                           (v (+ (atari-gain pt BLACK) (if (contact? pt) 3 0))))
+                      (if (> v bv) (loop (cdr ls) pt v)
+                                   (loop (cdr ls) best bv))))))))))
+
+;; =======================  SCORING  =======================
+;; stones on the board + territory (empty regions touching only one color).
+(define (count-stones color)
+  (let loop ((pt 0) (acc 0))
+    (if (>= pt NP) acc
+        (loop (+ pt 1) (if (= (at pt) color) (+ acc 1) acc)))))
+
+;; flood an empty region from `pt`; return (size touches-black touches-white)
+;; using a shared `seen` vector marked as we go.
+(define (flood-empty pt seen)
+  (let loop ((stack (list pt)) (size 0) (tb #f) (tw #f))
+    (if (null? stack) (list size tb tw)
+        (let ((p (car stack)) (rest (cdr stack)))
+          (if (vector-ref seen p)
+              (loop rest size tb tw)
+              (begin
+                (vector-set! seen p #t)
+                (let nloop ((ns (neighbors p)) (stk rest) (b tb) (w tw))
+                  (if (null? ns) (loop stk (+ size 1) b w)
+                      (let* ((q (car ns)) (qv (at q)))
+                        (cond ((= qv BLACK) (nloop (cdr ns) stk #t w))
+                              ((= qv WHITE) (nloop (cdr ns) stk b #t))
+                              ((vector-ref seen q) (nloop (cdr ns) stk b w))
+                              (else (nloop (cdr ns) (cons q stk) b w))))))))))))
+
+;; (black-territory white-territory) — empty regions touching exactly one color.
+(define (territory)
+  (let ((seen (make-vector NP #f)))
+    (let loop ((pt 0) (bt 0) (wt 0))
+      (if (>= pt NP) (list bt wt)
+          (if (and (= (at pt) EMPTY) (not (vector-ref seen pt)))
+              (let* ((reg (flood-empty pt seen))
+                     (size (car reg)) (tb (car (cdr reg))) (tw (car (cdr (cdr reg)))))
+                (cond ((and tb (not tw)) (loop (+ pt 1) (+ bt size) wt))
+                      ((and tw (not tb)) (loop (+ pt 1) bt (+ wt size)))
+                      (else (loop (+ pt 1) bt wt))))    ;; neutral / dame
+              (loop (+ pt 1) bt wt))))))
+
+(define (final-scores)
+  (let* ((terr (territory))
+         (bs (+ (count-stones BLACK) (car terr)))
+         (ws (+ (count-stones WHITE) (car (cdr terr)) KOMI)))
+    (list bs ws)))
+
+;; =======================  RENDER (SD framebuffer)  =======================
+
+(define (ix x) x)
+(define (grid-x c) (+ GX (* c GS)))
+(define (grid-y r) (+ GY (* r GS)))
+
+(define (draw-board last-pt caps)
+  (clear 4)                                   ;; brown board
+  ;; grid lines
+  (set-color 0)
+  (let loop ((i 0)) (when (< i N)
+    (line (grid-x 0) (grid-y i) (grid-x (- N 1)) (grid-y i))    ;; horizontal
+    (line (grid-x i) (grid-y 0) (grid-x i) (grid-y (- N 1)))    ;; vertical
+    (loop (+ i 1))))
+  ;; star points (hoshi): corners 2,2 / 2,6 / 6,2 / 6,6 and center 4,4
+  (set-color 0)
+  (for-each (lambda (rc) (disc (grid-x (car (cdr rc))) (grid-y (car rc)) 2))
+    (list (list 2 2) (list 2 6) (list 6 2) (list 6 6) (list 4 4)))
+  ;; stones
+  (let loop ((pt 0)) (when (< pt NP)
+    (let ((v (at pt)))
+      (when (not (= v EMPTY))
+        (let ((x (grid-x (col pt))) (y (grid-y (row pt))))
+          ;; black stone = dark disc w/ light rim; white stone = light disc w/ dark rim
+          (set-color (if (= v BLACK) 0 7))
+          (disc x y 9)
+          (set-color (if (= v BLACK) 5 5))
+          (circle x y 9)
+          ;; mark the most-recent stone with a small colored dot
+          (when (= pt last-pt)
+            (set-color (if (= v BLACK) 8 8))
+            (disc x y 3)))))
+    (loop (+ pt 1))))
+  ;; frame
+  (set-color 5)
+  (rect (- GX 8) (- GY 8) (+ (* (- N 1) GS) 16) (+ (* (- N 1) GS) 16)))
+
+(define (draw-hud move-no turn note bs ws)
+  (set-color 5) (rect-fill 236 16 82 208)
+  (fb/text "GO 9x9" 244 20 'yellow)
+  (fb/text (string-append "plan " (if (eq? AI-PLAN 'adaptive) "adpt" "strt"))
+           244 34 'white)
+  (fb/text (string-append "lvl " (case LEVEL ((easy) "easy") ((hard) "hard") (else "norm")))
+           244 46 'white)
+  (fb/text (string-append "move " (number->string move-no)) 244 58 'white)
+  (fb/text (string-append "turn " (if (= turn BLACK) "B" "W")) 244 70 'white)
+  (fb/text "score" 244 90 'lavender)
+  (fb/text (string-append "B " (number->string bs)) 244 102 'white)
+  (fb/text (string-append "W " (number->string ws)) 244 114 'white)
+  (fb/text "black=you" 244 138 'green)
+  (fb/text "white=AI" 244 150 'green)
+  (fb/text note 244 170 'pink))
+
+;; =======================  CHARM PASS: PALETTE + TITLE  =======================
+;; TEACHING IDEA — name your constants. Now "the sky" is a word, not a number,
+;; and restyling the whole cart is a one-line edit here.
+(define COL-SKY   1)   ;; dark background wash on the title
+(define COL-STARS 13)  ;; lavender speckle
+(define COL-FRAME 7)   ;; white frame / banner edge
+
+;; A calm, seed-driven starfield behind the title — deterministic (same every
+;; run), just a scatter of pixels for depth. Kept small so it costs little fuel.
+(define (draw-starfield)
+  (clear COL-SKY)
+  (let loop ((k 0) (s SEED))
+    (when (< k 24)
+      (let* ((s2 (modulo (+ (* s 1103515245) 12345) 2147483648))
+             (sx (modulo s2 W))
+             (s3 (modulo (+ (* s2 1103515245) 12345) 2147483648))
+             (sy (modulo s3 H)))
+        (pset sx sy COL-STARS)
+        (loop (+ k 1) s3)))))
+
+;; A title screen is just ANOTHER drawing: the same verbs that paint the board
+;; paint the splash. Order: show the title, play the theme, then start the game.
+(define (draw-title)
+  (draw-starfield)
+  (set-color 0) (rect-fill 34 62 252 60)          ;; banner shadow
+  (set-color 2) (rect-fill 30 58 252 60)          ;; banner
+  (set-color COL-FRAME) (rect 30 58 252 60)
+  (fb/text "G O   9 x 9" 106 78 'yellow)
+  (fb/text "the rule of breathing" 76 98 'white)
+  ;; a scrap of art: a black stone and a white stone side by side
+  (set-color 0) (disc 132 150 8) (set-color 5) (circle 132 150 8)
+  (set-color 7) (disc 188 150 8) (set-color 5) (circle 188 150 8)
+  (fb/text "* PRESS START *" 100 190 'green)
+  (fb/text "loading..." 130 212 'lavender))
+
+;; =======================  STATUS PRINT  =======================
+
+(define (pt-name pt)
+  (string-append "(" (number->string (row pt)) "," (number->string (col pt)) ")"))
+
+(define (print-status move-no turn pt caps)
+  (display "move ") (display move-no)
+  (display (if (= turn BLACK) "  B(you) " "  W(AI)  "))
+  (display (pt-name pt))
+  (when (> caps 0) (display "  captured ") (display caps))
+  ;; cheap running tally: stones on the board (NO territory flood — that is only
+  ;; run once at the end).  Liberties of the group we just played, for flavor.
+  (display "   |  stones B=") (display (count-stones BLACK))
+  (display " W=") (display (count-stones WHITE))
+  (display "  libs=") (display (liberties pt))
+  (newline))
+
+;; =======================  DRIVER  =======================
+
+(set-mode 'sd)
+
+(display "=== GO 9x9 — Motoi SD (320x240) ===") (newline)
+(display "You (Black, scripted opening then contact play) vs Motoi (White)") (newline)
+(display "AI-PLAN=") (display AI-PLAN) (display "  LEVEL=") (display LEVEL)
+(display "  KOMI=") (display KOMI) (newline)
+(display "Rule: fill a group's last breath (liberty) to capture it. Simple-ko on.") (newline)
+(newline)
+
+;; SPLASH FIRST: draw the title frame, sound the theme, THEN play. This is the
+;; ONE allowed extra dump — the loading screen, not a per-tick dump.
+(play-theme!)
+(draw-title)
+(display "--- SD title screen ---") (newline)
+(fb/dump 0 0 W H)
+(newline)
+
+(define RESULT "")
+(define LAST-CAPS 0)
+
+(let loop ((move-no 1) (turn BLACK) (passes 0))
+  (cond
+    ((> move-no MAX-MOVES)
+     (let* ((sc (final-scores)) (bs (car sc)) (ws (car (cdr sc))))
+       (set! RESULT
+         (cond ((> bs ws) "move cap reached — BLACK (you) leads on the board")
+               ((< bs ws) "move cap reached — WHITE (Motoi) leads on the board")
+               (else "move cap reached — dead even")))))
+    ((>= passes 2)
+     (set! RESULT "both passed — game over"))
+    (else
+     (let ((pt (if (= turn BLACK) (black-pick) (motoi-pick))))
+       (if (eq? pt #f)
+           ;; no legal move -> a pass
+           (begin
+             (when (= (modulo move-no SHOW-EVERY) 0)
+               (display "move ") (display move-no)
+               (display (if (= turn BLACK) "  B(you) " "  W(AI)  "))
+               (display "PASS") (newline))
+             (loop (+ move-no 1) (other-color turn) (+ passes 1)))
+           (let ((caps (play! pt turn)))
+             (set! LAST-CAPS caps)
+             (sfx-place! turn)                          ;; a click on every stone
+             (when (> caps 0) (sfx-capture!))            ;; a chime on a capture
+             (when (= turn BLACK) (scout-human! pt))   ;; adaptive brain watches
+             (when (= (modulo move-no SHOW-EVERY) 0)
+               (print-status move-no turn pt caps))
+             ;; the ONE SD screenshot at an interesting mid-game move
+             (when (= move-no DUMP-MOVE)
+               (let* ((sc (final-scores)) (bs (car sc)) (ws (car (cdr sc))))
+                 (draw-board pt caps)
+                 (draw-hud move-no (other-color turn)
+                           (if (> caps 0) "capture!" "...") bs ws)
+                 (newline)
+                 (display "--- SD screenshot @ move ") (display move-no)
+                 (display " ") (display (pt-name pt)) (display " ---") (newline)
+                 (fb/dump 0 0 W H)
+                 (newline)))
+             (loop (+ move-no 1) (other-color turn) 0)))))))
+
+;; =======================  RESULT  =======================
+
+(newline)
+(let* ((sc (final-scores)) (bs (car sc)) (ws (car (cdr sc))))
+  (sfx-end! bs ws)                          ;; result jingle: win / lose / tie
+  (display "RESULT: ") (display RESULT) (newline)
+  (display "FINAL SCORE (stones + territory, White +komi ") (display KOMI) (display "):") (newline)
+  (display "  BLACK (you)   = ") (display bs) (newline)
+  (display "  WHITE (Motoi) = ") (display ws) (newline)
+  (display "  WINNER: ")
+  (display (cond ((> bs ws) "BLACK — you!") ((< bs ws) "WHITE — Motoi") (else "tie"))) (newline))
+(newline)
+(display "Scouting record of your play (used by AI-PLAN 'adaptive):") (newline)
+(display "  contact/aggressive moves = ") (display HUMAN-AGGRO)
+(display " of ") (display HUMAN-MOVES) (newline)
+(display "  side pressure  left=") (display HUMAN-LEFT)
+(display " mid=") (display HUMAN-MID)
+(display " right=") (display HUMAN-RIGHT) (newline)
+(newline)
+(display "Fork it: flip AI-PLAN to 'adaptive so Motoi studies your habits, or") (newline)
+(display "raise LEVEL to 'hard (--fuel 500000). Swap BLACK-SCRIPT for live taps.") (newline)

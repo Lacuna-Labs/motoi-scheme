@@ -1,0 +1,584 @@
+;; mancala.sks
+;; Motoi Cart — Flagship (SD framebuffer)
+;;
+;; (cart
+;;   :name            "mancala"
+;;   :category        :game
+;;   :sub-category    :board
+;;   :audience        :kid
+;;   :complexity      4
+;;   :runtime-tier    :runs-on-core
+;;   :render          :sd-framebuffer
+;;   :sd-framebuffer  (320 240)
+;;   :one-line        "Play Mancala (Kalah) against Motoi — sow the seeds counterclockwise, land in your own store for a free turn, land in your empty pit to capture across, with a straight brain you can learn to beat and an adaptive one that studies your habits, drawn on the 320x240 screen."
+;;   :verbs-used      ("set-mode" "clear" "set-color" "disc" "circle" "rect"
+;;                     "rect-fill" "fb/text" "fb/dump" "make-vector" "vector-ref"
+;;                     "vector-set!" "vector-length" "quotient" "remainder"
+;;                     "modulo" "abs" "min" "max" "number->string" "string-append"
+;;                     "eq?" "cons" "car" "cdr" "list" "length" "for-each"
+;;                     "when" "unless" "cond" "case" "let" "let*" "set!")
+;;   :inspiration     "Mancala — the oldest family of board games on Earth, count-and-capture 'sowing' games played in scooped-out earth and rows of shells across Africa and Asia for thousands of years. This is the Kalah rules a kid learns first.")
+;;
+;; HOW TO RUN:
+;;   motoi run carts/mancala.sks
+;;
+;; WHAT THIS IS
+;;   Mancala (the Kalah ruleset) on Motoi's real SD screen (320x240). The whole
+;;   board is one vector of 14 little cups. Twelve are PITS (six for you, six for
+;;   Motoi) and two are STORES (your score-cup on the right, Motoi's on the left).
+;;   Each cup just holds a count of seeds — reading the board is plain arithmetic,
+;;   and the game is all about counting where a handful of seeds will land.
+;;
+;;   BOARD LAYOUT (indices in the vector):
+;;       Motoi's pits:   12 11 10  9  8  7        (top row, right to left)
+;;     Motoi store 13 |                        | 6  your store
+;;       Your pits:       0  1  2  3  4  5          (bottom row, left to right)
+;;   Seeds always travel COUNTERCLOCKWISE: your pits 0..5 -> your store 6 ->
+;;   Motoi's pits 7..12 -> (skip Motoi's store 13 on your turn) -> back to 0.
+;;
+;;   THE THREE RULES, exactly:
+;;   1. SOW. Pick one of your own non-empty pits. Lift ALL its seeds and drop them
+;;      one at a time into each following cup, going counterclockwise. You drop a
+;;      seed in your OWN store as you pass it, but you SKIP the opponent's store.
+;;   2. FREE TURN. If your last seed lands in your OWN store, you go again.
+;;   3. CAPTURE. If your last seed lands in one of your OWN empty pits, and the
+;;      pit directly across from it (on the opponent's side) has seeds, you
+;;      capture that seed AND all the seeds across, straight into your store.
+;;   When one side's six pits are all empty, the game ends and every remaining
+;;   seed goes to the owner of the side it is on. Most seeds in your store wins.
+;;
+;; MOTOI AS YOUR OPPONENT — two brains you can switch (the fun part)
+;;   Set AI-PLAN to pick how Motoi thinks:
+;;
+;;   'straight  (default) — a FIXED, learnable style. Motoi always: (1) takes a
+;;              FREE TURN whenever one is available (landing in its store), (2)
+;;              else grabs the biggest CAPTURE it can, (3) else sows from its
+;;              rightmost loaded pit — greedy and predictable. Watch it a few
+;;              games and you can read the pattern and beat it. That is the point
+;;              of the straight brain.
+;;
+;;   'adaptive  — Motoi WATCHES YOU. Across the match it keeps a little scouting
+;;              record: how often you grab free turns and how often you set up
+;;              captures. Then it adjusts. If you hoard free turns, it starts
+;;              emptying the pits that FEED your free-turn pit so the trick dries
+;;              up. If you play for captures, it keeps its own pits fuller as bait
+;;              so your captures grab less. It is readable and human — a person
+;;              could narrate every choice — NOT a perfect solver. Adaptive looks
+;;              a little wider, so on the top LEVEL it may want more fuel.
+;;
+;;   LEVEL — how far Motoi looks:
+;;     'easy    — the greedy rules above, one move deep. Fast. Fits DEFAULT fuel.
+;;     'normal  — also peeks one reply ahead: it won't take a move that hands YOU
+;;                a big capture right back.
+;;     'hard    — looks one move deeper still and prefers moves that keep its own
+;;                free-turn threats alive; it re-simulates far more, so it wants
+;;                a lot more fuel:
+;;                  motoi run carts/mancala.sks --fuel 800000
+;;                ('normal wants about --fuel 500000.)
+;;
+;; NO KEYBOARD — how "you vs Motoi" is expressed
+;;   A headless cart has no keys, so BOTH sides are driven by the engine and the
+;;   game auto-plays a full sample game to a result. YOU (bottom) follow a short
+;;   fixed opening script (a stand-in for a person) then play a simple free-turn/
+;;   capture heuristic; MOTOI (top) is the AI brain (AI-PLAN + LEVEL). On a real
+;;   surface you swap YOUR script for live taps and leave MOTOI as the AI.
+
+;; =======================  KNOBS  =======================
+
+(define AI-PLAN 'straight)   ;; 'straight (fixed, learnable) | 'adaptive (studies you)
+(define LEVEL   'easy)       ;; 'easy 'normal 'hard — how far MOTOI looks.
+                            ;; 'easy fits the DEFAULT 200000 fuel and finishes the
+                            ;; sample game. Deeper levels re-simulate far more and
+                            ;; want more fuel:
+                            ;;   normal: motoi run carts/mancala.sks --fuel 500000
+                            ;;   hard:   motoi run carts/mancala.sks --fuel 800000
+(define SEED    20260730)   ;; deterministic tie-breaks; change for a new game
+(define SEEDS-PER-PIT 4)    ;; classic Kalah starts each pit with 4 seeds
+(define MAX-TURNS 40)       ;; hard cap on turns so a full game always terminates
+(define SHOW-EVERY 1)       ;; print a status line this often (in turns)
+(define DUMP-TURN 8)        ;; render the ONE SD screenshot after this turn
+
+(define W 320)              ;; SD width
+(define H 240)              ;; SD height
+
+;; =======================  DETERMINISTIC PRNG  =======================
+;; A tiny linear-congruential generator so tie-breaks are stable every run.
+
+(define _seed SEED)
+(define (rnd)
+  (set! _seed (modulo (+ (* _seed 1103515245) 12345) 2147483648))
+  (/ _seed 2147483648))
+
+;; =======================  CHARM PASS: SOUND  =======================
+;; A little theme at the start, plus a small sound on each key event: seeds sown,
+;; a capture, a free turn, the final result. The audio verbs are REAL — (music)
+;; (melody) (sfx) (note) (tone) — but on a headless run there is no speaker, so
+;; they simply do nothing. The SHAPE is what teaches; on a real surface they sing.
+;;
+;; TEACHING IDEA — guard a nice-extra so it can NEVER crash the game. Sound is a
+;; bonus, not the point; if one audio call ever misbehaved it must not take the
+;; whole match down. So every sound goes through one flag (SOUND-ON) and one tiny
+;; wrapper (safe). Flip the flag off and the game plays on in silence, unchanged.
+(define SOUND-ON #t)
+(define (safe thunk) (when SOUND-ON (thunk)) #t)
+
+(define (play-theme!)                         ;; a rising "here we go!" phrase
+  (safe (lambda ()
+    (music 'mancala-theme)
+    (melody (list 60 64 67 72) 0.12))))       ;; C4 E4 G4 C5 — up the major chord
+(define (sfx-sow!)                             ;; a soft click as seeds drop
+  (safe (lambda () (sfx 'blip 440 0.04))))
+(define (sfx-capture!)                          ;; a bright chime on a capture
+  (safe (lambda () (note 79 0.10 0.7))))
+(define (sfx-free!)                             ;; a little lift for a free turn
+  (safe (lambda () (note 72 0.08 0.6))))
+(define (sfx-end! y a)                           ;; result: rising / low / flat
+  (safe (lambda ()
+    (cond ((> y a) (melody (list 67 72 76) 0.12))
+          ((< y a) (melody (list 55 52 48) 0.14))
+          (else    (tone 330 0.30))))))
+
+;; =======================  THE BOARD  =======================
+;; One vector of 14 cups.  Each holds a seed count.
+;;   0..5   = YOU (South) pits          6  = YOUR store
+;;   7..12  = MOTOI (North) pits        13 = MOTOI's store
+;; Play direction is increasing index, modulo 14 (counterclockwise), with each
+;; side skipping the OTHER side's store.
+(define BOARD (make-vector 14 0))
+
+(define YOU 'you)            ;; South, pits 0..5, store 6
+(define AI  'ai)             ;; North, pits 7..12, store 13
+(define YOU-STORE 6)
+(define AI-STORE 13)
+
+(define (cups pt) (vector-ref BOARD pt))
+(define (set-cup! pt v) (vector-set! BOARD pt v))
+(define (add-cup! pt n) (vector-set! BOARD pt (+ (vector-ref BOARD pt) n)))
+
+(define (own-store side) (if (eq? side YOU) YOU-STORE AI-STORE))
+(define (foe-store side) (if (eq? side YOU) AI-STORE YOU-STORE))
+;; the six pit indices a side may sow FROM
+(define (own-pits side) (if (eq? side YOU) (list 0 1 2 3 4 5) (list 7 8 9 10 11 12)))
+(define (own-pit? side pt)
+  (if (eq? side YOU) (and (>= pt 0) (<= pt 5)) (and (>= pt 7) (<= pt 12))))
+(define (other-side side) (if (eq? side YOU) AI YOU))
+
+;; the pit "directly across" from pit pt (for captures).  0<->12, 1<->11, ...,
+;; 5<->7 ; symmetric.  Stores have no opposite.
+(define (opposite pt) (- 12 pt))
+
+;; =======================  SETUP  =======================
+
+(define (setup!)
+  (let loop ((i 0))
+    (when (< i 14)
+      (set-cup! i (if (or (= i YOU-STORE) (= i AI-STORE)) 0 SEEDS-PER-PIT))
+      (loop (+ i 1)))))
+
+;; =======================  SOWING (the crux)  =======================
+;; Sow the seeds from pit `from` for `side`.  Returns the symbol describing what
+;; happened for turn control:  'again  (last seed in own store -> free turn)
+;;                             'done   (normal end of turn)
+;; Captures are applied here.  Assumes `from` is a legal, non-empty own pit.
+(define (sow! side from)
+  (let ((n (cups from))
+        (store (own-store side))
+        (skip  (foe-store side)))
+    (set-cup! from 0)                         ;; lift all seeds
+    ;; drop them one at a time going counterclockwise, skipping the foe's store
+    (let loop ((pos from) (left n))
+      (if (= left 0)
+          ;; all seeds placed — `pos` is where the LAST seed landed
+          (finish-move side pos store)
+          (let ((next (modulo (+ pos 1) 14)))
+            (if (= next skip)
+                (loop next left)              ;; hop over the opponent's store
+                (begin (add-cup! next 1)
+                       (loop next (- left 1)))))))))
+
+;; decide free-turn / capture from where the last seed landed
+(define (finish-move side last-pos store)
+  (cond
+    ;; landed in own store -> FREE TURN
+    ((= last-pos store) 'again)
+    ;; landed in own EMPTY pit (it was empty before this seed, so now holds 1)
+    ;; and the opposite pit has seeds -> CAPTURE both piles into own store
+    ((and (own-pit? side last-pos)
+          (= (cups last-pos) 1)
+          (> (cups (opposite last-pos)) 0))
+     (let ((mine (cups last-pos)) (across (cups (opposite last-pos))))
+       (set-cup! last-pos 0)
+       (set-cup! (opposite last-pos) 0)
+       (add-cup! store (+ mine across)))
+     'done)
+    (else 'done)))
+
+;; =======================  GAME-OVER + SWEEP  =======================
+;; a side is "empty" when all six of its pits hold zero
+(define (side-empty? side)
+  (let loop ((ps (own-pits side)))
+    (cond ((null? ps) #t)
+          ((> (cups (car ps)) 0) #f)
+          (else (loop (cdr ps))))))
+
+(define (game-over?) (or (side-empty? YOU) (side-empty? AI)))
+
+;; at game end, each side scoops its own remaining pit-seeds into its store
+(define (sweep!)
+  (for-each (lambda (p) (add-cup! YOU-STORE (cups p)) (set-cup! p 0)) (own-pits YOU))
+  (for-each (lambda (p) (add-cup! AI-STORE (cups p)) (set-cup! p 0)) (own-pits AI)))
+
+;; =======================  MOVE ANALYSIS (non-destructive)  =======================
+;; We evaluate candidate moves on a COPY of the board so the live game is never
+;; disturbed.  A tiny 14-cell copy is cheap.
+
+(define (snapshot) (let ((v (make-vector 14 0)))
+                     (let loop ((i 0)) (when (< i 14)
+                       (vector-set! v i (vector-ref BOARD i)) (loop (+ i 1)))) v))
+(define (restore! snap)
+  (let loop ((i 0)) (when (< i 14)
+    (vector-set! BOARD i (vector-ref snap i)) (loop (+ i 1)))))
+
+;; simulate `side` sowing `from` on the live board, returning
+;;   (result store-gain gives-free-turn) then RESTORE the board.
+;;   store-gain = how many seeds the side's store rose by (captures + free-store).
+(define (try-move side from)
+  (let* ((snap (snapshot))
+         (store (own-store side))
+         (before (cups store))
+         (res (sow! side from))
+         (gain (- (cups store) before)))
+    (restore! snap)
+    (list res gain)))
+
+(define (legal-moves side)
+  (let loop ((ps (own-pits side)) (acc '()))
+    (cond ((null? ps) (reverse acc))
+          ((> (cups (car ps)) 0) (loop (cdr ps) (cons (car ps) acc)))
+          (else (loop (cdr ps) acc)))))
+
+;; the best CAPTURE/gain a move gives (store-gain), and whether it frees a turn
+(define (move-gain side from) (car (cdr (try-move side from))))
+(define (move-frees? side from) (eq? (car (try-move side from)) 'again))
+
+;; =======================  MOTOI'S BRAIN  =======================
+;; Scouting record of the human (YOU): how often you take free turns / captures.
+(define YOU-FREE 0)
+(define YOU-CAPS 0)
+(define YOU-TURNS 0)
+
+(define (scout-you! result gain)
+  (set! YOU-TURNS (+ YOU-TURNS 1))
+  (when (eq? result 'again) (set! YOU-FREE (+ YOU-FREE 1)))
+  (when (> gain 1) (set! YOU-CAPS (+ YOU-CAPS 1))))    ;; a capture moves >1 seed
+
+(define (you-loves-free?) (and (> YOU-TURNS 0) (>= (* 2 YOU-FREE) YOU-TURNS)))
+(define (you-loves-caps?) (and (> YOU-TURNS 0) (>= (* 2 YOU-CAPS) YOU-TURNS)))
+
+;; the pit index whose seeds would FEED the human's free-turn pit.  A free turn
+;; happens when the human's pit `k` holds exactly (6 - k) seeds (so the last seed
+;; lands in store 6).  Emptying/altering the pit that would sow into pit `k`
+;; disrupts it.  We just target the human's fullest pit near the store as a
+;; readable proxy.
+(define (disrupt-free-target)
+  ;; the human's pit closest to their store (pit 5) that has seeds; emptying our
+  ;; side across from it changes the count they rely on. readable heuristic:
+  ;; sow from OUR pit whose seeds reach across into their store-feeders.
+  10)   ;; a fixed, readable "reach toward their store side" pit (index 10)
+
+(define (level-depth) (case LEVEL ((easy) 0) ((hard) 2) (else 1)))
+
+;; score a candidate move `from` for MOTOI.  Higher = better.  Deterministic;
+;; rnd only breaks ties.
+(define (score-move from)
+  (let* ((depth (level-depth))
+         (tm (try-move AI from))
+         (res (car tm)) (gain (car (cdr tm)))
+         (free-bonus (if (eq? res 'again) 12 0))     ;; love a free turn
+         (cap-bonus (* 3 gain))                      ;; and captures
+         ;; LEVEL 1+: don't hand the human a big capture right back.  Simulate
+         ;; our move, then measure the human's best immediate store-gain.
+         (reply-pen
+          (if (>= depth 1)
+              (let* ((snap (snapshot)) (_ (sow! AI from))
+                     (hbest (let loop ((ms (legal-moves YOU)) (b 0))
+                              (cond ((null? ms) b)
+                                    (else (let ((g (move-gain YOU (car ms))))
+                                            (loop (cdr ms) (max b g)))))))
+                     (__ (restore! snap)))
+                (* 2 hbest))
+              0))
+         ;; LEVEL 2: also prefer keeping our OWN future free-turn threats alive
+         (threat
+          (if (>= depth 2)
+              (let* ((snap (snapshot)) (_ (sow! AI from))
+                     (ours (let loop ((ms (legal-moves AI)) (c 0))
+                             (cond ((null? ms) c)
+                                   ((move-frees? AI (car ms)) (loop (cdr ms) (+ c 1)))
+                                   (else (loop (cdr ms) c)))))
+                     (__ (restore! snap)))
+                (* 3 ours))
+              0))
+         (plan
+          (if (eq? AI-PLAN 'adaptive)
+              ;; ADAPTIVE: bend the weights to counter the human.
+              (cond
+                ;; if the human hoards free turns, prize moves that reach across
+                ;; into their store-feeding pits (disrupt the trick)
+                ((you-loves-free?)
+                 (if (= from (disrupt-free-target)) 9 0))
+                ;; if the human plays for captures, keep our pits FULLER as bait
+                ;; that grabs less — value NOT emptying our biggest pit
+                ((you-loves-caps?)
+                 (- 0 (quotient (cups from) 2)))       ;; mild aversion to dumping big pits
+                (else 0))
+              0)))
+    (+ free-bonus cap-bonus (- 0 reply-pen) threat plan (rnd))))
+
+(define (motoi-pick)
+  (let ((moves (legal-moves AI)))
+    (if (null? moves) #f
+        (let loop ((ms moves) (best (car moves)) (bv -1000000))
+          (if (null? ms) best
+              (let ((v (score-move (car ms))))
+                (if (> v bv) (loop (cdr ms) (car ms) v)
+                             (loop (cdr ms) best bv))))))))
+
+;; YOU (the "human" stand-in): a short fixed opening script, then a simple
+;; free-turn / capture greedy pick.
+(define YOU-SCRIPT (list 2 5 1 4))
+(define you-idx 0)
+(define (list-ref* xs k) (if (= k 0) (car xs) (list-ref* (cdr xs) (- k 1))))
+
+(define (you-pick)
+  (let ((scripted (if (< you-idx (length YOU-SCRIPT)) (list-ref* YOU-SCRIPT you-idx) -1)))
+    (set! you-idx (+ you-idx 1))
+    (if (and (>= scripted 0) (> (cups scripted) 0))
+        scripted
+        ;; off-script: free turn first, then biggest capture, then leftmost
+        (let ((moves (legal-moves YOU)))
+          (if (null? moves) #f
+              (let loop ((ms moves) (best (car moves)) (bv -1))
+                (if (null? ms) best
+                    (let* ((from (car ms))
+                           (v (+ (if (move-frees? YOU from) 100 0)
+                                 (move-gain YOU from))))
+                      (if (> v bv) (loop (cdr ms) from v)
+                                   (loop (cdr ms) best bv))))))))))
+
+;; =======================  RENDER (SD framebuffer)  =======================
+;; two rows of 6 pits, a big store at each end, seed count drawn as text and as
+;; a little cluster of dots.
+
+(define PIT-R 15)
+(define STORE-W 30)
+(define STORE-H 96)
+(define TOP-Y 60)          ;; y of Motoi's pit row centers
+(define BOT-Y 168)         ;; y of your pit row centers
+(define PIT-X0 66)         ;; x of the first pit center
+(define PIT-DX 34)         ;; spacing between pit centers
+
+;; on-screen center (x y) for a cup index
+(define (cup-x-top i) (+ PIT-X0 (* (- 12 i) PIT-DX)))  ;; AI pits 7..12 right->left
+(define (cup-x-bot i) (+ PIT-X0 (* i PIT-DX)))          ;; your pits 0..5 left->right
+
+(define (draw-seeds cx cy n color)
+  ;; scatter up to a handful of dots so a cup "looks" full, plus the number
+  (set-color color)
+  (let loop ((k 0))
+    (when (and (< k n) (< k 8))
+      (let ((ang (* k 0.9)) (rr (+ 3 (* 1.4 k))))
+        (disc (+ cx (quotient (* (- (modulo (* k 7) 11) 5) rr) 6))
+              (+ cy (quotient (* (- (modulo (* k 5) 9) 4) rr) 6)) 2))
+      (loop (+ k 1)))))
+
+(define (draw-pit cx cy n stone-color highlight)
+  (set-color (if highlight 10 4))
+  (disc cx cy PIT-R)
+  (set-color 5) (circle cx cy PIT-R)
+  (draw-seeds cx cy n stone-color)
+  (fb/text (number->string n) (- cx 3) (- cy 3) 'white))
+
+(define (draw-store x y n label color)
+  (set-color 4) (rect-fill x y STORE-W STORE-H)
+  (set-color 5) (rect x y STORE-W STORE-H)
+  (draw-seeds (+ x (quotient STORE-W 2)) (+ y (quotient STORE-H 2)) n color)
+  (fb/text label (+ x 6) (+ y 6) 'yellow)
+  (fb/text (number->string n) (+ x 8) (+ y (- STORE-H 14)) 'white))
+
+(define (draw-board last-side last-from note)
+  (clear 1)
+  ;; title
+  (fb/text "MANCALA (KALAH)" 92 14 'yellow)
+  (fb/text "MOTOI (North)" 96 34 'pink)
+  (fb/text "YOU (South)" 100 196 'green)
+  ;; stores: Motoi (left, index 13), You (right, index 6)
+  (draw-store 20 TOP-Y (cups AI-STORE) "AI" 14)
+  (draw-store (- W 20 STORE-W) TOP-Y (cups YOU-STORE) "YOU" 11)
+  ;; Motoi pits (top row), indices 7..12 drawn right->left
+  (let loop ((i 7)) (when (<= i 12)
+    (draw-pit (cup-x-top i) TOP-Y (cups i) 14
+              (and (eq? last-side AI) (= i last-from)))
+    (loop (+ i 1))))
+  ;; Your pits (bottom row), indices 0..5 left->right
+  (let loop ((i 0)) (when (<= i 5)
+    (draw-pit (cup-x-bot i) BOT-Y (cups i) 11
+              (and (eq? last-side YOU) (= i last-from)))
+    (loop (+ i 1))))
+  ;; HUD strip
+  (set-color 5) (rect-fill 0 214 W 26)
+  (fb/text (string-append "plan " (if (eq? AI-PLAN 'adaptive) "adpt" "strt"))
+           6 220 'white)
+  (fb/text (string-append "lvl " (case LEVEL ((easy) "easy") ((hard) "hard") (else "norm")))
+           78 220 'white)
+  (fb/text note 150 220 'peach))
+
+;; =======================  CHARM PASS: PALETTE + TITLE  =======================
+;; TEACHING IDEA — name your constants. Now "the sky" is a word, not a number,
+;; and restyling the whole cart is a one-line edit here.
+(define COL-SKY   1)   ;; dark background wash on the title
+(define COL-STARS 13)  ;; lavender speckle
+(define COL-FRAME 7)   ;; white frame / banner edge
+
+;; A calm, seed-driven starfield behind the title — deterministic (same every
+;; run), just a scatter of pixels for depth. Kept small so it costs little fuel.
+(define (draw-starfield)
+  (clear COL-SKY)
+  (let loop ((k 0) (s SEED))
+    (when (< k 30)
+      (let* ((s2 (modulo (+ (* s 1103515245) 12345) 2147483648))
+             (sx (modulo s2 W))
+             (s3 (modulo (+ (* s2 1103515245) 12345) 2147483648))
+             (sy (modulo s3 H)))
+        (pset sx sy COL-STARS)
+        (loop (+ k 1) s3)))))
+
+;; A title screen is just ANOTHER drawing: the same verbs that paint the board
+;; paint the splash. Order: show the title, play the theme, then start the game.
+(define (draw-title)
+  (draw-starfield)
+  (set-color 0) (rect-fill 34 62 252 60)          ;; banner shadow
+  (set-color 2) (rect-fill 30 58 252 60)          ;; banner
+  (set-color COL-FRAME) (rect 30 58 252 60)
+  (fb/text "M A N C A L A" 104 78 'yellow)
+  (fb/text "sow and capture" 100 98 'white)
+  ;; a scrap of art: a little row of three seeds
+  (set-color 11) (disc 140 150 4) (disc 160 150 4) (disc 180 150 4)
+  (fb/text "* PRESS START *" 100 190 'green)
+  (fb/text "loading..." 130 212 'lavender))
+
+;; =======================  STATUS PRINT  =======================
+
+(define (side-name side) (if (eq? side YOU) "YOU" "MOTOI"))
+(define (pit-label side from)
+  ;; human-readable pit name: your pits a1..a6, Motoi's b1..b6
+  (if (eq? side YOU)
+      (string-append "a" (number->string (+ from 1)))
+      (string-append "b" (number->string (- from 6)))))
+
+(define (print-status turn side from result gain again?)
+  (display "turn ") (display turn)
+  (display "  ") (display (side-name side))
+  (display " plays ") (display (pit-label side from))
+  (when (> gain 0) (display "  (+") (display gain) (display " to store)"))
+  (when again? (display "  FREE TURN!"))
+  (display "   |  store YOU=") (display (cups YOU-STORE))
+  (display " MOTOI=") (display (cups AI-STORE))
+  (newline))
+
+;; =======================  DRIVER  =======================
+
+(set-mode 'sd)
+(setup!)
+
+(display "=== MANCALA (KALAH) — Motoi SD (320x240) ===") (newline)
+(display "You (South, pits a1..a6) vs Motoi (North, pits b1..b6)") (newline)
+(display "AI-PLAN=") (display AI-PLAN) (display "  LEVEL=") (display LEVEL)
+(display "  seeds/pit=") (display SEEDS-PER-PIT) (newline)
+(display "Sow counterclockwise. Land in your store = free turn. Land in your")
+(newline)
+(display "own empty pit = capture the seeds across. Most seeds in your store wins.")
+(newline) (newline)
+
+;; SPLASH FIRST: draw the title frame, sound the theme, THEN play. This is the
+;; ONE allowed extra dump — the loading screen, not a per-tick dump.
+(play-theme!)
+(draw-title)
+(display "--- SD title screen ---") (newline)
+(fb/dump 0 0 W H)
+(newline)
+
+(define RESULT "")
+(define DUMPED #f)
+
+;; play one side's TURN, which may chain several sows via free turns.  Returns
+;; the number of individual sows made (for the human scout on YOUR turns).
+(define (take-turn side turn)
+  (let again-loop ((sows 0))
+    (if (game-over?)
+        sows
+        (let ((from (if (eq? side YOU) (you-pick) (motoi-pick))))
+          (if (eq? from #f)
+              sows
+              (let* ((store (own-store side))
+                     (before (cups store))
+                     (res (sow! side from))       ;; play it ONCE, for real
+                     (gain (- (cups store) before))
+                     (again? (eq? res 'again)))
+                (sfx-sow!)                    ;; a click as the seeds drop
+                (when (> gain 1) (sfx-capture!)) ;; a chime on a real capture
+                (when again? (sfx-free!))      ;; a lift on a free turn
+                (when (eq? side YOU) (scout-you! res gain))
+                (when (= (modulo turn SHOW-EVERY) 0)
+                  (print-status turn side from res gain again?))
+                ;; the ONE SD screenshot at an interesting turn
+                (when (and (not DUMPED) (>= turn DUMP-TURN))
+                  (set! DUMPED #t)
+                  (draw-board side from (if again? "free turn!" (if (> gain 1) "capture!" "...")))
+                  (newline)
+                  (display "--- SD screenshot @ turn ") (display turn)
+                  (display " (") (display (side-name side)) (display " ")
+                  (display (pit-label side from)) (display ") ---") (newline)
+                  (fb/dump 0 0 W H)
+                  (newline))
+                (if (and again? (not (game-over?)))
+                    (again-loop (+ sows 1))       ;; FREE TURN: same side goes again
+                    (+ sows 1))))))))
+
+(let loop ((turn 1) (side YOU))
+  (cond
+    ((game-over?)
+     (sweep!)
+     (set! RESULT
+       (let ((y (cups YOU-STORE)) (a (cups AI-STORE)))
+         (cond ((> y a) "all pits empty — game over")
+               ((< y a) "all pits empty — game over")
+               (else "all pits empty — game over")))))
+    ((> turn MAX-TURNS)
+     (sweep!)
+     (set! RESULT "turn cap reached — swept remaining seeds"))
+    (else
+     (take-turn side turn)
+     (loop (+ turn 1) (other-side side)))))
+
+;; =======================  RESULT  =======================
+
+(newline)
+(sfx-end! (cups YOU-STORE) (cups AI-STORE))  ;; result jingle: win / lose / tie
+(let ((y (cups YOU-STORE)) (a (cups AI-STORE)))
+  (display "RESULT: ") (display RESULT) (newline)
+  (display "FINAL STORES:") (newline)
+  (display "  YOU   = ") (display y) (newline)
+  (display "  MOTOI = ") (display a) (newline)
+  (display "  WINNER: ")
+  (display (cond ((> y a) "YOU — nicely counted!")
+                 ((< y a) "MOTOI")
+                 (else "TIE"))) (newline))
+(newline)
+(display "Scouting record of your play (used by AI-PLAN 'adaptive):") (newline)
+(display "  free turns taken = ") (display YOU-FREE)
+(display "   captures = ") (display YOU-CAPS)
+(display "   of ") (display YOU-TURNS) (display " sows") (newline)
+(newline)
+(display "Fork it: flip AI-PLAN to 'adaptive so Motoi studies your habits, or") (newline)
+(display "raise LEVEL to 'hard (--fuel 800000). Swap YOU-SCRIPT for live taps.") (newline)

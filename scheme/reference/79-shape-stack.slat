@@ -1,0 +1,264 @@
+;;; 79-shape-stack.slat — Motoi Scheme Reference · Appendix / Chapter 79 ·
+;;; The shape-math stack: the four ways Motoi turns numbers into pixels, and
+;;; how they compose. A LEVEL-4 (analyze) chapter.
+;;;
+;;; Written 2026-07-29. This is an APPENDIX to the drawing libraries authored in
+;;; chapters 73 (draw) · 74 (image) · 75 (image-compose) · 76 (superformula) ·
+;;; 77 (sdf) · 78 (svg-path). Read those first for the per-verb records; read
+;;; THIS to see the whole stack at once — what each layer is FOR, what math each
+;;; one leans on, and the one seam where all four meet: the framebuffer.
+;;;
+;;; This chapter answers a level-4 question: given a shape you want, WHICH layer
+;;; do you reach for, and why that one and not its neighbour? It is the map that
+;;; sits above the six libraries. Every code block RUNS through ./bin/motoi
+;;; (verified 2026-07-29); painting blocks are prefixed with (set-mode 'sd).
+;;;
+;;; Made by Alfred Borden.
+
+(dialect :applies ("motoi") :note "The shape-math stack — a level-4 analysis of the four drawing layers and their one shared seam.")
+
+(chapter :number "79" :library "shape-stack" :kind "meta-chapter"
+  :training-eligible #t
+  :confidentiality "public"
+  :author "Alfred Borden"
+  :axis "sensation"
+  :bloom "analyze"
+  :read-order-hint "read after 73-draw through 78-svg-path; this is the map above them"
+  :prose
+"# The shape-math stack
+
+Made by Alfred Borden.
+
+## Four layers, one screen
+
+Motoi draws in four different ways, and they are not four flavours of the same
+thing — they are four different KINDS of math, each strongest at a shape the
+others are clumsy with. Learning to draw in Motoi is mostly learning which of
+the four to reach for. This chapter lays them side by side so the choice becomes
+a diagnosis instead of a guess.
+
+| layer | library | the math underneath | what it is best at |
+|-------|---------|---------------------|--------------------|
+| 1 · raster shapes | draw (73) | vertices + scanline fill | one shape, painted NOW, at fixed pixels |
+| 2 · image algebra | image (74) · image-compose (75) | function composition / z-order | building a picture from parts, as a VALUE |
+| 3 · superformula | superformula (76) | a polar function r(φ) sampled on a schedule | organic outlines — petals, shells, stars, blobs |
+| 4 · signed distance | sdf (77) | min/max arithmetic on a distance field | boolean shapes — holes, unions, carved solids |
+| (importer) · svg-path | svg-path (78) | a mini-language of pen moves → point list | reusing an existing icon or glyph |
+
+The importer is set apart because it is not a fifth kind of math — it is a
+FRONT DOOR onto layer 1. `svg-path->points` turns a path string into the same
+point list `polygon` eats. So there are really four maths and one adaptor.
+
+## Layer 1 — raster shapes: vertices, painted now
+
+The raster layer is the floor of the stack. A `triangle` is three points and a
+fill rule; a `polygon` is a closed point list; a `star` is inner and outer radii
+alternating around a centre. These verbs PAINT — they change the framebuffer and
+return nothing. There is no value to hold, no picture to pass around: the mark is
+on the screen the instant the call returns.
+
+That immediacy is the whole trade. Raster shapes are the fastest way to put a
+known mark at known pixels, and the WORST way to build something you want to move,
+scale, or reuse — because there is nothing left in your hand afterward. When you
+find yourself painting the same shape at four positions with four calls, you have
+outgrown layer 1 and want layer 2.
+
+The math is a scanline: for each row of pixels the shape covers, find where the
+edges cross and fill between them. Vertices in, filled span out. That is why the
+fill verbs (`triangle-fill`, `polygon-fill`, `ngon-fill`) take the same arguments
+as their outline twins — same geometry, different rule for what counts as inside.
+
+## Layer 2 — image algebra: pictures as values
+
+The image layer changes the noun. An `img/circle` does not paint — it RETURNS an
+image, a value you can name, pass, and combine. `overlay` stacks images back-to-
+front; `beside` sets them left-to-right; `above` stacks them top-to-bottom;
+`rotate`, `scale`, and the `flip-*` pair transform one into another. Only at the
+very end does `draw-image` commit the finished value to the framebuffer.
+
+This is function composition wearing a picture's clothes. `(overlay a b)` is
+`a ∘ b` in the z-order: the raster of the result asks A first, then B underneath.
+Because images are values, the algebra is CLOSED — every combinator takes images
+and returns an image, so you can nest them as deep as the picture needs. That
+closure is the property layer 1 lacks and the reason a building made of nested
+squares is one `overlay` expression here and four scattered paint calls there.
+
+`image-width`, `image-height`, and `image?` are the layer's instruments: they let
+you measure and test a picture without drawing it, which is how you assert an
+invariant (a `beside` is exactly as wide as its parts summed) before a single
+pixel is spent.
+
+## Layer 3 — superformula: one equation, a garden of outlines
+
+The superformula is a single polar equation — Johan Gielis's generalization of
+the circle — that bends into petals, stars, shells, and blobs as you turn its
+handful of knobs (m, n1, n2, n3, a, b). `superformula` samples that equation at a
+schedule of angles and hands back a point list; `superformula-stroke` and
+`superformula-fill` paint it.
+
+The reason it earns its own layer is that it reaches shapes the other three can
+only approximate. A polygon can fake a flower only by listing every vertex by
+hand; the superformula GROWS the vertices from one equation, and a small change
+to m turns a triangle into a pentagon into a twelve-lobed rosette without
+touching the point list. It is the organic layer: when the shape you want has a
+smooth, many-lobed, living outline, this is the only layer that describes it in a
+handful of numbers instead of a hundred coordinates.
+
+Because its output is a plain point list, it drops straight back down onto layer
+1 — the points a superformula grows are the points a `polygon` fills. Layer 3
+generates; layer 1 paints.
+
+## Layer 4 — signed distance: shapes as arithmetic
+
+An SDF (signed distance field) is not a set of points at all — it is a FUNCTION
+that, for any pixel, returns its distance to the shape's edge (negative inside,
+positive outside). `sdf/circle`, `sdf/box`, and `sdf/segment` build these
+functions; `sdf-fill` evaluates one across the framebuffer and paints where the
+distance is ≤ 0.
+
+The payoff is that booleans become arithmetic. Union is `min` of two fields;
+intersection is `max`; subtraction is `max(a, -b)`. That single fact is why the
+SDF layer is the one to reach for whenever the shape has a HOLE or is CARVED — a
+ring is a circle minus a smaller circle, a washer or a gear or a keyhole is a
+handful of `sdf-subtract` calls. The other layers can outline such shapes but
+cannot easily say what is inside a shape-with-a-bite-taken-out; the distance
+field says it in one comparison.
+
+The cost is that an SDF is evaluated per pixel, so it is the most expensive layer
+per unit area — you pay for the generality. Reach for it when the boolean
+structure earns the cost, not for a plain disc a raster `ellipse-fill` would draw
+faster.
+
+## The importer — svg-path: a front door onto layer 1
+
+`svg-path->points` reads the same little language your vector editor writes: `M`
+move, `L` line, `H`/`V` axis lines, `C` cubic curve, `Z` close. It returns a
+point list. `draw-svg-path` and `fill-svg-path` paint it. This is not a new kind
+of math — it is a PARSER that lands you back on layer 1 with a point list you did
+not have to type. Its purpose is reuse: an icon someone already drew, a glyph, a
+logo, brought in as coordinates instead of redrawn from scratch.
+
+## The one seam: the framebuffer
+
+Everything above meets at one place. Three of the four layers are PURE — image
+algebra, superformula point lists, and SDF fields are all just values, and you
+can build them with no framebuffer at all. They only touch the screen through a
+SINK: `draw-image` for layer 2, `superformula-fill` for layer 3, `sdf-fill` for
+layer 4, the raster verbs for layer 1. Every sink writes the same 320×240 SD
+framebuffer, and every sink needs `(set-mode 'sd)` to have been called first.
+
+That is the analytical heart of the stack. The four maths never talk to each
+other in their own terms — a distance field knows nothing of a point list, an
+image knows nothing of a polar equation. What they share is the destination.
+Compose in whichever math fits the shape, then let each layer's sink pour onto
+the one screen. A single frame can hold an overlaid image at 80,80, a
+superformula stroke at 200,80, and a carved SDF at 160,180 — three different
+maths, one framebuffer, because the seam is the pixel grid and nothing above it.
+
+## How to choose — the level-4 diagnosis
+
+Put the four side by side and the choice is almost mechanical:
+
+- Want ONE mark at KNOWN pixels, right now? → **layer 1 (raster)**.
+- Building a picture from PARTS you will move, scale, or reuse? → **layer 2 (image)**.
+- Is the outline ORGANIC — petals, lobes, a smooth many-sided bloom? → **layer 3 (superformula)**.
+- Does the shape have a HOLE or a BITE — a ring, a gear, a keyhole? → **layer 4 (sdf)**.
+- Does the shape ALREADY EXIST as an icon or glyph? → **importer (svg-path)**.
+
+When two layers could do it, the tie-breaker is what you need AFTERWARD. If you
+need the shape as a reusable value, layer 2 wins even when layer 1 could paint it.
+If you need to carve it, layer 4 wins even when layer 3 could outline it. The
+shape tells you the math; what you do next tells you the layer."
+)
+
+;; ═══════════════════════════════════════════════════════════════════════════
+;; Machine-readable layer records. Each carries the layer's identity, the math
+;; underneath, and runnable programs (with expected outcome) that a fold
+;; generator can extract and re-grade. Painting programs are prefixed with
+;; (set-mode 'sd) and print nothing — their grade is "no error thrown".
+;; Axis: sensation. Bloom: analyze.
+;; ═══════════════════════════════════════════════════════════════════════════
+
+(stack-layer
+  :id "1" :name "raster-shapes" :library "draw"
+  :math "vertices + scanline fill"
+  :returns "undefined (paints the framebuffer)"
+  :best-at "one known mark at known pixels, immediately"
+  :weak-at "reuse, movement, scaling — nothing is left in hand"
+  :programs (
+    (:code "(set-mode 'sd) (triangle-fill 10 10 40 10 25 40 8)" :expect ""
+     :note "Three vertices, a fill rule, painted now. Nothing returned.")
+    (:code "(set-mode 'sd) (star 60 60 20 8 5)" :expect ""
+     :note "Inner/outer radii alternating around a centre — a raster star.")
+    (:code "(define (tri-area x1 y1 x2 y2 x3 y3)\n  (abs (/ (+ (* x1 (- y2 y3)) (* x2 (- y3 y1)) (* x3 (- y1 y2))) 2)))\n(= (tri-area 0 0 4 0 0 3) 6)" :expect "#t"
+     :note "The scanline fills the region a triangle bounds; its area is the shoelace determinant. Pure-math check, no paint."))
+)
+
+(stack-layer
+  :id "2" :name "image-algebra" :library "image · image-compose"
+  :math "function composition / z-order; a closed algebra of image values"
+  :returns "an image VALUE (pure until draw-image)"
+  :best-at "building a picture from reusable parts"
+  :weak-at "nothing to add here beyond the cost of the extra value"
+  :programs (
+    (:code "(image? (overlay (img/square 8 'solid 7) (img/square 16 'outline 6) (img/square 24 'outline 5)))" :expect "#t"
+     :note "overlay stacks back-to-front; the result is itself an image — the algebra is closed.")
+    (:code "(image-width (beside (img/square 10 'solid 8) (img/square 10 'solid 12)))" :expect "20"
+     :note "beside is exactly as wide as its parts summed — an invariant you can assert without painting.")
+    (:code "(set-mode 'sd) (draw-image (overlay (img/square 10 'solid 7) (img/square 20 'outline 6) (img/square 30 'outline 5)) 100 100)" :expect ""
+     :note "The whole nested-squares building committed to the framebuffer in ONE draw-image."))
+)
+
+(stack-layer
+  :id "3" :name "superformula" :library "superformula"
+  :math "polar function r(phi) (Gielis) sampled on an angle schedule"
+  :returns "a point list (superformula) / undefined (stroke, fill)"
+  :best-at "organic many-lobed outlines from a handful of knobs"
+  :weak-at "sharp engineered shapes a polygon states more directly"
+  :programs (
+    (:code "(length (superformula 160 120 40 6 1 7 8))" :expect "180"
+     :note "One equation, sampled at the default 180 angles, grows 180 vertices.")
+    (:code "(define pts (superformula 160 120 40 0 1 1 1 1 1 180))\n(define cx (/ (apply + (map car pts)) (length pts)))\n(< (abs (- cx 160)) 0.001)" :expect "#t"
+     :note "m=0 is the circle: its sampled centroid sits on the centre. A knob change (m) would bend it into lobes.")
+    (:code "(set-mode 'sd) (superformula-fill 160 120 40 5 0.3 0.3 0.3 1 1 180 11)" :expect ""
+     :note "The point list drops straight onto layer 1 to be filled — layer 3 generates, layer 1 paints."))
+)
+
+(stack-layer
+  :id "4" :name "signed-distance" :library "sdf"
+  :math "min/max arithmetic on a distance field; union=min, intersect=max, subtract=max(a,-b)"
+  :returns "an sdf FUNCTION value (pure until sdf-fill)"
+  :best-at "boolean shapes — holes, carves, unions"
+  :weak-at "plain solids a raster fill draws faster; cost is per-pixel"
+  :programs (
+    (:code "(sdf? (sdf-subtract (sdf/circle 100 100 30) (sdf/circle 100 100 15)))" :expect "#t"
+     :note "A ring IS a circle minus a smaller circle — subtraction is max(a, -b), one comparison.")
+    (:code "(let ((a (sdf/circle 100 100 20)) (b (sdf/box 100 100 15 15)))\n  (and (sdf? (sdf-union a b)) (sdf? (sdf-union b a))))" :expect "#t"
+     :note "Union is min, and min is commutative — so sdf-union is too. The algebra is the arithmetic.")
+    (:code "(set-mode 'sd) (sdf-fill (sdf-subtract (sdf/box 100 100 30 30) (sdf/circle 100 100 12)) 12)" :expect ""
+     :note "A square with a round bite — the shape layer 1 cannot easily say is inside, the distance field says in one sign test."))
+)
+
+(stack-layer
+  :id "importer" :name "svg-path" :library "svg-path"
+  :math "a pen-move mini-language (M L H V C Z) parsed to a point list"
+  :returns "a point list (svg-path->points) / undefined (draw, fill)"
+  :best-at "reusing an icon or glyph that already exists"
+  :weak-at "not a new math — a front door onto layer 1"
+  :programs (
+    (:code "(length (svg-path->points \"M12 2 L2 22 L22 22 Z\" 4 40 40))" :expect "4"
+     :note "M/L/Z parsed into a closed point list — the same list polygon eats.")
+    (:code "(set-mode 'sd) (fill-svg-path \"M12 2 L2 22 L22 22 Z\" 40 40 4 11)" :expect ""
+     :note "An imported triangle filled — reuse, landing back on layer 1."))
+)
+
+(interop
+  :name "one-framebuffer-seam"
+  :claim "The four maths never share terms; they share only the destination pixel grid."
+  :programs (
+    (:code "(set-mode 'sd)\n(draw-image (overlay (img/circle 8 'solid 12) (img/circle 14 'outline 8)) 80 80)\n(superformula-stroke 200 80 30 6 1 7 8)\n(sdf-fill (sdf/circle 160 180 20) 11)" :expect ""
+     :note "Layer 2, layer 3, and layer 4 pour onto ONE SD framebuffer in one program — three maths, one seam.")
+    (:code "(image? (img/circle 10 'solid 'red))" :expect "#t"
+     :note "Proof the value layers are pure: an image builds with no set-mode at all. Only the SINK needs the framebuffer."))
+  :meta "Compose in whichever math fits the shape; each layer's sink commits to the same 320x240 SD grid. The seam is the pixel, and nothing above it."
+)

@@ -1,0 +1,964 @@
+;; chess.sks
+;; Motoi Cart — Flagship (SD framebuffer)
+;;
+;; (cart
+;;   :name            "chess"
+;;   :category        :game
+;;   :sub-category    :board
+;;   :audience        :kid
+;;   :complexity      5
+;;   :runtime-tier    :runs-on-core
+;;   :render          :sd-framebuffer
+;;   :one-line        "Play through the ten greatest chess games ever played — pick a side, and Motoi plays the other, either faithfully replaying the historical line or trusting its own brain when it sees a better move — a real 8x8 board drawn on the 320x240 screen."
+;;   :verbs-used      ("set-mode" "clear" "set-color" "rect-fill" "rect" "disc"
+;;                     "fb/text" "fb/dump" "make-vector" "vector-ref" "vector-set!"
+;;                     "vector-length" "quotient" "remainder" "modulo" "abs" "min"
+;;                     "max" "number->string" "string-append" "eq?" "cons" "car"
+;;                     "cdr" "list" "length" "reverse" "for-each" "when" "cond"
+;;                     "case" "let" "let*" "set!")
+;;   :inspiration     "Chess — a thousand years of a game with no dice and nothing hidden, and the machine dream since Turing hand-simulated 'Turochamp' in 1948 of a program that could pick its own move.")
+;;
+;; HOW TO RUN:
+;;   motoi run carts/chess.sks
+;;
+;; WHAT THIS IS
+;;   Chess on Motoi's real SD screen (320x240). The board is one vector of 64
+;;   squares — index 0 is a8, index 63 is h1 — and each square holds a small
+;;   number: 0 is empty, +1..+6 are the white pieces (pawn..king) and -1..-6 the
+;;   black ones. Numbers (not symbols) so decoding a piece is plain arithmetic;
+;;   a vector so reading a square is instant — both matter, because to pick a
+;;   move the machine has to look at the board many, many times.
+;;
+;;   Every rule of movement is here and correct: pawns step one (or two from
+;;   home), capture on the diagonals, and turn into a queen at the far rank;
+;;   knights jump their L; bishops, rooks and queens slide until something
+;;   blocks them; the king steps one square any direction. The program will
+;;   never make an illegal move, and it will never walk its own king into
+;;   check — it plays only moves that are actually legal.
+;;
+;;   CASTLING + EN-PASSANT: the SEARCH brain still leaves these out (to keep move
+;;   generation small and cheap), but the PLAYBACK layer that replays historical
+;;   games understands them — a book move can be tagged 'oo (kingside castle),
+;;   'ooo (queenside castle) or 'ep (en-passant) and applies faithfully, because
+;;   the great games use them. Promotion is always to a queen.
+;;
+;; THE TEN-GREATEST-GAMES FEATURE (the point of this cart)
+;;   A little table holds real games from chess history, each as a flat vector of
+;;   coordinate moves (ply 0 White, ply 1 Black, ...). Pick a game with the GAME
+;;   knob, pick which colour YOU play with HUMAN-SIDE, and Motoi plays the other
+;;   colour. There are two ways it can play its side:
+;;
+;;   MODE 'straight  — Motoi replays its side of the real game move for move, so
+;;                     you watch (and play into) a masterpiece exactly as it was
+;;                     played. If YOUR side ever leaves the book line, Motoi can
+;;                     no longer follow the script, so from that ply on it thinks
+;;                     for itself with its LEVEL brain and finishes the game.
+;;   MODE 'modified  — at each of its own moves Motoi computes its own best move
+;;                     AND looks up the book move. If its brain likes its own move
+;;                     enough better than the book (by SENSE-THRESHOLD) it departs
+;;                     from history — "its own sense sees something better" — and
+;;                     tells you so; otherwise it plays the historical move. Fully
+;;                     deterministic: same knobs, same game, every time.
+;;
+;; MOTOI AS YOUR OPPONENT — the LEVEL knob (the fun part)
+;;   'easy   — one ply: grab the most material you can right now, with a readable
+;;             tie-break toward the center. A beginner who takes what's hanging.
+;;   'normal — one reply deep: play the move that's best AFTER the opponent's
+;;             best immediate recapture — so it stops walking into obvious
+;;             trades that lose the piece back.
+;;   'hard   — two replies deep: it also checks whether it can win the piece
+;;             straight back, so it isn't scared off a good capture by a defended
+;;             square. It looks at more of the board, so it wants more fuel.
+;;   This is a shallow, readable, bounded search — not a deep minimax. In this
+;;   interpreter deep search does not fit the default fuel, and the brief is
+;;   clear: determinism and finishing the game beat maximal strength. 'easy runs
+;;   the full sample game on the default budget; 'normal / 'hard want --fuel.
+;;
+;; NO KEYBOARD — how "you vs Motoi" is expressed
+;;   A headless cart has no keys, so the HUMAN side is driven by the book's own
+;;   move-stream (you "play" the historical player's moves) and Motoi drives the
+;;   other side per the MODE above. On a real interactive surface you would swap
+;;   the human side's move-stream for live input from a person — read a from/to
+;;   square from the player, verify it is legal with move-ok?, apply it — and
+;;   leave Motoi's side exactly as it is here. Nothing else changes.
+;;
+;; POINTS
+;;   Material is counted the classic way — P=1, N=3, B=3, R=5, Q=9 — and shown
+;;   as a running scoreboard in the HUD, along with whose turn it is and the ply
+;;   and evaluation of the last move Motoi found.
+
+;; =======================  KNOBS  =======================
+
+;; --- WHICH GAME, and HOW Motoi plays it -----------------------------------
+(define GAME      'immortal) ;; which historical game to play. One of:
+                            ;;   'immortal  Anderssen-Kieseritzky, London 1851
+                            ;;   'evergreen Anderssen-Dufresne, Berlin 1852
+                            ;;   'opera     Morphy-Brunswick/Isouard, Paris 1858
+                            ;;   'century   D.Byrne-Fischer, New York 1956
+(define MODE      'straight) ;; 'straight — Motoi replays its side from the book
+                            ;;             (until YOUR side deviates, then brain).
+                            ;; 'modified — Motoi departs from the book when its
+                            ;;             own sense sees a clearly better move.
+(define HUMAN-SIDE 'white)   ;; 'white or 'black — the side YOU play. Motoi plays
+                            ;;             the other side.
+(define SENSE-THRESHOLD 250) ;; ('modified only) Motoi leaves the book only when
+                            ;; its heuristic best beats the book move by MORE than
+                            ;; this many centipawns. Bigger = more faithful to the
+                            ;; book; smaller = Motoi trusts itself more often.
+
+(define LEVEL     'easy)     ;; 'easy 'normal 'hard — how hard Motoi's OWN brain
+                            ;; looks when it is off the book (deviation in
+                            ;; 'straight, or a departure in 'modified). 'easy fits
+                            ;; the DEFAULT 200000 fuel; 'normal / 'hard want more:
+                            ;; motoi run carts/chess.sks --fuel 600000
+(define MAX-PLIES 24)       ;; hard cap on half-moves played this run. Replaying
+                            ;; book moves is cheap, but the ONE full-screen
+                            ;; (fb/dump) screenshot is fuel-hungry. 24 plies + a
+                            ;; climax dump fits the DEFAULT 200000 budget; to play
+                            ;; a game to its historical finish raise this AND fuel:
+                            ;; motoi run carts/chess.sks --fuel 700000  (with e.g.
+                            ;; MAX-PLIES 999 for the full mating combination).
+(define SHOW-EVERY 1)       ;; print a compact ASCII status line this often
+(define DUMP-PLY  16)       ;; render the ONE SD climax screenshot after this ply
+(define ORDERING  'simple)  ;; 'simple — plain material-greedy static ordering
+                            ;;           (the default; cheap, fits default fuel).
+                            ;; 'sharp  — add a piece-square-table + MVV-LVA
+                            ;;           capture-first ordering so the OWN-brain
+                            ;;           play is stronger. Costs more per node; use
+                            ;;           with LEVEL 'normal/'hard and --fuel.
+
+(define W 320)               ;; SD width
+(define H 240)               ;; SD height
+(define SQ 24)               ;; square size in pixels (8*24 = 192)
+(define BX 40)               ;; board top-left x
+(define BY 24)               ;; board top-left y
+
+;; =======================  THE BOARD  =======================
+;; One vector of 64 squares. Index = rank*8 + file, rank 0 = a8..h8 (top),
+;; rank 7 = a1..h1 (bottom).
+;;
+;; A square is an INTEGER, not a symbol — this is a deliberate fuel choice. In
+;; this interpreter every AST node costs one fuel, and `case`/`memq`-based piece
+;; decoding on symbols burns hundreds of nodes per square. With an integer code
+;; the decode is pure arithmetic (a few nodes), which cuts move generation cost
+;; by several times and is what lets a real game finish in the default budget.
+;;
+;;   0 = empty
+;;   +1..+6 = WHITE  P N B R Q K       (kind = the value)
+;;   -1..-6 = BLACK  P N B R Q K       (kind = the magnitude)
+(define EMPTY 0)
+(define P 1) (define N 2) (define B 3) (define R 4) (define Q 5) (define K 6)
+
+(define BOARD (make-vector 64 0))
+
+(define (at sq) (vector-ref BOARD sq))
+(define (put! sq p) (vector-set! BOARD sq p))
+(define (rank sq) (quotient sq 8))
+(define (file sq) (remainder sq 8))
+(define (sq-of r f) (+ (* r 8) f))
+(define (on-board? r f) (and (>= r 0) (< r 8) (>= f 0) (< f 8)))
+
+;; piece decoding — all arithmetic, no dispatch -----------------------------
+(define (empty? p) (= p 0))
+(define (side p)                      ;; 'w 'b or #f for empty
+  (cond ((> p 0) 'w) ((< p 0) 'b) (else #f)))
+(define (kind p) (abs p))             ;; 1..6, or 0 for empty
+(define (other s) (if (eq? s 'w) 'b 'w))
+(define (mine? p s) (if (eq? s 'w) (> p 0) (< p 0)))
+(define (foe?  p s) (if (eq? s 'w) (< p 0) (> p 0)))
+(define (memq x xs) (cond ((null? xs) #f) ((= x (car xs)) xs) (else (memq x (cdr xs)))))
+
+;; centipawn value by kind (index 0 unused) ---------------------------------
+(define VALS (vector 0 100 300 300 500 900 20000))
+(define (val-of p) (vector-ref VALS (abs p)))
+
+;; =======================  INITIAL POSITION  =======================
+
+(define (setup!)
+  (set! MAT 0)
+  (let loop ((i 0)) (when (< i 64) (put! i 0) (loop (+ i 1))))
+  ;; black (negative) back rank (top, rank 0) and pawns (rank 1)
+  (for-each (lambda (pr) (put! (car pr) (cadr pr)))
+    (list (list 0 (- R)) (list 1 (- N)) (list 2 (- B)) (list 3 (- Q))
+          (list 4 (- K)) (list 5 (- B)) (list 6 (- N)) (list 7 (- R))))
+  (let loop ((f 0)) (when (< f 8) (put! (sq-of 1 f) (- P)) (loop (+ f 1))))
+  ;; white (positive) pawns (rank 6) and back rank (bottom, rank 7)
+  (let loop ((f 0)) (when (< f 8) (put! (sq-of 6 f) P) (loop (+ f 1))))
+  (for-each (lambda (pr) (put! (car pr) (cadr pr)))
+    (list (list 56 R) (list 57 N) (list 58 B) (list 59 Q)
+          (list 60 K) (list 61 B) (list 62 N) (list 63 R))))
+
+;; =======================  MOVE GENERATION  =======================
+;; A move is (from to promo?)  promo? = #t when a pawn reaches the last rank.
+;; Generation for one side, ignoring king-safety (that is filtered later).
+
+;; NOTE ON DIALECT: this Scheme reads a quoted "dotted pair" like (a . b) as a
+;; three-element list (a . b) with a literal `.` symbol — improper pairs are not
+;; supported. So every "pair" here is a plain two-element list (list dr df), and
+;; we read the two components with car / cadr. Getting this wrong silently
+;; corrupts every move, so it is called out.
+(define (mk d1 d2) (list d1 d2))
+(define KNIGHT-D (list (mk -2 -1) (mk -2 1) (mk -1 -2) (mk -1 2)
+                       (mk 1 -2) (mk 1 2) (mk 2 -1) (mk 2 1)))
+(define KING-D   (list (mk -1 -1) (mk -1 0) (mk -1 1) (mk 0 -1)
+                       (mk 0 1) (mk 1 -1) (mk 1 0) (mk 1 1)))
+(define ROOK-D   (list (mk -1 0) (mk 1 0) (mk 0 -1) (mk 0 1)))
+(define BISH-D   (list (mk -1 -1) (mk -1 1) (mk 1 -1) (mk 1 1)))
+(define QUEEN-D  (append ROOK-D BISH-D))
+(define (d-r d) (car d))
+(define (d-f d) (cadr d))
+
+;; slide along directions until blocked; capture the first foe hit
+(define (slide-moves sq s dirs acc)
+  (let ((r (rank sq)) (f (file sq)))
+    (let dloop ((ds dirs) (acc acc))
+      (if (null? ds) acc
+          (let ((dr (d-r (car ds))) (df (d-f (car ds))))
+            (let step ((rr (+ r dr)) (ff (+ f df)) (acc acc))
+              (if (not (on-board? rr ff))
+                  (dloop (cdr ds) acc)
+                  (let ((p (at (sq-of rr ff))))
+                    (cond ((empty? p)
+                           (step (+ rr dr) (+ ff df)
+                                 (cons (list sq (sq-of rr ff) #f) acc)))
+                          ((foe? p s)
+                           (dloop (cdr ds) (cons (list sq (sq-of rr ff) #f) acc)))
+                          (else (dloop (cdr ds) acc)))))))))))
+
+;; single-step offsets (knight, king)
+(define (step-moves sq s deltas acc)
+  (let ((r (rank sq)) (f (file sq)))
+    (let loop ((ds deltas) (acc acc))
+      (if (null? ds) acc
+          (let ((rr (+ r (d-r (car ds)))) (ff (+ f (d-f (car ds)))))
+            (if (and (on-board? rr ff)
+                     (not (mine? (at (sq-of rr ff)) s)))
+                (loop (cdr ds) (cons (list sq (sq-of rr ff) #f) acc))
+                (loop (cdr ds) acc)))))))
+
+;; pawn moves: forward one (and two from home), diagonal captures, promotion
+(define (pawn-moves sq s acc)
+  (let* ((r (rank sq)) (f (file sq))
+         (dir (if (eq? s 'w) -1 1))          ;; white moves up (toward rank 0)
+         (start (if (eq? s 'w) 6 1))
+         (last (if (eq? s 'w) 0 7))
+         (r1 (+ r dir)))
+    (let* ((acc
+            (if (and (on-board? r1 f) (empty? (at (sq-of r1 f))))
+                (let ((m (list sq (sq-of r1 f) (= r1 last))))
+                  (if (and (= r start) (empty? (at (sq-of (+ r dir dir) f))))
+                      (cons (list sq (sq-of (+ r dir dir) f) #f) (cons m acc))
+                      (cons m acc)))
+                acc))
+           (acc
+            (let cap ((fs (list (- f 1) (+ f 1))) (acc acc))
+              (if (null? fs) acc
+                  (let ((ff (car fs)))
+                    (if (and (on-board? r1 ff) (foe? (at (sq-of r1 ff)) s))
+                        (cap (cdr fs) (cons (list sq (sq-of r1 ff) (= r1 last)) acc))
+                        (cap (cdr fs) acc)))))))
+      acc)))
+
+;; all pseudo-legal moves for side s (king-safety not yet checked)
+(define (gen-moves s)
+  (let loop ((sq 0) (acc '()))
+    (if (>= sq 64) acc
+        (let ((p (at sq)))
+          (if (mine? p s)
+              (loop (+ sq 1)
+                    (case (kind p)
+                      ((1) (pawn-moves sq s acc))
+                      ((2) (step-moves sq s KNIGHT-D acc))
+                      ((6) (step-moves sq s KING-D acc))
+                      ((4) (slide-moves sq s ROOK-D acc))
+                      ((3) (slide-moves sq s BISH-D acc))
+                      ((5) (slide-moves sq s QUEEN-D acc))
+                      (else acc)))
+              (loop (+ sq 1) acc))))))
+
+;; =======================  CHECK DETECTION  =======================
+
+(define (king-sq s)
+  (let ((want (if (eq? s 'w) K (- K))))
+    (let loop ((sq 0))
+      (cond ((>= sq 64) -1)
+            ((= (at sq) want) sq)
+            (else (loop (+ sq 1)))))))
+
+(define (nth-from m) (car m))
+(define (nth-to m)   (car (cdr m)))
+(define (nth-promo m)(car (cdr (cdr m))))
+
+;; Is square (r,f) attacked by side by-side?  Direct probe — MUCH cheaper than
+;; generating every opponent move. We look outward from the square itself:
+;;   * knight jumps landing on an enemy knight,
+;;   * king ring holding an enemy king,
+;;   * pawn diagonals holding an enemy pawn (pawns capture toward us),
+;;   * rays for rook/queen (orthogonal) and bishop/queen (diagonal).
+;; signed piece code for `by-side` of kind k  (white positive, black negative)
+(define (enemy-of by-side k) (if (eq? by-side 'w) k (- k)))
+
+(define (has? r f p)
+  (and (on-board? r f) (= (at (sq-of r f)) p)))
+
+;; walk a ray from (r,f); return #t if the first piece met is kind k1 or k2
+;; belonging to by-side. (rook/queen or bishop/queen.)
+(define (ray-hit? r f dr df by-side k1 k2)
+  (let step ((rr (+ r dr)) (ff (+ f df)))
+    (cond ((not (on-board? rr ff)) #f)
+          (else
+           (let ((p (at (sq-of rr ff))))
+             (cond ((= p 0) (step (+ rr dr) (+ ff df)))
+                   ((and (eq? (side p) by-side)
+                         (let ((k (abs p))) (or (= k k1) (= k k2)))) #t)
+                   (else #f)))))))
+
+(define (attacked-rf? r f by-side)
+  (or
+   ;; knights
+   (let loop ((ds KNIGHT-D))
+     (cond ((null? ds) #f)
+           ((has? (+ r (d-r (car ds))) (+ f (d-f (car ds)))
+                  (enemy-of by-side N)) #t)
+           (else (loop (cdr ds)))))
+   ;; enemy king adjacent
+   (let loop ((ds KING-D))
+     (cond ((null? ds) #f)
+           ((has? (+ r (d-r (car ds))) (+ f (d-f (car ds)))
+                  (enemy-of by-side K)) #t)
+           (else (loop (cdr ds)))))
+   ;; pawns: a by-side pawn attacks toward the OTHER side. white pawns move up
+   ;; (dir -1), so a white pawn attacking (r,f) sits at r+1; black pawn at r-1.
+   (let ((pr (if (eq? by-side 'w) (+ r 1) (- r 1))))
+     (or (has? pr (- f 1) (enemy-of by-side P))
+         (has? pr (+ f 1) (enemy-of by-side P))))
+   ;; orthogonal rays: rook or queen
+   (let loop ((ds ROOK-D))
+     (cond ((null? ds) #f)
+           ((ray-hit? r f (d-r (car ds)) (d-f (car ds)) by-side R Q) #t)
+           (else (loop (cdr ds)))))
+   ;; diagonal rays: bishop or queen
+   (let loop ((ds BISH-D))
+     (cond ((null? ds) #f)
+           ((ray-hit? r f (d-r (car ds)) (d-f (car ds)) by-side B Q) #t)
+           (else (loop (cdr ds)))))))
+
+(define (attacked? sq by-side) (attacked-rf? (rank sq) (file sq) by-side))
+
+(define (in-check? s) (attacked? (king-sq s) (other s)))
+
+;; --- incremental material -------------------------------------------------
+;; MAT = (white material) - (black material), in centipawns, kept up to date on
+;; every do/undo so a leaf evaluation is O(1) instead of a 64-square scan. In
+;; this interpreter a full-board scan is ~1500 fuel; the search would evaluate
+;; thousands of leaves, so scanning per leaf is not affordable. This is the
+;; single most important fuel decision in the cart.
+(define MAT 0)
+(define (signed-val p)                 ;; +white / -black centipawns of a piece
+  (cond ((> p 0) (val-of p))
+        ((< p 0) (- 0 (val-of p)))
+        (else 0)))
+
+;; make a move on the live board, return the captured piece (for undo).
+;; Updates MAT for the capture and for a pawn->queen promotion.
+(define (do-move! m)
+  (let* ((from (nth-from m)) (to (nth-to m))
+         (p (at from)) (cap (at to))
+         (moved (if (nth-promo m) (if (> p 0) Q (- Q)) p)))
+    (when (not (empty? cap)) (set! MAT (- MAT (signed-val cap))))
+    (when (nth-promo m)
+      (set! MAT (+ MAT (- (signed-val moved) (signed-val p)))))
+    (put! from '-)
+    (put! to moved)
+    cap))
+
+(define (undo-move! m cap p-orig)
+  (let ((moved (at (nth-to m))))
+    (when (nth-promo m)
+      (set! MAT (- MAT (- (signed-val moved) (signed-val p-orig)))))
+    (when (not (empty? cap)) (set! MAT (+ MAT (signed-val cap))))
+    (put! (nth-from m) p-orig)
+    (put! (nth-to m) cap)))
+
+;; -------------------------------------------------------------------------
+;; BOOK-MOVE APPLY LAYER (for faithful playback of historical games)
+;; A book move is (from to tag) where tag is one of:
+;;   #f    ordinary move
+;;   #t    pawn promotion (to a queen)
+;;   'oo   kingside castle  (king two files toward the h-file; rook jumps over)
+;;   'ooo  queenside castle (king two files toward the a-file; rook jumps over)
+;;   'ep   en-passant capture (the captured pawn sits BEHIND the destination)
+;; The search never generates tagged moves, so do-move!/undo-move! above are
+;; untouched; this layer only runs when we replay a scripted book line.
+(define (book-tag m) (nth-promo m))
+(define (book-oo?  m) (eq? (book-tag m) 'oo))
+(define (book-ooo? m) (eq? (book-tag m) 'ooo))
+(define (book-ep?  m) (eq? (book-tag m) 'ep))
+(define (book-promo? m) (eq? (book-tag m) #t))
+
+;; apply a book move destructively, keeping MAT correct. No undo needed: book
+;; playback never searches, it just walks the line forward.
+(define (apply-book! m)
+  (let* ((from (nth-from m)) (to (nth-to m)) (p (at from)))
+    (cond
+     ((book-oo? m)                       ;; king two squares; rook h->f (over king)
+      (put! from EMPTY) (put! to p)
+      (let* ((rk-from (+ to 1)) (rk-to (- to 1)) (rk (at rk-from)))
+        (put! rk-from EMPTY) (put! rk-to rk)))
+     ((book-ooo? m)                      ;; king two squares; rook a->d (over king)
+      (put! from EMPTY) (put! to p)
+      (let* ((rk-from (- to 2)) (rk-to (+ to 1)) (rk (at rk-from)))
+        (put! rk-from EMPTY) (put! rk-to rk)))
+     ((book-ep? m)                       ;; captured pawn is on to's file, from's rank
+      (let* ((cap-sq (sq-of (rank from) (file to))) (cap (at cap-sq)))
+        (when (not (empty? cap)) (set! MAT (- MAT (signed-val cap))))
+        (put! cap-sq EMPTY) (put! from EMPTY) (put! to p)))
+     (else                               ;; ordinary move or promotion
+      (let ((cap (at to))
+            (moved (if (book-promo? m) (if (> p 0) Q (- Q)) p)))
+        (when (not (empty? cap)) (set! MAT (- MAT (signed-val cap))))
+        (when (book-promo? m)
+          (set! MAT (+ MAT (- (signed-val moved) (signed-val p)))))
+        (put! from EMPTY) (put! to moved))))))
+
+;; name for a book move (handles the castle/ep/promo tags for the log)
+(define (book-move-name m)
+  (cond ((book-oo? m) "O-O")
+        ((book-ooo? m) "O-O-O")
+        (else
+         (let ((p (at (nth-from m))) (victim (at (nth-to m))))
+           (string-append
+             (case (kind p) ((1) "") ((2) "N") ((3) "B") ((4) "R") ((5) "Q") ((6) "K") (else "?"))
+             (sq-name (nth-from m))
+             (if (and (empty? victim) (not (book-ep? m))) "-" "x")
+             (sq-name (nth-to m))
+             (cond ((book-promo? m) "=Q") ((book-ep? m) " e.p.") (else "")))))))
+
+;; =======================  EVALUATION  =======================
+;; Positive is good for WHITE.  MAT (running material) is the leaf value.
+
+(define (center-bonus sq)
+  (let ((r (rank sq)) (f (file sq)))
+    (- 3 (+ (abs (- (* 2 r) 7)) (abs (- (* 2 f) 7))) )))  ;; peaks in the middle
+
+(define (evaluate) MAT)                 ;; O(1)
+
+;; -------------------------------------------------------------------------
+;; FUEL NOTE — why the AI is written this way.
+;; In this interpreter one AST node costs one fuel and the whole budget is
+;; 200000, so a full-board move-generation costs ~8000 fuel and a check test
+;; ~3000. A naive minimax that enumerates *legal* moves at every node (one
+;; check test per pseudo-move) blows the budget in two or three plies. So:
+;;
+;;   * moves are SCORED STATICALLY (no board mutation) by what they capture
+;;     plus a center/promotion nudge, from the mover's own point of view;
+;;   * only the CANDIDATE actually chosen is verified for king-safety, and we
+;;     walk candidates best-first, so a legal move is usually confirmed in one
+;;     or two check tests instead of ~20;
+;;   * the deeper LEVELs re-rank only the TOP-K candidates with a shallow
+;;     reply search, which bounds the branching hard.
+;; This is a shallow, readable, deterministic opponent — exactly the trade the
+;; brief asks for: finishing the game beats maximal strength.
+
+;; -------------------------------------------------------------------------
+;; OPTIONAL SHARPENING (ORDERING 'sharp): a small piece-square table (PST) plus
+;; MVV-LVA (Most-Valuable-Victim / Least-Valuable-Attacker) capture ordering.
+;; Both are STATIC (no board mutation), so they only sharpen the cheap 'easy
+;; ordering — they do NOT deepen the search. Gated behind the ORDERING knob so
+;; the default 'simple picker stays inside the default fuel budget.
+;;
+;; PST is written from WHITE's point of view over the 64 squares (index 0 = a8
+;; top-left .. 63 = h1 bottom-right): small nudges toward the centre and, for
+;; pawns, toward promotion. A shared table for all non-king pieces keeps it cheap.
+(define PST
+  (vector   0   0   0   0   0   0   0   0
+            5   5   5   5   5   5   5   5
+            2   3   5   6   6   5   3   2
+            1   3   6   9   9   6   3   1
+            1   3   6   9   9   6   3   1
+            2   3   5   6   6   5   3   2
+            5   5   5   5   5   5   5   5
+            0   0   0   0   0   0   0   0))
+;; PST value of landing on `to` for a piece of `kind`, from side s's viewpoint.
+;; For black we mirror the board (63 - to) so both sides feel "centre is good".
+(define (pst-of s to kind)
+  (let ((base (vector-ref PST (if (eq? s 'w) to (- 63 to)))))
+    (if (= kind P) (* base 2) base)))          ;; pawns weighted toward advancing
+
+;; static value of a move to the SIDE that makes it (higher = better for mover)
+(define (move-score s m)
+  (let* ((to (nth-to m))
+         (from (nth-from m))
+         (victim (at to))
+         (cap-gain (if (empty? victim) 0 (val-of victim)))
+         (promo (if (eq? (nth-promo m) #t) 800 0))
+         (ctr (center-bonus to)))
+    (if (eq? ORDERING 'sharp)
+        ;; MVV-LVA: reward capturing a big victim with a small attacker; add PST.
+        (let* ((attacker (kind (at from)))
+               (mvv-lva (if (empty? victim) 0
+                            (+ (* 10 (val-of victim)) (- 700 (* 100 attacker)))))
+               (pst (pst-of s to (kind (at from)))))
+          (+ mvv-lva promo pst ctr))
+        (+ cap-gain promo ctr))))
+
+;; is the move m legal for side s?  (make it, test own king, undo)
+(define (move-ok? s m)
+  (let* ((p (at (nth-from m))) (cap (do-move! m))
+         (safe (not (in-check? s))))
+    (undo-move! m cap p)
+    safe))
+
+;; The single best immediate capture available to side s: returns that capture's
+;; move (or #f) and its value.  Bounded — one gen-moves.  Used by the reply plies.
+(define (best-capture s)                ;; -> (move value) or (#f 0)
+  (let loop ((ms (gen-moves s)) (bm #f) (bv 0))
+    (if (null? ms) (list bm bv)
+        (let* ((v (at (nth-to (car ms))))
+               (g (if (empty? v) 0 (val-of v))))
+          (if (> g bv) (loop (cdr ms) (car ms) g) (loop (cdr ms) bm bv))))))
+
+(define (level-lookahead)
+  (case LEVEL ((easy) 0) ((hard) 2) (else 1)))
+
+;; net score of a move for side s at a given LOOKAHEAD:
+;;   0 (easy)   — static: just what the move itself is worth.
+;;   1 (normal) — subtract the opponent's best immediate recapture.
+;;   2 (hard)   — also add back OUR best recapture of that square (a crude but
+;;                honest second ply: don't fear a "capture" we simply win back).
+;; Deeper plies cost more fuel; the move list stays bounded so it terminates.
+(define (net-score s m look)
+  (let ((gain (move-score s m)))
+    (if (= look 0) gain
+        (let* ((p (at (nth-from m))) (cap (do-move! m))
+               (rep (best-capture (other s)))
+               (reply (cadr rep))
+               (back (if (and (> look 1) (car rep))
+                         ;; opponent grabs on square (nth-to reply); can we retake?
+                         (let* ((rm (car rep)) (rp (at (nth-from rm)))
+                                (rc (do-move! rm))
+                                (mine (cadr (best-capture s)))
+                                (_ (undo-move! rm rc rp)))
+                           mine)
+                         0))
+               (_ (undo-move! m cap p)))
+          (- (+ gain back) reply)))))
+
+;; best move by score in `pseudo` that is NOT in `skip` (a list of moves already
+;; rejected as illegal).  Returns the move or #f.  ONE linear pass, no legality
+;; test here — legality is confirmed by the caller so we spend the expensive
+;; check test only on the moves we actually intend to play.
+(define (best-scored s pseudo skip look)
+  (let loop ((ms pseudo) (best #f) (bv -1000000))
+    (cond ((null? ms) best)
+          ((member-move? (car ms) skip) (loop (cdr ms) best bv))
+          (else (let ((v (net-score s (car ms) look)))
+                  (if (> v bv) (loop (cdr ms) (car ms) v)
+                               (loop (cdr ms) best bv)))))))
+
+(define (member-move? m xs)
+  (cond ((null? xs) #f)
+        ((and (= (nth-from (car xs)) (nth-from m))
+              (= (nth-to (car xs)) (nth-to m))) #t)
+        (else (member-move? m (cdr xs)))))
+
+;; material balance (white-positive) after s plays m, then undo — for the HUD
+(define (mat-after s m)
+  (let* ((p (at (nth-from m))) (cap (do-move! m)) (v MAT) (_ (undo-move! m cap p)))
+    v))
+
+;; Choose side s's move from a PRE-GENERATED pseudo-legal list.  Walks the
+;; best-scored candidates and returns the first that is legal (king-safe).
+;; Returns (move eval) or (#f MAT) if no legal move exists (mate/stalemate).
+(define (choose-from s pseudo)
+  (let ((look (level-lookahead)))
+    (let loop ((skip '()))
+      (let ((m (best-scored s pseudo skip look)))
+        (cond ((eq? m #f) (list #f MAT))
+              ((move-ok? s m) (list m (mat-after s m)))
+              (else (loop (cons m skip))))))))
+
+;; =======================  MATERIAL SCOREBOARD  =======================
+
+(define (material s)
+  (let loop ((sq 0) (acc 0))
+    (if (>= sq 64) acc
+        (let ((p (at sq)))
+          (loop (+ sq 1)
+                (if (and (eq? (side p) s) (not (= (kind p) K)))
+                    (+ acc (quotient (val-of p) 100)) acc))))))
+
+;; =======================  ALGEBRAIC-ISH NOTATION  =======================
+
+(define FILES (vector "a" "b" "c" "d" "e" "f" "g" "h"))
+(define (sq-name sq)
+  (string-append (vector-ref FILES (file sq))
+                 (number->string (- 8 (rank sq)))))
+(define (move-name m p cap)
+  (string-append
+    (case (kind p) ((1) "") ((2) "N") ((3) "B") ((4) "R") ((5) "Q") ((6) "K") (else "?"))
+    (sq-name (nth-from m))
+    (if (empty? cap) "-" "x")
+    (sq-name (nth-to m))
+    (if (nth-promo m) "=Q" "")))
+
+;; =======================  THE TEN GREATEST GAMES  =======================
+;; Each game is a record  #(name white black year moves)  where `moves` is a
+;; flat vector of book moves (list from to tag), ply i at index i, White on the
+;; even plies and Black on the odd plies. The move indices use the same square
+;; numbering as the board: a8=0 .. h1=63.
+;;
+;; Every move below was transcribed from the real game's published score and
+;; then VALIDATED against this cart's own move generator + apply layer (each book
+;; move is legal in the position it is played from; illegal transcriptions were
+;; rejected, not shipped). No move list here is invented.
+;;
+;; Games left as needs-alfred (transcription not yet verified clean against the
+;; engine — deliberately NOT shipped rather than risk a wrong historical line):
+;;   ;; SLOT 5: needs-alfred (confirm game + PGN) — Kasparov-Topalov, Wijk 1999
+;;   ;; SLOT 6: needs-alfred (confirm game + PGN) — Fischer-Spassky 1972 Game 6
+
+(define (game-rec name white black year moves) (vector name white black year moves))
+(define (g-name r)  (vector-ref r 0))
+(define (g-white r) (vector-ref r 1))
+(define (g-black r) (vector-ref r 2))
+(define (g-year r)  (vector-ref r 3))
+(define (g-moves r) (vector-ref r 4))
+
+(define GAME-IMMORTAL
+  (game-rec "The Immortal Game" "Anderssen" "Kieseritzky" 1851
+    (vector
+        (list 52 36 #f) (list 12 28 #f) (list 53 37 #f) (list 28 37 #f)
+        (list 61 34 #f) (list 3 39 #f) (list 60 61 #f) (list 9 25 #f)
+        (list 34 25 #f) (list 6 21 #f) (list 62 45 #f) (list 39 23 #f)
+        (list 51 43 #f) (list 21 31 #f) (list 45 39 #f) (list 23 30 #f)
+        (list 39 29 #f) (list 10 18 #f) (list 54 38 #f) (list 31 21 #f)
+        (list 63 62 #f) (list 18 25 #f) (list 55 39 #f) (list 30 22 #f)
+        (list 39 31 #f) (list 22 30 #f) (list 59 45 #f) (list 21 6 #f)
+        (list 58 37 #f) (list 30 21 #f) (list 57 42 #f) (list 5 26 #f)
+        (list 42 27 #f) (list 21 49 #f) (list 37 19 #f) (list 26 62 #f)
+        (list 36 28 #f) (list 49 56 #f) (list 61 52 #f) (list 1 16 #f)
+        (list 29 14 #f) (list 4 3 #f) (list 45 21 #f) (list 6 21 #f)
+        (list 19 12 #f))))
+
+(define GAME-EVERGREEN
+  (game-rec "The Evergreen Game" "Anderssen" "Dufresne" 1852
+    (vector
+        (list 52 36 #f) (list 12 28 #f) (list 62 45 #f) (list 1 18 #f)
+        (list 61 34 #f) (list 5 26 #f) (list 49 33 #f) (list 26 33 #f)
+        (list 50 42 #f) (list 33 24 #f) (list 51 35 #f) (list 28 35 #f)
+        (list 60 62 'oo) (list 35 43 #f) (list 59 41 #f) (list 3 21 #f)
+        (list 36 28 #f) (list 21 22 #f) (list 61 60 #f) (list 6 12 #f)
+        (list 58 40 #f) (list 9 25 #f) (list 41 25 #f) (list 0 1 #f)
+        (list 25 32 #f) (list 24 17 #f) (list 57 51 #f) (list 2 9 #f)
+        (list 51 36 #f) (list 22 29 #f) (list 34 43 #f) (list 29 31 #f)
+        (list 36 21 #f) (list 14 21 #f) (list 28 21 #f) (list 7 6 #f)
+        (list 56 59 #f) (list 31 45 #f) (list 60 12 #f) (list 18 12 #f)
+        (list 32 11 #f) (list 4 11 #f) (list 43 29 #f) (list 11 4 #f)
+        (list 29 11 #f) (list 4 5 #f) (list 40 12 #f))))
+
+(define GAME-OPERA
+  (game-rec "The Opera Game" "Morphy" "Brunswick & Isouard" 1858
+    (vector
+        (list 52 36 #f) (list 12 28 #f) (list 62 45 #f) (list 11 19 #f)
+        (list 51 35 #f) (list 2 38 #f) (list 35 28 #f) (list 38 45 #f)
+        (list 59 45 #f) (list 19 28 #f) (list 61 34 #f) (list 6 21 #f)
+        (list 45 41 #f) (list 3 12 #f) (list 57 42 #f) (list 10 18 #f)
+        (list 58 30 #f) (list 9 25 #f) (list 42 25 #f) (list 18 25 #f)
+        (list 34 25 #f) (list 1 11 #f) (list 60 58 'ooo) (list 0 3 #f)
+        (list 59 11 #f) (list 3 11 #f) (list 63 59 #f) (list 12 20 #f)
+        (list 25 11 #f) (list 21 11 #f) (list 41 1 #f) (list 11 1 #f)
+        (list 59 3 #f))))
+
+(define GAME-CENTURY
+  (game-rec "The Game of the Century" "D. Byrne" "Fischer" 1956
+    (vector
+        (list 62 45 #f) (list 6 21 #f) (list 50 34 #f) (list 14 22 #f)
+        (list 57 42 #f) (list 5 14 #f) (list 51 35 #f) (list 4 6 'oo)
+        (list 58 37 #f) (list 11 27 #f) (list 59 41 #f) (list 27 34 #f)
+        (list 41 34 #f) (list 10 18 #f) (list 52 36 #f) (list 1 11 #f)
+        (list 56 59 #f) (list 11 17 #f) (list 34 26 #f) (list 2 38 #f)
+        (list 37 30 #f) (list 17 32 #f) (list 26 40 #f) (list 32 42 #f)
+        (list 49 42 #f) (list 21 36 #f) (list 30 12 #f) (list 3 17 #f)
+        (list 61 34 #f) (list 36 42 #f) (list 12 26 #f) (list 5 4 #f)
+        (list 60 61 #f) (list 38 20 #f) (list 26 17 #f) (list 20 34 #f)
+        (list 61 62 #f) (list 42 52 #f) (list 62 61 #f) (list 52 35 #f)
+        (list 61 62 #f) (list 35 52 #f) (list 62 61 #f) (list 52 42 #f)
+        (list 61 62 #f) (list 8 17 #f) (list 40 33 #f) (list 0 32 #f)
+        (list 33 17 #f) (list 42 59 #f) (list 55 47 #f) (list 32 48 #f)
+        (list 62 55 #f) (list 59 53 #f) (list 63 60 #f) (list 4 60 #f)
+        (list 17 3 #f) (list 14 5 #f) (list 45 60 #f) (list 34 27 #f)
+        (list 60 45 #f) (list 53 36 #f) (list 3 1 #f) (list 9 25 #f)
+        (list 47 39 #f) (list 15 31 #f) (list 45 28 #f) (list 6 14 #f)
+        (list 55 62 #f) (list 5 26 #f) (list 62 61 #f) (list 36 46 #f)
+        (list 61 60 #f) (list 26 33 #f) (list 60 59 #f) (list 27 41 #f)
+        (list 59 58 #f) (list 46 52 #f) (list 58 57 #f) (list 52 42 #f)
+        (list 57 58 #f) (list 48 50 #f))))
+
+;; look up the record for the GAME knob
+(define (game-for sym)
+  (case sym
+    ((immortal)  GAME-IMMORTAL)
+    ((evergreen) GAME-EVERGREEN)
+    ((opera)     GAME-OPERA)
+    ((century)   GAME-CENTURY)
+    (else GAME-IMMORTAL)))
+
+;; =======================  RENDER (SD framebuffer)  =======================
+
+(define (glyph p) (case (kind p)
+                    ((6) "K") ((5) "Q") ((4) "R") ((3) "B") ((2) "N") ((1) "P")
+                    (else "")))
+
+(define (draw-board flash-from flash-to)
+  (clear 1)
+  ;; squares
+  (let loop ((r 0)) (when (< r 8)
+    (let loop2 ((f 0)) (when (< f 8)
+      (let* ((sq (sq-of r f))
+             (light (= (modulo (+ r f) 2) 0))
+             (x (+ BX (* f SQ))) (y (+ BY (* r SQ)))
+             (base (if light 15 4)))          ;; peach light / brown dark
+        (set-color base)
+        (rect-fill x y SQ SQ)
+        (when (or (= sq flash-from) (= sq flash-to))
+          (set-color 10) (rect-fill x y SQ SQ))          ;; yellow flash
+        (loop2 (+ f 1)))))
+    (loop (+ r 1))))
+  ;; pieces
+  (let loop ((sq 0)) (when (< sq 64)
+    (let ((p (at sq)))
+      (when (not (empty? p))
+        (let ((x (+ BX (* (file sq) SQ))) (y (+ BY (* (rank sq) SQ))))
+          ;; a disc backing so both colors read on any square
+          (set-color (if (eq? (side p) 'w) 7 0))
+          (disc (+ x (quotient SQ 2)) (+ y (quotient SQ 2)) 9)
+          (fb/text (glyph p) (+ x 8) (+ y 8)
+                   (if (eq? (side p) 'w) 'black 'white)))))
+    (loop (+ sq 1))))
+  ;; frame + labels
+  (set-color 6)
+  (rect (- BX 1) (- BY 1) (+ (* 8 SQ) 2) (+ (* 8 SQ) 2))
+  (let loop ((f 0)) (when (< f 8)
+    (fb/text (vector-ref FILES f) (+ BX (* f SQ) 9) (+ BY (* 8 SQ) 3) 'white)
+    (loop (+ f 1))))
+  (let loop ((r 0)) (when (< r 8)
+    (fb/text (number->string (- 8 r)) (- BX 12) (+ BY (* r SQ) 8) 'white)
+    (loop (+ r 1)))))
+
+(define (draw-hud ply turn note)
+  (set-color 5) (rect-fill 236 24 80 192)
+  (fb/text "CHESS" 244 28 'yellow)
+  (fb/text (string-append "mode " (case MODE ((modified) "mod") (else "book")))
+           244 42 'white)
+  (fb/text (string-append "you " (if (eq? HUMAN-SIDE 'w) "W" "B")) 244 56 'white)
+  (fb/text (string-append "ply " (number->string ply)) 244 70 'white)
+  (fb/text (string-append "turn " (if (eq? turn 'w) "W" "B")) 244 84 'white)
+  (fb/text "material" 244 104 'lavender)
+  (fb/text (string-append "W " (number->string (material 'w))) 244 118 'white)
+  (fb/text (string-append "B " (number->string (material 'b))) 244 132 'white)
+  (fb/text note 244 154 'green))
+
+;; slide-animation helper: interpolated frames of a piece sliding between two
+;; squares. Fuel is tight, so we draw the board ONCE (flashing the destination)
+;; and then overlay the moving piece at a few interpolated points, rather than
+;; re-rendering the whole board per frame.
+(define (draw-piece-at cx cy p)
+  (set-color (if (eq? (side p) 'w) 7 0))
+  (disc cx cy 9)
+  (fb/text (glyph p) (- cx 3) (- cy 4) (if (eq? (side p) 'w) 'black 'white)))
+
+(define (animate-slide! m note ply)
+  (let* ((from (nth-from m)) (to (nth-to m)) (p (at from))
+         (fx (+ BX (* (file from) SQ) (quotient SQ 2)))
+         (fy (+ BY (* (rank from) SQ) (quotient SQ 2)))
+         (tx (+ BX (* (file to) SQ) (quotient SQ 2)))
+         (ty (+ BY (* (rank to) SQ) (quotient SQ 2))))
+    (draw-board -1 to)                  ;; board once, destination square flashing
+    (draw-hud ply 'w note)
+    ;; overlay the sliding piece at the 1/3, 2/3 and full points
+    (let loop ((k 1))
+      (when (<= k 3)
+        (draw-piece-at (+ fx (quotient (* (- tx fx) k) 3))
+                       (+ fy (quotient (* (- ty fy) k) 3)) p)
+        (loop (+ k 1))))))
+
+;; =======================  MOVE LOG  =======================
+
+(define MOVELOG '())  ;; list of strings, newest first
+
+(define (log-move! ply s name ev)
+  (set! MOVELOG
+    (cons (string-append
+            (number->string (+ (quotient ply 2) 1)) "."
+            (if (eq? s 'w) " " "..")
+            name
+            (if ev (string-append "  {eval " (number->string ev) "}") ""))
+          MOVELOG)))
+
+;; =======================  DRIVER  =======================
+;; Walk the chosen game's book move-vector ply by ply. HUMAN plays their side
+;; from the book (a real surface swaps this for live input); Motoi plays its side
+;; per MODE. Book moves apply through apply-book! (castling/ep aware); own-brain
+;; moves apply through do-move! (never tagged).
+
+;; normalize the human-side knob to internal 'w / 'b
+(define HUMAN (if (eq? HUMAN-SIDE 'black) 'b 'w))
+(define MOTOI (other HUMAN))
+(define REC (game-for GAME))
+(define BOOK (g-moves REC))
+(define NBOOK (vector-length BOOK))
+
+;; the book move for a given ply, or #f if the game's score has run out
+(define (book-at ply) (if (< ply NBOOK) (vector-ref BOOK ply) #f))
+
+;; heuristic-brain move for side s (used when off the book) -> (move eval)
+(define (brain-move s) (choose-from s (gen-moves s)))
+
+;; score a candidate book move for side s the same way the brain scores its own,
+;; so 'modified can compare them on one scale. A book move may be a castle/ep;
+;; those are treated as non-captures (score 0 gain) for the comparison.
+(define (book-brain-score s bm)
+  (if (or (book-oo? bm) (book-ooo? bm) (book-ep? bm)) 0
+      (net-score s bm (level-lookahead))))
+
+(set-mode 'sd)
+(setup!)
+
+(display "=== CHESS — Motoi SD (320x240) : Ten Greatest Games ===") (newline)
+(display (g-name REC)) (display " — ") (display (g-white REC))
+(display " vs ") (display (g-black REC)) (display ", ") (display (g-year REC))
+(newline)
+(display "You play ") (display (if (eq? HUMAN 'w) "WHITE" "BLACK"))
+(display "; Motoi plays ") (display (if (eq? MOTOI 'w) "WHITE" "BLACK"))
+(display ".  Mode: ") (display MODE) (newline)
+(display "P=1 N=B=3 R=5 Q=9.  Playback understands castling + en-passant.")
+(newline) (newline)
+
+(define RESULT "")
+(define DEVIATED #f)   ;; has the HUMAN side left the book? (ends 'straight book)
+(define LEFT-BOOK #f)  ;; has MOTOI departed the book in 'modified?
+(define LEFT-AT -1)    ;; ply at which Motoi first left the book
+
+;; play ONE ply; return (move . name) with the name computed BEFORE the move is
+;; applied (so piece/capture glyphs are correct), or #f if the game is over.
+;; Mutates the board.
+(define (brain-name-of s m) (move-name m (at (nth-from m)) (at (nth-to m))))
+(define (play-brain! ply turn)          ;; own-brain move -> (move . name) or #f
+  (let* ((picked (brain-move turn)) (m (car picked)))
+    (if (eq? m #f) #f
+        (let ((nm (brain-name-of turn m)))
+          (do-move! m)
+          (log-move! ply turn nm (cadr picked))
+          (cons m nm)))))
+(define (play-book! ply turn bm)        ;; scripted book move -> (move . name)
+  (let ((nm (book-move-name bm)))
+    (apply-book! bm)
+    (log-move! ply turn nm #f)
+    (cons bm nm)))
+
+(define (play-ply ply turn)
+  (let* ((bm (book-at ply)))
+    (cond
+     ;; ---- the game's written score is exhausted: both sides use their brain --
+     ((eq? bm #f) (play-brain! ply turn))
+     ;; ---- HUMAN's turn: play the book move (real surface = live input) -------
+     ((eq? turn HUMAN) (play-book! ply turn bm))
+     ;; ---- MOTOI, 'straight, human still on book: follow the script ----------
+     ((and (eq? MODE 'straight) (not DEVIATED)) (play-book! ply turn bm))
+     ;; ---- MOTOI in 'modified: compare its brain against the book ------------
+     ((eq? MODE 'modified)
+      (let* ((picked (brain-move turn)) (best (car picked))
+             (best-sc (if best (net-score turn best (level-lookahead)) -1000000))
+             (book-sc (book-brain-score turn bm)))
+        (if (and best (> (- best-sc book-sc) SENSE-THRESHOLD))
+            (let ((bn (brain-name-of turn best)))   ;; its sense sees better
+              (when (not LEFT-BOOK) (set! LEFT-BOOK #t) (set! LEFT-AT ply))
+              (display "  * Motoi left the book at ply ") (display ply)
+              (display ": played ") (display bn)
+              ;; show the book move by squares (the position may have diverged, so
+              ;; a glyph decode of the book's from-square would be misleading)
+              (display " over ") (display (sq-name (nth-from bm)))
+              (display "-") (display (sq-name (nth-to bm))) (newline)
+              (do-move! best)
+              (log-move! ply turn bn (cadr picked))
+              (cons best bn))
+            (play-book! ply turn bm))))            ;; agrees closely -> book
+     ;; ---- MOTOI after the human deviated ('straight): own brain ------------
+     (else (play-brain! ply turn)))))
+
+;; the run loop
+(let loop ((ply 0) (turn 'w))
+  (cond
+    ((>= ply MAX-PLIES)
+     (set! RESULT
+       (if (< ply NBOOK)
+           (string-append "ply cap reached at " (number->string ply)
+                          " of " (number->string NBOOK)
+                          " — raise MAX-PLIES + --fuel to play on")
+           "reached the end of the historical game")))
+    ((and (not (eq? turn HUMAN))       ;; game-over test only on the side to move
+          (not (book-at ply))
+          (eq? (car (brain-move turn)) #f))
+     (set! RESULT (if (in-check? turn) "CHECKMATE" "STALEMATE")))
+    (else
+     (let ((res (play-ply ply turn)))
+       (if (eq? res #f)
+           (set! RESULT (if (in-check? turn) "CHECKMATE" "STALEMATE"))
+           (let ((m (car res)) (nm (cdr res)))
+             ;; did the HUMAN just leave the book? (compare to what the book said)
+             (when (and (eq? turn HUMAN) (eq? MODE 'straight))
+               (let ((bm (book-at ply)))
+                 (when (and bm (not DEVIATED)
+                            (or (not (= (nth-from bm) (nth-from m)))
+                                (not (= (nth-to bm) (nth-to m)))))
+                   (set! DEVIATED #t))))
+             ;; compact ASCII status line
+             (when (= (modulo ply SHOW-EVERY) 0)
+               (display "ply ") (display ply)
+               (display (if (eq? turn 'w) "  W " "  B "))
+               (display nm)
+               (display (cond ((eq? turn HUMAN) "   (you)")
+                              (DEVIATED "   (Motoi, own brain)")
+                              (LEFT-BOOK "   (Motoi)")
+                              (else "   (Motoi, book)")))
+               (display "  | mat W=") (display (material 'w))
+               (display " B=") (display (material 'b)) (newline))
+             ;; ONE SD climax screenshot
+             (when (= ply DUMP-PLY)
+               (draw-board (nth-from m) (nth-to m))
+               (draw-hud ply (other turn)
+                         (if DEVIATED "off book"
+                             (if LEFT-BOOK "departed" "in book")))
+               (newline)
+               (display "--- SD screenshot @ ply ") (display ply)
+               (display " (") (display nm) (display ") ---")
+               (newline)
+               (fb/dump 0 0 W H)
+               (newline))
+             (loop (+ ply 1) (other turn))))))))
+
+;; =======================  RESULT  =======================
+
+(newline)
+(display "GAME: ") (display (g-name REC)) (newline)
+(display "STATUS: ")
+(cond (DEVIATED  (display "you left the book — Motoi finished on its own brain."))
+      (LEFT-BOOK (display "Motoi departed the book at ply ") (display LEFT-AT) (display "."))
+      (else      (display "played faithfully in the book.")))
+(newline)
+(newline)
+(display "MOVE LOG (most recent last):") (newline)
+(for-each (lambda (line) (display "  ") (display line) (newline))
+          (reverse MOVELOG))
+(newline)
+(display "RESULT: ") (display RESULT) (newline)
+(display "Final material  W=") (display (material 'w))
+(display "  B=") (display (material 'b)) (newline)
+(newline)
+(display "Fork it: change GAME ('immortal 'evergreen 'opera 'century), MODE")
+(newline)
+(display "('straight 'modified), HUMAN-SIDE ('white 'black), or raise MAX-PLIES")
+(newline)
+(display "with --fuel to play a masterpiece all the way to mate.")
+(newline)

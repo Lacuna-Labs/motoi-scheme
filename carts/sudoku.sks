@@ -1,0 +1,505 @@
+;; sudoku.sks
+;; Motoi Cart — Flagship (SD framebuffer)
+;;
+;; (cart
+;;   :name            "sudoku"
+;;   :category        :game
+;;   :sub-category    :puzzle
+;;   :audience        :kid
+;;   :complexity      4
+;;   :runtime-tier    :runs-on-core
+;;   :render          :sd-framebuffer
+;;   :one-line        "A 9x9 sudoku drawn on the 320x240 screen, solved by a fuel-cheap backtracker that always picks the most-constrained cell first."
+;;   :verbs-used      ("set-mode" "clear" "set-color" "line" "rect" "rect-fill"
+;;                     "fb/text" "fb/dump" "make-vector" "vector-ref" "vector-set!"
+;;                     "vector-length" "quotient" "remainder" "modulo" "number->string"
+;;                     "string-append" "when" "unless" "cond" "case" "let" "let*"
+;;                     "and" "or" "not" "set!")
+;;   :inspiration     "Sudoku — Howard Garns, 1979 (as 'Number Place'), popularized in Japan by Nikoli. One rule: every row, column, and 3x3 box holds 1..9 exactly once.")
+;;
+;; HOW TO RUN:
+;;   motoi run carts/sudoku.sks
+;;
+;; WHAT THIS IS
+;;   Sudoku on Motoi's real SD screen (320x240). The board is a VECTOR of 81
+;;   cells (0 means empty). One rule runs the whole game: every row, every
+;;   column, and every 3x3 box must hold the digits 1..9 exactly once.
+;;
+;;   We start from a fixed, hand-checked puzzle (a SEED constant) so the run is
+;;   the same every time — no clock, no luck. The DIFFICULTY knob decides how
+;;   many of the solved digits we hide before showing you the puzzle.
+;;
+;;   Then a backtracking solver fills it in. The trick that keeps it cheap:
+;;   MRV — "minimum remaining values". Instead of guessing at the first empty
+;;   cell, it always jumps to the empty cell with the FEWEST legal digits left.
+;;   That corners the search fast, so a well-formed grid solves in a few hundred
+;;   placements instead of exploding. Place a candidate, recurse, and if a cell
+;;   ever runs out of digits, back up and try the next one.
+;;
+;;   There is no keyboard here, so the cart auto-solves and shows its work: the
+;;   givens as ASCII, then the solved grid as ASCII, a VALID check, the number
+;;   of placements and backtracks, and ONE SD screenshot of the finished board.
+;;   On an interactive surface you'd type a digit into a cell and the same
+;;   row/col/box check would light it green if it's legal, red if it clashes.
+
+;; =======================  KNOBS  =======================
+
+(define DIFFICULTY 'normal)   ;; 'easy 'normal 'hard  — how many cells are hidden
+(define SEED       7)         ;; picks a puzzle variant (digit relabel of a base)
+(define MAX-STEPS  20000)     ;; hard cap on solver placements (fuel guard)
+
+(define W 320)                ;; SD width
+(define H 240)                ;; SD height
+
+;; =======================  DETERMINISTIC PRNG  =======================
+;; A tiny linear-congruential generator so variants are the same every run.
+
+(define _seed SEED)
+(define (rnd)
+  (set! _seed (modulo (+ (* _seed 1103515245) 12345) 2147483648))
+  (/ _seed 2147483648.0))
+(define (rnd-int n) (modulo (floor (* (rnd) n)) n))
+
+;; =======================  CHARM PASS: SOUND  =======================
+;; A gentle opening motif and small sounds on the puzzle's key beats: the reveal
+;; of the givens, and the "solved!" chime. The audio verbs are REAL — (music),
+;; (melody), (note), (tone) — but a headless run has no speaker, so they simply
+;; do nothing. That is fine: the SHAPE is what teaches; on a real surface they sing.
+;;
+;; TEACHING IDEA — "guard your nice-extras so they can NEVER crash the core."
+;; Sound is a treat, not the puzzle. Every audio call goes through one small
+;; wrapper, (safe ...), and one flag, SOUND-ON. Flip the flag off and the solver
+;; runs on in silence, unchanged. Keep the treats on a switch that cannot break
+;; the must-work part — the same idea as a seatbelt: it only ever helps.
+(define SOUND-ON #t)
+(define (safe thunk) (when SOUND-ON (thunk)) #t)
+
+;; a calm opening phrase — a rising pentatonic walk (a "settle in and think" motif)
+(define (play-theme!)
+  (safe (lambda ()
+    (music 'sudoku-theme)
+    (melody (list 60 62 64 67 69) 0.11))))   ;; C D E G A — five gentle steps
+(define (sfx-reveal!)                          ;; the puzzle appears — a soft tap
+  (safe (lambda () (note 64 0.08 0.5))))
+(define (sfx-solved!)                           ;; a bright resolving chime
+  (safe (lambda () (melody (list 67 72 76 79) 0.12))))
+
+;; =======================  BASE SOLUTION  =======================
+;; A fully-solved, valid 9x9 grid. Every variant is a digit-relabel of this,
+;; which keeps every row/col/box constraint intact. Index = row*9 + col.
+
+(define BASE
+  (vector 5 3 4  6 7 8  9 1 2
+          6 7 2  1 9 5  3 4 8
+          1 9 8  3 4 2  5 6 7
+
+          8 5 9  7 6 1  4 2 3
+          4 2 6  8 5 3  7 9 1
+          7 1 3  9 2 4  8 5 6
+
+          9 6 1  5 3 7  2 8 4
+          2 8 7  4 1 9  6 3 5
+          3 4 5  2 8 6  1 7 9))
+
+;; Build a random 1..9 -> 1..9 relabeling (a permutation) from the SEED.
+;; Relabeling a valid solution yields another valid solution.
+(define (make-relabel)
+  (let ((perm (make-vector 10 0))    ;; perm[d] = new label for digit d
+        (pool (list 1 2 3 4 5 6 7 8 9)))
+    (let loop ((d 1) (pool pool))
+      (when (<= d 9)
+        (let* ((n (length pool))
+               (i (rnd-int n))
+               ;; pull element i out of pool
+               (picked (list-ref pool i))
+               (rest (append (take pool i) (drop pool (+ i 1)))))
+          (vector-set! perm d picked)
+          (loop (+ d 1) rest))))
+    perm))
+
+;; small list helpers (SRFI-1 has take/drop; keep local to be safe)
+(define (take lst k)
+  (if (or (= k 0) (null? lst)) '()
+      (cons (car lst) (take (cdr lst) (- k 1)))))
+(define (drop lst k)
+  (if (or (= k 0) (null? lst)) lst
+      (drop (cdr lst) (- k 1))))
+
+;; The solved grid for THIS seed = BASE relabeled.
+(define SOLUTION
+  (let ((perm (make-relabel))
+        (out (make-vector 81 0)))
+    (let loop ((i 0))
+      (when (< i 81)
+        (vector-set! out i (vector-ref perm (vector-ref BASE i)))
+        (loop (+ i 1))))
+    out))
+
+;; =======================  MAKE THE PUZZLE  =======================
+;; Hide cells from SOLUTION to make the shown puzzle. DIFFICULTY sets how many.
+
+(define HOLES
+  (cond ((eq? DIFFICULTY 'easy)   32)
+        ((eq? DIFFICULTY 'hard)   44)
+        (else                     40)))
+
+;; PUZZLE = the grid the player sees (0 = blank). GIVEN? marks original clues.
+(define PUZZLE (make-vector 81 0))
+(define GIVEN  (make-vector 81 #f))
+
+(define (build-puzzle!)
+  ;; start as full solution
+  (let loop ((i 0))
+    (when (< i 81)
+      (vector-set! PUZZLE i (vector-ref SOLUTION i))
+      (vector-set! GIVEN i #t)
+      (loop (+ i 1))))
+  ;; punch HOLES random cells out (sampling with replacement is fine — we just
+  ;; keep going until we've cleared enough distinct cells)
+  (let loop ((cleared 0) (guard 0))
+    (when (and (< cleared HOLES) (< guard 4000))
+      (let ((i (rnd-int 81)))
+        (cond ((not (= (vector-ref PUZZLE i) 0))
+               (vector-set! PUZZLE i 0)
+               (vector-set! GIVEN i #f)
+               (loop (+ cleared 1) (+ guard 1)))
+              (else (loop cleared (+ guard 1))))))))
+
+;; =======================  THE SOLVER (backtracking + MRV)  =======================
+;; GRID is the working board the solver mutates. Cheap legality: scan the cell's
+;; row, column, and 3x3 box for a clash.
+
+(define GRID (make-vector 81 0))
+(define STEPS 0)       ;; placements attempted
+(define BACKTRACKS 0)  ;; times we undid a placement
+
+(define (copy-into! dst src)
+  (let loop ((i 0))
+    (when (< i 81)
+      (vector-set! dst i (vector-ref src i))
+      (loop (+ i 1)))))
+
+;; Precompute row/col/box index for every cell ONCE. Turns the hot legality
+;; check's quotient/remainder into cheap vector-refs (a real fuel win, since
+;; legal? runs tens of thousands of times during MRV search).
+(define ROWIX (make-vector 81 0))
+(define COLIX (make-vector 81 0))
+(define BOXIX (make-vector 81 0))
+(let loop ((i 0))
+  (when (< i 81)
+    (let ((r (quotient i 9)) (c (remainder i 9)))
+      (vector-set! ROWIX i r)
+      (vector-set! COLIX i c)
+      (vector-set! BOXIX i (+ (* (quotient r 3) 3) (quotient c 3))))
+    (loop (+ i 1))))
+
+(define (row-of i) (vector-ref ROWIX i))
+(define (col-of i) (vector-ref COLIX i))
+(define (box-of i) (vector-ref BOXIX i))
+
+;; --- Incremental constraint masks (the fuel win) ---
+;; For each row/col/box we keep a small "used digit" table so legality is three
+;; O(1) lookups instead of scanning 21 cells. Index = unit*10 + digit.
+(define ROWUSED (make-vector 90 #f))
+(define COLUSED (make-vector 90 #f))
+(define BOXUSED (make-vector 90 #f))
+
+;; per-cell base offsets into the mask tables (unit*10), computed once
+(define ROWBASE (make-vector 81 0))
+(define COLBASE (make-vector 81 0))
+(define BOXBASE (make-vector 81 0))
+(let loop ((i 0))
+  (when (< i 81)
+    (vector-set! ROWBASE i (* (row-of i) 10))
+    (vector-set! COLBASE i (* (col-of i) 10))
+    (vector-set! BOXBASE i (* (box-of i) 10))
+    (loop (+ i 1))))
+
+(define (mask-clear!)
+  (let loop ((i 0))
+    (when (< i 90)
+      (vector-set! ROWUSED i #f)
+      (vector-set! COLUSED i #f)
+      (vector-set! BOXUSED i #f)
+      (loop (+ i 1)))))
+
+;; place digit d at cell i (updates GRID + the three masks)
+(define (place! i d)
+  (vector-set! GRID i d)
+  (vector-set! ROWUSED (+ (vector-ref ROWBASE i) d) #t)
+  (vector-set! COLUSED (+ (vector-ref COLBASE i) d) #t)
+  (vector-set! BOXUSED (+ (vector-ref BOXBASE i) d) #t))
+
+;; remove the digit at cell i (updates GRID + masks)
+(define (unplace! i)
+  (let ((d (vector-ref GRID i)))
+    (vector-set! GRID i 0)
+    (vector-set! ROWUSED (+ (vector-ref ROWBASE i) d) #f)
+    (vector-set! COLUSED (+ (vector-ref COLBASE i) d) #f)
+    (vector-set! BOXUSED (+ (vector-ref BOXBASE i) d) #f)))
+
+;; seed the masks from the current GRID (called once after copy-into!)
+(define (mask-from-grid!)
+  (mask-clear!)
+  (let loop ((i 0))
+    (when (< i 81)
+      (let ((d (vector-ref GRID i)))
+        (when (not (= d 0))
+          (vector-set! ROWUSED (+ (vector-ref ROWBASE i) d) #t)
+          (vector-set! COLUSED (+ (vector-ref COLBASE i) d) #t)
+          (vector-set! BOXUSED (+ (vector-ref BOXBASE i) d) #t)))
+      (loop (+ i 1)))))
+
+;; Is digit d legal at cell i? Three O(1) lookups.
+(define (legal? i d)
+  (and (not (vector-ref ROWUSED (+ (vector-ref ROWBASE i) d)))
+       (not (vector-ref COLUSED (+ (vector-ref COLBASE i) d)))
+       (not (vector-ref BOXUSED (+ (vector-ref BOXBASE i) d)))))
+
+;; Count / collect legal candidates for an empty cell.
+(define (candidates i)
+  (let loop ((d 1) (acc '()))
+    (cond ((> d 9) (reverse acc))
+          ((legal? i d) (loop (+ d 1) (cons d acc)))
+          (else (loop (+ d 1) acc)))))
+
+;; count-only version — cheaper for MRV (no list allocation). Stops counting as
+;; soon as it reaches `cap` candidates, since MRV only cares which cell has the
+;; fewest — a cell already tied with the best-so-far can't win.
+(define (count-candidates i cap)
+  (let loop ((d 1) (n 0))
+    (cond ((> d 9) n)
+          ((>= n cap) n)                          ;; can't beat current best; bail
+          ((legal? i d) (loop (+ d 1) (+ n 1)))
+          (else (loop (+ d 1) n)))))
+
+;; MRV: find the empty cell with the fewest candidates.
+;; Returns the cell index, or -1 if the board is full.
+;; A returned cell with 0 candidates signals a dead end to the caller.
+;; Early-out: a cell with exactly 1 candidate can't be beaten, so stop.
+(define (pick-cell)
+  (let loop ((i 0) (best -1) (bestn 10))
+    (cond ((= i 81) best)
+          ((not (= (vector-ref GRID i) 0)) (loop (+ i 1) best bestn))
+          (else
+           (let ((n (count-candidates i bestn)))
+             (cond ((= n 0) i)                    ;; dead cell: return immediately
+                   ((= n 1) i)                    ;; can't do better than 1
+                   ((< n bestn) (loop (+ i 1) i n))
+                   (else (loop (+ i 1) best bestn))))))))
+
+;; Depth-first solve with MRV. Returns #t on success.
+(define (solve)
+  (cond ((> STEPS MAX-STEPS) #f)
+        (else
+         (let ((i (pick-cell)))
+           (cond
+             ((< i 0) #t)                                  ;; solved: no empties
+             (else
+              ;; try each candidate for the most-constrained cell
+              (let ((cands (candidates i)))
+                (cond ((null? cands) #f)                   ;; dead end
+                      (else
+                       (let try ((cs cands))
+                         (cond ((null? cs) #f)
+                               (else
+                                (set! STEPS (+ STEPS 1))
+                                (place! i (car cs))
+                                (cond ((solve) #t)
+                                      (else
+                                       (unplace! i)             ;; undo
+                                       (set! BACKTRACKS (+ BACKTRACKS 1))
+                                       (try (cdr cs))))))))))))))))
+
+;; =======================  VALIDATION  =======================
+;; Confirm the solved GRID really satisfies every row, column, and box.
+
+;; Every unit must be a permutation of 1..9. `base` is the first index of the
+;; unit and `stride` walks it (1 across a row, 9 down a column). Allocation-free.
+(define (unit-ok? base stride)
+  (let ((seen (make-vector 10 #f)))
+    (let loop ((k 0))
+      (cond ((= k 9) #t)
+            (else
+             (let ((v (vector-ref GRID (+ base (* k stride)))))
+               (cond ((or (< v 1) (> v 9)) #f)
+                     ((vector-ref seen v) #f)
+                     (else (vector-set! seen v #t) (loop (+ k 1))))))))))
+
+(define (box-ok? b)
+  (let* ((br (* (quotient b 3) 3))
+         (bc (* (remainder b 3) 3))
+         (seen (make-vector 10 #f)))
+    (let loop ((k 0))
+      (cond ((= k 9) #t)
+            (else
+             (let ((v (vector-ref GRID (+ (* (+ br (quotient k 3)) 9)
+                                          (+ bc (remainder k 3))))))
+               (cond ((or (< v 1) (> v 9)) #f)
+                     ((vector-ref seen v) #f)
+                     (else (vector-set! seen v #t) (loop (+ k 1))))))))))
+
+(define (valid-solution?)
+  (let loop ((k 0) (ok #t))
+    (if (or (not ok) (= k 9)) ok
+        (loop (+ k 1)
+              (and (unit-ok? (* k 9) 1)   ;; row k
+                   (unit-ok? k 9)         ;; col k
+                   (box-ok? k))))))       ;; box k
+
+;; =======================  ASCII PRINT  =======================
+
+(define (cell-char v) (if (= v 0) "." (number->string v)))
+
+(define (print-grid src label)
+  (display label) (newline)
+  (let loop ((r 0))
+    (when (< r 9)
+      (when (and (> r 0) (= (remainder r 3) 0))
+        (display "------+-------+------") (newline))
+      (let lc ((c 0))
+        (when (< c 9)
+          (when (and (> c 0) (= (remainder c 3) 0)) (display "| "))
+          (display (cell-char (vector-ref src (+ (* r 9) c))))
+          (display " ")
+          (lc (+ c 1))))
+      (newline)
+      (loop (+ r 1))))
+  (newline))
+
+;; =======================  CHARM PASS: LOOK  =======================
+;; A tiny palette so colors have NAMES, not magic numbers. When "the paper" is a
+;; word instead of the number 7, you can restyle the whole cart from one place —
+;; and a reader learns what each color is FOR. Naming your constants is one of
+;; the cheapest good habits in programming.
+(define COL-PAPER  7)    ;; white board paper
+(define COL-CELL   6)    ;; light grey cell lines
+(define COL-BOX    0)    ;; black thick box borders
+(define COL-BAR    1)    ;; dark title bar wash
+(define COL-SKY    1)    ;; splash background wash
+(define COL-STARS  13)   ;; lavender speckle on the splash
+(define COL-SHADE  0)    ;; drop-shadow black
+(define COL-BANNER 5)    ;; splash banner face
+(define COL-FRAME  7)    ;; white frame
+
+;; =======================  RENDER (SD framebuffer)  =======================
+;; Board is 180x180, centered: left=70, top=30. Cell = 20px.
+
+(define BX 70)   ;; board left
+(define BY 30)   ;; board top
+(define CS 20)   ;; cell size (9*20 = 180)
+
+;; A calm, seed-driven starfield behind the splash — deterministic (drawn from
+;; the LCG state) so it is the same every run. A background you can see gives the
+;; title screen depth for almost nothing; it is just pixels.
+(define (draw-splash-bg)
+  (clear COL-SKY)
+  (let loop ((n 0) (s SEED))
+    (when (< n 40)
+      (let* ((s2 (modulo (+ (* s 1103515245) 12345) 2147483648))
+             (x  (modulo s2 W))
+             (s3 (modulo (+ (* s2 1103515245) 12345) 2147483648))
+             (y  (modulo s3 H)))
+        (pset x y COL-STARS)
+        (loop (+ n 1) s3)))))
+
+;; The title / loading screen — its own SD frame. TEACHING IDEA: a title screen
+;; is just ANOTHER drawing; the same verbs that paint the board paint the splash.
+;; Order: show the title, play the theme, THEN solve.
+(define (draw-title)
+  (draw-splash-bg)
+  (set-color COL-SHADE)  (rect-fill 44 62 232 60)     ;; shadow
+  (set-color COL-BANNER) (rect-fill 40 58 232 60)      ;; banner
+  (set-color COL-FRAME)  (rect 40 58 232 60)
+  (fb/text "S U D O K U" 112 78 'yellow)
+  (fb/text "one rule: 1..9, once each" 84 98 'white)
+  ;; a scrap of art: a little 3x3 mini-grid with a few digits
+  (set-color COL-BOX)
+  (let loop ((k 0))
+    (when (<= k 3)
+      (line (+ 140 (* k 12)) 138 (+ 140 (* k 12)) 174)
+      (line 140 (+ 138 (* k 12)) 176 (+ 138 (* k 12)))
+      (loop (+ k 1))))
+  (fb/text "5" 143 141 'blue) (fb/text "3" 155 141 'blue)
+  (fb/text "7" 143 153 'red)  (fb/text "9" 167 165 'blue)
+  (fb/text "* PRESS START *" 104 190 'green)
+  (fb/text "loading a solved grid..." 78 208 'lavender))
+
+(define (draw-board)
+  (clear COL-PAPER)                          ;; white paper
+  ;; light cell lines
+  (set-color COL-CELL)
+  (let loop ((k 0))
+    (when (<= k 9)
+      (line (+ BX (* k CS)) BY (+ BX (* k CS)) (+ BY (* 9 CS)))
+      (line BX (+ BY (* k CS)) (+ BX (* 9 CS)) (+ BY (* k CS)))
+      (loop (+ k 1))))
+  ;; thick box lines (double stroke every 3rd line, drawn in black)
+  (set-color COL-BOX)
+  (let loop ((k 0))
+    (when (<= k 9)
+      (when (= (modulo k 3) 0)
+        (let ((x (+ BX (* k CS))) (y (+ BY (* k CS))))
+          ;; vertical box border, 2px
+          (line x BY x (+ BY (* 9 CS)))
+          (line (+ x 1) BY (+ x 1) (+ BY (* 9 CS)))
+          ;; horizontal box border, 2px
+          (line BX y (+ BX (* 9 CS)) y)
+          (line BX (+ y 1) (+ BX (* 9 CS)) (+ y 1))))
+      (loop (+ k 1))))
+  ;; digits: givens in dark-blue, solver-filled in red
+  (let loop ((i 0))
+    (when (< i 81)
+      (let ((v (vector-ref GRID i)))
+        (when (not (= v 0))
+          (let ((tx (+ BX (* (col-of i) CS) 7))
+                (ty (+ BY (* (row-of i) CS) 6))
+                (col (if (vector-ref GIVEN i) 'blue 'red)))
+            (fb/text (number->string v) tx ty col))))
+      (loop (+ i 1))))
+  ;; title bar
+  (set-color COL-BAR) (rect-fill 0 0 W 14)
+  (fb/text "SUDOKU" 4 4 'yellow)
+  (fb/text (symbol->string DIFFICULTY) 250 4 'peach))
+
+;; =======================  DRIVER  =======================
+
+(set-mode 'sd)
+
+(display "=== SUDOKU — Motoi SD (320x240) ===") (newline)
+(display "difficulty: ") (display DIFFICULTY)
+(display "   seed: ") (display SEED)
+(display "   holes: ") (display HOLES) (newline) (newline)
+
+;; SPLASH FIRST: sound the theme, draw the title frame, THEN solve. This is the
+;; ONE allowed extra dump — the loading screen, not a per-step dump.
+(play-theme!)
+(draw-title)
+(display "--- SD title screen ---") (newline)
+(fb/dump 0 0 W H)
+(newline)
+
+(build-puzzle!)
+(sfx-reveal!)                       ;; a soft tap as the givens appear
+(print-grid PUZZLE "PUZZLE (givens; . = blank):")
+
+;; load the puzzle into the solver's working grid, seed the masks, and solve
+(copy-into! GRID PUZZLE)
+(mask-from-grid!)
+(define SOLVED (solve))
+
+(cond
+  (SOLVED
+   (print-grid GRID "SOLVED:")
+   (display "solve: ") (display STEPS) (display " placements, ")
+   (display BACKTRACKS) (display " backtracks") (newline)
+   (display "VALID: ")
+   (display (if (valid-solution?) "yes — every row/col/box holds 1..9" "NO"))
+   (newline) (newline)
+   (sfx-solved!)                    ;; a bright resolving chime — the grid is done
+   (draw-board)
+   (display "--- SD screenshot: solved board ---") (newline)
+   (fb/dump 0 0 W H))
+  (else
+   (display "solver hit the step cap (") (display MAX-STEPS)
+   (display ") — puzzle too hard; lower HOLES.") (newline)))

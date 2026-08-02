@@ -1,0 +1,567 @@
+;; starfighter.sks
+;; Motoi Cart — Flagship (SD framebuffer)
+;;
+;; (cart
+;;   :name            "starfighter"
+;;   :category        :game
+;;   :sub-category    :shmup
+;;   :audience        :kid
+;;   :complexity      5
+;;   :runtime-tier    :runs-on-core
+;;   :render          :sd-framebuffer
+;;   :one-line        "A horizontal side-scrolling shooter: parallax starfields, sine-wave enemy waves, and a three-phase boss on the 320x240 screen."
+;;   :verbs-used      ("set-mode" "clear" "set-color" "disc" "circle" "line"
+;;                     "rect-fill" "triangle-fill" "pset" "fb/text" "fb/dump"
+;;                     "sin" "cos" "sqrt" "pi" "modulo" "quotient" "floor" "abs"
+;;                     "min" "max" "make-vector" "vector-ref" "vector-set!"
+;;                     "nth" "list-set" "map" "filter" "for-each" "range" "cons"
+;;                     "car" "cdr" "when" "unless" "cond" "let" "let*" "set!")
+;;   :inspiration     "The horizontal shoot-'em-up — Defender (Williams, 1980) gave it scrolling; the R-Type lineage gave it the giant multi-part boss you chip apart one piece at a time.")
+;;
+;; HOW TO RUN:
+;;   motoi run carts/starfighter.sks
+;;
+;; WHAT THIS IS
+;;   A side-scrolling space shooter, the whole thing drawn onto Motoi's real SD
+;;   screen (320x240). The world slides right-to-left in THREE parallax layers:
+;;   a far starfield that barely creeps, a mid layer of drifting nebula clouds,
+;;   and a near band of scrolling terrain that races past. Different speeds for
+;;   different depths — that's the trick your eye reads as 3D.
+;;
+;;   Your ship sits on the left and flies itself along a readable weaving path,
+;;   dodging up and down while firing a steady stream forward. Enemies enter from
+;;   the right in sine-wave formations and shoot back. Survive the waves and the
+;;   STAGE BOSS arrives: a big multi-part machine you beat in three phases —
+;;   first knock off its two gun-arms while the core is shielded, then the core
+;;   opens up and fires faster, then at low health it panics into a desperation
+;;   spread. Its HP bar and phase are on the HUD.
+;;
+;;   There is no keyboard here. A small auto-pilot flies the ship and a tiny LCG
+;;   (seeded by SEED) spawns the waves, so the cart plays the SAME every run.
+;;   Turn the LEVEL knob to scale enemy density, bullet speed, and boss health.
+;;   On an interactive surface the same draw calls paint every frame and a human
+;;   flies the ship instead of the auto-pilot.
+
+;; =======================  KNOBS  =======================
+
+(define LEVEL      'normal)   ;; 'easy 'normal 'hard — enemy density + boss HP
+(define SEED       20260730)  ;; deterministic wave spawns; change for a new run
+(define MAX-TICKS  56)        ;; run length (fits default fuel)
+(define SHOW-EVERY 12)        ;; print a status line this often
+(define DUMP-FRAME 50)        ;; render ONE SD screenshot here (mid boss fight)
+
+(define W 320)                ;; SD width
+(define H 240)                ;; SD height
+
+(define SHIP-X   36)          ;; ship rides this column, weaves in Y
+(define SHIP-R   7)           ;; ship half-size
+(define P-COOL   5)           ;; ticks between player shots
+(define P-BULLET-V 8.0)       ;; player bullet speed (rightward)
+(define BOSS-TICK 30)         ;; the boss arrives around here
+(define EB-CAP   16)          ;; hard cap on live enemy bullets (fuel guard)
+(define PB-CAP   10)          ;; hard cap on live player bullets
+
+;; =======================  DETERMINISTIC PRNG  =======================
+;; A tiny LCG so waves are identical every run, no host clock. rnd -> [0,1).
+
+(define _seed SEED)
+(define (rnd)
+  (set! _seed (modulo (+ (* _seed 1103515245) 12345) 2147483648))
+  (/ _seed 2147483648))
+(define (rnd-range lo hi) (+ lo (* (rnd) (- hi lo))))
+
+;; =======================  CHARM PASS: SOUND  =======================
+;; A soaring opening theme and a small sound on every key event: a shot fired,
+;; an enemy destroyed, a hit on the boss. The audio verbs are REAL — (music),
+;; (melody), (sfx), (tone), (note) — but a headless run has no speaker, so they
+;; simply do nothing. That is fine: the SHAPE is what teaches; on a real surface
+;; these same calls sing.
+;;
+;; TEACHING IDEA — "guard your nice-extras so they can NEVER crash the core."
+;; Sound is a treat, not the game. Every audio call goes through one small
+;; wrapper, (safe ...), and one flag, SOUND-ON. Flip the flag off and the fight
+;; plays on in silence, unchanged. Keep the treats on a switch that cannot break
+;; the must-work part — the same idea as a seatbelt: it only ever helps.
+(define SOUND-ON #t)
+(define (safe thunk) (when SOUND-ON (thunk)) #t)
+
+;; a soaring launch motif — a rising phrase, "punch it"
+(define (play-theme!)
+  (safe (lambda ()
+    (music 'starfighter-theme)
+    (melody (list 60 67 72 76) 0.11))))       ;; C4 G4 C5 E5 — a heroic climb
+(define (sfx-shoot!)  (safe (lambda () (sfx 'blip 720 0.03))))    ;; player fires
+(define (sfx-kill!)   (safe (lambda () (note 79 0.06 0.6))))      ;; enemy destroyed
+(define (sfx-boss!)   (safe (lambda () (note 50 0.05 0.7))))      ;; a hit lands on the boss
+(define (sfx-clear!)  (safe (lambda () (melody (list 72 76 79 84) 0.12))))  ;; boss down!
+
+;; =======================  LEVEL SCALING  =======================
+
+(define SPAWN-EVERY                       ;; ticks between enemy spawns
+  (cond ((eq? LEVEL 'easy) 9) ((eq? LEVEL 'hard) 4) (else 6)))
+(define E-BULLET-V                         ;; enemy bullet speed
+  (cond ((eq? LEVEL 'easy) 1.8) ((eq? LEVEL 'hard) 3.0) (else 2.4)))
+(define BOSS-HP-MAX
+  (cond ((eq? LEVEL 'easy) 80) ((eq? LEVEL 'hard) 160) (else 120)))
+(define ARM-HP
+  (cond ((eq? LEVEL 'easy) 5) ((eq? LEVEL 'hard) 12) (else 8)))
+
+;; =======================  PARALLAX LAYERS (vectors)  =======================
+;; Three depth layers scroll right-to-left at different speeds. Stars are held
+;; in flat vectors (x0 y0 x1 y1 ...) so stepping them is cheap. When a star
+;; slides off the left it wraps to the right — an endless field.
+
+(define FAR-N  26)   (define FAR-SPD  0.4)   ;; far starfield: barely moves
+(define MID-N  10)   (define MID-SPD  1.1)   ;; mid nebula puffs: medium
+(define NEAR-SPD 3.0)                         ;; near terrain band: fast
+
+(define (make-stars n)
+  (let ((v (make-vector (* 2 n) 0)))
+    (let loop ((i 0))
+      (when (< i n)
+        (vector-set! v (* 2 i)       (floor (rnd-range 0 W)))
+        (vector-set! v (+ (* 2 i) 1) (floor (rnd-range 6 (- H 6))))
+        (loop (+ i 1))))
+    v))
+
+(define FAR  (make-stars FAR-N))
+(define MID  (make-stars MID-N))
+
+;; scroll one star vector left by spd, wrapping x past 0 back to W
+(define (scroll-stars! v n spd)
+  (let loop ((i 0))
+    (when (< i n)
+      (let ((x (- (vector-ref v (* 2 i)) spd)))
+        (vector-set! v (* 2 i) (if (< x 0) (+ x W) x)))
+      (loop (+ i 1)))))
+
+;; near terrain: a scrolling ground silhouette. We track one scroll offset and
+;; draw a repeating jagged band from a fixed height table.
+(define NEAR-OFF 0)
+(define GROUND '(18 26 14 30 22 16 28 20 24 14 30 18))  ;; ridge heights
+
+;; =======================  STATE  =======================
+;; ship    = (y vy cooldown)                 rides fixed X, weaves in Y
+;; enemy   = (x y phase kind hp)             kind 0=weaver 1=diver
+;; p-bullet= (x y)                            player shot, flies right
+;; e-bullet= (x y vx vy)                      enemy/boss shot
+;; boss    = (x y hp phase arm1 arm2 fire-t) ; arms are HP, 0 = destroyed
+
+(define SHIP (list (/ H 2) 0 0))
+(define ENEMIES '())
+(define PB '())              ;; player bullets
+(define EB '())              ;; enemy bullets
+(define SCORE 0)
+(define STAGE 1)
+(define BOSS #f)             ;; #f until it arrives
+(define GAME-OVER #f)
+
+(define (s-y)  (nth SHIP 0))
+(define (s-vy) (nth SHIP 1))
+(define (s-cd) (nth SHIP 2))
+(define (s! k v) (set! SHIP (list-set SHIP k v)))
+
+(define (e-x e) (nth e 0))
+(define (e-y e) (nth e 1))
+(define (e-ph e) (nth e 2))
+(define (e-kind e) (nth e 3))
+(define (e-hp e) (nth e 4))
+
+(define (b-x b) (nth b 0))
+(define (b-y b) (nth b 1))
+(define (b-hp b) (nth b 2))
+(define (b-phase b) (nth b 3))
+(define (b-arm1 b) (nth b 4))
+(define (b-arm2 b) (nth b 5))
+(define (b-fire b) (nth b 6))
+(define (boss! k v) (set! BOSS (list-set BOSS k v)))
+
+;; =======================  HELPERS  =======================
+
+(define (clampv v lo hi) (min hi (max lo v)))
+(define (cap lst n)                      ;; keep at most n items (fuel guard)
+  (if (> (length lst) n)
+      (let loop ((l lst) (k n) (acc '()))
+        (if (or (= k 0) (null? l)) (reverse acc)
+            (loop (cdr l) (- k 1) (cons (car l) acc))))
+      lst))
+(define (dist ax ay bx by)
+  (let ((dx (- ax bx)) (dy (- ay by)))
+    (sqrt (+ (* dx dx) (* dy dy)))))
+
+;; =======================  PLAYER AUTO-PILOT  =======================
+;; Weave along a smooth path and dodge the nearest incoming bullet. Readable:
+;; a sine ride gives the base weave; if a bullet is close in Y, nudge away.
+
+(define (nearest-threat-dy)
+  ;; signed Y distance to the closest enemy bullet ahead of the ship
+  (let loop ((bs EB) (best 999) (bestdy 0))
+    (cond ((null? bs) bestdy)
+          (else
+           (let* ((b (car bs)) (dx (- (nth b 0) SHIP-X)))
+             (if (and (> dx 0) (< dx 70))
+                 (let ((d (abs (- (nth b 1) (s-y)))))
+                   (if (< d best)
+                       (loop (cdr bs) d (- (nth b 1) (s-y)))
+                       (loop (cdr bs) best bestdy)))
+                 (loop (cdr bs) best bestdy)))))))
+
+(define (pilot! t)
+  ;; base weave: smooth sine ride; once the boss is here, line up on a live arm
+  ;; (phase 1) or the core (later) so the auto-pilot actually chips it down.
+  (let* ((base (cond ((and BOSS (= (b-phase BOSS) 1) (> (b-arm1 BOSS) 0))
+                      (- (b-y BOSS) 20))
+                     ((and BOSS (= (b-phase BOSS) 1) (> (b-arm2 BOSS) 0))
+                      (+ (b-y BOSS) 20))
+                     (BOSS (b-y BOSS))
+                     (else (+ (/ H 2) (* 60 (sin (* t 0.18)))))))
+         (dodge (let ((dy (nearest-threat-dy)))
+                  (cond ((and (> dy -22) (< dy 0)) 14)     ;; bullet above → go down
+                        ((and (< dy 22) (>= dy 0)) -14)    ;; bullet below → go up
+                        (else 0))))
+         (want (clampv (+ base dodge) 16 (- H 16)))
+         (dy (- want (s-y))))
+    (s! 1 (clampv (* dy 0.35) -6 6))                        ;; smooth toward target
+    (s! 0 (clampv (+ (s-y) (s-vy)) 12 (- H 12)))
+    (when (> (s-cd) 0) (s! 2 (- (s-cd) 1)))
+    (when (<= (s-cd) 0)                                     ;; fire forward on cooldown
+      (set! PB (cons (list (+ SHIP-X SHIP-R) (s-y)) PB))
+      (sfx-shoot!)                                           ;; pew — a forward shot
+      (s! 2 P-COOL))))
+
+;; =======================  ENEMY SPAWNS + STEP  =======================
+
+(define (spawn-enemy! t)
+  (let* ((kind (if (< (rnd) 0.5) 0 1))
+         (y (floor (rnd-range 24 (- H 24))))
+         (phase (rnd-range 0 (* 2 pi))))
+    (set! ENEMIES (cons (list W y phase kind 2) ENEMIES))))
+
+(define (step-enemies! t)
+  (set! ENEMIES
+    (filter (lambda (e) (> (e-x e) -14))
+      (map (lambda (e)
+             (let* ((nx (- (e-x e) 2.2))
+                    (ph (+ (e-ph e) 0.16))
+                    ;; weaver rides a sine in Y; diver eases toward the ship
+                    (ny (if (= (e-kind e) 0)
+                            (clampv (+ (e-y e) (* 1.8 (sin ph))) 12 (- H 12))
+                            (clampv (+ (e-y e) (* 0.10 (- (s-y) (e-y e)))) 12 (- H 12)))))
+               (list nx ny ph (e-kind e) (e-hp e))))
+           ENEMIES)))
+  ;; enemies occasionally fire toward the ship
+  (for-each
+    (lambda (e)
+      (when (and (< (e-x e) (- W 20)) (< (rnd) 0.06))
+        (let* ((dx (- SHIP-X (e-x e))) (dy (- (s-y) (e-y e)))
+               (d (max 1 (dist SHIP-X (s-y) (e-x e) (e-y e)))))
+          (set! EB (cons (list (e-x e) (e-y e)
+                               (* E-BULLET-V (/ dx d)) (* E-BULLET-V (/ dy d))) EB)))))
+    ENEMIES))
+
+;; =======================  BULLET STEP  =======================
+
+(define (step-pb!)
+  (set! PB (cap (filter (lambda (b) (< (nth b 0) (+ W 4)))
+                  (map (lambda (b) (list (+ (nth b 0) P-BULLET-V) (nth b 1))) PB))
+                PB-CAP)))
+
+(define (step-eb!)
+  (set! EB (cap (filter (lambda (b) (and (> (nth b 0) -4) (< (nth b 0) (+ W 4))
+                                         (> (nth b 1) -4) (< (nth b 1) (+ H 4))))
+                  (map (lambda (b) (list (+ (nth b 0) (nth b 2)) (+ (nth b 1) (nth b 3))
+                                         (nth b 2) (nth b 3))) EB))
+                EB-CAP)))
+
+;; =======================  THE BOSS (multi-stage)  =======================
+;; Arrives from the right, parks at the right edge, and bobs. Three phases:
+;;   PHASE 1: core shielded — only the two gun-arms take damage. Arms fire
+;;            straight beams. Destroy both arms to advance.
+;;   PHASE 2: core exposed — faster aimed shots at the ship.
+;;   PHASE 3: desperation (HP below a third) — wide bullet SPREAD every shot.
+
+(define (spawn-boss!)
+  (set! BOSS (list (+ W 40) (/ H 2) BOSS-HP-MAX 1 ARM-HP ARM-HP 0)))
+
+(define (boss-step! t)
+  (when BOSS
+    ;; slide in until parked, then bob
+    (let* ((tx (- W 46))
+           (nx (if (> (b-x BOSS) tx) (- (b-x BOSS) 3) tx))
+           (ny (+ (/ H 2) (* 34 (sin (* t 0.10))))))
+      (boss! 0 nx) (boss! 1 ny))
+    ;; phase transitions
+    (cond ((and (= (b-phase BOSS) 1) (<= (b-arm1 BOSS) 0) (<= (b-arm2 BOSS) 0))
+           (boss! 3 2))
+          ((and (= (b-phase BOSS) 2) (< (b-hp BOSS) (quotient BOSS-HP-MAX 3)))
+           (boss! 3 3)))
+    ;; fire pattern by phase
+    (boss! 6 (+ (b-fire BOSS) 1))
+    (when (>= (b-x BOSS) (- W 60))
+      (let ((cx (b-x BOSS)) (cy (b-y BOSS)) (ph (b-phase BOSS)) (ft (b-fire BOSS)))
+        (cond
+          ;; PHASE 1 — arms fire straight beams left, on a slow cadence
+          ((and (= ph 1) (= (modulo ft 8) 0))
+           (when (> (b-arm1 BOSS) 0)
+             (set! EB (cons (list cx (- cy 20) (- 0 E-BULLET-V) 0) EB)))
+           (when (> (b-arm2 BOSS) 0)
+             (set! EB (cons (list cx (+ cy 20) (- 0 E-BULLET-V) 0) EB))))
+          ;; PHASE 2 — faster aimed shots at the ship
+          ((and (= ph 2) (= (modulo ft 5) 0))
+           (let* ((dx (- SHIP-X cx)) (dy (- (s-y) cy))
+                  (d (max 1 (dist SHIP-X (s-y) cx cy))) (v (* E-BULLET-V 1.4)))
+             (set! EB (cons (list cx cy (* v (/ dx d)) (* v (/ dy d))) EB))))
+          ;; PHASE 3 — desperation: a wide spread every few ticks
+          ((and (= ph 3) (= (modulo ft 6) 0))
+           (for-each
+             (lambda (k)
+               (let ((a (+ pi (* k 0.4))))       ;; fan out to the left
+                 (set! EB (cons (list cx cy (* E-BULLET-V (cos a))
+                                      (* E-BULLET-V (sin a))) EB))))
+             (range -2 3))))))))
+
+;; =======================  COLLISIONS  =======================
+
+(define (resolve-enemy-hits!)
+  ;; player bullets vs enemies
+  (let ((live-pb PB) (survivors '()))
+    (for-each
+      (lambda (e)
+        (let ((hit #f))
+          (set! live-pb
+            (filter (lambda (b)
+                      (if (and (not hit) (< (dist (nth b 0) (nth b 1) (e-x e) (e-y e)) 9))
+                          (begin (set! hit #t) #f) #t))
+                    live-pb))
+          (if hit
+              (if (> (e-hp e) 1)
+                  (set! survivors (cons (list-set e 4 (- (e-hp e) 1)) survivors))
+                  (begin (set! SCORE (+ SCORE 25)) (sfx-kill!)))   ;; enemy destroyed
+              (set! survivors (cons e survivors)))))
+      ENEMIES)
+    (set! ENEMIES survivors)
+    (set! PB live-pb)))
+
+(define (resolve-boss-hits!)
+  (when BOSS
+    (let ((cx (b-x BOSS)) (cy (b-y BOSS)) (ph (b-phase BOSS)) (live-pb '()))
+      (for-each
+        (lambda (b)
+          (let* ((bx (nth b 0)) (by (nth b 1)) (spent #f))
+            (cond
+              ;; PHASE 1 — only arms are vulnerable
+              ((= ph 1)
+               (cond ((and (> (b-arm1 BOSS) 0) (< (dist bx by cx (- cy 20)) 12))
+                      (boss! 4 (- (b-arm1 BOSS) 1)) (set! SCORE (+ SCORE 5))
+                      (set! spent #t))
+                     ((and (> (b-arm2 BOSS) 0) (< (dist bx by cx (+ cy 20)) 12))
+                      (boss! 5 (- (b-arm2 BOSS) 1)) (set! SCORE (+ SCORE 5))
+                      (set! spent #t))))
+              ;; PHASE 2/3 — core takes damage
+              (else
+               (when (< (dist bx by cx cy) 20)
+                 (boss! 2 (- (b-hp BOSS) 1)) (set! SCORE (+ SCORE 10))
+                 (set! spent #t))))
+            (when spent (sfx-boss!))            ;; a low thud lands on the boss
+            (unless spent (set! live-pb (cons b live-pb)))))
+        PB)
+      (set! PB live-pb))))
+
+;; =======================  CHARM PASS: LOOK  =======================
+;; A tiny palette so colors have NAMES, not magic numbers. When "deep space" is
+;; a word instead of the number 0, restyling the whole cart is a one-line edit
+;; here — and a reader learns what each color is FOR.
+(define COL-SPACE  0)    ;; the black void
+(define COL-STARS  5)    ;; far starfield speckle
+(define COL-SHADE  0)    ;; splash drop-shadow
+(define COL-BANNER 1)    ;; splash banner face
+(define COL-FRAME  7)    ;; splash frame
+
+;; The title / loading screen — its own SD frame. TEACHING IDEA: a title screen
+;; is just ANOTHER drawing; the same verbs that paint the fight paint the splash.
+;; Order: show the title, play the theme, THEN launch. The stars come straight
+;; from the parallax FAR field we already seeded, so the splash matches the game.
+(define (draw-title)
+  (clear COL-SPACE)
+  (let loop ((i 0))                            ;; scatter the far starfield behind
+    (when (< i FAR-N)
+      (pset (floor (vector-ref FAR (* 2 i))) (floor (vector-ref FAR (+ (* 2 i) 1)))
+            COL-STARS)
+      (loop (+ i 1))))
+  (set-color COL-SHADE)  (rect-fill 44 56 232 62)      ;; shadow
+  (set-color COL-BANNER) (rect-fill 40 52 232 62)       ;; banner
+  (set-color COL-FRAME)  (rect 40 52 232 62)
+  (fb/text "S T A R F I G H T E R" 78 70 'green)
+  (fb/text "clear the waves, beat the boss" 66 90 'white)
+  ;; a scrap of art: the player ship (nose right) and an enemy (nose left)
+  (triangle-fill 164 132 148 124 148 140 12)
+  (set-color 7) (disc 152 132 2)
+  (triangle-fill 184 132 198 124 198 140 14)
+  (fb/text "* PRESS START *" 104 172 'yellow)
+  (fb/text "spinning up the engines..." 76 192 'lavender))
+
+;; =======================  RENDER (SD framebuffer)  =======================
+
+(define (draw-parallax)
+  ;; far starfield — faint single pixels
+  (let loop ((i 0))
+    (when (< i FAR-N)
+      (pset (floor (vector-ref FAR (* 2 i))) (floor (vector-ref FAR (+ (* 2 i) 1))) COL-STARS)
+      (loop (+ i 1))))
+  ;; mid nebula puffs — small dim discs
+  (set-color 2)
+  (let loop ((i 0))
+    (when (< i MID-N)
+      (disc (floor (vector-ref MID (* 2 i))) (floor (vector-ref MID (+ (* 2 i) 1))) 4)
+      (loop (+ i 1))))
+  (set-color 1)
+  (let loop ((i 0))
+    (when (< i MID-N)
+      (pset (floor (vector-ref MID (* 2 i))) (floor (vector-ref MID (+ (* 2 i) 1))) 12)
+      (loop (+ i 1))))
+  ;; near terrain — a fast scrolling jagged ground band at the bottom
+  (let ((cols (length GROUND)) (cw 30))
+    (let loop ((c 0))
+      (when (< c 12)
+        (let* ((gx (- (* c cw) (modulo NEAR-OFF (* cols cw))))
+               (gh (nth GROUND (modulo c cols))))
+          (set-color 4) (rect-fill gx (- H gh) cw gh)
+          (set-color 9) (rect-fill gx (- H gh) cw 2))
+        (loop (+ c 1))))))
+
+(define (draw-ship)
+  (let ((y (s-y)))
+    ;; forward-pointing arrow (nose right)
+    (triangle-fill (+ SHIP-X SHIP-R) y (- SHIP-X SHIP-R) (- y SHIP-R)
+                   (- SHIP-X SHIP-R) (+ y SHIP-R) 12)
+    (set-color 7) (disc (- SHIP-X 1) y 2)                          ;; bright cockpit shine
+    (set-color 14) (line (+ SHIP-X SHIP-R) y (- SHIP-X 2) (- y 3)) ;; a highlight edge
+    (set-color 9) (rect-fill (- SHIP-X SHIP-R 3) (- y 1) 3 3)))   ;; engine flare
+
+(define (draw-enemy e)
+  (let ((c (if (= (e-kind e) 0) 11 14)))
+    ;; nose-left arrow
+    (triangle-fill (- (e-x e) 8) (e-y e) (+ (e-x e) 6) (- (e-y e) 6)
+                   (+ (e-x e) 6) (+ (e-y e) 6) c)
+    (set-color 8) (disc (+ (e-x e) 2) (e-y e) 2)))
+
+(define (draw-boss)
+  (when BOSS
+    (let ((cx (b-x BOSS)) (cy (b-y BOSS)) (ph (b-phase BOSS)))
+      ;; hull
+      (set-color 5) (rect-fill (- cx 22) (- cy 34) 40 68)
+      (set-color 6) (rect-fill (- cx 18) (- cy 28) 30 56)
+      ;; core — shielded (blue) in phase 1, exposed (red/orange) after
+      (cond ((= ph 1) (set-color 12) (disc cx cy 12) (set-color 7) (circle cx cy 14))
+            ((= ph 2) (set-color 8)  (disc cx cy 12))
+            (else     (set-color 9)  (disc cx cy 13) (set-color 10) (disc cx cy 6)))
+      ;; gun-arms (phase 1 targets) — drawn only while alive
+      (when (> (b-arm1 BOSS) 0)
+        (set-color 14) (rect-fill (- cx 30) (- cy 26) 12 10))
+      (when (> (b-arm2 BOSS) 0)
+        (set-color 14) (rect-fill (- cx 30) (+ cy 16) 12 10)))))
+
+(define (draw-bullets)
+  (set-color 10) (for-each (lambda (b) (disc (nth b 0) (nth b 1) 2)) PB)
+  (set-color 8)  (for-each (lambda (b) (disc (nth b 0) (nth b 1) 2)) EB))
+
+(define (draw-hud)
+  (rect-fill 0 0 W 10)
+  (fb/text "STARFIGHTER" 3 2 'green)
+  (fb/text (string-append "SCORE " (number->string SCORE)) 150 2 'yellow)
+  (fb/text (string-append "ST" (number->string STAGE)) 288 2 'white)
+  ;; boss HP bar
+  (when BOSS
+    (let* ((frac (max 0 (/ (b-hp BOSS) BOSS-HP-MAX)))
+           (bw (floor (* 120 frac))))
+      (set-color 5) (rect-fill 96 231 120 6)
+      (set-color 8) (rect-fill 96 231 bw 6)
+      (fb/text "BOSS" 66 230 'red)
+      (fb/text (string-append "P" (number->string (b-phase BOSS))) 220 230 'orange))))
+
+(define (render!)
+  (clear COL-SPACE)
+  (draw-parallax)
+  (for-each draw-enemy ENEMIES)
+  (draw-boss)
+  (draw-bullets)
+  (draw-ship)
+  (draw-hud))
+
+;; =======================  STATUS LINE (ASCII)  =======================
+
+(define (status t)
+  (display "t=") (display t)
+  (display "  stage=") (display STAGE)
+  (display "  enemies=") (display (length ENEMIES))
+  (display "  pb=") (display (length PB))
+  (display "  eb=") (display (length EB))
+  (display "  boss=")
+  (if BOSS
+      (begin (display (b-hp BOSS)) (display "/") (display BOSS-HP-MAX)
+             (display " ph") (display (b-phase BOSS)))
+      (display "-"))
+  (display "  score=") (display SCORE)
+  (newline))
+
+;; =======================  DRIVER  =======================
+
+(set-mode 'sd)                 ;; this cart renders to the SD framebuffer
+
+(display "=== STARFIGHTER — Motoi SD (320x240) ===") (newline)
+(display "level: ") (display LEVEL)
+(display "   boss-hp: ") (display BOSS-HP-MAX)
+(display "   seed: ") (display SEED) (newline)
+(display "parallax: far starfield / mid nebula / near terrain") (newline) (newline)
+
+;; SPLASH FIRST: sound the theme, draw the title frame, THEN launch. This is the
+;; ONE allowed extra dump — the loading screen, not a per-tick dump. The second
+;; and last dump is the boss-fight frame inside the loop below.
+(play-theme!)
+(draw-title)
+(display "--- SD title screen ---") (newline)
+(fb/dump 0 0 W H)
+(newline)
+(display "PRESS START (headless: the auto-pilot flies)") (newline) (newline)
+
+(let loop ((t 0))
+  (cond
+    ((or (> t MAX-TICKS)
+         (and BOSS (<= (b-hp BOSS) 0)))
+     (newline)
+     (cond ((and BOSS (<= (b-hp BOSS) 0))
+            (sfx-clear!)                    ;; victory fanfare — the boss is down
+            (display "BOSS DESTROYED — stage clear!  final score ") (display SCORE))
+           (else
+            (display "time up.  score ") (display SCORE)
+            (when BOSS (display "   boss hp ") (display (b-hp BOSS)))))
+     (newline))
+    (else
+     ;; scroll the three parallax layers
+     (scroll-stars! FAR FAR-N FAR-SPD)
+     (scroll-stars! MID MID-N MID-SPD)
+     (set! NEAR-OFF (+ NEAR-OFF NEAR-SPD))
+     ;; boss arrival
+     (when (and (not BOSS) (>= t BOSS-TICK))
+       (set! STAGE 2) (spawn-boss!)
+       (display ">>> STAGE 2: the boss approaches <<<") (newline))
+     ;; spawn waves until the boss shows
+     (when (and (not BOSS) (= (modulo t SPAWN-EVERY) 0) (< (length ENEMIES) 5))
+       (spawn-enemy! t))
+     ;; act
+     (pilot! t)
+     (step-enemies! t)
+     (boss-step! t)
+     (step-pb!)
+     (step-eb!)
+     (resolve-enemy-hits!)
+     (resolve-boss-hits!)
+     ;; report
+     (when (= (modulo t SHOW-EVERY) 0) (status t))
+     (when (= t DUMP-FRAME)
+       (render!)
+       (newline)
+       (display "--- SD screenshot @ t=") (display t)
+       (display "  (boss fight, parallax visible) ---") (newline)
+       (fb/dump 0 0 W H))
+     (loop (+ t 1)))))

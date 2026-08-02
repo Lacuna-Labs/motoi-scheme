@@ -1,0 +1,616 @@
+;; space-invaders.sks
+;; Motoi Cart — Flagship (SD framebuffer)
+;;
+;; (cart
+;;   :name            "space-invaders"
+;;   :category        :game
+;;   :sub-category    :space
+;;   :audience        :kid
+;;   :complexity      5
+;;   :runtime-tier    :runs-on-core
+;;   :render          :sd-framebuffer
+;;   :one-line        "A marching grid of aliens speeds up as you thin it out — dodge the bombs, hide behind crumbling shields, and shoot back on the 320x240 screen."
+;;   :verbs-used      ("set-mode" "clear" "set-color" "rect-fill" "disc" "line"
+;;                     "fb/text" "fb/dump" "make-vector" "vector-ref" "vector-set!"
+;;                     "vector-length" "modulo" "quotient" "remainder" "abs" "min"
+;;                     "max" "floor" "number->string" "for-each" "range" "cons"
+;;                     "car" "cdr" "filter" "map" "when" "unless" "cond" "let"
+;;                     "let*" "set!")
+;;   :inspiration     "Space Invaders — Tomohiro Nishikado, Taito 1978. The row of aliens that marches faster as their ranks thin; the game that made the arcade a place people lined up for.")
+;;
+;; HOW TO RUN:
+;;   motoi run carts/space-invaders.sks
+;;
+;; WHAT THIS IS
+;;   Space Invaders on Motoi's real SD screen (320x240). A block of aliens —
+;;   five rows by eight columns — slides sideways together. When the edge alien
+;;   touches a wall the whole block steps down one notch and reverses. Here is
+;;   the trick that made 1978 players sweat: the fewer aliens left, the LESS
+;;   work the machine has to do each frame, so the survivors march FASTER. The
+;;   game got harder as you won — an accident of the hardware that turned into
+;;   the whole feeling of the game.
+;;
+;;   You are the cannon at the bottom. You can slide left and right and fire one
+;;   shot at a time. Three shields sit between you and the sky; every hit chips a
+;;   brick out of them, so the wall you hide behind slowly crumbles. The aliens
+;;   drop bombs; a bomb that reaches your cannon costs a life. Now and then a UFO
+;;   streaks across the very top — tag it for bonus points.
+;;
+;;   There is no keyboard here. A small, readable auto-gunner drives the cannon
+;;   so the cart plays the same every run: it slides under the lowest alien in
+;;   the nearest column, jukes sideways when a bomb is falling straight at it,
+;;   and fires whenever its shot is free. Bomb timing comes from a tiny seeded
+;;   random number generator, so "random" is the same every time. On a real
+;;   surface you would swap the auto-gunner for a joystick and a fire button —
+;;   the draw calls and the rules stay exactly the same.
+;;
+;;   Everything is drawn with the SD draw verbs (rect-fill aliens in two little
+;;   animation frames, discs and lines for shots, fb/text for the HUD) into the
+;;   320x240 framebuffer, then shown once with (fb/dump). Read it, tune a knob,
+;;   and watch a different battle.
+
+;; =======================  KNOBS  =======================
+
+(define LEVEL   'normal)   ;; 'easy 'normal 'hard — march speed + bomb rate
+(define SEED    92017)     ;; deterministic bomb/UFO timing; change for a new run
+(define MAX-TICKS 60)      ;; how long the run lasts (fits default fuel)
+(define SHOW-EVERY 15)     ;; print a compact scoreboard this often
+(define DUMP-FRAME 48)     ;; render one SD screenshot at this tick (mid-wave)
+
+(define W 320)             ;; SD width
+(define H 240)             ;; SD height
+
+(define ROWS 5)            ;; alien formation rows
+(define COLS 8)            ;; alien formation columns
+(define A-W  16)           ;; alien cell width
+(define A-H  10)           ;; alien cell height
+(define A-GAPX 8)          ;; horizontal gap between aliens
+(define A-GAPY 8)          ;; vertical gap between aliens
+(define STEP-DOWN 10)      ;; pixels the block drops at an edge
+
+(define CANNON-Y 224)      ;; y of the player cannon
+(define CANNON-W 18)       ;; cannon width
+(define CANNON-SPD 4)      ;; cannon slide speed
+(define SHOT-SPD 6)        ;; player bullet speed (upward)
+(define BOMB-SPD 3)        ;; alien bomb speed (downward)
+(define UFO-Y 12)          ;; y of the bonus UFO
+(define UFO-SPD 3)         ;; UFO slide speed
+
+;; =======================  DETERMINISTIC PRNG  =======================
+;; A tiny linear-congruential generator so bomb timing is the same every run.
+
+(define _seed SEED)
+(define (rnd)                        ;; -> [0,1)
+  (set! _seed (modulo (+ (* _seed 1103515245) 12345) 2147483648))
+  (/ _seed 2147483648))
+(define (rnd-int n) (floor (* (rnd) n)))
+
+;; =======================  CHARM PASS: SOUND  =======================
+;; A short arcade theme at the start and a small sound on every key event: a
+;; shot fired, an alien hit, a bomb striking home. The audio verbs are REAL —
+;; (music), (melody), (sfx), (tone), (note) — but a headless run has no speaker,
+;; so they simply do nothing. That is fine: the SHAPE is what teaches; on a real
+;; surface these same calls sing.
+;;
+;; TEACHING IDEA — "guard your nice-extras so they can NEVER crash the core."
+;; Sound is a treat, not the game. Every audio call goes through one small
+;; wrapper, (safe ...), and one flag, SOUND-ON. Flip the flag off and the battle
+;; plays on in silence, unchanged. Keep the treats on a switch that cannot break
+;; the must-work part — the same idea as a seatbelt: it only ever helps.
+(define SOUND-ON #t)
+(define (safe thunk) (when SOUND-ON (thunk)) #t)
+
+;; a marching arcade motif — a low, descending four-note phrase (the classic
+;; "here they come" feel)
+(define (play-theme!)
+  (safe (lambda ()
+    (music 'invaders-theme)
+    (melody (list 48 47 46 45) 0.14))))       ;; C3 B2 Bb2 A2 — a menacing march
+(define (sfx-shoot!)  (safe (lambda () (sfx 'blip 660 0.04))))     ;; player fires
+(define (sfx-hit! r)  (safe (lambda () (note (+ 72 (* 2 r)) 0.06 0.6))))  ;; alien pops
+(define (sfx-ufo!)    (safe (lambda () (melody (list 76 79 76 72) 0.06))))   ;; UFO tagged
+(define (sfx-hurt!)   (safe (lambda () (tone 110 0.20))))          ;; a bomb hits us
+
+;; =======================  DIFFICULTY  =======================
+;; Base march = alien fires-forward one column of pixels every N ticks; fewer
+;; aliens -> smaller N -> faster. BOMB-CHANCE is bombs-per-tick probability.
+
+(define BASE-STEP-TICKS
+  (cond ((= LEVEL 'easy) 6)
+        ((= LEVEL 'hard) 3)
+        (else 4)))
+(define MARCH-DX
+  (cond ((= LEVEL 'easy) 5)
+        ((= LEVEL 'hard) 9)
+        (else 7)))
+(define BOMB-CHANCE
+  (cond ((= LEVEL 'easy) 0.10)
+        ((= LEVEL 'hard) 0.34)
+        (else 0.20)))
+
+;; =======================  STATE  =======================
+;; The alien grid lives in a flat vector (O(1) reads — cheap fuel). Cell value
+;; #t = alive, #f = dead. Index = row*COLS + col.
+
+(define ALIVE (make-vector (* ROWS COLS) #t))
+(define (idx r c) (+ (* r COLS) c))
+(define (alien-alive? r c) (vector-ref ALIVE (idx r c)))
+(define (kill-alien! r c) (vector-set! ALIVE (idx r c) #f))
+
+(define (count-alive)
+  (let loop ((i 0) (n 0))
+    (if (>= i (vector-length ALIVE)) n
+        (loop (+ i 1) (if (vector-ref ALIVE i) (+ n 1) n)))))
+
+;; formation origin (top-left of the block) and march direction
+(define FX 40)            ;; formation left x
+(define FY 30)            ;; formation top y
+(define DIR 1)            ;; +1 marching right, -1 marching left
+(define ANIM 0)          ;; animation frame 0/1 (leg wiggle)
+
+;; the pixel center of alien (r,c) given the current formation origin
+(define CELL-DX (+ A-W A-GAPX))
+(define CELL-DY (+ A-H A-GAPY))
+(define (alien-x r c) (+ FX (* c CELL-DX)))
+(define (alien-y r c) (+ FY (* r CELL-DY)))
+
+;; cannon: (x lives)
+(define CANNON-X (/ W 2))
+(define LIVES 3)
+
+;; one player bullet at a time: #f or (x y)
+(define SHOT #f)
+
+;; falling bombs: list of (x y)
+(define BOMBS '())
+
+;; UFO: #f or (x dir)  — x position, direction across the top
+(define UFO #f)
+(define UFO-TIMER 0)
+
+(define SCORE 0)
+(define WAVE 1)
+
+;; shields: three blocks, each a vector of bricks. A shield is BW x BH bricks.
+(define BW 8)            ;; bricks wide per shield
+(define BH 3)            ;; bricks tall per shield
+(define BRICK 4)        ;; brick pixel size
+(define SHIELD-Y 190)   ;; top y of the shields
+(define SHIELDS
+  (list (make-vector (* BW BH) #t)
+        (make-vector (* BW BH) #t)
+        (make-vector (* BW BH) #t)))
+;; left x of each shield, spread across the play field
+(define SHIELD-XS
+  (map (lambda (k) (+ 40 (* k 95))) (range 0 3)))
+
+(define (shield-brick-alive? sh bi) (vector-ref sh bi))
+
+;; =======================  MATH HELPERS  =======================
+
+(define (clamp v lo hi) (max lo (min hi v)))
+(define (between? v lo hi) (and (>= v lo) (< v hi)))
+
+;; =======================  MARCH  =======================
+;; Find the leftmost / rightmost / lowest occupied columns/rows so the block
+;; bounces off the true edge of what's left, and bombs come from real aliens.
+
+(define (rightmost-col)
+  (let loop ((c (- COLS 1)))
+    (cond ((< c 0) 0)
+          ((any-in-col? c) c)
+          (else (loop (- c 1))))))
+(define (leftmost-col)
+  (let loop ((c 0))
+    (cond ((>= c COLS) (- COLS 1))
+          ((any-in-col? c) c)
+          (else (loop (+ c 1))))))
+(define (any-in-col? c)
+  (let loop ((r 0))
+    (cond ((>= r ROWS) #f)
+          ((alien-alive? r c) #t)
+          (else (loop (+ r 1))))))
+(define (lowest-row-in-col c)
+  (let loop ((r (- ROWS 1)))
+    (cond ((< r 0) #f)
+          ((alien-alive? r c) r)
+          (else (loop (- r 1))))))
+(define (lowest-alien-y)
+  (let loop ((r (- ROWS 1)))
+    (cond ((< r 0) 0)
+          ((any-in-row? r) (+ (alien-y r 0) A-H))
+          (else (loop (- r 1))))))
+(define (any-in-row? r)
+  (let loop ((c 0))
+    (cond ((>= c COLS) #f)
+          ((alien-alive? r c) #t)
+          (else (loop (+ c 1))))))
+
+;; how many ticks between marches right now — speeds up as ranks thin
+(define (march-ticks)
+  (let ((n (count-alive)))
+    (max 1 (floor (* BASE-STEP-TICKS (/ (+ n 1) (* ROWS COLS)))))))
+
+(define (march!)
+  (set! ANIM (- 1 ANIM))
+  (let* ((rc (rightmost-col)) (lc (leftmost-col))
+         (rx (+ (alien-x 0 rc) A-W))
+         (lx (alien-x 0 lc)))
+    (cond
+      ;; hit a wall: drop down and reverse
+      ((and (= DIR 1) (>= (+ rx MARCH-DX) (- W 6)))
+       (set! FY (+ FY STEP-DOWN)) (set! DIR -1))
+      ((and (= DIR -1) (<= (- lx MARCH-DX) 6))
+       (set! FY (+ FY STEP-DOWN)) (set! DIR 1))
+      (else
+       (set! FX (+ FX (* DIR MARCH-DX)))))))
+
+;; =======================  BOMBS  =======================
+;; A random living alien in the lowest position of a random column drops a bomb.
+
+(define (maybe-drop-bomb!)
+  (when (< (rnd) BOMB-CHANCE)
+    (let* ((c (rnd-int COLS))
+           (r (lowest-row-in-col c)))
+      (when r
+        (set! BOMBS (cons (list (+ (alien-x r c) (/ A-W 2))
+                                (+ (alien-y r c) A-H))
+                          BOMBS))))))
+
+(define (step-bombs!)
+  (set! BOMBS
+    (filter (lambda (b) (< (nth b 1) H))
+      (map (lambda (b) (list (nth b 0) (+ (nth b 1) BOMB-SPD))) BOMBS))))
+
+;; =======================  UFO  =======================
+
+(define (maybe-spawn-ufo! t)
+  (when (and (not UFO) (> t 0) (= (modulo t 23) 0))
+    (let ((from-left (< (rnd) 0.5)))
+      (set! UFO (list (if from-left -14 (+ W 14))
+                      (if from-left 1 -1))))))
+
+(define (step-ufo!)
+  (when UFO
+    (let ((x (+ (nth UFO 0) (* (nth UFO 1) UFO-SPD))))
+      (if (or (< x -20) (> x (+ W 20)))
+          (set! UFO #f)
+          (set! UFO (list x (nth UFO 1)))))))
+
+;; =======================  AUTO-GUNNER (player AI)  =======================
+;; Read the world, pick where to slide, decide whether to fire. Readable, not
+;; perfect: dodge an incoming bomb first, else line up under the nearest low
+;; alien column, then shoot when the barrel is clear.
+
+(define (nearest-bomb-dx)                 ;; signed x-gap to the closest bomb, or #f
+  (let loop ((bs BOMBS) (best #f) (bd 1e9))
+    (cond ((null? bs) best)
+          (else
+           (let* ((b (car bs)) (dx (- (nth b 0) CANNON-X)) (ad (abs dx)))
+             (if (and (< (nth b 1) CANNON-Y) (< ad bd))
+                 (loop (cdr bs) dx ad)
+                 (loop (cdr bs) best bd)))))))
+
+(define (target-column-x)                 ;; x of nearest occupied column center
+  (let loop ((c 0) (best #f) (bd 1e9))
+    (cond ((>= c COLS) best)
+          ((any-in-col? c)
+           (let* ((cx (+ (alien-x 0 c) (/ A-W 2))) (d (abs (- cx CANNON-X))))
+             (if (< d bd) (loop (+ c 1) cx d) (loop (+ c 1) best bd))))
+          (else (loop (+ c 1) best bd)))))
+
+(define (gunner!)
+  (let ((bombdx (nearest-bomb-dx))
+        (tx (target-column-x)))
+    (cond
+      ;; a bomb is bearing down close — juke away from it
+      ((and bombdx (< (abs bombdx) 12))
+       (set! CANNON-X (clamp (+ CANNON-X (if (> bombdx 0) (- CANNON-SPD) CANNON-SPD))
+                             CANNON-W (- W CANNON-W))))
+      (tx
+       (cond ((> (- tx CANNON-X) 2)
+              (set! CANNON-X (clamp (+ CANNON-X CANNON-SPD) CANNON-W (- W CANNON-W))))
+             ((< (- tx CANNON-X) -2)
+              (set! CANNON-X (clamp (- CANNON-X CANNON-SPD) CANNON-W (- W CANNON-W)))))))
+    ;; fire if the barrel is free and we're roughly under a target (or the UFO)
+    (when (not SHOT)
+      (when (or (and UFO (< (abs (- (nth UFO 0) CANNON-X)) 10))
+                (and tx (< (abs (- tx CANNON-X)) 6)))
+        (set! SHOT (list CANNON-X (- CANNON-Y 6)))
+        (sfx-shoot!)))))                    ;; pew — the barrel fires
+
+;; =======================  PLAYER SHOT  =======================
+
+(define (step-shot!)
+  (when SHOT
+    (let ((ny (- (nth SHOT 1) SHOT-SPD)))
+      (if (< ny 0) (set! SHOT #f)
+          (set! SHOT (list (nth SHOT 0) ny))))))
+
+;; which alien (if any) contains point (px,py)?  returns (r c) or #f
+;; O(1): map the point straight to a grid cell instead of scanning all 40.
+(define (alien-at px py)
+  (let ((rc (- px FX)) (ry (- py FY)))
+    (if (or (< rc 0) (< ry 0)) #f
+        (let ((c (quotient (floor rc) CELL-DX))
+              (r (quotient (floor ry) CELL-DY)))
+          (if (and (< c COLS) (< r ROWS)
+                   ;; inside the alien body, not the gap
+                   (< (remainder (floor rc) CELL-DX) A-W)
+                   (< (remainder (floor ry) CELL-DY) A-H)
+                   (alien-alive? r c))
+              (list r c) #f)))))
+
+;; =======================  SHIELDS  =======================
+;; Map a point to a shield brick; if a brick is there and alive, chip it and
+;; report a hit. Used by both the player shot and falling bombs.
+
+(define (shield-hit? px py)
+  (let loop ((k 0) (shs SHIELDS) (xs SHIELD-XS))
+    (cond ((null? shs) #f)
+          (else
+           (let* ((sx (car xs)) (sh (car shs))
+                  (lx (- px sx)) (ly (- py SHIELD-Y)))
+             (if (and (between? lx 0 (* BW BRICK)) (between? ly 0 (* BH BRICK)))
+                 (let* ((bx (floor (/ lx BRICK))) (by (floor (/ ly BRICK)))
+                        (bi (+ (* by BW) bx)))
+                   (if (shield-brick-alive? sh bi)
+                       (begin (vector-set! sh bi #f) #t)
+                       (loop (+ k 1) (cdr shs) (cdr xs))))
+                 (loop (+ k 1) (cdr shs) (cdr xs))))))))
+
+;; =======================  COLLISIONS  =======================
+
+(define (resolve-shot!)
+  (when SHOT
+    (let ((sx (nth SHOT 0)) (sy (nth SHOT 1)))
+      (cond
+        ;; hit the UFO?
+        ((and UFO (between? sx (- (nth UFO 0) 9) (+ (nth UFO 0) 9))
+                  (between? sy (- UFO-Y 4) (+ UFO-Y 4)))
+         (set! SCORE (+ SCORE 100)) (set! UFO #f) (set! SHOT #f)
+         (sfx-ufo!))                        ;; bonus! a bright little riff
+        ;; hit an alien?
+        (else
+         (let ((hit (alien-at sx sy)))
+           (cond (hit
+                  (kill-alien! (nth hit 0) (nth hit 1))
+                  ;; top rows worth more, like the classic
+                  (set! SCORE (+ SCORE (* 10 (- ROWS (nth hit 0)))))
+                  (set! SHOT #f)
+                  (sfx-hit! (nth hit 0)))    ;; an alien pops — pitch by rank
+                 ;; else chip a shield if we grazed one
+                 ((and (>= sy SHIELD-Y) (shield-hit? sx sy))
+                  (set! SHOT #f)))))))))
+
+(define (resolve-bombs!)
+  (set! BOMBS
+    (filter
+      (lambda (b)
+        (let ((bx (nth b 0)) (by (nth b 1)))
+          (cond
+            ;; bomb reaches the cannon -> lose a life
+            ((and (between? by (- CANNON-Y 4) (+ CANNON-Y 6))
+                  (between? bx (- CANNON-X CANNON-W) (+ CANNON-X CANNON-W)))
+             (set! LIVES (- LIVES 1)) (sfx-hurt!) #f)   ;; a bomb got through
+            ;; bomb chips a shield
+            ((and (>= by SHIELD-Y) (shield-hit? bx by)) #f)
+            (else #t))))
+      BOMBS)))
+
+;; =======================  CHARM PASS: LOOK  =======================
+;; A tiny palette so colors have NAMES, not magic numbers. When "space" is a
+;; word instead of the number 0, restyling the whole cart is a one-line edit
+;; here — and a reader learns what each color is FOR.
+(define COL-SPACE  0)    ;; the black void behind everything
+(define COL-STARS 13)    ;; lavender starfield speckle
+(define COL-HUD    1)    ;; dark HUD strip
+(define COL-SHADE  0)    ;; splash drop-shadow
+(define COL-BANNER 1)    ;; splash banner face
+(define COL-FRAME  7)    ;; splash frame
+
+;; A calm, seed-driven starfield behind the battle — deterministic (from the
+;; SEED constant) so it is the same every run. Kept up high so it does not clash
+;; with the shields and cannon. Depth for almost nothing; it is just pixels.
+(define (draw-starfield)
+  (let loop ((n 0) (s SEED))
+    (when (< n 36)
+      (let* ((s2 (modulo (+ (* s 1103515245) 12345) 2147483648))
+             (x  (modulo s2 W))
+             (s3 (modulo (+ (* s2 1103515245) 12345) 2147483648))
+             (y  (+ 12 (modulo s3 150))))      ;; sky band, above the shields
+        (pset x y COL-STARS)
+        (loop (+ n 1) s3)))))
+
+;; The title / loading screen — its own SD frame. TEACHING IDEA: a title screen
+;; is just ANOTHER drawing; the same verbs that paint the battle paint the
+;; splash. Order: show the title, play the theme, THEN start the invasion.
+(define (draw-title)
+  (clear COL-SPACE)
+  (draw-starfield)
+  (set-color COL-SHADE)  (rect-fill 44 58 232 60)      ;; shadow
+  (set-color COL-BANNER) (rect-fill 40 54 232 60)       ;; banner
+  (set-color COL-FRAME)  (rect 40 54 232 60)
+  (fb/text "SPACE INVADERS" 96 72 'green)
+  (fb/text "they march faster as they thin" 68 92 'white)
+  ;; a scrap of art: one little alien + the cannon
+  (set-color 11) (rect-fill 148 128 12 6)
+  (set-color 11) (rect-fill 146 132 3 4) (rect-fill 160 132 3 4)
+  (set-color 0)  (rect-fill 150 130 2 2) (rect-fill 156 130 2 2)
+  (set-color 6)  (rect-fill 142 150 26 6) (rect-fill 153 144 4 5)  ;; cannon
+  (fb/text "* PRESS START *" 104 174 'yellow)
+  (fb/text "loading the arcade..." 84 194 'lavender))
+
+;; =======================  RENDER (SD framebuffer)  =======================
+
+(define (draw-alien r c)
+  ;; two little frames: body + wiggling "legs". Row color varies by rank.
+  (let ((x (alien-x r c)) (y (alien-y r c))
+        (col (cond ((= r 0) 11) ((= r 1) 11) ((= r 2) 10) ((= r 3) 9) (else 8))))
+    (set-color col)
+    (rect-fill (+ x 3) y (- A-W 6) (- A-H 4))   ;; body
+    (rect-fill x (+ y 2) 3 (- A-H 6))           ;; left arm
+    (rect-fill (+ x A-W -3) (+ y 2) 3 (- A-H 6));; right arm
+    ;; eyes
+    (set-color 0)
+    (rect-fill (+ x 5) (+ y 2) 2 2)
+    (rect-fill (+ x A-W -7) (+ y 2) 2 2)
+    ;; legs wiggle by animation frame
+    (set-color col)
+    (if (= ANIM 0)
+        (begin (rect-fill (+ x 2) (+ y A-H -3) 2 3)
+               (rect-fill (+ x A-W -4) (+ y A-H -3) 2 3))
+        (begin (rect-fill (+ x 5) (+ y A-H -3) 2 3)
+               (rect-fill (+ x A-W -7) (+ y A-H -3) 2 3)))))
+
+(define (draw-aliens)
+  (for-each
+    (lambda (r)
+      (for-each
+        (lambda (c) (when (alien-alive? r c) (draw-alien r c)))
+        (range 0 COLS)))
+    (range 0 ROWS)))
+
+(define (draw-shields)
+  (let loop ((shs SHIELDS) (xs SHIELD-XS))
+    (unless (null? shs)
+      (let ((sx (car xs)) (sh (car shs)))
+        (set-color 11)
+        (for-each
+          (lambda (by)
+            (for-each
+              (lambda (bx)
+                (when (shield-brick-alive? sh (+ (* by BW) bx))
+                  (rect-fill (+ sx (* bx BRICK)) (+ SHIELD-Y (* by BRICK)) BRICK BRICK)))
+              (range 0 BW)))
+          (range 0 BH)))
+      (loop (cdr shs) (cdr xs)))))
+
+(define (draw-cannon)
+  (set-color 6)
+  (rect-fill (- CANNON-X CANNON-W) (- CANNON-Y 4) (* 2 CANNON-W) 8)
+  (rect-fill (- CANNON-X 2) (- CANNON-Y 10) 4 6)    ;; barrel
+  (set-color 7)                                      ;; a bright inner stripe = shine
+  (rect-fill (- CANNON-X CANNON-W) (- CANNON-Y 4) (* 2 CANNON-W) 1))
+
+(define (draw-shot)
+  (when SHOT
+    (set-color 7)
+    (line (nth SHOT 0) (- (nth SHOT 1) 3) (nth SHOT 0) (+ (nth SHOT 1) 3))))
+
+(define (draw-bombs)
+  (set-color 14)
+  (for-each (lambda (b) (disc (nth b 0) (nth b 1) 2)) BOMBS))
+
+(define (draw-ufo)
+  (when UFO
+    (set-color 8)
+    (rect-fill (- (nth UFO 0) 9) (- UFO-Y 2) 18 5)
+    (set-color 13)
+    (rect-fill (- (nth UFO 0) 4) (- UFO-Y 4) 8 3)))
+
+(define (render! t)
+  (clear COL-SPACE)
+  (draw-starfield)                          ;; a quiet star band behind the fight
+  (draw-aliens)
+  (draw-shields)
+  (draw-ufo)
+  (draw-bombs)
+  (draw-cannon)
+  (draw-shot)
+  ;; HUD strip
+  (set-color COL-HUD) (rect-fill 0 0 W 9)
+  (fb/text "SPACE INVADERS" 4 1 'green)
+  (fb/text (string-append "SCORE " (number->string SCORE)) 150 1 'yellow)
+  (fb/text (string-append "LIVES " (number->string LIVES)) 235 1 'peach)
+  (fb/text (string-append "WAVE " (number->string WAVE)) 285 1 'lavender))
+
+;; =======================  WAVE / NEW WAVE  =======================
+
+(define (start-wave! n)
+  (set! WAVE n)
+  (let loop ((i 0))
+    (when (< i (vector-length ALIVE)) (vector-set! ALIVE i #t) (loop (+ i 1))))
+  (set! FX 40)
+  (set! FY (min 60 (+ 30 (* 8 (- n 1)))))   ;; next wave starts lower
+  (set! DIR 1)
+  (set! BOMBS '())
+  (set! SHOT #f))
+
+;; =======================  ONE TICK  =======================
+
+(define _march-acc 0)
+
+(define (tick! t)
+  ;; 1. player decides + acts
+  (gunner!)
+  (step-shot!)
+  ;; 2. aliens march on their (speeding-up) cadence
+  (set! _march-acc (+ _march-acc 1))
+  (when (>= _march-acc (march-ticks))
+    (set! _march-acc 0)
+    (march!)
+    (maybe-drop-bomb!))
+  ;; 3. bombs + UFO move
+  (step-bombs!)
+  (maybe-spawn-ufo! t)
+  (step-ufo!)
+  ;; 4. resolve collisions
+  (resolve-shot!)
+  (resolve-bombs!)
+  ;; 5. cleared? advance the wave
+  (when (= (count-alive) 0) (start-wave! (+ WAVE 1))))
+
+;; =======================  SCOREBOARD  =======================
+
+(define (scoreboard t)
+  (display "t=") (display t)
+  (display "  aliens=") (display (count-alive))
+  (display "  cadence=") (display (march-ticks))
+  (display "  bombs=") (display (length BOMBS))
+  (display "  lives=") (display LIVES)
+  (display "  score=") (display SCORE)
+  (display "  wave=") (display WAVE)
+  (newline))
+
+;; =======================  DRIVER  =======================
+
+(set-mode 'sd)
+
+(display "=== SPACE INVADERS — Motoi SD (320x240) ===") (newline)
+(display "level: ") (display LEVEL)
+(display "   formation: ") (display ROWS) (display "x") (display COLS)
+(display " aliens") (newline)
+(display "the fewer aliens remain, the faster they march.") (newline) (newline)
+
+;; SPLASH FIRST: sound the theme, draw the title frame, THEN play. This is the
+;; ONE allowed extra dump — the loading screen, not a per-tick dump. The second
+;; and last dump is the mid-wave gameplay frame inside the loop below.
+(play-theme!)
+(draw-title)
+(display "--- SD title screen ---") (newline)
+(fb/dump 0 0 W H)
+(newline)
+(display "PRESS START (headless: the auto-gunner takes over)") (newline) (newline)
+
+(let loop ((t 0))
+  (cond
+    ((or (> t MAX-TICKS) (<= LIVES 0) (> (lowest-alien-y) CANNON-Y))
+     (newline)
+     (cond ((<= LIVES 0)
+            (display "GAME OVER — cannon destroyed.  final score ") (display SCORE))
+           ((> (lowest-alien-y) CANNON-Y)
+            (display "INVADED — the aliens reached the ground.  score ") (display SCORE))
+           (else
+            (display "time up.  aliens left ") (display (count-alive))
+            (display "   score ") (display SCORE)))
+     (display "   (wave ") (display WAVE) (display ")") (newline))
+    (else
+     (tick! t)
+     (when (= (modulo t SHOW-EVERY) 0) (scoreboard t))
+     (when (= t DUMP-FRAME)
+       (render! t)
+       (newline)
+       (display "--- SD screenshot @ t=") (display t) (display " ---") (newline)
+       (fb/dump 0 0 W H))
+     (loop (+ t 1)))))

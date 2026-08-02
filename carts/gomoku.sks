@@ -1,0 +1,557 @@
+;; gomoku.sks
+;; Motoi Cart — Flagship (SD framebuffer)
+;;
+;; (cart
+;;   :name            "gomoku"
+;;   :category        :game
+;;   :sub-category    :board
+;;   :audience        :kid
+;;   :complexity      5
+;;   :runtime-tier    :runs-on-core
+;;   :render          :sd-framebuffer
+;;   :one-line        "Five-in-a-row on a 13x13 grid against Motoi — a threat-hunting brain that spots open fours and open threes with straight and adaptive plans, drawn on the 320x240 screen."
+;;   :verbs-used      ("set-mode" "clear" "set-color" "rect-fill" "rect" "disc"
+;;                     "circle" "line" "fb/text" "fb/dump" "make-vector" "vector-ref"
+;;                     "vector-set!" "vector" "quotient" "remainder" "modulo" "abs"
+;;                     "min" "max" "number->string" "string-append" "eq?" "cons"
+;;                     "car" "cdr" "list" "length" "reverse" "for-each" "map"
+;;                     "filter" "when" "unless" "cond" "case" "let" "let*" "set!")
+;;   :inspiration     "Gomoku / Five-in-a-Row — an ancient stones-on-a-grid game older than the paper it is drawn on. Simple to state, deep to play: the whole art is in seeing the threat two moves before it lands.")
+;;
+;; HOW TO RUN:
+;;   motoi run carts/gomoku.sks
+;;
+;; WHAT THIS IS
+;;   Gomoku on Motoi's real SD screen (320x240). The board is one vector of 169
+;;   points — 13 across, 13 down — where 0 is empty, 1 is YOU (black stones) and
+;;   2 is MOTOI (white stones). You take turns placing one stone on any empty
+;;   point. The first to line up FIVE in a row — across, down, or on either
+;;   diagonal — wins. That is the whole game.
+;;
+;;   Five-in-a-row is easy to say and hard to play because it is all about
+;;   THREATS. An "open three" (three of your stones with room to grow both ends)
+;;   forces a block; two threats at once can't both be blocked. So the brain here
+;;   doesn't search deep — it reads the lines through each candidate point and
+;;   scores what it sees, the way a person eyeballs the board.
+;;
+;; MOTOI AS YOUR OPPONENT — two brains you can switch (the fun part)
+;;   AI-PLAN 'straight  (default) — a FIXED, learnable plan, checked in order:
+;;     1. WIN NOW    — a point that makes five for Motoi: take it.
+;;     2. BLOCK NOW  — a point where YOU would make five next: jam it.
+;;     3. OWN THREAT — build Motoi's own open three / open four (offense).
+;;     4. GUARD THREE— damp YOUR open threes before they become open fours.
+;;     5. CENTER     — all else equal, play nearer the middle, and always near
+;;                     the action (only points next to a stone are considered).
+;;   Predictable on purpose: learn the order and you can set a double threat it
+;;   cannot answer.
+;;
+;;   AI-PLAN 'adaptive — the SAME reads, but Motoi WATCHES HOW YOU PLAY. It tallies
+;;   whether you play attacking moves (extending your own lines) or quiet ones, and
+;;   which quadrant you favor. Against an attacker it leans its weights toward
+;;   DEFENSE (guarding your threes harder); against a quiet builder it leans toward
+;;   OFFENSE (pressing its own lines). You can SEE the difference in the sample
+;;   game: 'straight Motoi stubbornly runs its opening line down column 9 to a win,
+;;   while 'adaptive Motoi — once it has read you as an attacker and sees you build
+;;   a live three — LEAVES that line early to guard you instead. Same script, two
+;;   different games. A readable shift in temperament, not a solver.
+;;
+;;   LEVEL 'easy | 'normal | 'hard — how wide it looks:
+;;     'easy   — the reads above on the points right next to a stone.
+;;     'normal — also weighs "open" vs "blocked" lines (a three with both ends
+;;               free is worth far more than one walled off on an end).
+;;     'hard   — a one-ply peek: for its top points it imagines your best reply and
+;;               avoids handing you an open four. Looks wider, so it wants a little
+;;               more fuel on long games.
+;;   The DEFAULT ('straight + 'normal) finishes the sample game inside the default
+;;   200000 fuel budget.
+;;
+;; NO KEYBOARD — how "you vs Motoi" is expressed
+;;   A headless cart has no keys, so both sides are driven by the engine. YOU (black)
+;;   follow a short fixed point-script — a stand-in for a real person — and MOTOI
+;;   (white) is the brain above. On a real surface you swap the script for a live
+;;   "tap a point" and leave Motoi as your opponent at your chosen PLAN and LEVEL.
+
+;; =======================  KNOBS  =======================
+
+(define AI-PLAN 'straight)   ;; 'straight (fixed, learnable) | 'adaptive (reads you)
+                            ;; 'straight fits DEFAULT 200000 fuel at every LEVEL.
+                            ;; 'adaptive leaves its opening book to guard when it
+                            ;; reads you as an attacker, so it runs the positional
+                            ;; scorer more and wants a bit more fuel:
+                            ;;   motoi run carts/gomoku.sks --fuel 300000
+(define LEVEL   'normal)     ;; 'easy 'normal 'hard — how wide Motoi looks.
+                            ;; DEFAULT ('straight + 'normal) fits 200000 fuel;
+                            ;; every LEVEL fits 200000 under 'straight.
+(define SEED    31337)       ;; deterministic tie-breaks; change for new games
+(define N       13)          ;; board is N x N (13 -> 5-in-a-row fits nicely)
+(define WIN     5)           ;; stones in a row to win
+(define MAX-MOVES 60)        ;; hard cap on total stones placed (game ends sooner)
+
+(define W 320)               ;; SD width
+(define H 240)               ;; SD height
+(define CELL 16)             ;; grid pitch in pixels; 13*16 = 208
+(define BX 18)               ;; board top-left x
+(define BY 16)               ;; board top-left y
+(define RAD 6)               ;; stone radius
+
+;; =======================  DETERMINISTIC PRNG  =======================
+;; A tiny LCG so any tie-break is the same every run (see asteroids rnd).
+
+(define _seed SEED)
+(define (rnd)
+  (set! _seed (modulo (+ (* _seed 1103515245) 12345) 2147483648))
+  (/ _seed 2147483648))
+
+;; =======================  CHARM PASS: SOUND  =======================
+;; A little theme at the start, plus a small sound on each key event: a stone
+;; placed, a win-line completing, the final result. The audio verbs are REAL —
+;; (music) (melody) (sfx) (note) (tone) — but on a headless run there is no
+;; speaker, so they simply do nothing. The SHAPE is what teaches.
+;;
+;; TEACHING IDEA — guard a nice-extra so it can NEVER crash the game. Sound is a
+;; bonus, not the point; if one audio call ever misbehaved it must not take the
+;; whole match down. So every sound goes through one flag (SOUND-ON) and one tiny
+;; wrapper (safe). Flip the flag off and the game plays on in silence, unchanged.
+;; That is the seatbelt idea: it only ever helps, it never gets in the way.
+(define SOUND-ON #t)
+(define (safe thunk) (when SOUND-ON (thunk)) #t)
+
+(define (play-theme!)                         ;; a rising "here we go!" phrase
+  (safe (lambda ()
+    (music 'gomoku-theme)
+    (melody (list 55 59 62 67) 0.12))))       ;; G3 B3 D4 G4 — up the major chord
+(define (sfx-place! who)                      ;; a soft click as a stone lands
+  (safe (lambda () (sfx 'blip (if (= who YOU) 392 520) 0.04))))
+(define (sfx-line!)                            ;; a chime when a five just formed
+  (safe (lambda () (note 79 0.10 0.7))))
+(define (sfx-win! w)                           ;; result: rising win / low other
+  (safe (lambda ()
+    (cond ((= w YOU) (melody (list 67 72 76) 0.12))
+          ((= w AI)  (melody (list 55 52 48) 0.14))
+          (else      (tone 330 0.30))))))
+
+;; =======================  CHARM PASS: PALETTE  =======================
+;; TEACHING IDEA — name your constants. Now "the sky" is a word, not a number,
+;; and restyling the whole cart is a one-line edit here.
+(define COL-SKY   1)   ;; dark background wash on the title
+(define COL-STARS 13)  ;; lavender speckle
+(define COL-FRAME 7)   ;; white frame / banner edge
+(define COL-BLACK 0)   ;; black stone
+(define COL-WHITE 7)   ;; white stone
+
+;; A calm, seed-driven starfield behind the title — deterministic (same every
+;; run), just a scatter of pixels for depth. Kept small so it costs little fuel.
+(define (draw-starfield)
+  (clear COL-SKY)
+  (let loop ((k 0) (s SEED))
+    (when (< k 30)
+      (let* ((s2 (modulo (+ (* s 1103515245) 12345) 2147483648))
+             (sx (modulo s2 W))
+             (s3 (modulo (+ (* s2 1103515245) 12345) 2147483648))
+             (sy (modulo s3 H)))
+        (pset sx sy COL-STARS)
+        (loop (+ k 1) s3)))))
+
+;; =======================  CHARM PASS: TITLE SCREEN  =======================
+;; TEACHING IDEA — a title screen is just ANOTHER drawing: the same verbs that
+;; paint the board paint the splash. Order: show the title, play the theme, then
+;; start the game.
+(define (draw-title)
+  (draw-starfield)
+  (set-color 0) (rect-fill 34 62 252 60)          ;; banner shadow
+  (set-color 2) (rect-fill 30 58 252 60)          ;; banner
+  (set-color COL-FRAME) (rect 30 58 252 60)
+  (fb/text "G O M O K U" 108 78 'yellow)
+  (fb/text "five in a row" 108 98 'white)
+  ;; a scrap of art: a black stone and a white stone side by side
+  (set-color COL-BLACK) (disc 132 150 8) (set-color 5) (circle 132 150 8)
+  (set-color COL-WHITE) (disc 188 150 8) (set-color 5) (circle 188 150 8)
+  (fb/text "* PRESS START *" 100 190 'green)
+  (fb/text "loading..." 130 212 'lavender))
+
+;; =======================  THE BOARD  =======================
+;; One vector of N*N points.  index = r*N + c.  0 empty, 1 YOU (black), 2 MOTOI.
+(define EMPTY 0)
+(define YOU   1)
+(define AI    2)
+
+(define BOARD (make-vector (* N N) 0))
+(define (idx r c) (+ (* r N) c))
+(define (pt r c) (vector-ref BOARD (idx r c)))
+(define (set-pt! r c v) (vector-set! BOARD (idx r c) v))
+(define (in? r c) (and (>= r 0) (< r N) (>= c 0) (< c N)))
+(define (empty-pt? r c) (= (pt r c) EMPTY))
+(define (other p) (if (= p YOU) AI YOU))
+
+;; =======================  LINE READING  =======================
+;; The four line directions (the reverse is walked as -dr,-dc).
+(define DIRS (list (list 0 1) (list 1 0) (list 1 1) (list 1 -1)))
+
+;; count contiguous stones of p stepping (dr,dc) from (r,c), NOT counting (r,c).
+(define (run-len r c dr dc p)
+  (let loop ((rr (+ r dr)) (cc (+ c dc)) (n 0))
+    (if (and (in? rr cc) (= (pt rr cc) p))
+        (loop (+ rr dr) (+ cc dc) (+ n 1))
+        n)))
+
+;; ONE walk that returns BOTH the run length AND whether the cell just past it is
+;; empty (an "open" end), encoded as  n*2 + (open? 1 0)  to avoid a cons per call.
+;; This replaces run-len + a separate open-end? re-walk in the hot scorer.
+(define (ray r c dr dc p)
+  (let loop ((rr (+ r dr)) (cc (+ c dc)) (n 0))
+    (if (and (in? rr cc) (= (pt rr cc) p))
+        (loop (+ rr dr) (+ cc dc) (+ n 1))
+        (+ (* n 2) (if (and (in? rr cc) (= (pt rr cc) EMPTY)) 1 0)))))
+(define (ray-n code) (quotient code 2))
+(define (ray-open? code) (= (remainder code 2) 1))
+
+;; If p plays at (r,c) (currently empty), does it make WIN (five) in any line?
+(define (makes-win? r c p)
+  (let loop ((ds DIRS))
+    (cond ((null? ds) #f)
+          (else
+           (let* ((d (car ds)) (dr (car d)) (dc (car (cdr d)))
+                  (total (+ 1 (run-len r c dr dc p)
+                            (run-len r c (- 0 dr) (- 0 dc) p))))
+             (if (>= total WIN) #t (loop (cdr ds))))))))
+
+;; Score one LINE (length L including the placed stone, with `ends` open ends).
+;;   L>=5 win · L=4 open2 huge · L=4 open1 big · L=3 open2 good · L=3 open1 small ·
+;;   L=2 open2 tiny · else ~nothing.  'easy is flat and ignores openness.
+(define (line-score len ends weigh)
+  (cond
+    ((>= len WIN) 100000)
+    ((and weigh (>= len 4) (= ends 2)) 12000)
+    ((>= len 4) 3000)
+    ((and weigh (= len 3) (= ends 2)) 900)
+    ((= len 3) 200)
+    ((and weigh (= len 2) (= ends 2)) 60)
+    ((>= len 2) 20)
+    (else 1)))
+
+;; ONE-PASS dual read of empty point (r,c): walk each of the 4 axes a single time
+;; and accumulate BOTH players' line scores from the same cells.  Returns
+;; (ai-threat . you-threat) as a two-element list.  Halving the walks (one per
+;; axis instead of one per axis PER PLAYER) is the key fuel win for the brain.
+(define (dual-threat r c)
+  (let ((weigh (not (eq? LEVEL 'easy))))
+    (let loop ((ds DIRS) (ai 0) (you 0))
+      (if (null? ds) (list ai you)
+          (let* ((d (car ds)) (dr (car d)) (dc (car (cdr d)))
+                 (af (ray r c dr dc AI))  (ab (ray r c (- 0 dr) (- 0 dc) AI))
+                 (yf (ray r c dr dc YOU)) (yb (ray r c (- 0 dr) (- 0 dc) YOU))
+                 (a-len (+ 1 (ray-n af) (ray-n ab)))
+                 (y-len (+ 1 (ray-n yf) (ray-n yb)))
+                 (a-ends (+ (if (ray-open? af) 1 0) (if (ray-open? ab) 1 0)))
+                 (y-ends (+ (if (ray-open? yf) 1 0) (if (ray-open? yb) 1 0))))
+            (loop (cdr ds)
+                  (+ ai (line-score a-len a-ends weigh))
+                  (+ you (line-score y-len y-ends weigh))))))))
+
+;; =======================  CANDIDATE POINTS  =======================
+;; Only points ADJACENT to an existing stone matter (a stone in empty space is
+;; useless).  Scanning all 169 points per move and re-scanning per candidate is
+;; far too much fuel; restricting to the frontier is what makes the brain cheap.
+;; STONES is a running list of (r c) placed points; we grow candidates from it.
+(define STONES '())    ;; every placed point, newest first (for the frontier)
+
+;; grow-box! is a no-op now (kept so the driver call is harmless); the frontier is
+;; built directly from recent stones instead of a box scan — see frontier-points.
+(define (grow-box! r c) #t)
+
+;; The frontier = the empty neighbors (within distance 1) of the most recent
+;; RECENT-K stones.  Building it from the action, not the whole board, keeps the
+;; candidate list tiny (a dozen points) so the positional scan is affordable in
+;; this interpreter.  A membership guard avoids scoring the same point twice.
+(define RECENT-K 4)     ;; how many recent stones seed the frontier
+
+(define (mem-rc? r c xs)
+  (cond ((null? xs) #f)
+        ((and (= (car (car xs)) r) (= (car (cdr (car xs))) c)) #t)
+        (else (mem-rc? r c (cdr xs)))))
+
+;; add the empty neighbors (distance 1) of stone (sr,sc) to acc, skipping dupes.
+(define NB (list (list -1 -1) (list -1 0) (list -1 1) (list 0 -1)
+                 (list 0 1) (list 1 -1) (list 1 0) (list 1 1)))
+(define (add-neighbors sr sc acc)
+  (let loop ((ds NB) (acc acc))
+    (if (null? ds) acc
+        (let* ((d (car ds)) (rr (+ sr (car d))) (cc (+ sc (car (cdr d)))))
+          (loop (cdr ds)
+                (if (and (in? rr cc) (empty-pt? rr cc) (not (mem-rc? rr cc acc)))
+                    (cons (list rr cc) acc)
+                    acc))))))
+
+(define (frontier-points)
+  (let loop ((ss STONES) (k RECENT-K) (acc '()))
+    (if (or (null? ss) (= k 0)) acc
+        (loop (cdr ss) (- k 1)
+              (add-neighbors (car (car ss)) (car (cdr (car ss))) acc)))))
+
+;; =======================  MOTOI'S ADAPTIVE READ  =======================
+;; A tiny record of how YOU play: attacking moves (that extended your own line to
+;; 2+) vs quiet moves, and which quadrant you favor.
+(define YOU-ATTACK 0)
+(define YOU-QUIET  0)
+(define YOU-THREAT? #f)           ;; did YOUR last move build a live line (>=3)?
+(define QUAD (vector 0 0 0 0))    ;; NW NE SW SE counts
+
+(define (quad-of r c)
+  (+ (if (>= r (quotient N 2)) 2 0) (if (>= c (quotient N 2)) 1 0)))
+
+(define (note-your-move! r c was-attack)
+  (if was-attack (set! YOU-ATTACK (+ YOU-ATTACK 1)) (set! YOU-QUIET (+ YOU-QUIET 1)))
+  (vector-set! QUAD (quad-of r c) (+ (vector-ref QUAD (quad-of r c)) 1)))
+
+;; is YOU an attacker?  (has played more attacking than quiet moves.)
+(define (attacker?) (> YOU-ATTACK YOU-QUIET))
+
+;; adaptive weights: vs an attacker, defense matters more (bigger block/guard);
+;; vs a quiet builder, offense matters more (bigger own-threat).  'straight = 1x.
+(define (def-weight)
+  (if (and (eq? AI-PLAN 'adaptive) (attacker?)) 3 2))
+(define (off-weight)
+  (if (and (eq? AI-PLAN 'adaptive) (not (attacker?))) 3 2))
+
+;; center pull: peaks in the middle of the board (all else equal).
+(define (center-weight r c)
+  (let ((mid (quotient N 2)))
+    (- (* 2 mid) (+ (abs (- r mid)) (abs (- c mid))))))
+
+;; =======================  SCORING A CANDIDATE  =======================
+;; Score point (r,c) for MOTOI.  Combine: an instant win, a needed block, our own
+;; offense, guarding your threats, and a small center pull + stable tie-break.
+;; positional value of point (r,c) for MOTOI.  Win/block are handled by the cheap
+;; passes in motoi-pick, so here we just weigh offense (our own threat) against
+;; defense (denying yours) with the current temperament, plus a center pull and a
+;; stable tie-break.  ONE dual-threat call does both colors.
+(define (score-point r c)
+  (let* ((dt (dual-threat r c))
+         (mine (car dt))                              ;; OWN THREAT (offense)
+         (yours (car (cdr dt)))                       ;; GUARD (defense)
+         (ctr (* 3 (center-weight r c)))              ;; CENTER
+         (jit (modulo (* (+ (* r N) c 1) _seed) 37))) ;; stable tie-break
+    (+ (* (off-weight) mine) (* (def-weight) yours) ctr jit)))
+
+;; 'hard adds a one-ply peek: after Motoi plays (r,c), if YOU then have any point
+;; that makes an open four or a win, subtract for it (don't hand over the game).
+(define (hard-penalty r c)
+  (if (not (eq? LEVEL 'hard)) 0
+      (begin
+        (set-pt! r c AI)
+        (let ((worst
+               (let loop ((fs (frontier-points)) (b 0))
+                 (cond ((null? fs) b)
+                       (else
+                        (let* ((f (car fs)) (fr (car f)) (fc (car (cdr f))))
+                          (loop (cdr fs)
+                                (max b (if (makes-win? fr fc YOU) 40000
+                                           (quotient (car (cdr (dual-threat fr fc))) 4))))))))))
+          (set-pt! r c EMPTY)
+          (- 0 worst)))))
+
+;; pick Motoi's point.  To stay cheap in this interpreter we scan the frontier in
+;; CHEAP-FIRST passes and stop at the first decisive one, instead of fully scoring
+;; every point every time:
+;;   pass 1  WIN NOW  — the cheapest test (makes-win?); if any, play it at once.
+;;   pass 2  BLOCK NOW — same cheap test for YOUR five; if any, jam it.
+;;   pass 3  POSITIONAL — only now do the fuller threat score on each point.
+;; Most turns resolve in pass 1 or 2 for a few hundred fuel; the expensive
+;; positional sum only runs when nothing is forced.  If the board is empty, center.
+(define (find-win-in fs p)
+  (let loop ((fs fs))
+    (cond ((null? fs) #f)
+          ((makes-win? (car (car fs)) (car (cdr (car fs))) p) (car fs))
+          (else (loop (cdr fs))))))
+
+;; Motoi's OPENING script (like a human's memorized opening): its first few
+;; stones are fixed and FREE to compute (no scan), which both plays a sensible
+;; line and — crucially in this interpreter — reserves fuel so a real game can be
+;; played out and a five actually landed under the default budget.  After the
+;; opening (or if a scripted point is taken, or a WIN/BLOCK is available) Motoi
+;; falls through to the live brain.  This mirrors chess.sks's WHITE-SCRIPT idea.
+(define MOTOI-SCRIPT (list (list 7 9) (list 8 9) (list 9 9) (list 10 9)))
+(define motoi-idx 0)
+
+(define (motoi-pick)
+  (if (null? STONES)
+      (list (quotient N 2) (quotient N 2))
+      (let ((fs (frontier-points)))          ;; build the frontier ONCE, reuse it
+        (cond
+          ((find-win-in fs AI))              ;; pass 1: win now (cheap)
+          ((find-win-in fs YOU))             ;; pass 2: block your five (cheap)
+          ;; OPENING BOOK (free) — but this is where the two plans part ways.
+          ;; 'straight stubbornly plays its memorized line.  'adaptive, once it has
+          ;; READ YOU AS AN ATTACKER and sees you just built a live line, ABANDONS
+          ;; the book to guard instead — a readable "it adjusted to me" moment. In
+          ;; the log the two plans then choose different points on the same turn.
+          ((and (not (and (eq? AI-PLAN 'adaptive) (attacker?) YOU-THREAT?))
+                (let ((s (if (< motoi-idx (length MOTOI-SCRIPT))
+                             (list-nth MOTOI-SCRIPT motoi-idx) #f)))
+                  (set! motoi-idx (+ motoi-idx 1))
+                  (and s (empty-pt? (car s) (car (cdr s))) s))))
+          (else                              ;; pass 3: positional (the costly one)
+           (let loop ((fs fs) (bestp #f) (bestv -2000000))
+             (cond ((null? fs) (or bestp (list (quotient N 2) (quotient N 2))))
+                   (else
+                    (let* ((f (car fs)) (r (car f)) (c (car (cdr f)))
+                           (v (+ (score-point r c) (hard-penalty r c))))
+                      (if (> v bestv) (loop (cdr fs) f v)
+                          (loop (cdr fs) bestp bestv)))))))))))
+
+;; =======================  THE HUMAN (scripted stand-in)  =======================
+;; A short fixed point-stream stands in for a real person's taps.  Each entry is
+;; (r c).  If a scripted point is taken, fall back to the best-threat frontier
+;; point for YOU so the game always proceeds sensibly.
+;; This stand-in human is an ATTACKER: they push their own row-6 line hard
+;; (6,6)(6,7)(6,8)... building open threes that demand an answer.  Against
+;; 'straight Motoi weighs offense and defense evenly; against 'adaptive Motoi,
+;; once it has read you as an attacker, it leans to DEFENSE and guards your line
+;; sooner — so the two plans pick different points on the same script.
+(define YOU-SCRIPT
+  (list (list 6 6) (list 6 7) (list 6 8) (list 6 5) (list 7 7)
+        (list 5 8) (list 8 8) (list 6 4) (list 7 9) (list 5 6)))
+(define you-idx 0)
+(define (list-nth xs k) (if (= k 0) (car xs) (list-nth (cdr xs) (- k 1))))
+
+;; best frontier point for YOU by threat (used when the script runs out / collides).
+(define (you-fallback)
+  (if (null? STONES)
+      (list (quotient N 2) (quotient N 2))
+      (let loop ((fs (frontier-points)) (bestp #f) (bestv -1))
+        (cond ((null? fs) (or bestp (list (quotient N 2) (quotient N 2))))
+              (else
+               (let* ((f (car fs)) (r (car f)) (c (car (cdr f)))
+                      (v (car (cdr (dual-threat r c)))))
+                 (if (> v bestv) (loop (cdr fs) f v) (loop (cdr fs) bestp bestv))))))))
+
+(define (you-pick)
+  (let ((scripted (if (< you-idx (length YOU-SCRIPT)) (list-nth YOU-SCRIPT you-idx) #f)))
+    (set! you-idx (+ you-idx 1))
+    (if (and scripted (empty-pt? (car scripted) (car (cdr scripted))))
+        scripted
+        (you-fallback))))
+
+;; =======================  RENDER (SD framebuffer)  =======================
+
+(define (draw-stone r c hr hc)
+  (let ((p (pt r c)))
+    (when (not (= p EMPTY))
+      (let ((cx (+ BX (* c CELL))) (cy (+ BY (* r CELL))))
+        (set-color (if (= p YOU) 0 7))       ;; black / white stone
+        (disc cx cy RAD)
+        (set-color 5) (circle cx cy RAD)     ;; grey rim so white reads on brown
+        (when (and (= r hr) (= c hc))
+          (set-color 8) (circle cx cy (+ RAD 2)))))))  ;; red ring = last stone
+
+(define (draw-board hr hc)
+  (clear 4)                                  ;; brown board
+  ;; grid lines (points sit on line intersections, drawn as a lattice)
+  (set-color 0)
+  (let loop ((i 0))
+    (when (< i N)
+      (line BX (+ BY (* i CELL)) (+ BX (* (- N 1) CELL)) (+ BY (* i CELL)))   ;; rows
+      (line (+ BX (* i CELL)) BY (+ BX (* i CELL)) (+ BY (* (- N 1) CELL)))   ;; cols
+      (loop (+ i 1))))
+  ;; stones
+  (let rloop ((r 0))
+    (when (< r N)
+      (let cloop ((c 0))
+        (when (< c N)
+          (draw-stone r c hr hc)
+          (cloop (+ c 1))))
+      (rloop (+ r 1)))))
+
+(define (draw-hud moves last-r last-c note)
+  (set-color 5) (rect-fill 240 16 78 208)
+  (fb/text "GOMOKU" 246 20 'yellow)
+  (fb/text "5 in a row" 246 32 'white)
+  (fb/text (string-append "plan " (if (eq? AI-PLAN 'adaptive) "adpt" "strt")) 246 50 'white)
+  (fb/text (string-append "lvl " (case LEVEL ((easy) "easy") ((hard) "hard") (else "norm")))
+           246 62 'white)
+  (fb/text (string-append "moves " (number->string moves)) 246 80 'white)
+  (fb/text (string-append "last " (number->string last-r) "," (number->string last-c))
+           246 92 'white)
+  (fb/text "read of you" 246 112 'lavender)
+  (fb/text (string-append "atk " (number->string YOU-ATTACK)) 246 124 'white)
+  (fb/text (string-append "quiet " (number->string YOU-QUIET)) 246 136 'white)
+  (fb/text (string-append "style " (if (attacker?) "attack" "quiet")) 246 148 'white)
+  (fb/text note 246 172 'green))
+
+;; =======================  DRIVER  =======================
+
+(set-mode 'sd)
+
+(display "=== GOMOKU (Five in a Row) — Motoi SD (320x240) ===") (newline)
+(display "You (black, scripted) vs Motoi (white).  plan=") (display AI-PLAN)
+(display "  level=") (display LEVEL) (newline)
+(display "Place a stone on any empty point; first to five wins.") (newline)
+(newline)
+
+;; SPLASH FIRST: draw the title frame, sound the theme, THEN play. This is the
+;; ONE allowed extra dump — the loading screen, not a per-tick dump.
+(play-theme!)
+(draw-title)
+(display "--- SD title screen ---") (newline)
+(fb/dump 0 0 W H)
+(newline)
+
+(define RESULT "")
+(define WINNER 0)          ;; incremental winner (checked only on the placed point)
+(define LAST-R 6) (define LAST-C 6)
+
+(let loop ((moves 0) (turn YOU))
+  (cond
+    ((= WINNER YOU) (set! RESULT "YOU (black) win — five in a row!"))
+    ((= WINNER AI)  (set! RESULT "MOTOI (white) wins — five in a row!"))
+    ((>= moves MAX-MOVES) (set! RESULT "move cap reached — no five, drawn"))
+    (else
+     (let* ((mv (if (= turn YOU) (you-pick) (motoi-pick)))
+            (r (car mv)) (c (car (cdr mv))))
+       ;; classify Motoi's choice BEFORE placing (all reads are pre-move).
+       (let* ((dt (dual-threat r c))
+              (reason
+              (if (= turn AI)
+                  (cond ((makes-win? r c AI) "win")
+                        ((makes-win? r c YOU) "block")
+                        ((>= (car dt) (car (cdr dt))) "attack")
+                        (else "guard"))
+                  ""))
+             (was-attack (and (= turn YOU) (>= (car (cdr dt)) 20))))  ;; extended a line
+         (set-pt! r c turn)
+         (set! STONES (cons (list r c) STONES))
+         (grow-box! r c)
+         (sfx-place! turn)                   ;; a small click on every placed stone
+         ;; incremental win test on the JUST-PLACED point only (makes-win? counts
+         ;; the neighbors of (r,c) plus the stone itself, so it is correct here).
+         (when (makes-win? r c turn) (set! WINNER turn) (sfx-line!))
+         (when (= turn YOU)
+           (note-your-move! r c was-attack)
+           ;; a live line (open/closed three or better) sets the threat flag that
+           ;; 'adaptive Motoi reacts to by leaving its opening book to guard.
+           (set! YOU-THREAT? (>= (car (cdr dt)) 200)))
+         (set! LAST-R r) (set! LAST-C c)
+         (let ((who (if (= turn YOU) "YOU " "MOTOI")))
+           (display who) (display " -> (") (display r) (display ",") (display c) (display ")")
+           (when (= turn AI) (display "   [") (display reason) (display "]"))
+           (newline))
+         (loop (+ moves 1) (other turn)))))))
+
+;; =======================  RESULT  =======================
+
+(newline)
+(sfx-win! WINNER)                        ;; result jingle: win / lose / draw
+(draw-board LAST-R LAST-C)
+(draw-hud you-idx LAST-R LAST-C "final")
+(display "--- SD final board ---") (newline)
+(fb/dump 0 0 W H)
+(newline)
+
+(display "RESULT: ") (display RESULT) (newline)
+(display "Your read: attacking=") (display YOU-ATTACK)
+(display " quiet=") (display YOU-QUIET)
+(display "  -> Motoi read you as ") (display (if (attacker?) "an attacker" "a quiet builder"))
+(newline)
+(newline)
+(display "Fork it: flip AI-PLAN ('straight <-> 'adaptive) or raise LEVEL to 'hard,") (newline)
+(display "or replace YOU-SCRIPT with live point taps for a real game.") (newline)

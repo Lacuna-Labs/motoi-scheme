@@ -1,0 +1,679 @@
+;; nine-mens-morris.sks
+;; Motoi Cart — Flagship (SD framebuffer)
+;;
+;; (cart
+;;   :name            "nine-mens-morris"
+;;   :category        :game
+;;   :sub-category    :board
+;;   :audience        :kid
+;;   :complexity      5
+;;   :runtime-tier    :runs-on-core
+;;   :render          :sd-framebuffer
+;;   :one-line        "Play Nine Men's Morris against Motoi — place nine men, slide them along the lines to build mills, and lift an enemy man each time you close three-in-a-row, on the 320x240 screen."
+;;   :verbs-used      ("set-mode" "clear" "set-color" "rect-fill" "rect" "disc"
+;;                     "circle" "line" "fb/text" "fb/dump" "make-vector" "vector-ref"
+;;                     "vector-set!" "vector" "vector-length" "quotient" "remainder"
+;;                     "modulo" "abs" "min" "max" "number->string" "string-append"
+;;                     "eq?" "cons" "car" "cdr" "list" "length" "reverse" "for-each"
+;;                     "map" "filter" "member" "when" "unless" "cond" "case" "let"
+;;                     "let*" "set!")
+;;   :inspiration     "Nine Men's Morris — a mill game so old the board is scratched into a roofing slab of an Egyptian temple and into the cloister seats of medieval cathedrals; three-in-a-row with legs.")
+;;
+;; HOW TO RUN:
+;;   motoi run carts/nine-mens-morris.sks
+;;
+;; WHAT THIS IS
+;;   Nine Men's Morris on Motoi's real SD screen (320x240). The board is 24
+;;   points where the lines cross — three nested squares joined by four spokes.
+;;   Each point is a small number in one vector: 0 empty, 1 a BLACK man, 2 a
+;;   WHITE man. Reading a point is instant, which matters because the brain looks
+;;   at the board a lot.
+;;
+;;   The game has THREE phases, and this cart plays all three correctly:
+;;     1. PLACING — you each drop your nine men onto empty points, one at a time.
+;;     2. MOVING  — once all are placed, you slide a man to an EMPTY point that is
+;;                  directly connected to it by a line (its neighbors, not a jump).
+;;     3. FLYING  — when you are down to exactly three men, you are allowed to
+;;                  "fly": move a man to ANY empty point on the board. Last-ditch
+;;                  freedom for the losing side.
+;;
+;;   THE MILL RULE (the heart of it). A "mill" is three of your men in a row along
+;;   one of the sixteen marked lines. Every time a move CLOSES a mill, you get to
+;;   remove one of the opponent's men from the board. You may not take a man that
+;;   is itself part of a mill — UNLESS every one of the opponent's men is in a
+;;   mill, in which case you may take any. Both halves of that rule are enforced.
+;;
+;;   You LOSE if you are ground down to two men, or if it is your turn to move and
+;;   you have no legal move at all.
+;;
+;; MOTOI AS YOUR OPPONENT — two brains you can switch (the fun part)
+;;   AI-PLAN 'straight  (default) — one fixed, readable style. Motoi scores each
+;;     option by: does it CLOSE a mill (grab a man)? does it BLOCK a mill you are
+;;     one move from closing? does it build toward a mill of its own? plus a small
+;;     bonus for crossings (points on more lines are worth more). Same priorities
+;;     every game, so you can learn to feint a mill and punish it.
+;;   AI-PLAN 'adaptive — Motoi watches how YOU play and shifts its priorities. It
+;;     counts how many mills you have closed and how aggressive you have been, and
+;;     if you are mill-happy it weights BLOCKING your mills much higher; if you are
+;;     passive it presses its own mill-building. Readable, human-like, narratable —
+;;     not a perfect solver.
+;;
+;;   LEVEL is the depth knob:
+;;     'easy   — take the best IMMEDIATE option by the score above.
+;;     'normal — same, with mill-blocking always on (the sound default).
+;;     'hard   — also looks one reply deep: avoid handing you a mill on your next
+;;               move. It examines more, so it wants more fuel:
+;;               motoi run carts/nine-mens-morris.sks --fuel 800000
+;;
+;; NO KEYBOARD — how "you vs Motoi" is expressed
+;;   A headless cart has no keys, so BOTH sides are driven automatically. BLACK
+;;   follows a short fixed opening script (a stand-in for "the human") and then
+;;   plays the same readable heuristic; WHITE is the Motoi brain at your chosen
+;;   AI-PLAN and LEVEL. On a real surface you swap BLACK's script for live taps.
+;;
+;; FUEL / SAMPLE LENGTH — the honest bit
+;;   In this interpreter a single scan of the board (checking mills and moves) is
+;;   thousands of fuel, so a whole game costs well past the default 200000. The
+;;   DEFAULT plays a short, correct SAMPLE (MAX-TURNS turns) that finishes cleanly
+;;   and draws one SD climax frame — every rule is exact, it just stops early. For
+;;   a full game raise MAX-TURNS and give more fuel:
+;;   motoi run carts/nine-mens-morris.sks --fuel 2000000  (with MAX-TURNS 80)
+
+;; =======================  KNOBS  =======================
+
+(define AI-PLAN   'straight)  ;; 'straight (fixed style) or 'adaptive (counters you)
+(define LEVEL     'normal)    ;; 'easy 'normal 'hard — depth of WHITE (Motoi).
+                              ;; DEFAULT 'straight + 'normal fits 200000 fuel.
+                              ;; 'hard looks a reply deeper and wants more:
+                              ;; motoi run carts/nine-mens-morris.sks --fuel 800000
+(define SEED      20260730)   ;; determinism knob (reserved)
+;; MAX-TURNS caps the auto-played sample. A full game is ~40-80 turns and costs
+;; far more than the default 200000 fuel, so the default plays a short honest
+;; sample and draws the SD frame. For a full game: raise this + give --fuel.
+(define MAX-TURNS 10)         ;; default sample length (fits 200000 fuel + one dump)
+(define SHOW-EVERY 1)         ;; print a compact status line this often
+
+(define W 320)                ;; SD width
+(define H 240)                ;; SD height
+
+;; =======================  THE BOARD TOPOLOGY  =======================
+;; 24 points, numbered 0..23. Layout (three nested squares + four spokes):
+;;
+;;   0--------1--------2      (outer ring: 0 1 2 / 3 4 5 / 6..)
+;;   |        |        |
+;;   |  8-----9----10  |      (middle ring: 8 9 10 / 11 12 / 13 14 15)
+;;   |  |     |     |  |
+;;   |  | 16-17-18  |  |      (inner ring: 16 17 18 / 19 20 / 21 22 23)
+;;   |  |  |     |  |  |
+;;   3--11-19    20-13-5
+;;   |  |  |     |  |  |
+;;   |  | 21-22-23  |  |
+;;   |  |     |     |  |
+;;   |  13.. (see mills)      -- the classic 24-point Morris board.
+;;
+;; This is the STANDARD board: 3 concentric squares, midpoints of each side
+;; joined by a spoke, no diagonals. We encode it as (a) SCREEN COORDINATES for
+;; each point and (b) the sixteen MILL lines, then DERIVE adjacency from the
+;; mills (two points are neighbors iff they are consecutive within some mill).
+(define BLACK 1)
+(define WHITE 2)
+(define EMPTY 0)
+(define (opp s) (if (= s BLACK) WHITE BLACK))
+
+;; =======================  CHARM PASS: SOUND  =======================
+;; A little theme at the start, plus a small sound on each key event: a man
+;; placed/slid, a mill closing, the final result. The audio verbs are REAL —
+;; (music) (melody) (sfx) (note) (tone) — but on a headless run there is no
+;; speaker, so they simply do nothing. The SHAPE is what teaches; on a real
+;; surface these same calls sing.
+;;
+;; TEACHING IDEA — guard a nice-extra so it can NEVER crash the game. Sound is a
+;; bonus, not the point; if one audio call ever misbehaved it must not take the
+;; whole match down. So every sound goes through one flag (SOUND-ON) and one tiny
+;; wrapper (safe). Flip the flag off and the game plays on in silence, unchanged.
+(define SOUND-ON #t)
+(define (safe thunk) (when SOUND-ON (thunk)) #t)
+
+(define (play-theme!)                         ;; a rising "here we go!" phrase
+  (safe (lambda ()
+    (music 'morris-theme)
+    (melody (list 57 60 64 69) 0.12))))       ;; A3 C4 E4 A4 — up the minor chord
+(define (sfx-place! who)                      ;; a soft click as a man lands/slides
+  (safe (lambda () (sfx 'blip (if (= who BLACK) 392 520) 0.04))))
+(define (sfx-mill!)                            ;; a bright chime when a mill closes
+  (safe (lambda () (note 79 0.10 0.7))))
+(define (sfx-end! b w)                          ;; result: rising / low / flat
+  (safe (lambda ()
+    (cond ((> b w) (melody (list 67 72 76) 0.12))
+          ((< b w) (melody (list 55 52 48) 0.14))
+          (else    (tone 330 0.30))))))
+
+(define BOARD (make-vector 24 0))
+(define (at p) (vector-ref BOARD p))
+(define (put! p v) (vector-set! BOARD p v))
+(define (empty? p) (= (at p) 0))
+
+;; Screen coordinates (x y) for each of the 24 points. Outer square spans
+;; ~(30,30)..(198,198); middle inset 28px; inner inset 56px. Points ordered:
+;;   outer 0..7 (clockwise from top-left, with midpoints), then middle 8..15,
+;;   then inner 16..23 — same ordering the mills below assume.
+(define PX (vector  30 114 198   30 198   30 114 198      ;; 0..7  outer
+                    58 114 170   58 170   58 114 170      ;; 8..15 middle
+                    86 114 142   86 142   86 114 142))    ;; 16..23 inner
+(define PY (vector  30  30  30  114 114  198 198 198      ;; 0..7  outer
+                    58  58  58  114 114  170 170 170      ;; 8..15 middle
+                    86  86  86  114 114  142 142 142))    ;; 16..23 inner
+(define (px p) (vector-ref PX p))
+(define (py p) (vector-ref PY p))
+
+;; The SIXTEEN mills (each a 3-point line). Points must be listed so that the
+;; MIDDLE point of each mill is a neighbor of both ends — that is how we derive
+;; adjacency. Eight are the "edges" of the three squares; eight run along the
+;; spokes connecting the squares.
+;;   Outer square edges:   0-1-2  0-3-5  2-4-7  5-6-7
+;;   Middle square edges:  8-9-10 8-11-13 10-12-15 13-14-15
+;;   Inner square edges:   16-17-18 16-19-21 18-20-23 21-22-23
+;;   Spokes (top/left/right/bottom): 1-9-17  3-11-19  4-12-20  6-14-22
+(define MILLS
+  (list (list  0  1  2) (list  0  3  5) (list  2  4  7) (list  5  6  7)
+        (list  8  9 10) (list  8 11 13) (list 10 12 15) (list 13 14 15)
+        (list 16 17 18) (list 16 19 21) (list 18 20 23) (list 21 22 23)
+        (list  1  9 17) (list  3 11 19) (list  4 12 20) (list  6 14 22)))
+
+;; Adjacency, DERIVED once from the mills: within each 3-point line, the middle
+;; point neighbors both ends. Stored as a vector of neighbor-lists for O(1) reads.
+(define ADJ (make-vector 24 '()))
+(define (add-adj! a b)
+  (unless (member b (vector-ref ADJ a))
+    (vector-set! ADJ a (cons b (vector-ref ADJ a)))))
+(for-each
+  (lambda (m)
+    (let ((a (car m)) (b (car (cdr m))) (c (car (cdr (cdr m)))))
+      (add-adj! a b) (add-adj! b a)      ;; end-middle
+      (add-adj! b c) (add-adj! c b)))    ;; middle-end
+  MILLS)
+(define (neighbors p) (vector-ref ADJ p))
+
+;; =======================  MILL DETECTION  =======================
+;; Point p is part of a mill for side s iff some mill line through p is all s.
+(define (in-mill? p s)
+  (let loop ((ms MILLS))
+    (cond ((null? ms) #f)
+          (else
+           (let* ((m (car ms))
+                  (a (car m)) (b (car (cdr m))) (c (car (cdr (cdr m)))))
+             (if (and (or (= a p) (= b p) (= c p))
+                      (= (at a) s) (= (at b) s) (= (at c) s))
+                 #t
+                 (loop (cdr ms))))))))
+
+;; Would placing/keeping side s on point p complete a mill? (p already holds s.)
+;; Same as in-mill? but named for the "did this move close a mill" question.
+(define (closes-mill? p s) (in-mill? p s))
+
+;; =======================  MEN COUNTS (incremental)  =======================
+;; Kept up to date so reads are O(1). PLACED counts how many each side has
+;; dropped (placing phase ends when both reach 9). ON-BOARD is live men.
+(define PLACED-B 0) (define PLACED-W 0)
+(define ON-B 0) (define ON-W 0)
+(define (placed s) (if (= s BLACK) PLACED-B PLACED-W))
+(define (on-board s) (if (= s BLACK) ON-B ON-W))
+
+(define (do-place! p s)
+  (put! p s)
+  (if (= s BLACK)
+      (begin (set! PLACED-B (+ PLACED-B 1)) (set! ON-B (+ ON-B 1)))
+      (begin (set! PLACED-W (+ PLACED-W 1)) (set! ON-W (+ ON-W 1)))))
+
+(define (do-remove! p s)   ;; remove a man of side s from p
+  (put! p EMPTY)
+  (if (= s BLACK) (set! ON-B (- ON-B 1)) (set! ON-W (- ON-W 1))))
+
+(define (do-move! from to s)  ;; slide a placed man (no count change)
+  (put! from EMPTY)
+  (put! to s))
+
+;; =======================  PHASES  =======================
+;; A side is PLACING until it has dropped all 9 men. After that it is MOVING, and
+;; becomes FLYING when reduced to exactly 3 men on the board.
+(define (placing? s) (< (placed s) 9))
+(define (flying? s) (and (not (placing? s)) (= (on-board s) 3)))
+
+;; =======================  MOVE ENUMERATION  =======================
+;; A "target" the current side can act on:
+;;   placing phase — any empty point (place a man there)
+;;   moving phase  — a (from to) slide: from = one of s's men, to = an empty
+;;                   neighbor (or ANY empty point when flying).
+;; Placement targets are plain point numbers; slides are two-element lists.
+
+(define (empty-points)
+  (let loop ((p 0) (acc '()))
+    (cond ((>= p 24) (reverse acc))
+          ((empty? p) (loop (+ p 1) (cons p acc)))
+          (else (loop (+ p 1) acc)))))
+
+;; slides for side s in the moving/flying phase
+(define (slides s)
+  (let ((fly (flying? s)))
+    (let loop ((p 0) (acc '()))
+      (cond ((>= p 24) acc)
+            ((= (at p) s)
+             (loop (+ p 1)
+                   (if fly
+                       ;; flying: to ANY empty point
+                       (let el ((es (empty-points)) (a acc))
+                         (if (null? es) a (el (cdr es) (cons (list p (car es)) a))))
+                       ;; walking: to empty neighbors only
+                       (let nl ((ns (neighbors p)) (a acc))
+                         (cond ((null? ns) a)
+                               ((empty? (car ns)) (nl (cdr ns) (cons (list p (car ns)) a)))
+                               (else (nl (cdr ns) a)))))))
+            (else (loop (+ p 1) acc))))))
+
+;; does side s have ANY legal move? (used for the game-over / stuck test)
+(define (has-move? s)
+  (if (placing? s)
+      (not (null? (empty-points)))
+      (not (null? (slides s)))))
+
+;; =======================  REMOVAL CHOICE (the mill rule)  =======================
+;; When side s closes a mill it removes one of the opponent's men. Legal targets:
+;; opponent men NOT in a mill; but if EVERY opponent man is in a mill, any may be
+;; taken. This is the exact rule, enforced here.
+(define (removable-targets s)
+  (let ((o (opp s)))
+    (let loop ((p 0) (free '()) (all '()))
+      (cond ((>= p 24)
+             (if (null? free) (reverse all) (reverse free)))  ;; prefer non-mill men
+            ((= (at p) o)
+             (if (in-mill? p o)
+                 (loop (+ p 1) free (cons p all))
+                 (loop (+ p 1) (cons p free) (cons p all))))
+            (else (loop (+ p 1) free all))))))
+
+;; value of removing a given opponent man (prefer men on busy crossings, and men
+;; that are one step from completing a mill — those are the dangerous ones).
+(define (crossing-weight p) (length (neighbors p)))  ;; 2,3, or 4 lines meet here
+
+(define (pick-removal s)
+  (let ((cands (removable-targets s)))
+    (if (null? cands) -1
+        (let loop ((cs (cdr cands)) (best (car cands)) (bv (crossing-weight (car cands))))
+          (if (null? cs) best
+              (let ((v (crossing-weight (car cs))))
+                (if (> v bv) (loop (cdr cs) (car cs) v) (loop (cdr cs) best bv))))))))
+
+;; =======================  ADAPTIVE STATE  =======================
+;; A small record of how the HUMAN (BLACK) plays, updated each human turn. The
+;; 'adaptive brain reads it to shift its own weights: if you close a lot of mills
+;; it blocks yours harder; if you are passive it presses its own.
+(define HUMAN-MILLS 0)   ;; mills BLACK has closed
+(define HUMAN-TURNS 0)   ;; turns BLACK has taken
+(define (note-human! closed-a-mill?)
+  (set! HUMAN-TURNS (+ HUMAN-TURNS 1))
+  (when closed-a-mill? (set! HUMAN-MILLS (+ HUMAN-MILLS 1))))
+
+;; weights the brain uses: (mill-close block build). 'adaptive lifts `block` when
+;; the human is mill-happy; 'straight keeps a fixed, learnable profile.
+(define (plan-weights)
+  (if (eq? AI-PLAN 'adaptive)
+      (let ((millhappy (and (> HUMAN-TURNS 0)
+                            (> (* 2 HUMAN-MILLS) HUMAN-TURNS))))  ;; mills in > half its turns
+        (if millhappy (list 100 90 20) (list 100 30 45)))
+      (list 100 40 25)))
+
+;; =======================  MOVE SCORING  =======================
+;; Score an ACTION for side s. Actions are placements (a point) or slides
+;; ((from to)). We test the action on the live board with a snapshot/restore so
+;; scoring is exact and allocation-free-ish. No board-copy primitive exists, so
+;; we save just the touched points and restore them — same discipline as chess.
+
+;; apply an action for scoring; return a snapshot to restore with
+(define (probe-place! p s) (let ((old (at p))) (put! p s) old))
+(define (probe-unplace! p old) (put! p old))
+
+;; Does side (opp s) have a mill threat that includes empty point p? i.e. is p a
+;; square we should BLOCK because the opponent is one move from a mill there?
+(define (block-value p s)
+  (let ((o (opp s)))
+    (let loop ((ms MILLS) (v 0))
+      (cond ((null? ms) v)
+            (else
+             (let* ((m (car ms)) (a (car m)) (b (car (cdr m))) (c (car (cdr (cdr m)))))
+               (if (or (= a p) (= b p) (= c p))
+                   (let ((cnt (+ (if (= (at a) o) 1 0) (if (= (at b) o) 1 0) (if (= (at c) o) 1 0)))
+                         (emp (+ (if (= (at a) 0) 1 0) (if (= (at b) 0) 1 0) (if (= (at c) 0) 1 0))))
+                     ;; opponent has 2 on this line and only p is empty -> blocking p is big
+                     (if (and (= cnt 2) (= emp 1)) (loop (cdr ms) (max v 1))
+                         (loop (cdr ms) v)))
+                   (loop (cdr ms) v))))))))
+
+;; ONE-PASS line analysis (fuel win): for empty point p and side s, scan the 16
+;; mills a SINGLE time and return three flags at once — would placing s on p
+;; CLOSE a mill, BUILD a fresh threat (a line with 2 s + the rest empty through
+;; p), and is p a square where the OPPONENT is one move from a mill (BLOCK). This
+;; replaces three separate 16-mill loops (closes-mill? / threat-at? / block-value)
+;; with one, cutting per-candidate scoring cost by ~3x — which is what lets a
+;; longer sample fit the fuel budget. Returns (close? build? block?) as 0/1 ints.
+(define (line-scan p s)
+  (let ((o (opp s)))
+    (let loop ((ms MILLS) (close 0) (build 0) (block 0))
+      (cond ((null? ms) (list close build block))
+            (else
+             (let* ((m (car ms)) (a (car m)) (b (car (cdr m))) (c (car (cdr (cdr m)))))
+               (if (not (or (= a p) (= b p) (= c p)))
+                   (loop (cdr ms) close build block)   ;; line doesn't touch p
+                   (let* ((va (at a)) (vb (at b)) (vc (at c))
+                          ;; treat p as if it now holds s (it is empty on the live board)
+                          (sa (if (= a p) s va)) (sb (if (= b p) s vb)) (sc (if (= c p) s vc))
+                          (ns (+ (if (= sa s) 1 0) (if (= sb s) 1 0) (if (= sc s) 1 0)))
+                          (nemp (+ (if (= sa 0) 1 0) (if (= sb 0) 1 0) (if (= sc 0) 1 0)))
+                          ;; opponent presence on the ACTUAL line (p is empty for them)
+                          (no (+ (if (= va o) 1 0) (if (= vb o) 1 0) (if (= vc o) 1 0)))
+                          (nemp0 (+ (if (= va 0) 1 0) (if (= vb 0) 1 0) (if (= vc 0) 1 0))))
+                     (loop (cdr ms)
+                           (if (= ns 3) 1 close)                    ;; all s -> mill closed
+                           (if (and (= ns 2) (= nemp 1)) 1 build)   ;; 2 s + 1 gap -> threat
+                           (if (and (= no 2) (= nemp0 1)) 1 block)  ;; opp 2 + only p gap -> block
+                           )))))))))
+
+;; Score placing side s on empty point p (does NOT mutate on return).
+(define (score-place s p)
+  (let* ((w (plan-weights))
+         (w-mill (car w)) (w-block (car (cdr w))) (w-build (car (cdr (cdr w))))
+         (ls (line-scan p s))
+         (mill (if (= (car ls) 1) w-mill 0))
+         (build (if (= (car (cdr ls)) 1) w-build 0))
+         (block (if (= (car (cdr (cdr ls))) 1) w-block 0))
+         (cross (crossing-weight p)))
+    (+ mill build block cross)))
+
+;; ONE-PASS analysis of the LIVE board around point t for side s: (close build
+;; block) after t already holds s (used for slides, where we mutate then score).
+(define (line-scan-live t s)
+  (let ((o (opp s)))
+    (let loop ((ms MILLS) (close 0) (build 0) (block 0))
+      (cond ((null? ms) (list close build block))
+            (else
+             (let* ((m (car ms)) (a (car m)) (b (car (cdr m))) (c (car (cdr (cdr m)))))
+               (if (not (or (= a t) (= b t) (= c t)))
+                   (loop (cdr ms) close build block)
+                   (let* ((va (at a)) (vb (at b)) (vc (at c))
+                          (ns (+ (if (= va s) 1 0) (if (= vb s) 1 0) (if (= vc s) 1 0)))
+                          (nemp (+ (if (= va 0) 1 0) (if (= vb 0) 1 0) (if (= vc 0) 1 0)))
+                          (no (+ (if (= va o) 1 0) (if (= vb o) 1 0) (if (= vc o) 1 0))))
+                     (loop (cdr ms)
+                           (if (= ns 3) 1 close)
+                           (if (and (= ns 2) (= nemp 1)) 1 build)
+                           (if (and (= no 2) (= nemp 1)) 1 block))))))))))
+
+;; Score sliding side s from `f` to `t`.
+(define (score-slide s f t)
+  (let* ((w (plan-weights))
+         (w-mill (car w)) (w-block (car (cdr w))) (w-build (car (cdr (cdr w))))
+         (cross (crossing-weight t)))
+    (do-move! f t s)
+    (let* ((ls (line-scan-live t s))
+           (mill  (if (= (car ls) 1) w-mill 0))
+           (build (if (= (car (cdr ls)) 1) w-build 0))
+           (block (if (= (car (cdr (cdr ls))) 1) w-block 0))
+           ;; 'hard: penalize handing the opponent a mill they can close next
+           (deep (if (eq? LEVEL 'hard) (* 60 (opp-can-mill? s)) 0)))
+      (do-move! t f s)   ;; undo the slide
+      (- (+ mill build block cross) deep))))
+
+;; count of empty points where the opponent could close a mill on THEIR next move
+;; (used only by 'hard). Cheap: for each empty point, is it a block-value for the
+;; opponent (i.e. opp has 2-on-a-line with this the only gap)?
+(define (opp-can-mill? s)
+  (let ((o (opp s)))
+    (let loop ((p 0) (n 0))
+      (cond ((>= p 24) n)
+            ((and (empty? p) (> (block-value p o) 0)) (loop (+ p 1) (+ n 1)))
+            (else (loop (+ p 1) n))))))
+
+;; =======================  CHOOSING A MOVE  =======================
+;; Returns an action: a point (placement) or a (from to) list (slide). Highest
+;; score wins; deterministic tie-break to the lowest index/first found.
+
+(define (best-placement s)
+  (let ((es (empty-points)))
+    (if (null? es) #f
+        (let loop ((ps (cdr es)) (best (car es)) (bv (score-place s (car es))))
+          (if (null? ps) best
+              (let ((v (score-place s (car ps))))
+                (if (> v bv) (loop (cdr ps) (car ps) v) (loop (cdr ps) best bv))))))))
+
+(define (best-slide s)
+  (let ((ss (slides s)))
+    (if (null? ss) #f
+        (let loop ((rest (cdr ss))
+                   (best (car ss))
+                   (bv (score-slide s (car (car ss)) (car (cdr (car ss))))))
+          (if (null? rest) best
+              (let ((v (score-slide s (car (car rest)) (car (cdr (car rest))))))
+                (if (> v bv) (loop (cdr rest) (car rest) v) (loop (cdr rest) best bv))))))))
+
+(define (motoi-action s)
+  (if (placing? s) (best-placement s) (best-slide s)))
+
+;; =======================  HUMAN (BLACK) SIDE  =======================
+;; A short fixed opening script of placement points (a stand-in for a person),
+;; then the same readable heuristic. Each scripted point is used only if empty.
+(define BLACK-SCRIPT (list 4 12 20 0))   ;; grab busy crossings early
+(define script-idx 0)
+(define (list-ref* xs k) (if (= k 0) (car xs) (list-ref* (cdr xs) (- k 1))))
+
+(define (human-action s)
+  (if (placing? s)
+      (let ((scripted (if (< script-idx (length BLACK-SCRIPT))
+                          (list-ref* BLACK-SCRIPT script-idx) #f)))
+        (set! script-idx (+ script-idx 1))
+        (if (and scripted (empty? scripted)) scripted (best-placement s)))
+      (best-slide s)))
+
+;; =======================  APPLY AN ACTION  =======================
+;; Perform the chosen action for side s. Returns a short label string. If the
+;; action closes a mill, remove one opponent man per the rule and note it.
+
+(define (point-name p) (string-append "p" (number->string p)))
+
+(define (apply-action! s act)
+  (cond
+    ((number? act)
+     ;; placement
+     (do-place! act s)
+     (let ((closed (closes-mill? act s)))
+       (when closed
+         (let ((tgt (pick-removal s)))
+           (when (>= tgt 0) (do-remove! tgt (opp s)))))
+       (list (string-append "place " (point-name act)
+                            (if closed " +MILL!" "")) closed)))
+    (else
+     ;; slide (from to)
+     (let ((f (car act)) (t (car (cdr act))))
+       (do-move! f t s)
+       (let ((closed (closes-mill? t s)))
+         (when closed
+           (let ((tgt (pick-removal s)))
+             (when (>= tgt 0) (do-remove! tgt (opp s)))))
+         (list (string-append "move " (point-name f) "->" (point-name t)
+                              (if closed " +MILL!" "")) closed))))))
+
+;; =======================  RENDER (SD framebuffer)  =======================
+
+(define (draw-lines)
+  (set-color 4)   ;; brown board lines
+  ;; three squares: connect each square's 8 points around the ring
+  (for-each
+    (lambda (sq)                     ;; sq = list of 8 points in ring order
+      (let ((a (list-ref* sq 0)) (b (list-ref* sq 1)) (c (list-ref* sq 2))
+            (d (list-ref* sq 3)) (e (list-ref* sq 4)) (f (list-ref* sq 5))
+            (g (list-ref* sq 6)) (h (list-ref* sq 7)))
+        ;; ring order: TL T TR L R BL B BR  ->  TL-T-TR-R-BR-B-BL-L-TL
+        (line (px a) (py a) (px b) (py b)) (line (px b) (py b) (px c) (py c))
+        (line (px c) (py c) (px e) (py e)) (line (px e) (py e) (px h) (py h))
+        (line (px h) (py h) (px g) (py g)) (line (px g) (py g) (px f) (py f))
+        (line (px f) (py f) (px d) (py d)) (line (px d) (py d) (px a) (py a))))
+    (list (list 0 1 2 3 4 5 6 7)
+          (list 8 9 10 11 12 13 14 15)
+          (list 16 17 18 19 20 21 22 23)))
+  ;; four spokes connecting the midpoints of each side across the rings
+  (line (px 1) (py 1) (px 17) (py 17))    ;; top spoke  1-9-17
+  (line (px 3) (py 3) (px 19) (py 19))    ;; left spoke 3-11-19
+  (line (px 4) (py 4) (px 20) (py 20))    ;; right spoke 4-12-20
+  (line (px 6) (py 6) (px 22) (py 22)))   ;; bottom spoke 6-14-22
+
+(define (draw-men last-p)
+  (let loop ((p 0)) (when (< p 24)
+    (let ((v (at p)) (x (px p)) (y (py p)))
+      (cond
+        ((= v 0)                                   ;; empty point: small node
+         (set-color 6) (disc x y 2))
+        (else
+         (set-color (if (= v BLACK) 0 7)) (disc x y 6)
+         (set-color (if (= v BLACK) 5 6)) (circle x y 6)))
+      (when (= p last-p)                           ;; highlight the last point acted on
+        (set-color 10) (circle x y 8)))
+    (loop (+ p 1)))))
+
+(define (draw-hud turn note phase)
+  (set-color 5) (rect-fill 224 8 92 224)
+  (fb/text "MORRIS" 230 12 'yellow)
+  (fb/text (string-append "plan " (if (eq? AI-PLAN 'adaptive) "adpt" "strt")) 230 28 'white)
+  (fb/text (string-append "lvl " (case LEVEL ((easy) "easy") ((hard) "hard") (else "norm"))) 230 42 'white)
+  (fb/text (string-append "phase " phase) 230 60 'lavender)
+  (fb/text (string-append "turn " (if (= turn BLACK) "B" "W")) 230 74 'white)
+  (fb/text "men on board" 230 96 'lavender)
+  (fb/text (string-append "B " (number->string ON-B)) 230 110 'white)
+  (fb/text (string-append "W " (number->string ON-W)) 230 124 'white)
+  (fb/text "placed" 230 146 'lavender)
+  (fb/text (string-append "B " (number->string PLACED-B) "/9") 230 160 'white)
+  (fb/text (string-append "W " (number->string PLACED-W) "/9") 230 174 'white)
+  (fb/text note 230 200 'green))
+
+(define (draw-board last-p turn phase note)
+  (clear 3)
+  (draw-lines)
+  (draw-men last-p)
+  (set-color 6) (rect 4 4 216 216)
+  (draw-hud turn note phase))
+
+;; =======================  CHARM PASS: PALETTE + TITLE  =======================
+;; TEACHING IDEA — name your constants. Now "the sky" is a word, not a number,
+;; and restyling the whole cart is a one-line edit here.
+(define COL-SKY   1)   ;; dark background wash on the title
+(define COL-STARS 13)  ;; lavender speckle
+(define COL-FRAME 7)   ;; white frame / banner edge
+
+;; A calm, seed-driven starfield behind the title — deterministic (same every
+;; run), just a scatter of pixels for depth. Kept small so it costs little fuel.
+(define (draw-starfield)
+  (clear COL-SKY)
+  (let loop ((k 0) (s SEED))
+    (when (< k 30)
+      (let* ((s2 (modulo (+ (* s 1103515245) 12345) 2147483648))
+             (sx (modulo s2 W))
+             (s3 (modulo (+ (* s2 1103515245) 12345) 2147483648))
+             (sy (modulo s3 H)))
+        (pset sx sy COL-STARS)
+        (loop (+ k 1) s3)))))
+
+;; A title screen is just ANOTHER drawing: the same verbs that paint the board
+;; paint the splash. Order: show the title, play the theme, then start the game.
+(define (draw-title)
+  (draw-starfield)
+  (set-color 0) (rect-fill 34 62 252 60)          ;; banner shadow
+  (set-color 2) (rect-fill 30 58 252 60)          ;; banner
+  (set-color COL-FRAME) (rect 30 58 252 60)
+  (fb/text "NINE MEN'S MORRIS" 78 78 'yellow)
+  (fb/text "mills with legs" 106 98 'white)
+  ;; a scrap of art: a black man and a white man side by side
+  (set-color 0) (disc 132 150 8) (set-color 5) (circle 132 150 8)
+  (set-color 7) (disc 188 150 8) (set-color 5) (circle 188 150 8)
+  (fb/text "* PRESS START *" 100 190 'green)
+  (fb/text "loading..." 130 212 'lavender))
+
+;; =======================  DRIVER  =======================
+
+(set-mode 'sd)
+
+(display "=== NINE MEN'S MORRIS — Motoi SD (320x240) ===") (newline)
+(display "You (Black, scripted opening then heuristic) vs Motoi (White)") (newline)
+(display "AI-PLAN=") (display AI-PLAN) (display "  LEVEL=") (display LEVEL) (newline)
+(display "Place 9, then slide along lines; close a mill to lift an enemy man.") (newline)
+(newline)
+
+;; SPLASH FIRST: draw the title frame, sound the theme, THEN play. This is the
+;; ONE allowed extra dump — the loading screen, not a per-tick dump.
+(play-theme!)
+(draw-title)
+(display "--- SD title screen ---") (newline)
+(fb/dump 0 0 W H)
+(newline)
+
+(define RESULT "")
+(define LAST-P -1)
+(define TURNS-DONE 0)
+
+(define (phase-name s)
+  (cond ((placing? s) "place") ((flying? s) "fly") (else "move")))
+
+;; compact ASCII status printer
+(define (status turn label)
+  (display "turn ") (display TURNS-DONE)
+  (display (if (= turn BLACK) "  B " "  W "))
+  (display label)
+  (display "  |  on-board B=") (display ON-B) (display " W=") (display ON-W)
+  (display "  placed B=") (display PLACED-B) (display " W=") (display PLACED-W)
+  (newline))
+
+;; Auto-play. Each turn: the side to move acts (place or slide); if that closed a
+;; mill it already removed an opponent man. Then we check the loss conditions.
+(let loop ((turn BLACK))
+  (cond
+    ((>= TURNS-DONE MAX-TURNS)
+     (set! RESULT "turn cap reached (default sample; raise MAX-TURNS + --fuel for a full game)"))
+    ;; a side with <3 men (after placing) has lost; a stuck side has lost
+    ((and (not (placing? turn)) (< (on-board turn) 3))
+     (set! RESULT (string-append (if (= turn BLACK) "BLACK" "WHITE")
+                                 " is down to two men — LOSES")))
+    ((not (has-move? turn))
+     (set! RESULT (string-append (if (= turn BLACK) "BLACK" "WHITE")
+                                 " has no legal move — LOSES")))
+    (else
+     (let ((act (if (= turn BLACK) (human-action turn) (motoi-action turn))))
+       (if (eq? act #f)
+           (set! RESULT (string-append (if (= turn BLACK) "BLACK" "WHITE")
+                                       " has no legal move — LOSES"))
+           (let* ((ph (phase-name turn))
+                  (res (apply-action! turn act))
+                  (label (car res))
+                  (closed (car (cdr res))))
+             (sfx-place! turn)                 ;; a click on every man placed/slid
+             (when closed (sfx-mill!))          ;; a bright chime when a mill closes
+             (when (= turn BLACK) (note-human! closed))
+             ;; remember a point to highlight in the climax frame
+             (set! LAST-P (if (number? act) act (car (cdr act))))
+             (set! TURNS-DONE (+ TURNS-DONE 1))
+             (when (= (modulo TURNS-DONE SHOW-EVERY) 0)
+               (status turn label))
+             (loop (opp turn))))))))
+
+;; =======================  ONE SD CLIMAX FRAME  =======================
+
+(sfx-end! ON-B ON-W)                     ;; result jingle: you lead / Motoi / even
+(draw-board LAST-P BLACK (phase-name BLACK)
+            (cond ((> ON-B ON-W) "you lead") ((< ON-B ON-W) "Motoi leads") (else "even")))
+(newline)
+(display "--- SD screenshot: current position (last move ringed) ---") (newline)
+(fb/dump 0 0 W H)
+(newline)
+
+(display "RESULT: ") (display RESULT) (newline)
+(display "Men on board  B(you)=") (display ON-B) (display "  W(Motoi)=") (display ON-W) (newline)
+(display "Placed  B=") (display PLACED-B) (display "/9  W=") (display PLACED-W) (display "/9") (newline)
+(newline)
+(display "Fork it: flip AI-PLAN to 'adaptive to make Motoi study your style,") (newline)
+(display "raise LEVEL to 'hard for a reply-deep brain (wants --fuel), or swap") (newline)
+(display "BLACK-SCRIPT for live taps from a real player.") (newline)

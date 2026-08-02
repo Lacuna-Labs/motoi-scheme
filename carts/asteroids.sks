@@ -1,0 +1,360 @@
+;; asteroids.sks
+;; Motoi Cart — Flagship (SD framebuffer)
+;;
+;; (cart
+;;   :name            "asteroids"
+;;   :category        :game
+;;   :sub-category    :space
+;;   :audience        :kid
+;;   :complexity      4
+;;   :runtime-tier    :runs-on-core
+;;   :render          :sd-framebuffer
+;;   :one-line        "A vector ship adrift in a field of splitting rocks — thrust, wrap, and shoot, drawn on the 320x240 screen."
+;;   :verbs-used      ("set-mode" "clear" "set-color" "disc" "line" "triangle-fill"
+;;                     "rect-fill" "fb/text" "fb/dump" "sin" "cos" "atan" "sqrt"
+;;                     "pi" "modulo" "floor" "abs" "min" "max" "nth" "list-set"
+;;                     "map" "filter" "for-each" "range" "cons" "car" "cdr"
+;;                     "when" "cond" "let" "let*" "set!")
+;;   :inspiration     "Asteroids — Lyle Rains & Ed Logg, Atari 1979. Vector rocks that break into smaller rocks; the game that taught a generation about inertia.")
+;;
+;; HOW TO RUN:
+;;   motoi run carts/asteroids.sks
+;;
+;; WHAT THIS IS
+;;   Asteroids on Motoi's real SD screen (320x240). A ship is five numbers —
+;;   (x y angle vx vy) — a triangle you can point and push. Rocks drift with no
+;;   friction (Newton's first law: nothing stops them). Shoot a big rock and it
+;;   splits into two smaller, faster ones; shoot the smallest and it's gone.
+;;   Clear the field and you win.
+;;
+;;   There is no keyboard here. A small, readable auto-pilot flies the ship so
+;;   the cart plays the same every run: it turns toward the nearest rock, thrusts
+;;   when it is pointed roughly right, and fires on cooldown. Read it, change the
+;;   DIFFICULTY knob, and watch it play differently.
+;;
+;;   Everything is drawn with the SD draw verbs (disc, line, triangle-fill,
+;;   fb/text) into the 320x240 framebuffer, then shown with (fb/dump). On an
+;;   interactive surface the same draw calls paint every frame to the screen.
+
+;; =======================  KNOBS  =======================
+
+(define DIFFICULTY 'normal)   ;; 'easy 'normal 'hard  — rock count + speed
+(define SEED       12345)     ;; deterministic rock field; change for a new one
+(define MAX-TICKS  90)        ;; how long the run lasts (fits default fuel)
+(define SHOW-EVERY 15)        ;; print a scoreboard line this often
+(define DUMP-FRAME 60)        ;; render one SD screenshot at this tick
+
+(define W 320)                ;; SD width
+(define H 240)                ;; SD height
+
+(define THRUST   0.10)        ;; engine push per thrust
+(define TURN     0.28)        ;; radians per turn
+(define DRAG     0.995)       ;; a whisper of drag so the demo stays readable
+(define BULLET-V 3.2)         ;; bullet speed
+(define BULLET-LIFE 42)       ;; ticks a bullet lives
+(define COOLDOWN 6)           ;; ticks between shots
+(define SHIP-R   7)           ;; ship size
+
+;; =======================  DETERMINISTIC PRNG  =======================
+;; A tiny linear-congruential generator so the field is the same every run
+;; without depending on the host clock. rnd -> [0,1).
+
+(define _seed SEED)
+(define (rnd)
+  (set! _seed (modulo (+ (* _seed 1103515245) 12345) 2147483648))
+  (/ _seed 2147483648))
+(define (rnd-range lo hi) (+ lo (* (rnd) (- hi lo))))
+
+;; =======================  CHARM PASS: SOUND  =======================
+;; A short opening theme and a tiny sound on each event — a shot fired, a rock
+;; smashed, the run's end. The audio verbs are REAL (tone note sfx music melody)
+;; but on a headless run there is no speaker, so they simply do nothing. The
+;; SHAPE is what teaches; on a real surface these same calls sing.
+;;
+;; TEACHING IDEA — "guard your nice-extras so they can never crash the core."
+;; Sound is a bonus, not the game. Every audio call goes through one small
+;; wrapper, (safe ...), and one flag, SOUND-ON. Turn it off and the game flies
+;; on in silence, unchanged. A seatbelt for extras: it only ever helps.
+(define SOUND-ON #t)
+(define (safe thunk) (when SOUND-ON (thunk)) #t)
+
+(define (play-theme!)                            ;; a rising major chord, "launch!"
+  (safe (lambda ()
+    (music 'ast-theme)
+    (melody (list 60 64 67 72) 0.12))))          ;; C4 E4 G4 C5
+
+(define (sfx-shoot!)                              ;; the pew of the cannon
+  (safe (lambda () (sfx 'blip 620 0.04))))
+(define (sfx-boom!)                               ;; a rock cracks apart — a low thud
+  (safe (lambda () (note 45 0.10 0.7))))
+(define (sfx-end! cleared)                        ;; result: bright if cleared, flat if not
+  (safe (lambda ()
+    (if cleared (melody (list 67 72 76) 0.12)     ;; field cleared — a win fanfare
+                (tone 300 0.30)))))               ;; time up — a flat tone
+
+;; =======================  CHARM PASS: PALETTE  =======================
+;; TEACHING IDEA — name your constants. Now "deep space" is a word, not the
+;; number 0, and restyling the whole cart is a one-line edit right here.
+(define COL-SPACE  0)    ;; deep-space black background
+(define COL-STARS  13)   ;; lavender star speckle
+(define COL-SHIP   7)    ;; the white ship
+(define COL-BIG    6)    ;; big rock
+(define COL-MED    13)   ;; medium rock
+(define COL-SMALL  15)   ;; small rock
+(define COL-CORE   5)    ;; rock inner shade
+(define COL-BULLET 10)   ;; bullet
+(define COL-HUD    0)    ;; HUD bar
+
+;; =======================  DIFFICULTY  =======================
+
+(define ROCK-COUNT
+  (cond ((= DIFFICULTY 'easy) 3)
+        ((= DIFFICULTY 'hard) 7)
+        (else 5)))
+(define ROCK-SPEED
+  (cond ((= DIFFICULTY 'easy) 0.5)
+        ((= DIFFICULTY 'hard) 1.3)
+        (else 0.9)))
+
+;; =======================  STATE  =======================
+;; ship  = (x y angle vx vy cooldown alive)
+;; rock  = (x y vx vy size)          size 3=big 2=med 1=small
+;; bullet= (x y vx vy life)
+
+(define SHIP (list (/ W 2) (/ H 2) 0 0 0 0 #t))
+(define ROCKS '())
+(define BULLETS '())
+(define SCORE 0)
+
+(define (sh k) (nth SHIP k))
+(define (sh! k v) (set! SHIP (list-set SHIP k v)))
+(define (r-x r) (nth r 0))
+(define (r-y r) (nth r 1))
+(define (r-vx r) (nth r 2))
+(define (r-vy r) (nth r 3))
+(define (r-size r) (nth r 4))
+(define (b-x b) (nth b 0))
+(define (b-y b) (nth b 1))
+(define (b-life b) (nth b 4))
+
+;; seed the rock field away from the ship's center
+(define (spawn-rocks n)
+  (when (> n 0)
+    (let* ((edge (floor (* (rnd) 4)))
+           (x (cond ((= edge 0) 4) ((= edge 1) (- W 4)) (else (rnd-range 4 (- W 4)))))
+           (y (cond ((= edge 2) 4) ((= edge 3) (- H 4)) (else (rnd-range 4 (- H 4)))))
+           (ang (* (rnd) 2 pi))
+           (vx (* ROCK-SPEED (cos ang)))
+           (vy (* ROCK-SPEED (sin ang))))
+      (set! ROCKS (cons (list x y vx vy 3) ROCKS))
+      (spawn-rocks (- n 1)))))
+
+;; =======================  MATH HELPERS  =======================
+
+(define (wrap v hi)
+  (cond ((< v 0) (+ v hi))
+        ((>= v hi) (- v hi))
+        (else v)))
+(define (norm a)
+  (cond ((> a pi) (- a (* 2 pi)))
+        ((< a (- 0 pi)) (+ a (* 2 pi)))
+        (else a)))
+(define (dist ax ay bx by)
+  (let ((dx (- ax bx)) (dy (- ay by)))
+    (sqrt (+ (* dx dx) (* dy dy)))))
+
+;; =======================  AUTO-PILOT  =======================
+;; Turn toward the nearest rock; thrust if roughly aimed; fire on cooldown.
+
+(define (nearest-rock)
+  (let loop ((rs ROCKS) (best #f) (bd 1e9))
+    (cond ((null? rs) best)
+          (else
+           (let ((d (dist (sh 0) (sh 1) (r-x (car rs)) (r-y (car rs)))))
+             (if (< d bd) (loop (cdr rs) (car rs) d)
+                          (loop (cdr rs) best bd)))))))
+
+(define (pilot!)
+  (let ((target (nearest-rock)))
+    (when target
+      (let* ((want (atan (- (r-y target) (sh 1)) (- (r-x target) (sh 0))))
+             (err  (norm (- want (sh 2)))))
+        (cond ((> err 0.15) (sh! 2 (norm (+ (sh 2) TURN))))
+              ((< err -0.15) (sh! 2 (norm (- (sh 2) TURN))))
+              (else
+               ;; aimed: thrust a little and shoot
+               (sh! 3 (+ (sh 3) (* THRUST (cos (sh 2)))))
+               (sh! 4 (+ (sh 4) (* THRUST (sin (sh 2)))))
+               (when (<= (sh 5) 0) (fire!) (sh! 5 COOLDOWN))))))))
+
+(define (fire!)
+  (sfx-shoot!)                              ;; pew — one blip per shot
+  (let ((nx (+ (sh 0) (* SHIP-R (cos (sh 2)))))
+        (ny (+ (sh 1) (* SHIP-R (sin (sh 2))))))
+    (set! BULLETS
+      (cons (list nx ny
+                  (+ (sh 3) (* BULLET-V (cos (sh 2))))
+                  (+ (sh 4) (* BULLET-V (sin (sh 2))))
+                  BULLET-LIFE)
+            BULLETS))))
+
+;; =======================  STEP  =======================
+
+(define (step-ship!)
+  (sh! 0 (wrap (+ (sh 0) (sh 3)) W))
+  (sh! 1 (wrap (+ (sh 1) (sh 4)) H))
+  (sh! 3 (* (sh 3) DRAG))
+  (sh! 4 (* (sh 4) DRAG))
+  (when (> (sh 5) 0) (sh! 5 (- (sh 5) 1))))
+
+(define (step-rocks!)
+  (set! ROCKS
+    (map (lambda (r)
+           (list (wrap (+ (r-x r) (r-vx r)) W)
+                 (wrap (+ (r-y r) (r-vy r)) H)
+                 (r-vx r) (r-vy r) (r-size r)))
+         ROCKS)))
+
+(define (step-bullets!)
+  (set! BULLETS
+    (filter (lambda (b) (> (b-life b) 0))
+      (map (lambda (b)
+             (list (wrap (+ (b-x b) (nth b 2)) W)
+                   (wrap (+ (b-y b) (nth b 3)) H)
+                   (nth b 2) (nth b 3) (- (b-life b) 1)))
+           BULLETS))))
+
+(define (rock-radius size) (cond ((= size 3) 18) ((= size 2) 11) (else 6)))
+
+;; split a big rock into two smaller, faster ones
+(define (split-rock r)
+  (if (<= (r-size r) 1)
+      '()
+      (let* ((ns (- (r-size r) 1))
+             (a1 (* (rnd) 2 pi))
+             (spd (* ROCK-SPEED 1.6)))
+        (list (list (r-x r) (r-y r) (* spd (cos a1)) (* spd (sin a1)) ns)
+              (list (r-x r) (r-y r) (* spd (cos (+ a1 pi))) (* spd (sin (+ a1 pi))) ns)))))
+
+;; bullet/rock collisions: survivors + fragments + score
+(define (resolve-hits!)
+  (let ((new-rocks '()) (live-bullets BULLETS))
+    (for-each
+      (lambda (r)
+        (let ((hit #f) (rad (rock-radius (r-size r))))
+          (set! live-bullets
+            (filter (lambda (b)
+                      (if (and (not hit) (< (dist (b-x b) (b-y b) (r-x r) (r-y r)) rad))
+                          (begin (set! hit #t) #f)
+                          #t))
+                    live-bullets))
+          (cond (hit
+                 (sfx-boom!)               ;; a rock just cracked apart
+                 (set! SCORE (+ SCORE (* 10 (- 4 (r-size r)))))
+                 (for-each (lambda (f) (set! new-rocks (cons f new-rocks)))
+                           (split-rock r)))
+                (else (set! new-rocks (cons r new-rocks))))))
+      ROCKS)
+    (set! ROCKS new-rocks)
+    (set! BULLETS live-bullets)))
+
+;; =======================  RENDER (SD framebuffer)  =======================
+
+(define (draw-ship)
+  (let* ((x (sh 0)) (y (sh 1)) (a (sh 2))
+         (nx (+ x (* SHIP-R (cos a))))            (ny (+ y (* SHIP-R (sin a))))
+         (lx (+ x (* SHIP-R (cos (+ a 2.5)))))    (ly (+ y (* SHIP-R (sin (+ a 2.5)))))
+         (rx (+ x (* SHIP-R (cos (- a 2.5)))))    (ry (+ y (* SHIP-R (sin (- a 2.5))))))
+    (triangle-fill nx ny lx ly rx ry 7)))
+
+(define (draw-rock r)
+  (set-color (cond ((= (r-size r) 3) 6) ((= (r-size r) 2) 13) (else 15)))
+  (disc (r-x r) (r-y r) (rock-radius (r-size r)))
+  (set-color 5)
+  (disc (r-x r) (r-y r) (max 1 (- (rock-radius (r-size r)) 3))))
+
+(define (draw-bullet b)
+  (set-color COL-BULLET)
+  (disc (b-x b) (b-y b) 2))
+
+;; A calm, seed-driven starfield across the whole void — drawn from the LCG
+;; constants (not the clock) so it is identical every run. Just pixels: cheap.
+(define (draw-background)
+  (clear COL-SPACE)
+  (let loop ((n 0) (s SEED))
+    (when (< n 40)
+      (let* ((s2 (modulo (+ (* s 1103515245) 12345) 2147483648))
+             (x  (modulo s2 W))
+             (s3 (modulo (+ (* s2 1103515245) 12345) 2147483648))
+             (y  (modulo s3 H)))
+        (pset x y COL-STARS)
+        (loop (+ n 1) s3)))))
+
+;; TEACHING IDEA — a title screen is just ANOTHER drawing; the same verbs that
+;; paint the game paint the splash. Order: show title, play the theme, then go.
+(define (draw-title)
+  (draw-background)
+  (fb/text "A S T E R O I D S" 84 70 'green)
+  (fb/text "vector rocks in the void" 78 92 'white)
+  ;; a scrap of art: a little ship pointing right + a big rock beside it
+  (triangle-fill 150 132 130 122 130 142 COL-SHIP)
+  (set-color COL-BIG)   (disc 200 132 12)
+  (set-color COL-CORE)  (disc 200 132 9)
+  (fb/text "* PRESS START *" 106 172 'yellow)
+  (fb/text "engines warming..." 96 190 'lavender))
+
+(define (render!)
+  (draw-background)                        ;; deep space + a starfield behind all
+  (for-each draw-rock ROCKS)
+  (for-each draw-bullet BULLETS)
+  (draw-ship)
+  (set-color COL-HUD) (rect-fill 0 0 W 12)
+  (fb/text "ASTEROIDS" 4 3 'green)
+  (fb/text (string-append "SCORE " (number->string SCORE)) 220 3 'yellow))
+
+;; =======================  DRIVER  =======================
+
+(set-mode 'sd)                             ;; the SD framebuffer (added by charm pass)
+
+(spawn-rocks ROCK-COUNT)
+
+(display "=== ASTEROIDS — Motoi SD (320x240) ===") (newline)
+(display "difficulty: ") (display DIFFICULTY)
+(display "   rocks: ") (display ROCK-COUNT) (newline) (newline)
+
+;; SPLASH FIRST: draw the title frame, sound the theme, THEN play. This is the
+;; ONE extra dump the charm layer allows — the loading screen, not a per-tick dump.
+(play-theme!)
+(draw-title)
+(display "--- SD title screen ---") (newline)
+(fb/dump 0 0 W H)
+(newline)
+
+(let loop ((t 0))
+  (cond
+    ((or (> t MAX-TICKS) (null? ROCKS))
+     (sfx-end! (null? ROCKS))            ;; result jingle: bright if cleared, flat if not
+     (newline)
+     (cond ((null? ROCKS)
+            (display "FIELD CLEARED — you win.  final score ") (display SCORE))
+           (else
+            (display "time up.  rocks left ") (display (length ROCKS))
+            (display "   score ") (display SCORE)))
+     (newline))
+    (else
+     (pilot!)
+     (step-ship!)
+     (step-rocks!)
+     (step-bullets!)
+     (resolve-hits!)
+     (when (= (modulo t SHOW-EVERY) 0)
+       (display "t=") (display t)
+       (display "  rocks=") (display (length ROCKS))
+       (display "  bullets=") (display (length BULLETS))
+       (display "  score=") (display SCORE) (newline))
+     (when (= t DUMP-FRAME)
+       (render!)
+       (newline)
+       (display "--- SD screenshot @ t=") (display t) (display " ---") (newline)
+       (fb/dump 0 0 W H))
+     (loop (+ t 1)))))

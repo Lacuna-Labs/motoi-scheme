@@ -1,0 +1,354 @@
+;; spacewar.sks
+;; Motoi Cart — Wave 1
+;;
+;; (cart
+;;   :name            "spacewar"
+;;   :category        :game
+;;   :sub-category    :space
+;;   :audience        :kid
+;;   :complexity      4
+;;   :runtime-tier    :runs-on-core
+;;   :one-line        "Two ships duel around a star's gravity — the oldest video game, playable by a human or a readable AI."
+;;   :verbs-used      ("display" "newline" "for-each" "range" "nth" "list-set"
+;;                     "make-list" "cons" "car" "cdr" "sin" "cos" "atan" "sqrt"
+;;                     "pi" "round" "abs" "min" "max" "modulo" "length" "map"
+;;                     "filter" "when" "cond" "let" "let*" "set!")
+;;   :inspiration     "Spacewar! — Steve Russell and friends on the MIT PDP-1, 1962. The first game people played on a screen for fun.")
+;;
+;; HOW TO RUN:
+;;   motoi run carts/spacewar.sks
+;;
+;; WHAT THIS IS
+;;   Spacewar! is the oldest video game that still matters: two spaceships
+;;   circling a star, trading torpedoes, each pulled by the same real gravity.
+;;   This cart is that game, played out deterministically frame-by-frame so it
+;;   runs with no keyboard and no randomness — read it, fork it, and it plays
+;;   the same every time.
+;;
+;;   A ship is five numbers: (x y angle vx vy) — where it is, which way it
+;;   points, and how fast it drifts. The star at the middle of the screen adds
+;;   a little velocity toward itself every tick (Newton: a = G*M / r^2). Thrust
+;;   pushes the ship the way its nose points. Fire spits a torpedo that carries
+;;   the ship's own velocity plus a kick. Fly into the star, or take a hit, and
+;;   you're gone.
+;;
+;; PLAYER TWO — two ways to play (the fun part)
+;;   * MULTIPLAYER (no AI): both ships are people. Here "player one" is a
+;;     scripted key-stream (P1-SCRIPT) — swap it for real keys on an
+;;     interactive surface and a friend flies the green ship.
+;;   * AI OPPONENT: the red ship is a small, READABLE robot pilot. Not one
+;;     perfect optimal player — several human-flavored PLAYSTYLEs you can pick
+;;     and read: a rusher, an orbiter, a slingshotter, a feinter. A fun
+;;     opponent is human-like, not optimal: it commits to a plan, and it makes
+;;     honest mistakes.
+;;
+;;   Change the two knobs right below and re-run.
+
+;; =======================  KNOBS  =======================
+
+(define P2-MODE   'ai)       ;; 'ai  = red ship is a robot pilot
+                             ;; 'human = red ship reads P2-SCRIPT (two people)
+(define PLAYSTYLE 'rusher)   ;; 'rusher 'orbiter 'slingshot 'feint
+
+(define WIDTH   44)          ;; screen columns
+(define HEIGHT  22)          ;; screen rows
+(define MAX-TICKS 90)        ;; how long the duel runs
+(define SHOW-EVERY 6)        ;; print one frame out of this many
+
+;; physics constants (tuned for a readable, slow duel)
+(define GM       9.0)        ;; star pull strength  (G * mass-of-star)
+(define STAR-R   1.6)        ;; crash radius around the star
+(define THRUST   0.06)       ;; how hard the engine pushes
+(define TURN     0.30)       ;; radians turned per rotate
+(define TORP-V   0.9)        ;; torpedo muzzle speed
+(define TORP-LIFE 22)        ;; ticks a torpedo lives
+(define COOLDOWN  4)         ;; ticks between shots
+(define HIT-R    1.2)        ;; how close a torpedo must be to hit
+
+(define STAR-X (/ WIDTH 2))
+(define STAR-Y (/ HEIGHT 2))
+
+;; =======================  STATE  =======================
+;; A ship is a list: (x y angle vx vy alive cooldown).
+;; A torpedo is a list: (x y vx vy life owner).
+
+(define (mk-ship x y a vx vy) (list x y a vx vy #t 0))
+
+(define GREEN (mk-ship 6           (/ HEIGHT 2)  0        0  0))       ;; nose right
+(define RED   (mk-ship (- WIDTH 6) (/ HEIGHT 2)  pi       0  0))       ;; nose left
+(define TORPS '())
+
+;; ship field accessors
+(define (s-x s)    (nth s 0))
+(define (s-y s)    (nth s 1))
+(define (s-ang s)  (nth s 2))
+(define (s-vx s)   (nth s 3))
+(define (s-vy s)   (nth s 4))
+(define (s-alive s)(nth s 5))
+(define (s-cool s) (nth s 6))
+
+;; torpedo field accessors
+(define (t-x t)    (nth t 0))
+(define (t-y t)    (nth t 1))
+(define (t-vx t)   (nth t 2))
+(define (t-vy t)   (nth t 3))
+(define (t-life t) (nth t 4))
+(define (t-owner t)(nth t 5))
+
+;; =======================  HELPERS  =======================
+
+(define (wrapf v hi)                 ;; keep a coordinate on the toroidal screen
+  (cond ((< v 0)   (wrapf (+ v hi) hi))
+        ((>= v hi) (wrapf (- v hi) hi))
+        (else v)))
+
+(define (norm a)                     ;; fold an angle into [-pi, pi]
+  (cond ((> a pi)     (norm (- a (* 2 pi))))
+        ((< a (- pi)) (norm (+ a (* 2 pi))))
+        (else a)))
+
+(define (dist ax ay bx by)
+  (let ((dx (- ax bx)) (dy (- ay by)))
+    (sqrt (+ (* dx dx) (* dy dy)))))
+
+;; gravity kick from the star onto a point moving at (vx vy) -> new (vx vy)
+(define (gravity-step x y vx vy)
+  (let* ((dx (- STAR-X x)) (dy (- STAR-Y y))
+         (r  (max 0.6 (dist x y STAR-X STAR-Y)))
+         (a  (/ GM (* r r))))
+    (list (+ vx (* a (/ dx r)))
+          (+ vy (* a (/ dy r))))))
+
+;; =======================  SHIP PHYSICS  =======================
+;; Apply one action ('thrust 'left 'right 'fire 'coast) to a ship, return the
+;; new ship. Firing is handled by the driver (it needs to add to TORPS), so
+;; here 'fire just behaves like 'coast for the motion.
+
+(define (ship-step s action)
+  (if (not (s-alive s)) s
+      (let* ((ang (cond ((eq? action 'left)  (norm (- (s-ang s) TURN)))
+                        ((eq? action 'right) (norm (+ (s-ang s) TURN)))
+                        (else (s-ang s))))
+             (thrusting (eq? action 'thrust))
+             (vx0 (if thrusting (+ (s-vx s) (* THRUST (cos ang))) (s-vx s)))
+             (vy0 (if thrusting (+ (s-vy s) (* THRUST (sin ang))) (s-vy s)))
+             (g   (gravity-step (s-x s) (s-y s) vx0 vy0))
+             (vx  (nth g 0)) (vy (nth g 1))
+             (nx  (wrapf (+ (s-x s) vx) WIDTH))
+             (ny  (wrapf (+ (s-y s) vy) HEIGHT))
+             (dead-star (< (dist nx ny STAR-X STAR-Y) STAR-R))
+             (cool (max 0 (- (s-cool s) 1))))
+        (list nx ny ang vx vy (not dead-star) cool))))
+
+;; Spawn a torpedo from a ship's nose. Returns the torpedo, or #f if on cooldown.
+(define (ship-fire s owner)
+  (if (or (not (s-alive s)) (> (s-cool s) 0)) #f
+      (list (+ (s-x s) (* 1.2 (cos (s-ang s))))
+            (+ (s-y s) (* 1.2 (sin (s-ang s))))
+            (+ (s-vx s) (* TORP-V (cos (s-ang s))))
+            (+ (s-vy s) (* TORP-V (sin (s-ang s))))
+            TORP-LIFE owner)))
+
+(define (arm s)                       ;; put a ship on cooldown after firing
+  (list (s-x s) (s-y s) (s-ang s) (s-vx s) (s-vy s) (s-alive s) COOLDOWN))
+
+;; =======================  TORPEDO PHYSICS  =======================
+
+(define (torp-step t)                 ;; gravity bends torpedoes too
+  (let* ((g  (gravity-step (t-x t) (t-y t) (t-vx t) (t-vy t)))
+         (vx (nth g 0)) (vy (nth g 1)))
+    (list (wrapf (+ (t-x t) vx) WIDTH)
+          (wrapf (+ (t-y t) vy) HEIGHT)
+          vx vy (- (t-life t) 1) (t-owner t))))
+
+(define (torp-alive? t) (> (t-life t) 0))
+
+;; Did torpedo t hit ship s (and s is not the owner's own ship-tag)?
+(define (torp-hits? t s tag)
+  (and (s-alive s)
+       (not (eq? (t-owner t) tag))
+       (< (dist (t-x t) (t-y t) (s-x s) (s-y s)) HIT-R)))
+
+;; =======================  THE AI PILOT (player two)  =======================
+;; Each playstyle is a tiny policy: read the world, pick ONE action. They are
+;; meant to be read, not to be perfect. "Human-like, not optimal."
+
+(define (angle-to s tx ty)            ;; heading error toward a target point
+  (norm (- (atan (- ty (s-y s)) (- tx (s-x s))) (s-ang s))))
+
+(define (turn-toward s tx ty aligned-action)
+  ;; turn to face (tx ty); once we're roughly aimed, do aligned-action
+  (let ((err (angle-to s tx ty)))
+    (cond ((> err  0.35) 'right)
+          ((< err -0.35) 'left)
+          (else aligned-action))))
+
+;; rusher — charge the enemy, fire when the nose lines up
+(define (ai-rusher me foe)
+  (turn-toward me (s-x foe) (s-y foe)
+               (if (< (abs (angle-to me (s-x foe) (s-y foe))) 0.2) 'fire 'thrust)))
+
+;; orbiter — keep a respectful distance from the star, fire across at the foe
+(define (ai-orbiter me foe)
+  (let ((r (dist (s-x me) (s-y me) STAR-X STAR-Y)))
+    (cond ((< r 6.0)  (turn-toward me (- (* 2 (s-x me)) STAR-X)   ;; aim away from star
+                                      (- (* 2 (s-y me)) STAR-Y) 'thrust))
+          ((< (abs (angle-to me (s-x foe) (s-y foe))) 0.25) 'fire)
+          (else (turn-toward me (s-x foe) (s-y foe) 'coast)))))
+
+;; slingshot — dive past the star to steal speed when far, then face the foe
+(define (ai-slingshot me foe)
+  (let ((rfoe (dist (s-x me) (s-y me) (s-x foe) (s-y foe))))
+    (if (> rfoe 16.0)
+        (turn-toward me STAR-X STAR-Y 'thrust)               ;; commit to the dive
+        (turn-toward me (s-x foe) (s-y foe)
+                     (if (< (abs (angle-to me (s-x foe) (s-y foe))) 0.2) 'fire 'coast)))))
+
+;; feint — approach on even ticks, veer off on odd ones (readable head-games)
+(define (ai-feint me foe tick)
+  (if (= (modulo tick 8) 0)
+      'fire
+      (if (< (modulo tick 16) 8)
+          (turn-toward me (s-x foe) (s-y foe) 'thrust)
+          (turn-toward me (- (* 2 (s-x me)) (s-x foe))
+                          (- (* 2 (s-y me)) (s-y foe)) 'thrust))))
+
+(define (ai-action me foe tick)
+  (cond ((eq? PLAYSTYLE 'orbiter)   (ai-orbiter me foe))
+        ((eq? PLAYSTYLE 'slingshot) (ai-slingshot me foe))
+        ((eq? PLAYSTYLE 'feint)     (ai-feint me foe tick))
+        (else                       (ai-rusher me foe))))
+
+;; =======================  PLAYER ONE (and human P2)  =======================
+;; A scripted key-stream, cycled by tick. Replace with real input on a live
+;; surface. This is how a SECOND CONTROLLER wires in — no AI required.
+
+(define P1-SCRIPT '(thrust thrust right fire coast thrust left fire coast right))
+(define P2-SCRIPT '(thrust left fire coast thrust thrust right fire coast left))
+
+(define (script-action script tick)
+  (nth script (modulo tick (length script))))
+
+;; =======================  RENDER  =======================
+
+(define (blank-row)  (make-list WIDTH " "))
+(define (blank-grid) (map (lambda (_) (blank-row)) (range 0 HEIGHT)))
+
+(define (plot g x y mark)
+  (let ((col (round x)) (row (round y)))
+    (if (or (< col 0) (>= col WIDTH) (< row 0) (>= row HEIGHT)) g
+        (list-set g row (list-set (nth g row) col mark)))))
+
+(define (heading-glyph ang)           ;; 8-way arrow from the ship's angle
+  (let ((a (norm ang)))
+    (cond ((< a (* pi -0.875)) "<")
+          ((< a (* pi -0.625)) "\\")
+          ((< a (* pi -0.375)) "^")
+          ((< a (* pi -0.125)) "/")
+          ((< a (* pi  0.125)) ">")
+          ((< a (* pi  0.375)) "\\")
+          ((< a (* pi  0.625)) "v")
+          ((< a (* pi  0.875)) "/")
+          (else "<"))))
+
+(define (draw-frame tick)
+  (let* ((g0 (blank-grid))
+         (g1 (plot g0 STAR-X STAR-Y "*"))
+         (g2 (let loop ((ts TORPS) (g g1))
+               (if (null? ts) g
+                   (loop (cdr ts) (plot g (t-x (car ts)) (t-y (car ts)) ".")))))
+         (g3 (if (s-alive GREEN) (plot g2 (s-x GREEN) (s-y GREEN) "G") g2))
+         (g4 (if (s-alive RED)   (plot g3 (s-x RED)   (s-y RED)   "R") g3)))
+    (display "  tick=") (display tick)
+    (display "   G:") (display (if (s-alive GREEN) (heading-glyph (s-ang GREEN)) "x"))
+    (display "  R:")   (display (if (s-alive RED)   (heading-glyph (s-ang RED))   "x"))
+    (display "   torps=") (display (length TORPS))
+    (newline)
+    (display "  +")
+    (for-each (lambda (_) (display "-")) (range 0 WIDTH))
+    (display "+") (newline)
+    (for-each
+     (lambda (row) (display "  |") (for-each display row) (display "|") (newline))
+     g4)
+    (display "  +")
+    (for-each (lambda (_) (display "-")) (range 0 WIDTH))
+    (display "+") (newline)))
+
+;; =======================  ONE TICK  =======================
+
+(define (both-dead-or-one?) (or (not (s-alive GREEN)) (not (s-alive RED))))
+
+(define (fire-from ship tag)
+  ;; try to fire this ship; on success push a torpedo and arm the cooldown
+  (let ((t (ship-fire ship tag)))
+    (if t
+        (begin (set! TORPS (cons t TORPS)) (arm ship))
+        ship)))
+
+(define (resolve-hits)
+  ;; a torpedo that reaches the enemy kills it and is spent
+  (for-each
+   (lambda (t)
+     (when (torp-hits? t GREEN 'green) (set! GREEN (list-set GREEN 5 #f)))
+     (when (torp-hits? t RED   'red)   (set! RED   (list-set RED   5 #f))))
+   TORPS)
+  ;; drop torpedoes that hit something or expired
+  (set! TORPS
+    (filter (lambda (t)
+              (and (torp-alive? t)
+                   (not (torp-hits? t GREEN 'green))
+                   (not (torp-hits? t RED   'red))))
+            TORPS)))
+
+(define (tick! t)
+  ;; 1. choose actions
+  (let ((ga (script-action P1-SCRIPT t))
+        (ra (if (eq? P2-MODE 'ai)
+                (ai-action RED GREEN t)
+                (script-action P2-SCRIPT t))))
+    ;; 2. fire (before moving, from the current nose)
+    (when (eq? ga 'fire) (set! GREEN (fire-from GREEN 'green)))
+    (when (eq? ra 'fire) (set! RED   (fire-from RED   'red)))
+    ;; 3. move ships
+    (set! GREEN (ship-step GREEN ga))
+    (set! RED   (ship-step RED   ra))
+    ;; 4. move torpedoes
+    (set! TORPS (map torp-step TORPS))
+    ;; 5. resolve collisions
+    (resolve-hits)))
+
+;; =======================  DRIVER  =======================
+
+(display "SPACEWAR!  —  G (green) vs R (red),  * = star,  . = torpedo")
+(newline)
+(display "============================================================")
+(newline)
+(display "  mode: player-two = ") (display P2-MODE)
+(when (eq? P2-MODE 'ai) (display "   playstyle = ") (display PLAYSTYLE))
+(newline)
+(display "  gravity pulls both ships toward the star every tick.")
+(newline) (newline)
+
+(draw-frame 0)
+
+(let loop ((t 1))
+  (when (and (<= t MAX-TICKS) (not (both-dead-or-one?)))
+    (tick! t)
+    (when (or (= (modulo t SHOW-EVERY) 0) (both-dead-or-one?))
+      (draw-frame t))
+    (loop (+ t 1))))
+
+(newline)
+(display
+  (cond ((and (not (s-alive GREEN)) (not (s-alive RED)))
+         "  DOUBLE KILL — both ships are gone.")
+        ((not (s-alive GREEN)) "  RED WINS — green was destroyed.")
+        ((not (s-alive RED))   "  GREEN WINS — red was destroyed.")
+        (else "  TIME — both pilots survived the duel.")))
+(newline) (newline)
+(display "  Fork it: flip P2-MODE to 'human for two players, or change")
+(newline)
+(display "  PLAYSTYLE ('rusher 'orbiter 'slingshot 'feint) to fight a")
+(newline)
+(display "  different robot. Tune GM to make the star meaner.")
+(newline)

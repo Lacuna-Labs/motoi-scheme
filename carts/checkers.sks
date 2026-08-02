@@ -1,0 +1,701 @@
+;; checkers.sks
+;; Motoi Cart — Flagship (SD framebuffer)
+;;
+;; (cart
+;;   :name            "checkers"
+;;   :category        :game
+;;   :sub-category    :board
+;;   :audience        :kid
+;;   :complexity      5
+;;   :runtime-tier    :runs-on-core
+;;   :render          :sd-framebuffer
+;;   :one-line        "American draughts on the 320x240 screen — men that jump, kings that crown, and a Motoi opponent you can pick the strength of."
+;;   :verbs-used      ("set-mode" "clear" "set-color" "disc" "circle" "ring"
+;;                     "rect-fill" "fb/text" "fb/dump" "make-vector" "vector-ref"
+;;                     "vector-set!" "vector-length" "quotient" "remainder"
+;;                     "modulo" "abs" "min" "max" "floor" "even?" "number->string"
+;;                     "map" "filter" "for-each" "length" "append" "reverse"
+;;                     "range" "cons" "car" "cdr" "let" "let*" "cond" "case"
+;;                     "when" "unless" "set!")
+;;   :inspiration     "Draughts / checkers — a game older than chess by some counts, played on a chessboard's dark squares. The jump-capture is the whole heart of it.")
+;;
+;; HOW TO RUN:
+;;   motoi run carts/checkers.sks
+;;
+;; WHAT THIS IS
+;;   Checkers (American / English draughts) on Motoi's real SD screen. The
+;;   board is 8x8, and the pieces only ever live on the 32 dark squares. Each
+;;   side starts with 12 men. Men slide one square diagonally FORWARD. If an
+;;   enemy sits on a forward diagonal with an empty square just beyond it, you
+;;   JUMP: you leap over, and the enemy is captured. Land and there's another
+;;   jump? You must keep jumping — that's a multi-jump chain, all in one turn.
+;;
+;;   Two rules make draughts draughts, and both are here:
+;;     * FORCED CAPTURE — if any jump is available to you, you must take a
+;;       jump; you may not make a quiet slide instead.
+;;     * CROWNING — reach the far row and your man becomes a KING (drawn with
+;;       a little ring-crown). Kings move and jump BOTH directions.
+;;   Rules variant chosen: American / English draughts — men capture forward
+;;   only, forced captures are mandatory but NOT required to be the maximal
+;;   one (any legal jump satisfies the rule), a lone king is not "flying".
+;;
+;;   HOW MOTOI PLAYS (the LEVEL knob):
+;;     'easy   — greedy: grab the biggest capture on offer, else the first
+;;               readable slide. A friendly beginner.
+;;     'normal — 2-ply minimax on material + king value: it looks one move
+;;               ahead for your reply and won't hang a piece for nothing.
+;;     'hard   — 3-ply alpha-beta: a little deeper, prunes dead branches.
+;;   The search is shallow and the move list is bounded on purpose so every
+;;   move stays cheap in fuel. This is a readable opponent, not a solver.
+;;
+;;   "MULTIPLAYER — a game it can play WITH you": there is no keyboard in a
+;;   headless cart, so BOTH seats are driven automatically to play a whole
+;;   sample game to a result. RED is the Motoi AI at LEVEL; BLACK is a second,
+;;   simpler "club player" AI so you can watch a full game unfold the same way
+;;   every run. On a real interactive surface you would swap ONE seat's
+;;   move-picker for live input — click a piece, click a square — and leave the
+;;   other seat as Motoi. That's the whole change: one function, one seat.
+;;
+;;   A side with no legal move loses. If neither side is stuck by the move
+;;   cap, we adjudicate by material (kings count double). One jump mid-game is
+;;   animated as a couple of slide frames with the captured square flashed, and
+;;   we dump ONE SD screenshot so you can see the board on the real screen.
+
+;; =======================  KNOBS  =======================
+
+;; LEVEL sets the RED (Motoi) seat's strength. NOTE ON FUEL: this interpreter
+;; spends real fuel per legal-move scan, so a deep search over a whole game will
+;; not fit the default 200000 budget. The DEFAULT that ships (and passes the
+;; run gate) is 'easy, which needs no search. 'normal (2-ply) and 'hard (3-ply)
+;; are fully implemented and correct — run them with a bigger budget, e.g.
+;;   motoi run carts/checkers.sks --fuel 3000000
+;; after setting LEVEL below. Determinism holds at every level.
+(define LEVEL     'easy)    ;; 'easy 'normal 'hard  — strength of the RED (Motoi) seat
+(define MAX-MOVES 16)       ;; hard cap on plies so the sample game fits fuel
+(define SHOW-EVERY 10)      ;; print a compact board + counts this often (plies)
+(define DUMP-PLY   8)       ;; render ONE SD screenshot at this ply
+(define ANIMATE-JUMP #t)    ;; animate the first capture as slide frames
+
+(define W 320)              ;; SD width
+(define H 240)              ;; SD height
+
+;; board geometry on the SD screen: an 8x8 grid of 26px squares, offset so it
+;; sits centered-ish with room for a HUD strip at the top.
+(define SQ   26)            ;; square size in pixels
+(define OX   56)            ;; board origin x
+(define OY   20)            ;; board origin y
+
+;; =======================  BOARD STATE  =======================
+;; The board is a length-64 VECTOR (O(1) reads — no list nth in the hot loop).
+;; Index = row*8 + col, row 0 at the TOP of the screen, row 7 at the bottom.
+;; Cell values:
+;;   0 = empty
+;;   1 = RED man    2 = RED king      (RED starts at the BOTTOM, moves UP)
+;;   3 = BLACK man  4 = BLACK king    (BLACK starts at the TOP, moves DOWN)
+;; Playable squares are the DARK squares: (odd? (+ row col)).
+
+;; =======================  CHARM PASS: SOUND  =======================
+;; A short opening theme and a small sound on each event — a slide, a capture, a
+;; crowning, the result. The audio verbs are REAL (tone note sfx music melody)
+;; but on a headless run there is no speaker, so they simply do nothing. The
+;; SHAPE is what teaches; on a real surface these same calls sing.
+;;
+;; TEACHING IDEA — "guard your nice-extras so they can never crash the core."
+;; Sound is a bonus, not the game. Every audio call goes through one small
+;; wrapper, (safe ...), and one flag, SOUND-ON. Turn it off and the game plays
+;; on in silence, unchanged. A seatbelt for extras: it only ever helps.
+(define SOUND-ON #t)
+(define (safe thunk) (when SOUND-ON (thunk)) #t)
+
+(define (play-theme!)                            ;; a rising major chord, "here we go!"
+  (safe (lambda ()
+    (music 'chk-theme)
+    (melody (list 60 64 67 72) 0.12))))          ;; C4 E4 G4 C5
+
+(define (sfx-slide!)                              ;; a quiet click as a man slides
+  (safe (lambda () (sfx 'blip 440 0.04))))
+(define (sfx-capture!)                            ;; a jump lands — a bright chime
+  (safe (lambda () (note 76 0.10 0.7))))
+(define (sfx-crown!)                              ;; a man reaches the far row — a flourish
+  (safe (lambda () (melody (list 72 76 79) 0.09))))
+(define (sfx-win! side)                           ;; result: rising for RED, gentle for BLACK
+  (safe (lambda ()
+    (cond ((eq? side 'red)   (melody (list 67 72 76) 0.12))
+          ((eq? side 'black) (melody (list 55 52 48) 0.14))
+          (else              (tone 330 0.30))))))    ;; a flat draw tone
+
+;; =======================  CHARM PASS: PALETTE  =======================
+;; TEACHING IDEA — name your constants. Now "the dark square" is a word, not the
+;; number 4, and restyling the whole board is a one-line edit right here.
+(define COL-SPACE  0)    ;; black background wash behind the board
+(define COL-STARS  13)   ;; lavender speckle
+(define COL-LIGHT  15)   ;; peach (light square)
+(define COL-DARK   4)    ;; brown (dark, playable square)
+(define COL-RED    8)    ;; RED man
+(define COL-BLACK  1)    ;; BLACK man
+(define COL-CROWN  10)   ;; king crown
+
+(define EMPTY 0)
+(define R-MAN 1) (define R-KING 2)
+(define B-MAN 3) (define B-KING 4)
+
+(define BOARD (make-vector 64 EMPTY))
+
+(define (idx r c) (+ (* r 8) c))
+(define (bref r c) (vector-ref BOARD (idx r c)))
+(define (bset! r c v) (vector-set! BOARD (idx r c) v))
+
+(define (on-board? r c) (and (>= r 0) (< r 8) (>= c 0) (< c 8)))
+(define (dark? r c) (odd? (+ r c)))
+
+(define (empty? v)  (= v EMPTY))
+(define (red? v)    (or (= v R-MAN) (= v R-KING)))
+(define (black? v)  (or (= v B-MAN) (= v B-KING)))
+(define (king? v)   (or (= v R-KING) (= v B-KING)))
+(define (man? v)    (or (= v R-MAN) (= v B-MAN)))
+(define (side-of v) (cond ((red? v) 'red) ((black? v) 'black) (else #f)))
+(define (foe? v side)
+  (cond ((eq? side 'red) (black? v))
+        ((eq? side 'black) (red? v))
+        (else #f)))
+
+;; set up the standard opening: 12 men each on the dark squares of the outer
+;; three rows. BLACK on top rows 0..2, RED on bottom rows 5..7.
+(define (setup!)
+  (let loop ((r 0))
+    (when (< r 8)
+      (let loop2 ((c 0))
+        (when (< c 8)
+          (when (dark? r c)
+            (cond ((<= r 2) (bset! r c B-MAN))
+                  ((>= r 5) (bset! r c R-MAN))
+                  (else     (bset! r c EMPTY))))
+          (loop2 (+ c 1))))
+      (loop (+ r 1)))))
+
+;; =======================  MOVE GENERATION  =======================
+;; A move is a list: (from-r from-c to-r to-c captured-list) where
+;; captured-list is a list of (r c) squares removed by this move (empty for a
+;; quiet slide, one+ for a jump chain).
+
+(define (mv fr fc tr tc caps) (list fr fc tr tc caps))
+(define (mv-fr m) (car m))
+(define (mv-fc m) (car (cdr m)))
+(define (mv-tr m) (car (cdr (cdr m))))
+(define (mv-tc m) (car (cdr (cdr (cdr m)))))
+(define (mv-caps m) (car (cdr (cdr (cdr (cdr m))))))
+(define (jump? m) (not (null? (mv-caps m))))
+
+;; forward directions for a piece value: men are one-way, kings both ways.
+;; RED moves UP (row -1); BLACK moves DOWN (row +1).
+(define (dirs-for v)
+  (cond ((= v R-MAN)  '((-1 -1) (-1 1)))
+        ((= v B-MAN)  '(( 1 -1) ( 1 1)))
+        ((king? v)    '((-1 -1) (-1 1) ( 1 -1) ( 1 1)))
+        (else '())))
+
+;; all single-step jumps available FROM (r c) given the piece there.
+;; Returns a list of moves (each capturing exactly one piece here; chaining is
+;; handled by expand-jumps below).
+(define (one-jumps r c v)
+  (let ((side (side-of v)))
+    (let loop ((ds (dirs-for v)) (acc '()))
+      (if (null? ds) (reverse acc)
+          (let* ((d (car ds)) (dr (car d)) (dc (car (cdr d)))
+                 (mr (+ r dr)) (mc (+ c dc))          ;; the jumped square
+                 (tr (+ r (* 2 dr))) (tc (+ c (* 2 dc))))  ;; landing
+            (if (and (on-board? tr tc)
+                     (empty? (bref tr tc))
+                     (foe? (bref mr mc) side))
+                (loop (cdr ds) (cons (mv r c tr tc (list (list mr mc))) acc))
+                (loop (cdr ds) acc)))))))
+
+;; all quiet slides FROM (r c).
+(define (one-slides r c v)
+  (let loop ((ds (dirs-for v)) (acc '()))
+    (if (null? ds) (reverse acc)
+        (let* ((d (car ds)) (dr (car d)) (dc (car (cdr d)))
+               (tr (+ r dr)) (tc (+ c dc)))
+          (if (and (on-board? tr tc) (empty? (bref tr tc)))
+              (loop (cdr ds) (cons (mv r c tr tc '()) acc))
+              (loop (cdr ds) acc))))))
+
+;; Expand a piece's jumps into full CHAINS (multi-jumps) WITHOUT copying the
+;; board — the fuel-cheap way. We walk the jump tree carrying the current
+;; landing square and the list of squares captured so far. A square already in
+;; `caps` is treated as empty (its piece is gone); every landing square along a
+;; chain was empty on the live board to begin with, so no mutation is needed.
+;; A jump is "done" when no further jump is available from the landing square.
+
+(define (captured? r c caps)
+  (let loop ((cs caps))
+    (cond ((null? cs) #f)
+          ((and (= (car (car cs)) r) (= (car (cdr (car cs))) c)) #t)
+          (else (loop (cdr cs))))))
+
+;; recursive chain walk. (r c) = current square of the moving piece (value v),
+;; caps = squares captured so far this turn. Returns a list of (to-r to-c caps)
+;; endpoints; each is a complete chain from the ORIGIN.
+(define (walk-jumps r c v caps side)
+  (let loop ((ds (dirs-for v)) (ends '()))
+    (if (null? ds)
+        ends
+        (let* ((d (car ds)) (dr (car d)) (dc (car (cdr d)))
+               (mr (+ r dr)) (mc (+ c dc))            ;; jumped square
+               (tr (+ r (* 2 dr))) (tc (+ c (* 2 dc))))  ;; landing
+          (if (and (on-board? tr tc)
+                   ;; landing must be empty on live board and not the origin's
+                   ;; captured trail (chains never cross their own captures)
+                   (empty? (bref tr tc))
+                   (not (captured? tr tc caps))
+                   ;; jumped square holds a live enemy not already captured
+                   (foe? (bref mr mc) side)
+                   (not (captured? mr mc caps)))
+              (let* ((ncaps (cons (list mr mc) caps))
+                     ;; American rule: a man crowned mid-jump STOPS.
+                     (crowned (and (man? v)
+                                   (or (and (= v R-MAN) (= tr 0))
+                                       (and (= v B-MAN) (= tr 7)))))
+                     (more (if crowned '() (walk-jumps tr tc v ncaps side))))
+                (loop (cdr ds)
+                      (if (null? more)
+                          (cons (list tr tc ncaps) ends)  ;; leaf endpoint
+                          (append more ends))))            ;; deeper endpoints
+              (loop (cdr ds) ends))))))
+
+;; produce every full jump chain starting from (r c) with piece v, as moves.
+(define (chains-from r c v)
+  (let ((side (side-of v)))
+    (map (lambda (e) (mv r c (car e) (car (cdr e)) (reverse (car (cdr (cdr e))))))
+         (walk-jumps r c v '() side))))
+
+;; ALL legal moves for a side, honoring the FORCED-CAPTURE rule: if any jump
+;; exists anywhere for the side, only jumps are legal.
+;;
+;; Fuel note: only the 32 DARK squares can ever hold a piece, so we walk those
+;; 32 indices directly (a precomputed list) instead of all 64 cells, and we
+;; cons results in place — order does not matter for legality. This roughly
+;; halves the per-call cost, which the shallow search leans on heavily.
+(define DARK-CELLS
+  (let loop ((i 0) (acc '()))
+    (if (>= i 64) (reverse acc)
+        (let ((r (quotient i 8)) (c (remainder i 8)))
+          (loop (+ i 1) (if (odd? (+ r c)) (cons i acc) acc))))))
+
+(define (legal-moves side)
+  (let loop ((cells DARK-CELLS) (jumps '()) (slides '()) (any-jump #f))
+    (if (null? cells)
+        (if any-jump jumps slides)
+        (let* ((i (car cells)) (v (vector-ref BOARD i)))
+          (if (eq? (side-of v) side)
+              (let* ((r (quotient i 8)) (c (remainder i 8))
+                     (js (chains-from r c v)))
+                (if (null? js)
+                    ;; no jump from here; only keep the slides if no jump has
+                    ;; been seen anywhere yet (we may still discard them later)
+                    (loop (cdr cells) jumps
+                          (if any-jump slides (append (one-slides r c v) slides))
+                          any-jump)
+                    (loop (cdr cells) (append js jumps) slides #t)))
+              (loop (cdr cells) jumps slides any-jump))))))
+
+;; =======================  APPLY A MOVE (for real, on BOARD)  =======================
+;; returns a fully-formed move actually applied, with crowning. Mutates BOARD.
+(define (apply-move! m)
+  (let* ((fr (mv-fr m)) (fc (mv-fc m)) (tr (mv-tr m)) (tc (mv-tc m))
+         (v (bref fr fc)))
+    (bset! fr fc EMPTY)
+    (for-each (lambda (rc) (bset! (car rc) (car (cdr rc)) EMPTY)) (mv-caps m))
+    ;; crown on reaching the far row
+    (let ((nv (cond ((and (= v R-MAN) (= tr 0)) R-KING)
+                    ((and (= v B-MAN) (= tr 7)) B-KING)
+                    (else v))))
+      (bset! tr tc nv)
+      (not (= nv v)))))  ;; #t if a crown just happened
+
+;; apply-with-undo!: play move m, returning a restore list of (index . old)
+;; pairs so the search can undo it cheaply (a move touches only a few squares,
+;; far cheaper than copying the whole 64-vector every node).
+;; NOTE: this Scheme does not carry dotted pairs — (cons a b) with a non-list b
+;; behaves like a list cell, so undo records are 2-element LISTS (index old).
+(define (apply-with-undo! m)
+  (let* ((fr (mv-fr m)) (fc (mv-fc m)) (tr (mv-tr m)) (tc (mv-tc m))
+         (fi (idx fr fc)) (ti (idx tr tc))
+         (v (vector-ref BOARD fi))
+         (undo (list (list fi v) (list ti (vector-ref BOARD ti)))))
+    (vector-set! BOARD fi EMPTY)
+    (let ((u2 (let loop ((cs (mv-caps m)) (acc undo))
+                (if (null? cs) acc
+                    (let ((ci (idx (car (car cs)) (car (cdr (car cs))))))
+                      (let ((rec (list ci (vector-ref BOARD ci))))
+                        (vector-set! BOARD ci EMPTY)
+                        (loop (cdr cs) (cons rec acc))))))))
+      (let ((nv (cond ((and (= v R-MAN) (= tr 0)) R-KING)
+                      ((and (= v B-MAN) (= tr 7)) B-KING)
+                      (else v))))
+        (vector-set! BOARD ti nv))
+      u2)))
+
+(define (undo! undo)
+  (for-each (lambda (p) (vector-set! BOARD (car p) (car (cdr p)))) undo))
+
+;; =======================  EVALUATION  =======================
+;; material from RED's point of view: +man, +2*king for RED; negative for BLACK.
+(define KING-VALUE 2)
+(define (material)
+  (let loop ((i 0) (acc 0))
+    (if (>= i 64) acc
+        (let ((v (vector-ref BOARD i)))
+          (loop (+ i 1)
+                (cond ((= v R-MAN)  (+ acc 1))
+                      ((= v R-KING) (+ acc KING-VALUE))
+                      ((= v B-MAN)  (- acc 1))
+                      ((= v B-KING) (- acc KING-VALUE))
+                      (else acc)))))))
+
+;; score from the moving side's perspective (higher = better for `side`).
+(define (eval-for side) (if (eq? side 'red) (material) (- (material))))
+(define (other side) (if (eq? side 'red) 'black 'red))
+
+;; count pieces per side (men + kings), returns (men kings)
+(define (count-side side)
+  (let loop ((i 0) (men 0) (kings 0))
+    (if (>= i 64) (list men kings)
+        (let ((v (vector-ref BOARD i)))
+          (cond ((and (eq? side 'red) (= v R-MAN))   (loop (+ i 1) (+ men 1) kings))
+                ((and (eq? side 'red) (= v R-KING))  (loop (+ i 1) men (+ kings 1)))
+                ((and (eq? side 'black) (= v B-MAN)) (loop (+ i 1) (+ men 1) kings))
+                ((and (eq? side 'black) (= v B-KING))(loop (+ i 1) men (+ kings 1)))
+                (else (loop (+ i 1) men kings)))))))
+
+;; =======================  SEARCH  =======================
+;; Negamax with alpha-beta. Depth is small (1..3) and the move list is bounded,
+;; so a move costs little fuel. Operates on scratch copies of BOARD.
+(define SEARCH-CAP 10)   ;; consider at most this many moves per node (bound fuel)
+
+(define (take lst n)
+  (cond ((or (null? lst) (<= n 0)) '())
+        (else (cons (car lst) (take (cdr lst) (- n 1))))))
+
+;; negamax returns the best score for `side` to move at this position.
+(define (negamax side depth alpha beta)
+  (let ((moves (legal-moves side)))
+    (cond
+      ((null? moves) -1000)                 ;; side to move is stuck => it loses
+      ((<= depth 0) (eval-for side))
+      (else
+       ;; jumps naturally sort first (legal-moves returns them exclusively when
+       ;; forced); bound the branching factor for fuel safety.
+       (let loop ((ms (take moves SEARCH-CAP)) (best -100000) (a alpha))
+         (if (null? ms) best
+             (let* ((m (car ms))
+                    (undo (apply-with-undo! m))
+                    (score (- (negamax (other side) (- depth 1) (- beta) (- a)))))
+               (undo! undo)
+               (let* ((nb (max best score))
+                      (na (max a score)))
+                 (if (>= na beta)
+                     nb                        ;; beta cutoff (alpha-beta prune)
+                     (loop (cdr ms) nb na))))))))))
+
+;; depth for the RED (Motoi) seat by LEVEL.
+(define (level-depth)
+  (cond ((eq? LEVEL 'easy) 0)     ;; greedy only — handled specially below
+        ((eq? LEVEL 'hard) 3)
+        (else 2)))
+
+;; RED move picker. 'easy = greedy (biggest capture else first slide);
+;; 'normal/'hard = alpha-beta of the appropriate depth.
+(define (pick-red-move)
+  (let ((moves (legal-moves 'red)))
+    (cond
+      ((null? moves) #f)
+      ((eq? LEVEL 'easy)
+       ;; greedy: prefer the move capturing the MOST pieces, else the first.
+       (let loop ((ms (cdr moves)) (best (car moves)) (bn (length (mv-caps (car moves)))))
+         (if (null? ms) best
+             (let ((n (length (mv-caps (car ms)))))
+               (if (> n bn) (loop (cdr ms) (car ms) n)
+                            (loop (cdr ms) best bn))))))
+      (else
+       (let ((depth (level-depth)))
+         (let loop ((ms (take moves SEARCH-CAP)) (best (car moves)) (bs -100000))
+           (if (null? ms) best
+               (let* ((m (car ms))
+                      (undo (apply-with-undo! m))
+                      (score (- (negamax 'black (- depth 1) -100000 100000))))
+                 (undo! undo)
+                 (if (> score bs) (loop (cdr ms) m score)
+                                  (loop (cdr ms) best bs))))))))))
+
+;; BLACK is the "club player": a simpler readable opponent so the game plays
+;; the same every run. Forced captures still apply (legal-moves handles it);
+;; among choices it takes the biggest capture, else pushes the most-advanced
+;; man forward (toward crowning), else the first legal slide.
+(define (pick-black-move)
+  (let ((moves (legal-moves 'black)))
+    (cond
+      ((null? moves) #f)
+      (else
+       (let loop ((ms (cdr moves)) (best (car moves))
+                  (bscore (black-move-score (car moves))))
+         (if (null? ms) best
+             (let ((s (black-move-score (car ms))))
+               (if (> s bscore) (loop (cdr ms) (car ms) s)
+                                (loop (cdr ms) best bscore)))))))))
+
+(define (black-move-score m)
+  ;; captures dominate; then reward moving down the board (toward row 7).
+  (+ (* 100 (length (mv-caps m)))
+     (mv-tr m)))                          ;; larger to-row = further advanced
+
+;; =======================  RENDER (SD framebuffer)  =======================
+;; light squares = peach (15), dark playable squares = brown (4).
+;; RED men = red disc (8) with dark outline; BLACK men = dark-blue disc (1).
+;; kings get a small ring-crown on top in yellow.
+
+(define (square-cx c) (+ OX (* c SQ) (quotient SQ 2)))
+(define (square-cy r) (+ OY (* r SQ) (quotient SQ 2)))
+
+;; A calm, seed-driven starfield in the side margins around the board — drawn
+;; from the LCG constants (not the clock) so it is identical every run. The board
+;; is fixed (no SEED knob here), so we seed the speckle from a fixed constant.
+(define STAR-SEED 20260730)
+(define (draw-background)
+  (clear COL-SPACE)
+  (let loop ((n 0) (s STAR-SEED))
+    (when (< n 34)
+      (let* ((s2 (modulo (+ (* s 1103515245) 12345) 2147483648))
+             (x  (modulo s2 W))
+             (s3 (modulo (+ (* s2 1103515245) 12345) 2147483648))
+             (y  (modulo s3 H)))
+        ;; keep stars OFF the board so they never fight the pieces for attention
+        (when (or (< x (- OX 2)) (> x (+ OX (* 8 SQ) 2)))
+          (pset x y COL-STARS))
+        (loop (+ n 1) s3)))))
+
+;; TEACHING IDEA — a title screen is just ANOTHER drawing; the same verbs that
+;; paint the board paint the splash. Order: show title, play the theme, then go.
+(define (draw-title)
+  (draw-background)
+  (set-color 0)       (rect-fill 34 66 252 66)        ;; drop shadow
+  (set-color COL-DARK)(rect-fill 30 62 252 66)        ;; banner
+  (set-color 6)       (rect 30 62 252 66)
+  (fb/text "C H E C K E R S" 92 82 'yellow)
+  (fb/text "Motoi  vs  club" 116 100 'white)
+  ;; a scrap of art: a red man and a crowned black man
+  (set-color COL-RED)   (disc 140 132 10)
+  (set-color COL-BLACK) (disc 178 132 10)
+  (set-color COL-CROWN) (ring 178 132 7 4)
+  (fb/text "* PRESS START *" 106 168 'green)
+  (fb/text "setting up..." 120 186 'lavender))
+
+(define (draw-board)
+  (draw-background)                         ;; black void + a starfield in the margins
+  ;; squares
+  (let loop ((r 0))
+    (when (< r 8)
+      (let loop2 ((c 0))
+        (when (< c 8)
+          (set-color (if (dark? r c) 4 15))
+          (rect-fill (+ OX (* c SQ)) (+ OY (* r SQ)) SQ SQ)
+          (loop2 (+ c 1)))
+        )
+      (loop (+ r 1)))))
+
+(define (draw-piece r c v)
+  (let ((cx (square-cx c)) (cy (square-cy r)) (rad (- (quotient SQ 2) 3)))
+    ;; body
+    (set-color (if (red? v) COL-RED COL-BLACK))
+    (disc cx cy rad)
+    ;; rim
+    (set-color (if (red? v) 2 0))
+    (circle cx cy rad)
+    (circle cx cy (- rad 1))
+    ;; one bright inner ring = a cheap "shine" that reads as depth
+    (set-color (if (red? v) 14 12))
+    (circle cx cy (- rad 4))
+    ;; king crown: a small yellow ring on top of the disc
+    (when (king? v)
+      (set-color COL-CROWN)
+      (ring cx cy (- rad 3) (- rad 6))
+      (star-fill cx cy 4 2 5 0 10))))
+
+(define (draw-pieces)
+  (let loop ((i 0))
+    (when (< i 64)
+      (let ((v (vector-ref BOARD i)))
+        (unless (empty? v)
+          (draw-piece (quotient i 8) (remainder i 8) v)))
+      (loop (+ i 1)))))
+
+(define (draw-hud ply)
+  (let* ((rc (count-side 'red)) (bc (count-side 'black)))
+    (set-color 0) (rect-fill 0 0 W OY)
+    (fb/text "CHECKERS" 4 6 'yellow)
+    (fb/text (string-append "RED " (number->string (+ (car rc) (car (cdr rc)))))
+             120 6 'red)
+    (fb/text (string-append "BLK " (number->string (+ (car bc) (car (cdr bc)))))
+             200 6 'blue)
+    (fb/text (string-append "PLY " (number->string ply)) 264 6 'white)))
+
+(define (render! ply)
+  (draw-board)
+  (draw-pieces)
+  (draw-hud ply))
+
+;; flash a captured square (draw an X of lines) — used in the jump animation.
+(define (flash-square r c)
+  (let ((x (+ OX (* c SQ))) (y (+ OY (* r SQ))))
+    (set-color 10)
+    (line x y (+ x SQ) (+ y SQ))
+    (line (+ x SQ) y x (+ y SQ))
+    (rect x y SQ SQ)))
+
+;; animate a single jump as two interpolated slide frames of the moving disc
+;; travelling from `from` to `to`, with the captured square flashed. This is a
+;; VISUAL flourish only — the real board mutation happens in apply-move!.
+;; Fuel-aware: we render the full board ONCE, then paint the two interpolation
+;; frames as light overlays (moving disc + capture flash) on top of it — no
+;; full re-render per frame.
+(define (animate-jump! m v ply)
+  (let* ((fr (mv-fr m)) (fc (mv-fc m)) (tr (mv-tr m)) (tc (mv-tc m))
+         (fx (square-cx fc)) (fy (square-cy fr))
+         (tx (square-cx tc)) (ty (square-cy tr))
+         (rad (- (quotient SQ 2) 3)))
+    (render! ply)
+    ;; flash every captured square (the pieces being jumped)
+    (for-each (lambda (rc) (flash-square (car rc) (car (cdr rc)))) (mv-caps m))
+    (let loop ((k 1))
+      (when (<= k 2)
+        (let* ((t (/ k 3))
+               (px (+ fx (* t (- tx fx))))
+               (py (+ fy (* t (- ty fy)))))
+          (set-color (if (red? v) 8 1))
+          (disc px py rad)
+          (set-color 10)
+          (circle px py rad))
+        (loop (+ k 1))))))
+
+;; =======================  DRIVER  =======================
+
+(set-mode 'sd)                             ;; the SD framebuffer (added by charm pass)
+
+(setup!)
+
+(display "=== CHECKERS — Motoi SD (320x240) — American/English draughts ===")
+(newline)
+(display "RED = Motoi AI (LEVEL ") (display LEVEL)
+(display ")   BLACK = readable club player") (newline)
+(display "forced captures ON, multi-jumps chain, back row crowns a king")
+(newline) (newline)
+
+;; a small ASCII board so every SHOW-EVERY ply is readable in plain stdout.
+(define (glyph v)
+  (cond ((= v R-MAN) "r") ((= v R-KING) "R")
+        ((= v B-MAN) "b") ((= v B-KING) "B")
+        (else ".")))
+(define (print-ascii)
+  (let loop ((r 0))
+    (when (< r 8)
+      (display "  ")
+      (let loop2 ((c 0))
+        (when (< c 8)
+          (display (if (dark? r c) (glyph (bref r c)) " "))
+          (display " ")
+          (loop2 (+ c 1))))
+      (newline)
+      (loop (+ r 1)))))
+
+(define (move->str m)
+  (string-append
+   "(" (number->string (mv-fr m)) "," (number->string (mv-fc m)) ")->"
+   "(" (number->string (mv-tr m)) "," (number->string (mv-tc m)) ")"
+   (if (jump? m)
+       (string-append " x" (number->string (length (mv-caps m))))
+       "")))
+
+;; whether we've spent our one jump-animation yet
+(define animated #f)
+;; whether we've dumped our one screenshot yet
+(define dumped #f)
+
+;; SPLASH FIRST: draw the title frame, sound the theme, THEN play. This is the
+;; ONE extra dump the charm layer allows — the loading screen, not a per-ply dump.
+(play-theme!)
+(draw-title)
+(display "--- SD title screen ---") (newline)
+(fb/dump 0 0 W H)
+(newline)
+
+;; run the game
+(let loop ((ply 1) (side 'red))
+  (let ((m (if (eq? side 'red) (pick-red-move) (pick-black-move))))
+    (cond
+      ;; the side to move has no legal move -> it loses
+      ((not m)
+       (sfx-win! (if (eq? side 'red) 'black 'red))    ;; the OTHER side wins
+       (newline)
+       (display "  ") (display side)
+       (display " has no legal move.  ")
+       (display (if (eq? side 'red) "BLACK WINS." "RED WINS."))
+       (newline))
+      ;; move cap reached -> adjudicate by material
+      ((> ply MAX-MOVES)
+       (sfx-win! (let ((mat (material)))
+                   (cond ((> mat 0) 'red) ((< mat 0) 'black) (else 'draw))))
+       (newline)
+       (let ((mat (material)))
+         (display "  move cap reached (") (display MAX-MOVES)
+         (display " plies). adjudicating by material: ")
+         (display (cond ((> mat 0) "RED AHEAD -> RED WINS.")
+                        ((< mat 0) "BLACK AHEAD -> BLACK WINS.")
+                        (else "EVEN -> DRAW.")))
+         (display "  (material=") (display mat) (display ")")
+         (newline)))
+      (else
+       (let ((v (bref (mv-fr m) (mv-fc m))))
+         ;; animate the FIRST jump we see, once
+         (when (and ANIMATE-JUMP (jump? m) (not animated))
+           (set! animated #t)
+           (animate-jump! m v ply)
+           (display "  ~ animated jump ") (display (move->str m))
+           (display " (captured ") (display (length (mv-caps m)))
+           (display ") — flashed the taken square") (newline))
+         ;; apply for real
+         (let ((crowned (apply-move! m)))
+           ;; a small sound per event: capture, crown, or a quiet slide
+           (cond ((jump? m) (sfx-capture!))
+                 (else      (sfx-slide!)))
+           (when crowned (sfx-crown!))
+           ;; compact move log
+           (when (or (jump? m) crowned (= (modulo ply SHOW-EVERY) 0))
+             (display "  ply ") (display ply) (display "  ")
+             (display (if (eq? side 'red) "RED  " "BLACK"))
+             (display "  ") (display (move->str m))
+             (when crowned (display "  ***CROWNED***"))
+             (newline))
+           ;; periodic ASCII board + counts
+           (when (= (modulo ply SHOW-EVERY) 0)
+             (let ((rc (count-side 'red)) (bc (count-side 'black)))
+               (display "    RED ") (display (car rc)) (display "m+")
+               (display (car (cdr rc))) (display "k   BLACK ")
+               (display (car bc)) (display "m+") (display (car (cdr bc)))
+               (display "k") (newline))
+             (print-ascii))
+           ;; ONE SD screenshot mid-game
+           (when (and (>= ply DUMP-PLY) (not dumped))
+             (set! dumped #t)
+             (render! ply)
+             (newline)
+             (display "--- SD screenshot @ ply ") (display ply) (display " ---")
+             (newline)
+             (fb/dump 0 0 W H)
+             (newline)))
+         (loop (+ ply 1) (other side)))))))
+
+(newline)
+(display "Fork it: change LEVEL ('easy 'normal 'hard) to face a stronger Motoi,")
+(newline)
+(display "or replace pick-black-move with live clicks to sit in the BLACK seat.")
+(newline)

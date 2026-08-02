@@ -1,0 +1,487 @@
+;; connect-four.sks
+;; Motoi Cart — Flagship (SD framebuffer)
+;;
+;; (cart
+;;   :name            "connect-four"
+;;   :category        :game
+;;   :sub-category    :board
+;;   :audience        :kid
+;;   :complexity      4
+;;   :runtime-tier    :runs-on-core
+;;   :render          :sd-framebuffer
+;;   :one-line        "Drop discs down a 7x6 board and race Motoi to four-in-a-row — a readable threat-hunting brain with straight and adaptive plans, drawn on the 320x240 screen."
+;;   :verbs-used      ("set-mode" "clear" "set-color" "rect-fill" "rect" "disc"
+;;                     "circle" "line" "fb/text" "fb/dump" "make-vector" "vector-ref"
+;;                     "vector-set!" "vector" "quotient" "remainder" "modulo" "abs"
+;;                     "min" "max" "number->string" "string-append" "eq?" "cons"
+;;                     "car" "cdr" "list" "length" "reverse" "for-each" "map"
+;;                     "when" "unless" "cond" "case" "let" "let*" "set!")
+;;   :inspiration     "Connect Four — the vertical-checkers race sold by Milton Bradley in 1974 and solved by hand in 1988: the first player always wins by starting dead center. Gravity turns a simple grid into a game of stacked threats.")
+;;
+;; HOW TO RUN:
+;;   motoi run carts/connect-four.sks
+;;
+;; WHAT THIS IS
+;;   Connect Four on Motoi's real SD screen (320x240). The board is one vector of
+;;   42 cells — 7 columns wide, 6 rows tall — where 0 is empty, 1 is YOU (red) and
+;;   2 is MOTOI (yellow). You do not place a disc anywhere you like: you pick a
+;;   COLUMN and gravity drops the disc to the lowest empty cell. First to line up
+;;   four in a row — across, up, or on either diagonal — wins.
+;;
+;;   Because gravity does the placing, a "move" is just a number 0..6 (which
+;;   column). That makes the whole game cheap to think about: to decide, Motoi
+;;   only has to imagine dropping into each of the seven columns and score what it
+;;   sees. No deep search — a few readable rules.
+;;
+;; MOTOI AS YOUR OPPONENT — two brains you can switch (the fun part)
+;;   AI-PLAN 'straight  (default) — a FIXED, learnable plan, checked in order:
+;;     1. WIN NOW    — if a column gives Motoi four-in-a-row, take it.
+;;     2. BLOCK NOW  — else if a column would give YOU four next turn, jam it.
+;;     3. MAKE THREE — else prefer a drop that builds Motoi's own open three.
+;;     4. CENTER     — else lean toward the middle column, where lines cross most.
+;;   Predictable on purpose: watch it a few games and you can out-plan it.
+;;
+;;   AI-PLAN 'adaptive — the SAME four rules, but Motoi also WATCHES WHERE YOU
+;;   PLAY. It keeps a little tally of which side of the board you favor (left,
+;;   center, right). If you keep hammering one wing, it shades its center-bias
+;;   toward defending that wing early, and it grows quicker to block once it sees
+;;   you like to rush. It is not a perfect solver — it is a player forming a read
+;;   on you, the kind of adjustment you could say out loud.
+;;
+;;   LEVEL 'easy | 'normal | 'hard — how far the brain looks:
+;;     'easy   — the four rules above, and that is all.
+;;     'normal — also refuses a drop that hands YOU an immediate win on top of it
+;;               (it won't fill a column to set up your four).
+;;     'hard   — a one-ply peek: for its top choices it imagines your best reply
+;;               and avoids moves that let you win right back. It scans every reply
+;;               for every candidate, so it wants more fuel (--fuel 600000).
+;;   The DEFAULT ('straight + 'normal) finishes the sample game inside the default
+;;   200000 fuel budget; 'easy and 'normal both fit the default.
+;;
+;; NO KEYBOARD — how "you vs Motoi" is expressed
+;;   A headless cart has no keys, so both sides are driven by the engine. YOU (red)
+;;   follow a short fixed column-script — here a "right-side rusher" who keeps
+;;   piling into columns 5-6 — and MOTOI (yellow) is the brain above. That habit is
+;;   the point: watch 'straight Motoi camp the center and win in column 3, then
+;;   flip AI-PLAN to 'adaptive and watch it read your right-side lean and shift its
+;;   own build toward column 4 — the SAME script, two different games. On a real
+;;   surface you swap the script for a live "which column?" tap and leave Motoi as
+;;   your opponent at your chosen PLAN and LEVEL.
+
+;; =======================  KNOBS  =======================
+
+(define AI-PLAN 'straight)   ;; 'straight (fixed, learnable) | 'adaptive (reads you)
+(define LEVEL   'normal)     ;; 'easy 'normal 'hard — how far Motoi looks ahead.
+                            ;; DEFAULT ('straight + 'normal) fits 200000 fuel.
+                            ;; 'hard adds a one-ply reply scan and wants more fuel:
+                            ;;   motoi run carts/connect-four.sks --fuel 600000
+(define SEED    24601)       ;; deterministic tie-breaks; change for new games
+(define MAX-MOVES 42)        ;; hard cap = a full board; the game ends sooner on a win
+(define DUMP-AT 12)          ;; render one SD screenshot after this many discs land
+
+(define W 320)               ;; SD width
+(define H 240)               ;; SD height
+(define COLS 7)
+(define ROWS 6)
+
+;; board geometry (pixels)
+(define CELL 30)             ;; cell size; 7*30 = 210 wide, 6*30 = 180 tall
+(define BX 20)               ;; board top-left x
+(define BY 30)               ;; board top-left y
+(define RAD 12)              ;; disc radius
+
+;; =======================  DETERMINISTIC PRNG  =======================
+;; A tiny LCG so any tie-break is the same every run (see asteroids rnd).
+
+(define _seed SEED)
+(define (rnd)
+  (set! _seed (modulo (+ (* _seed 1103515245) 12345) 2147483648))
+  (/ _seed 2147483648))
+
+;; =======================  CHARM PASS: SOUND  =======================
+;; A short opening theme and a tiny sound on each event — a drop, a block, a win.
+;; The audio verbs are REAL (tone note sfx music melody) but on a headless run
+;; there is no speaker, so they simply do nothing. The SHAPE is what teaches.
+;;
+;; TEACHING IDEA — "guard your nice-extras so they can never crash the core."
+;; Sound is a bonus, not the game. Every audio call goes through one small
+;; wrapper, (safe ...), and one flag, SOUND-ON. Turn the flag off and the game
+;; plays on in silence, unchanged. A seatbelt for your extras: it only helps.
+(define SOUND-ON #t)
+(define (safe thunk) (when SOUND-ON (thunk)) #t)
+
+;; opening motif — a rising major chord, "here we go!"
+(define (play-theme!)
+  (safe (lambda ()
+    (music 'c4-theme)
+    (melody (list 60 64 67 72) 0.12))))         ;; C4 E4 G4 C5
+
+;; one named helper per event so the driver reads like a sentence
+(define (sfx-drop! who)                          ;; a soft blip as a disc lands
+  (safe (lambda () (sfx 'blip (if (= who YOU) 520 392) 0.05))))
+(define (sfx-block!)                              ;; Motoi jams your threat — a chime
+  (safe (lambda () (note 76 0.10 0.7))))
+(define (sfx-win! w)                              ;; result jingle
+  (safe (lambda ()
+    (cond ((= w YOU) (melody (list 67 72 76) 0.12))    ;; bright win fanfare
+          ((= w AI)  (melody (list 55 52 48) 0.14))    ;; a gentle descent
+          (else      (tone 330 0.30))))))              ;; flat draw tone
+
+;; =======================  CHARM PASS: PALETTE  =======================
+;; TEACHING IDEA — name your constants. Now "the slab" is a word, not the number
+;; 12, and restyling the whole cart is a one-line edit right here.
+(define COL-SKY   0)    ;; black background wash behind the board
+(define COL-STARS 13)   ;; lavender speckle
+(define COL-SLAB  12)   ;; the classic blue Connect-Four board
+(define COL-YOU   8)    ;; red disc
+(define COL-AI    10)   ;; yellow disc
+(define COL-HOLE  1)    ;; empty hole
+(define COL-FRAME 7)    ;; white frame / highlights
+
+;; =======================  THE BOARD  =======================
+;; One vector of 42 cells.  index = row*COLS + col.  row 0 = TOP, row 5 = BOTTOM.
+;; Gravity fills from the bottom up.
+;;   0 = empty   1 = YOU (red)   2 = MOTOI (yellow)
+(define EMPTY 0)
+(define YOU   1)
+(define AI    2)
+
+(define BOARD (make-vector (* ROWS COLS) 0))
+(define (idx r c) (+ (* r COLS) c))
+(define (cell r c) (vector-ref BOARD (idx r c)))
+(define (set-cell! r c v) (vector-set! BOARD (idx r c) v))
+(define (in? r c) (and (>= r 0) (< r ROWS) (>= c 0) (< c COLS)))
+(define (other p) (if (= p YOU) AI YOU))
+
+;; lowest empty row in column c, or -1 if the column is full.
+(define (drop-row c)
+  (let loop ((r (- ROWS 1)))
+    (cond ((< r 0) -1)
+          ((= (cell r c) EMPTY) r)
+          (else (loop (- r 1))))))
+
+(define (col-open? c) (>= (drop-row c) 0))
+
+;; place / lift a disc in column c for player p; return the row it landed in.
+(define (place! c p)
+  (let ((r (drop-row c)))
+    (when (>= r 0) (set-cell! r c p))
+    r))
+(define (lift! c r) (when (>= r 0) (set-cell! r c EMPTY)))
+
+;; =======================  LINE COUNTING  =======================
+;; The four ray directions we test for four-in-a-row.
+(define DIRS (list (list 0 1) (list 1 0) (list 1 1) (list 1 -1)))
+
+;; count same-player discs stepping (dr,dc) from (r,c), NOT counting (r,c).
+(define (run-len r c dr dc p)
+  (let loop ((rr (+ r dr)) (cc (+ c dc)) (n 0))
+    (if (and (in? rr cc) (= (cell rr cc) p))
+        (loop (+ rr dr) (+ cc dc) (+ n 1))
+        n)))
+
+;; would a disc for p at (r,c) complete four-in-a-row?  (r,c) must already hold p.
+(define (makes-four? r c p)
+  (let loop ((ds DIRS))
+    (cond ((null? ds) #f)
+          (else
+           (let* ((d (car ds)) (dr (car d)) (dc (car (cdr d)))
+                  (total (+ 1 (run-len r c dr dc p)
+                            (run-len r c (- 0 dr) (- 0 dc) p))))
+             (if (>= total 4) #t (loop (cdr ds))))))))
+
+;; the longest line length p would own THROUGH (r,c) (for open-three scoring).
+(define (best-line r c p)
+  (let loop ((ds DIRS) (best 1))
+    (cond ((null? ds) best)
+          (else
+           (let* ((d (car ds)) (dr (car d)) (dc (car (cdr d)))
+                  (total (+ 1 (run-len r c dr dc p)
+                            (run-len r c (- 0 dr) (- 0 dc) p))))
+             (loop (cdr ds) (max best total)))))))
+
+;; The game-over test is done INCREMENTALLY, not by scanning the whole board each
+;; turn.  A four-in-a-row can only be completed by the disc that just landed, so
+;; we test `makes-four?` on that single cell at drop time and remember the WINNER.
+;; A per-ply 42-cell x 4-direction scan is far too much fuel in this interpreter;
+;; this is the single most important fuel decision in the cart.
+(define WINNER 0)   ;; 0 = nobody yet, else YOU or AI
+
+(define (board-full?)
+  (let loop ((c 0)) (cond ((>= c COLS) #t) ((col-open? c) #f) (else (loop (+ c 1))))))
+
+;; =======================  MOTOI'S BRAIN  =======================
+;; Everything is "imagine the drop, look, put it back".  Bounded: at most COLS
+;; imagined drops per decision (plus a shallow peek at 'hard), so a move is cheap.
+
+;; If p drops in column c, do they win immediately?
+(define (winning-drop? c p)
+  (let ((r (place! c p)))
+    (if (< r 0) #f
+        (let ((w (makes-four? r c p))) (lift! c r) w))))
+
+;; The longest line p would build by dropping in column c (>=1, 4 means a win).
+(define (line-after c p)
+  (let ((r (place! c p)))
+    (if (< r 0) 0
+        (let ((n (best-line r c p))) (lift! c r) n))))
+
+;; After p drops in c, does the cell ON TOP hand the OTHER player an instant win?
+;; (used by 'normal / 'hard so Motoi won't build your ladder for you.)
+(define (opens-win-above? c p)
+  (let ((r (place! c p)))
+    (if (< r 0) #f
+        (let ((bad (and (> r 0) (winning-drop-at? (- r 1) c (other p)))))
+          (lift! c r) bad))))
+
+;; would placing OTHER's disc at the specific cell (r,c) win for them? helper.
+(define (winning-drop-at? r c p)
+  (set-cell! r c p)
+  (let ((w (makes-four? r c p))) (set-cell! r c EMPTY) w))
+
+;; --- adaptive read: a tiny record of where YOU tend to play -----------------
+;; counts of your drops in the left third (cols 0-1), center (2-4), right (5-6),
+;; and how many total moves you've made (aggression grows the block-eagerness).
+(define YOU-LEFT 0)
+(define YOU-MID  0)
+(define YOU-RIGHT 0)
+(define YOU-MOVES 0)
+
+(define (note-your-move! c)
+  (set! YOU-MOVES (+ YOU-MOVES 1))
+  (cond ((<= c 1) (set! YOU-LEFT (+ YOU-LEFT 1)))
+        ((>= c 5) (set! YOU-RIGHT (+ YOU-RIGHT 1)))
+        (else (set! YOU-MID (+ YOU-MID 1)))))
+
+;; which wing does the human favor?  'left 'right or 'center (the default read).
+(define (favored-wing)
+  (cond ((and (> YOU-LEFT YOU-MID) (> YOU-LEFT YOU-RIGHT)) 'left)
+        ((and (> YOU-RIGHT YOU-MID) (> YOU-RIGHT YOU-LEFT)) 'right)
+        (else 'center)))
+
+;; center-preference weight for a column: normally peaks at the middle (col 3).
+;; In 'adaptive Motoi shades that preference toward the wing YOU favor, so it
+;; contests your side early instead of always camping the center.
+(define (center-weight c)
+  (let ((base (- 3 (abs (- c 3)))))          ;; 0..3, peak at col 3
+    (if (eq? AI-PLAN 'adaptive)
+        (let ((wing (favored-wing)))
+          (cond ((and (eq? wing 'left)  (<= c 2)) (+ base 2))
+                ((and (eq? wing 'right) (>= c 4)) (+ base 2))
+                (else base)))
+        base)))
+
+;; how eager is Motoi to block?  'straight is steady; 'adaptive blocks harder
+;; the more aggressively YOU have been playing (a readable rising guard).
+(define (block-bonus)
+  (if (and (eq? AI-PLAN 'adaptive) (>= YOU-MOVES 3)) 12000 9000))
+
+;; score a candidate column for MOTOI.  Higher = better.  -1 means "illegal".
+;; This is the whole heuristic, laid out in priority order so it reads top-down.
+(define (score-col c)
+  (cond
+    ((not (col-open? c)) -1000000)                 ;; can't play a full column
+    ((winning-drop? c AI) 1000000)                 ;; 1. WIN NOW
+    ((winning-drop? c YOU) (block-bonus))          ;; 2. BLOCK NOW (imagine YOUR drop here)
+    (else
+     (let* ((mine (line-after c AI))               ;; 3. MAKE THREE (own longest line)
+            (three (cond ((>= mine 3) 400) ((= mine 2) 120) (else 0)))
+            (ctr (* 10 (center-weight c)))         ;; 4. CENTER (or adaptive wing)
+            (jitter (quotient (modulo (* (+ c 1) _seed) 997) 100))  ;; tiny stable tie-break
+            (penalty
+             (cond
+               ;; 'normal and 'hard: don't drop where it hands YOU the cell above.
+               ((and (or (eq? LEVEL 'normal) (eq? LEVEL 'hard))
+                     (opens-win-above? c AI)) -8000)
+               (else 0))))
+       (+ three ctr jitter penalty)))))
+
+;; 'hard adds a one-ply peek: after Motoi's drop, subtract the value of YOUR
+;; best immediate reply, so it avoids moves that give you a strong answer.
+(define (hard-adjust c base)
+  (if (not (eq? LEVEL 'hard)) base
+      (let ((r (place! c AI)))
+        (if (< r 0) base
+            (let ((your-best
+                   (let loop ((cc 0) (b 0))
+                     (cond ((>= cc COLS) b)
+                           ((not (col-open? cc)) (loop (+ cc 1) b))
+                           ((winning-drop? cc YOU) (loop (+ cc 1) (max b 5000)))
+                           (else (loop (+ cc 1)
+                                       (max b (* 30 (line-after cc YOU)))))))))
+              (lift! c r)
+              (- base your-best))))))
+
+;; pick Motoi's column: score all seven, take the best (deterministic tie-break).
+(define (motoi-pick)
+  (let loop ((c 0) (bestc -1) (bestv -2000000))
+    (if (>= c COLS) bestc
+        (let ((v (hard-adjust c (score-col c))))
+          (if (> v bestv) (loop (+ c 1) c v) (loop (+ c 1) bestc bestv))))))
+
+;; =======================  THE HUMAN (scripted stand-in)  =======================
+;; A short fixed column-stream stands in for a real person's taps.  If a scripted
+;; column is full, fall back to the first open column so the game always proceeds.
+;; This stand-in human is a RIGHT-SIDE rusher: they keep piling into columns 5-6.
+;; Against 'straight Motoi that habit goes unpunished; against 'adaptive Motoi the
+;; read of your wing flips to R and Motoi starts contesting the right early — so
+;; the two plans visibly diverge on the very same script (try both).
+(define YOU-SCRIPT (list 5 6 5 6 5 4 6 3 5 2))
+(define you-idx 0)
+(define (list-nth xs k) (if (= k 0) (car xs) (list-nth (cdr xs) (- k 1))))
+
+(define (you-pick)
+  (let ((c (if (< you-idx (length YOU-SCRIPT))
+               (list-nth YOU-SCRIPT you-idx)
+               (modulo (* (+ you-idx 1) 3) COLS))))
+    (set! you-idx (+ you-idx 1))
+    (if (col-open? c)
+        c
+        (let loop ((k 0)) (cond ((>= k COLS) -1) ((col-open? k) k) (else (loop (+ k 1))))))))
+
+;; =======================  CHARM PASS: BACKGROUND + TITLE  =======================
+;; A calm, seed-driven starfield behind the slab gives depth for ~free. It is
+;; drawn from the LCG constants (not the clock) so it is the same every run, and
+;; kept up near the top strip so it never fights the board for attention.
+(define (draw-background)
+  (clear COL-SKY)
+  (let loop ((n 0) (s SEED))
+    (when (< n 36)
+      (let* ((s2 (modulo (+ (* s 1103515245) 12345) 2147483648))
+             (x  (modulo s2 W))
+             (s3 (modulo (+ (* s2 1103515245) 12345) 2147483648))
+             (y  (modulo s3 (- BY 6))))         ;; stars stay in the top sky band
+        (pset x y COL-STARS)
+        (loop (+ n 1) s3)))))
+
+;; TEACHING IDEA — a title screen is just ANOTHER drawing; the same verbs that
+;; paint the board paint the splash. Order: show title, play the theme, then go.
+(define (draw-title)
+  (draw-background)
+  (set-color COL-SKY)  (rect-fill 34 66 252 66)       ;; drop shadow
+  (set-color COL-SLAB) (rect-fill 30 62 252 66)       ;; blue banner
+  (set-color COL-FRAME)(rect 30 62 252 66)
+  (fb/text "CONNECT  FOUR" 96 82 'yellow)
+  (fb/text "you  vs  Motoi" 116 100 'white)
+  ;; a scrap of art: two stacked discs, one red one yellow
+  (set-color COL-YOU) (disc 150 130 9)
+  (set-color COL-AI)  (disc 174 130 9)
+  (fb/text "* PRESS START *" 106 168 'green)
+  (fb/text "dropping in..." 118 186 'lavender))
+
+;; =======================  RENDER (SD framebuffer)  =======================
+
+(define (disc-color p) (cond ((= p YOU) COL-YOU) ((= p AI) COL-AI) (else COL-HOLE)))
+
+(define (draw-board hi-r hi-c)
+  (draw-background)                                    ;; sky + stars behind the slab
+  ;; the classic blue board slab
+  (set-color COL-SLAB)
+  (rect-fill (- BX 6) (- BY 6) (+ (* COLS CELL) 12) (+ (* ROWS CELL) 12))
+  ;; the holes (empty = dark) and discs
+  (let loop ((r 0)) (when (< r ROWS)
+    (let loop2 ((c 0)) (when (< c COLS)
+      (let* ((cx (+ BX (* c CELL) (quotient CELL 2)))
+             (cy (+ BY (* r CELL) (quotient CELL 2)))
+             (p (cell r c)))
+        (set-color (disc-color p))
+        (disc cx cy RAD)
+        (when (and (= r hi-r) (= c hi-c))       ;; ring the disc that just landed
+          (set-color 7) (circle cx cy (+ RAD 2)))
+        (loop2 (+ c 1)))))
+    (loop (+ r 1))))
+  ;; column numbers under the board
+  (let loop ((c 0)) (when (< c COLS)
+    (fb/text (number->string c) (+ BX (* c CELL) 12) (+ BY (* ROWS CELL) 8) 'white)
+    (loop (+ c 1)))))
+
+(define (draw-hud moves last-col note)
+  (set-color 5) (rect-fill 244 30 74 180)
+  (fb/text "CONNECT" 250 34 'yellow)
+  (fb/text "FOUR" 250 46 'yellow)
+  (fb/text (string-append "plan " (if (eq? AI-PLAN 'adaptive) "adpt" "strt")) 250 66 'white)
+  (fb/text (string-append "lvl " (case LEVEL ((easy) "easy") ((hard) "hard") (else "norm")))
+           250 78 'white)
+  (fb/text (string-append "drops " (number->string moves)) 250 96 'white)
+  (fb/text (string-append "last c" (number->string last-col)) 250 108 'white)
+  (fb/text "read of you" 250 128 'lavender)
+  (fb/text (string-append "L" (number->string YOU-LEFT)
+                          " M" (number->string YOU-MID)
+                          " R" (number->string YOU-RIGHT)) 250 140 'white)
+  (fb/text (string-append "wing " (case (favored-wing) ((left) "L") ((right) "R") (else "C")))
+           250 152 'white)
+  (fb/text note 250 176 'green))
+
+;; =======================  DRIVER  =======================
+
+(set-mode 'sd)
+
+(display "=== CONNECT FOUR — Motoi SD (320x240) ===") (newline)
+(display "You (red, scripted) vs Motoi (yellow).  plan=") (display AI-PLAN)
+(display "  level=") (display LEVEL) (newline)
+(display "Pick a COLUMN 0..6; gravity drops the disc. First to four wins.") (newline)
+(newline)
+
+;; SPLASH FIRST: draw the title frame, sound the theme, THEN play. This is the
+;; ONE extra dump the charm layer allows — the loading screen, not a per-tick dump.
+(play-theme!)
+(draw-title)
+(display "--- SD title screen ---") (newline)
+(fb/dump 0 0 W H)
+(newline)
+
+(define RESULT "")
+(define LAST-COL 3)
+
+(let loop ((moves 0) (turn YOU))
+  (cond
+    ((= WINNER YOU) (set! RESULT "YOU (red) win — four in a row!"))
+    ((= WINNER AI)  (set! RESULT "MOTOI (yellow) wins — four in a row!"))
+    ((board-full?) (set! RESULT "board full — a hard-fought draw"))
+    ((>= moves MAX-MOVES) (set! RESULT "move cap reached — drawn"))
+    (else
+     (let ((c (if (= turn YOU) (you-pick) (motoi-pick))))
+       (cond
+         ((< c 0) (set! RESULT "no legal column — drawn"))
+         (else
+          ;; classify Motoi's choice BEFORE the disc lands (the reasons are all
+          ;; "imagine the drop" tests, so they must be read on the pre-drop board).
+          (let ((reason
+                 (if (= turn AI)
+                     (cond ((winning-drop? c AI) "win")
+                           ((winning-drop? c YOU) "block")
+                           ((>= (line-after c AI) 3) "make-3")
+                           (else "center"))
+                     "")))
+          (let ((r (place! c turn)))
+            (when (= turn YOU) (note-your-move! c))
+            (sfx-drop! turn)                          ;; a small blip as the disc lands
+            (when (and (= turn AI) (string=? reason "block")) (sfx-block!))
+            (when (and (>= r 0) (makes-four? r c turn)) (set! WINNER turn))
+            (set! LAST-COL c)
+            (let ((who (if (= turn YOU) "YOU " "MOTOI")))
+              (display who) (display " -> col ") (display c)
+              (display "  (row ") (display r) (display ")")
+              (when (= turn AI)
+                (display "   [") (display reason) (display "]"))
+              (newline))
+            (loop (+ moves 1) (other turn))))))))))
+
+;; =======================  RESULT  =======================
+
+(sfx-win! WINNER)                                     ;; result jingle: win / lose / draw
+(newline)
+(draw-board -1 -1)
+(draw-hud you-idx LAST-COL "final")
+(display "--- SD final board ---") (newline)
+(fb/dump 0 0 W H)
+(newline)
+
+(display "RESULT: ") (display RESULT) (newline)
+(display "Your read: left=") (display YOU-LEFT)
+(display " mid=") (display YOU-MID)
+(display " right=") (display YOU-RIGHT)
+(display "  -> Motoi read your wing as ") (display (favored-wing)) (newline)
+(newline)
+(display "Fork it: flip AI-PLAN ('straight <-> 'adaptive) or raise LEVEL to 'hard,") (newline)
+(display "or replace YOU-SCRIPT with live column taps for a real game.") (newline)
