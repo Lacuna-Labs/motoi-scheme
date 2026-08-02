@@ -2,18 +2,18 @@
 
 Generated: 2026-07-19
 Files scanned: 87
-Total verbs: 1271
+Total verbs: 1379
 
 ## Overall row coverage
 
 | Row | Present | 3-Discipline | Coverage % |
 |---|---|---|---|
-| row-2-audit | 1271 | 1271 | 100.0% / 100.0% |
-| row-3-dimension | 1271 | 1151 | 100.0% / 90.6% |
-| row-4-proof | 1271 | 1271 | 100.0% / 100.0% |
-| row-5-emergence | 1271 | 1270 | 100.0% / 99.9% |
+| row-2-audit | 1379 | 1379 | 100.0% / 100.0% |
+| row-3-dimension | 1379 | 1259 | 100.0% / 91.3% |
+| row-4-proof | 1379 | 1379 | 100.0% / 100.0% |
+| row-5-emergence | 1379 | 1378 | 100.0% / 99.9% |
 
-**Verbs with FULL 4-row + 3-discipline coverage: 1151 / 1271** (90.6%)
+**Verbs with FULL 4-row + 3-discipline coverage: 1259 / 1379** (91.3%)
 
 ## Per-library coverage
 
@@ -27,7 +27,7 @@ Total verbs: 1271
 | audio | 13 | 13 | 0 | 0 |
 | base | 1 | 1 | 0 | 0 |
 | beat | 1 | 1 | 0 | 0 |
-| bytevector | 9 | 9 | 0 | 0 |
+| bytevector | 10 | 10 | 0 | 0 |
 | calc | 30 | 30 | 0 | 0 |
 | char | 17 | 17 | 0 | 0 |
 | chem | 5 | 5 | 0 | 0 |
@@ -52,7 +52,7 @@ Total verbs: 1271
 | geom | 57 | 57 | 0 | 0 |
 | grid | 12 | 12 | 0 | 0 |
 | hash | 26 | 26 | 0 | 0 |
-| higher-order | 9 | 9 | 0 | 0 |
+| higher-order | 21 | 21 | 0 | 0 |
 | image | 9 | 9 | 0 | 0 |
 | image-compose | 15 | 15 | 0 | 0 |
 | input | 5 | 5 | 0 | 0 |
@@ -61,8 +61,8 @@ Total verbs: 1271
 | juggle | 6 | 6 | 0 | 0 |
 | lazy | 2 | 2 | 0 | 0 |
 | linalg | 23 | 23 | 0 | 0 |
-| list | 15 | 15 | 0 | 0 |
-| math | 56 | 56 | 0 | 0 |
+| list | 54 | 54 | 0 | 0 |
+| math | 80 | 80 | 0 | 0 |
 | matrix | 21 | 21 | 0 | 0 |
 | motion | 14 | 14 | 0 | 0 |
 | note | 3 | 3 | 0 | 0 |
@@ -74,7 +74,7 @@ Total verbs: 1271
 | pattern | 1 | 1 | 0 | 0 |
 | phys | 19 | 19 | 0 | 0 |
 | plot | 14 | 14 | 0 | 0 |
-| predicate | 21 | 21 | 0 | 0 |
+| predicate | 37 | 37 | 0 | 0 |
 | prefab | 2 | 2 | 0 | 0 |
 | route | 1 | 1 | 0 | 0 |
 | scene | 5 | 5 | 0 | 0 |
@@ -83,7 +83,7 @@ Total verbs: 1271
 | solve | 13 | 13 | 0 | 0 |
 | sprite | 4 | 4 | 0 | 0 |
 | stat | 18 | 18 | 0 | 0 |
-| string | 41 | 41 | 0 | 0 |
+| string | 52 | 52 | 0 | 0 |
 | superformula | 3 | 3 | 0 | 0 |
 | svg-path | 3 | 3 | 0 | 0 |
 | sym | 1 | 1 | 0 | 0 |
@@ -95,7 +95,7 @@ Total verbs: 1271
 | topo | 28 | 28 | 0 | 0 |
 | transport | 2 | 2 | 0 | 0 |
 | vec | 18 | 18 | 0 | 0 |
-| vector | 10 | 10 | 0 | 0 |
+| vector | 15 | 15 | 0 | 0 |
 | weather | 1 | 1 | 0 | 0 |
 | world | 52 | 52 | 0 | 0 |
 
@@ -119,4 +119,4 @@ None found. ✓
 
 ## Verdict
 
-✗ INCOMPLETE (90.6%). More authoring needed before fold.
+✗ INCOMPLETE (91.3%). More authoring needed before fold.

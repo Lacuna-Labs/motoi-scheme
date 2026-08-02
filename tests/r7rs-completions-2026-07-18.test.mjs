@@ -122,10 +122,13 @@ test('string-pad / string-pad-right', () => {
   assert.equal(run('(string-pad-right "7" 3 "0")'), '700')
 })
 
-test('string-trim / string-trim-left / string-trim-right', () => {
-  assert.equal(run('(string-trim "  hi  ")'), 'hi')
+// SRFI-13 `string-trim` is LEFT-ONLY. Until 2026-08-02 this test asserted
+// both-end trimming, which is `string-trim-both`.
+test('string-trim / string-trim-left / string-trim-right / string-trim-both', () => {
+  assert.equal(run('(string-trim "  hi  ")'), 'hi  ')
   assert.equal(run('(string-trim-left "  hi  ")'), 'hi  ')
   assert.equal(run('(string-trim-right "  hi  ")'), '  hi')
+  assert.equal(run('(string-trim-both "  hi  ")'), 'hi')
 })
 
 test('string-replace / string-reverse / string-count', () => {

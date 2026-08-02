@@ -132,6 +132,20 @@ function format(v) {
     const imPart = ai === 1 ? 'i' : `${ai}i`
     return `${re}${sign}${imPart}`
   }
+  // Everything below used to fall through to String(v) and print the JS
+  // artifact `[object Object]` — the same meaningless text for four unrelated
+  // Scheme types, at the top level where a learner reads the answer.
+  if (v && typeof v === 'object' && v.__eof__ === true) return '#<eof>'
+  if (v && typeof v === 'object' && Array.isArray(v.vals)) {
+    return v.vals.map(format).join(' ')
+  }
+  if (v && typeof v === 'object' && v.__promise__ === true) {
+    return v.forced ? format(v.value) : '#<promise>'
+  }
+  if (typeof v === 'function') return '#<procedure>'
+  if (v && typeof v === 'object' && typeof v.kind === 'string' && 'buffer' in v) {
+    return `#<port ${v.kind}>`
+  }
   return String(v)
 }
 

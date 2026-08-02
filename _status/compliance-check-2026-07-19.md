@@ -1,4130 +1,2098 @@
 # Motoi Reference Compliance Check — code runnability
 
-Total code blocks checked: 14809
-Passes: 14326
-Failures: 483
+Total code blocks checked: 17588
+Passes: 17310
+Failures: 278
 Skipped (marked :runs "spec-only"): 3
 
-Pass rate: 96.7%
+Pass rate: 98.4%
 
 ## Failures — grouped by verb
 
 
-### `all-verbs` — file `00b-introspection.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (filter (lambda (v) (equal? (substring v 0 6) 'audio/')) (all-verbs))
-  ```
-  Error:
-  ```
-  error: apostrophe (') inside identifier — Motoi uses ' as quote; rename the identifier (banker-s, banker_s) or use spaces (line 1, col 54)
-
-  ```
-- **row-2-audit** :eng-program
-  ```scheme
-  (define (namespace-census)
-  (define (ns v) (let ((s (if (symbol? v) (symbol->string v) v)))
-                   (let loop ((i 0))
-                     (cond ((>= i (string-length s)) 'core)
-                           ((char=? (string-ref s i) #\/) (substring s 0 i))
-                           (else 
-  ```
-  Error:
-  ```
-  error: Cannot use 'in' operator to search for 'name' in ai
-
-  ```
-
 ### `arity-of` — file `00b-introspection.slat`
 
-- **row-2-audit** :program
+- **row-2-audit** :math-program
   ```scheme
-  (let ((a (arity-of 'my-verb)))
-  (if (and (number? a) (= a (length args)))
-      (apply 'my-verb args)
-      'wrong-arity))
+  ;; Mean minimum-arity: reduce each verb's arity (an integer, or (min max) for variadics) to its min, then average over a sample — a real central-tendency statistic on the vocabulary's shape.
+(let* ((vs (take (all-verbs) 60))
+       (as (filter (lambda (a) (or (number? a) (pair? a))) (map arity-of vs
   ```
   Error:
   ```
-  error: unbound symbol: args
+  error: +: expected a number, got nothing
 
   ```
-- **row-2-audit** :eng-program
+- **row-4-proof** :math-program
   ```scheme
-  (define (call-if-compatible v args)
-  (let ((a (arity-of v)))
-    (cond ((null? a) (list 'unknown v))
-          ((number? a) (if (= a (length args)) (apply v args) (list 'arg-mismatch 'need a 'got (length args))))
-          (else (let ((mn (car a)) (mx (cadr a)) (n (length args)))
-                  
+  ;; Lower bound on argument count: every verb's minimum arity is ≥ 0 — you cannot call a verb with a negative number of arguments. Proven by min over the sample.
+(let* ((vs (take (all-verbs) 80))
+       (as (filter (lambda (a) (or (number? a) (pair? a))) (map arity-of vs)))
+       (mins (map (lambda 
   ```
   Error:
   ```
-  error: not a function: car
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (dispatch-table entries args)
-  ;; Table of (name . verb); pick first whose arity matches args.
-  (let loop ((es entries))
-    (cond ((null? es) 'no-match)
-          ((let ((a (arity-of (cdr (car es)))))
-             (and (number? a) (= a (length args))))
-           (apply (cdr (car es)) arg
-  ```
-  Error:
-  ```
-  error: introspect: expected symbol or string, got object
+  error: min: expected a number, got nothing
 
   ```
 
 ### `describe` — file `00b-introspection.slat`
 
-- **row-4-proof** :cs-program
-  ```scheme
-  (define (defensive? v)
-  ;; even a bare symbol never breaks the caller
-  (with-handler (lambda (e) #f)
-    (lambda () (string? (describe v)))))
-(defensive? 'utterly-undefined-name)
-  ```
-  Error:
-  ```
-  error: unbound symbol: with-handler
-
-  ```
-
-### `help` — file `00b-introspection.slat`
-
 - **row-5-emergence** :eng-composition
   ```scheme
-  (define (registry-tabulate keys)
-  ;; Build one column per key, one row per verb.
-  (let* ((all (all-verbs))
-         (rows (map (lambda (v)
-                      (let ((m (help v)))
-                        (cons v (map (lambda (k)
-                                       (if (null? m) '- (cdr (or (as
+  (define (namespaced-manual ns)
+  (let ((matches (filter (lambda (v) (equal? (substring (symbol->string v) 0 (string-length ns)) ns))
+                         (all-verbs))))
+    (for-each (lambda (v) (display (describe v)) (newline)) matches)))
+(namespaced-manual "audio/")
   ```
   Error:
   ```
-  error: Cannot read properties of null (reading 'find')
+  error: substring: end 6 is past the end of a string of length 1. To TEST a prefix use (string-prefix? "..." s); to TRUNCATE use (substring s 0 (min 6 (string-length s))).
 
   ```
 
-### `stats/verb-calls` — file `00b-introspection.slat`
+### `grid-cols` — file `01-core.slat`
 
 - **row-5-emergence** :cs-composition
   ```scheme
-  (define (namespace-heat)
-  ;; Aggregate top-100 by namespace prefix.
-  (let ((by-ns '()))
-    (for-each (lambda (row)
-                (let* ((v (symbol->string (car row)))
-                       (slash (and (> (string-length v) 0)
-                                   (let loop ((i 0))
-                
+  (define (index->cell i)
+  (let ((w (grid-cols)))
+    (list (modulo i w) (quotient i w))))
+(display (index->cell 5))
   ```
   Error:
   ```
-  error: Cannot use 'in' operator to search for 'name' in :tick
-
-  ```
-
-### `across-beats` — file `01-core.slat`
-
-- **row-2-audit** :math-program
-  ```scheme
-  (define (formation-size name)
-  ;; formations are finite maps: slot-index -> (x y); size = entity count
-  (length (descriptor-slots (across-beats name))))
-(formation-size 'circle)
-  ```
-  Error:
-  ```
-  error: unbound symbol: descriptor-slots
-
-  ```
-
-### `after` — file `01-core.slat`
-
-- **row-2-audit** :eng-program
-  ```scheme
-  (define (cooldown-gate ctx action)
-  (if (> (- (time 'now) (ctx-get 'last-fire ctx)) 2)
-      (begin (action) (ctx-set 'last-fire (time 'now) ctx))
-      (after 0.2 'retry-action ctx)))
-(cooldown-gate (ctx) (lambda () (world/spawn 'effect 0 0)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: ctx
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (retry-with-backoff ctx attempt)
-  (let ((delay (* 0.5 (expt 2 attempt))))
-    (if (< attempt 4)
-        (after delay 'retry (ctx-set 'attempt (+ attempt 1) ctx))
-        (next 'failed ctx))))
-(retry-with-backoff (ctx) 0)
-  ```
-  Error:
-  ```
-  error: unbound symbol: ctx
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (send-request req) req)
-(define (timeout-race send-fn ctx)
-  ;; fire request + arm timeout simultaneously
-  (send-fn (ctx-get 'req ctx))
-  (after 5 'timeout ctx))
-(timeout-race send-request (ctx))
-  ```
-  Error:
-  ```
-  error: unbound symbol: ctx
-
-  ```
-
-### `after-frame` — file `01-core.slat`
-
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (idempotent-measure key)
-  ;; guard: skip if already measured this key
-  (unless (assoc key (measured-cache))
-    (after-frame
-      (lambda ()
-        (cache-set! key (card-rows))))))
-(idempotent-measure 'main-panel)
-  ```
-  Error:
-  ```
-  error: unbound symbol: measured-cache
-
-  ```
-
-### `arc-between` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define swoop (arc-between '(0 0) '(100 0) '(height 40)))
-(in-formation swoop (list 'boss))
-  ```
-  Error:
-  ```
-  error: unbound symbol: in-formation
-
-  ```
-- **row-2-audit** :eng-program
-  ```scheme
-  (define entry-arc (arc-between '(0 0) '(80 40) '(height 30)))
-(in-formation entry-arc (list 'boss))
-  ```
-  Error:
-  ```
-  error: unbound symbol: in-formation
-
-  ```
-- **row-4-proof** :math-program
-  ```scheme
-  (define (endpoint-check start end h)
-  ;; B(0)=start B(1)=end for quadratic Bezier through (mid-x, h)
-  (let ((mid (list (/ (+ (car start) (car end)) 2) h)))
-    (and (equal? (bezier2 start mid end 0) start)
-         (equal? (bezier2 start mid end 1) end))))
-(endpoint-check '(0 0) '(100 0) 40)
-  ```
-  Error:
-  ```
-  error: unbound symbol: bezier2
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define path (arc-between (entity/pos 'leader) (entity/pos 'target)))
-(in-formation path (list 'follower1 'follower2 'follower3))
-  ```
-  Error:
-  ```
-  error: unbound symbol: in-formation
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (arc-length-approx start end h steps)
-  ;; numeric arc-length by Riemann sum on Bezier
-  (let ((mid (list (/ (+ (car start) (car end)) 2) h)))
-    (let loop ((i 0) (acc 0))
-      (if (= i steps) acc
-          (let* ((t1 (/ i steps))
-                 (t2 (/ (+ i 1) steps))
-                 (p
-  ```
-  Error:
-  ```
-  error: unbound symbol: bezier2
-
-  ```
-
-### `at-beat` — file `01-core.slat`
-
-- **row-3-dimension** :code
-  ```scheme
-  ;; sample a curve at t = 0.75:
-(easing 'ease-in-out 0.75)
-  ```
-  Error:
-  ```
-  error: unbound symbol: easing
-
-  ```
-
-### `audio-bands` — file `01-core.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (snapshot-isolated?)
-  (let ((a (audio-bands)))
-    (set-car! a 999)
-    (let ((b (audio-bands)))
-      (not (= (car b) 999)))))
-(display (snapshot-isolated?))
-  ```
-  Error:
-  ```
-  error: unbound symbol: set-car!
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define a (audio-bands))
-(set-car! a 999)
-(define b (audio-bands))
-(display (= (car b) 999))  ;; expect #f
-  ```
-  Error:
-  ```
-  error: unbound symbol: set-car!
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define a (audio-bands))
-(set-car! a 999)
-(define b (audio-bands))
-(display (= (car b) 999))  ;; #f — copy-on-read confirmed
-  ```
-  Error:
-  ```
-  error: unbound symbol: set-car!
-
-  ```
-
-### `audio-halt` — file `01-core.slat`
-
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (resource-pool size factory)
-  ;; pool of audio handles; halt all on teardown
-  (let ((handles (map (lambda (_) (factory)) (iota size))))
-    (lambda (op)
-      (case op
-        ((teardown) (for-each audio-halt handles))
-        ((get)      handles)))))
-(define pool (resource-pool 3 (lambda 
-  ```
-  Error:
-  ```
-  error: not a function: undefined
-
-  ```
-
-### `audio-master-volume` — file `01-core.slat`
-
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (scene-transition-out ctx)
-  (let loop ((v 1.0))
-    (audio-master-volume v)
-    (if (> v 0)
-        (after 0.05 'fade-step (ctx-set 'vol (- v 0.05) ctx))
-        (begin (audio-halt (ctx-get 'handle ctx))
-               (next 'scene-black ctx)))))
-(scene-transition-out (ctx))
-  ```
-  Error:
-  ```
-  error: unbound symbol: ctx
-
-  ```
-
-### `audio-perceptual-bands` — file `01-core.slat`
-
-- **row-4-proof** :program
-  ```scheme
-  (display (for-all (lambda (b) (>= b 0)) (audio-perceptual-bands)))  ;; expect #t
-  ```
-  Error:
-  ```
-  error: unbound symbol: for-all
-
-  ```
-
-### `audio-tempo` — file `01-core.slat`
-
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define plan '((0 . 90) (16 . 120) (32 . 140) (48 . 90)))
-(on-frame
-  (lambda ()
-    (let ((bar (quotient (frame) 240)))
-      (let ((hit (assv bar plan)))
-        (when hit (audio-tempo (cdr hit))))))
-  ```
-  Error:
-  ```
-  error: missing ) (line 2, col 1)
-
-  ```
-
-### `begin-frame` — file `01-core.slat`
-
-- **row-4-proof** :program
-  ```scheme
-  (let ((ok (begin-frame 'main)))
-  (display (or (eq? ok #t) (eq? ok #f))))  ;; expect #t
-  ```
-  Error:
-  ```
-  error: Cannot use 'in' operator to search for 'name' in true
-
-  ```
-
-### `camera-bring-to-view` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (camera-bring-to-view (player-id))
-  ```
-  Error:
-  ```
-  error: unbound symbol: player-id
-
-  ```
-- **row-2-audit** :program
-  ```scheme
-  (card-do
-  (lambda (ctx)
-    (camera-bring-to-view (ctx-get 'npc-id ctx) 40 300)
-    (next 'talk ctx)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: card-do
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (camera-bring-to-view (player-id) 24)
-;; once settled: player bounds ⊆ (viewport shrunk by 24px on every side)
-(display 'framed)
-  ```
-  Error:
-  ```
-  error: unbound symbol: player-id
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (display (eq? (camera-bring-to-view (player-id)) '()))  ;; null, tween runs later
-  ```
-  Error:
-  ```
-  error: unbound symbol: player-id
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (camera-bring-to-view (player-id) 20)
-(camera-bring-to-view (player-id) 60)
-;; the 60px call leaves at least as much margin as the 20px call
-(display 'more-pad-more-margin)
-  ```
-  Error:
-  ```
-  error: unbound symbol: player-id
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define (focus-tour ids)
-  (fold
-    (lambda (id delay)
-      (after delay 'focus (list 'id id))
-      (+ delay 800))
-    0 ids))
-(focus-tour (list (player-id) (boss-id) (exit-id)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: player-id
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define rec (camera-record 'highlight))
-(camera-bring-to-view (boss-id) 50 600)
-(on-frame (lambda () (camera-frame rec 'screen)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: boss-id
-
-  ```
-
-### `camera-center-on` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (on-minimap-click
-  (lambda (wx wy)
-    (camera-center-on wx wy)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: on-minimap-click
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define z0 (camera-zoom))
-(camera-center-on 200 0)
-;; scale omitted -> zoom unchanged
-(display (= (camera-zoom) z0))  ;; expect #t after settle
-  ```
-  Error:
-  ```
-  error: unbound symbol: camera-zoom
-
-  ```
-
-### `camera-export` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (let ((r (camera-export handle '(:format "png"))))
-  (if (pair? r)
-      (escalate 'export-failed (list ':reason (cadr r)))
-      (display 'exported)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: handle
-
-  ```
-- **row-2-audit** :program
-  ```scheme
-  (camera-export rec '(:format "gif" :delay 50))
-  ```
-  Error:
-  ```
-  error: unbound symbol: rec
-
-  ```
-- **row-3-dimension** :code
-  ```scheme
-  (camera-export rec '(:format "gif"))
-  ```
-  Error:
-  ```
-  error: unbound symbol: rec
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (let ((r (camera-export bad-handle)))
-  (display (or (number? r) (and (pair? r) (eq? (car r) 'error)))))  ;; expect #t
-  ```
-  Error:
-  ```
-  error: unbound symbol: bad-handle
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define a (camera-export rec1 '(:format "gif")))
-(define b (camera-export rec2 '(:format "gif")))
-;; equal frames + equal opts => equal encoded bytes
-(display 'reproducible)
-  ```
-  Error:
-  ```
-  error: unbound symbol: rec1
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define (record-and-export name draw frames)
-  (let ((rec (camera-record name)))
-    (for-each (lambda (_) (draw) (camera-frame rec 'screen)) (iota frames))
-    (camera-export rec '(:format "gif" :delay 50))))
-(record-and-export 'replay redraw-scene 30)
-  ```
-  Error:
-  ```
-  error: unbound symbol: redraw-scene
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (export-with-retry handle opts tries)
-  (let loop ((n tries))
-    (let ((r (camera-export handle opts)))
-      (if (and (pair? r) (> n 1))
-          (loop (- n 1))
-          r))))
-(export-with-retry rec '(:format "gif") 3)
-  ```
-  Error:
-  ```
-  error: unbound symbol: rec
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (on-event 'boss-defeated
-  (lambda ()
-    (let ((r (camera-export current-recorder '(:format "gif"))))
-      (unless (pair? r) (card-emit 'highlight-saved r)))))
-  ```
-  Error:
-  ```
-  error: unbound symbol: on-event
-
-  ```
-
-### `camera-fit-all` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (if establishing? (camera-fit-all 40 500) (camera-bring-to-view sel-id))
-  ```
-  Error:
-  ```
-  error: unbound symbol: establishing?
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (camera-fit-all 24 0)
-;; once settled: for each entity e, (in-viewport? (entity/pos e)) => #t
-(display (for-all (world/entities) (lambda (e) (in-viewport? (entity/pos e)))))
-  ```
-  Error:
-  ```
-  error: unbound symbol: for-all
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (overview-around thunk)
-  (camera-fit-all 40 300)
-  (thunk)
-  (camera-fit-all 40 300))
-(overview-around (lambda () (run-turn)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: run-turn
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (on-event 'entity-spawned
-  (lambda () (camera-fit-all 40 300)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: on-event
-
-  ```
-
-### `camera-frame` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (let ((r (camera-frame h "canvas")))
-  (if (pair? r) (escalate 'capture-failed (list ':reason (cadr r))) r))
-  ```
-  Error:
-  ```
-  error: unbound symbol: h
-
-  ```
-- **row-3-dimension** :code
-  ```scheme
-  (camera-frame h "canvas")
-  ```
-  Error:
-  ```
-  error: unbound symbol: h
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define n0 (recorder-length h))
-(camera-frame h "canvas")
-(display (= (recorder-length h) (+ n0 1)))  ;; expect #t
-  ```
-  Error:
-  ```
-  error: unbound symbol: recorder-length
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (camera-frame h 'a)
-(camera-frame h 'b)
-;; buffer is [... a b], never [... b a]
-(display 'order-preserved)
-  ```
-  Error:
-  ```
-  error: unbound symbol: h
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (record-loop h draw n)
-  (let loop ((i 0))
-    (when (< i n) (draw) (camera-frame h 'screen) (wait 33) (loop (+ i 1)))))
-(record-loop (camera-record 'anim) redraw 30)
-  ```
-  Error:
-  ```
-  error: unbound symbol: redraw
-
-  ```
-
-### `camera-home` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (if want-origin? (camera-home) (camera-fit-all))
-  ```
-  Error:
-  ```
-  error: unbound symbol: want-origin?
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (cutscene body)
-  (camera-home 0)
-  (body)
-  (camera-home 500))
-(cutscene play-boss-intro)
-  ```
-  Error:
-  ```
-  error: unbound symbol: play-boss-intro
-
-  ```
-
-### `camera-pan` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (if horizontal? (camera-pan dx) (camera-tilt dy))
-  ```
-  Error:
-  ```
-  error: unbound symbol: horizontal?
-
-  ```
-
-### `camera-pan-to` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (if precise-point? (camera-pan-to x y) (camera-center-on x y))
-  ```
-  Error:
-  ```
-  error: unbound symbol: precise-point?
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (let ((e (world/find (lambda (x) (eq? (entity/kind x) 'quest)))))
-  (when e (camera-pan-to (entity-x e) (entity-y e) 400)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: entity-x
-
-  ```
-
-### `camera-record` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (let ((r (camera-record 'my-scene)))
-  (if (pair? r) (escalate 'record-open-failed (list ':reason (cadr r))) r))
-  ```
-  Error:
-  ```
-  error: escalate: record-open-failed :reason,0
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define h (camera-record 'empty))
-(display (= (recorder-length h) 0))  ;; expect #t
-  ```
-  Error:
-  ```
-  error: unbound symbol: recorder-length
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (on-event 'level-start
-  (lambda ()
-    (set! current-rec (camera-record (level-name)))))
-  ```
-  Error:
-  ```
-  error: unbound symbol: on-event
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (with-recording name body)
-  (let ((h (camera-record name)))
-    (if (pair? h) h
-        (begin (body h) (camera-export h '(:format "gif"))))))
-(with-recording 'run capture-a-run)
-  ```
-  Error:
-  ```
-  error: unbound symbol: capture-a-run
-
-  ```
-
-### `camera-scale` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (if (< (camera-scale) 0.5) (draw-detail) (draw-coarse))
-  ```
-  Error:
-  ```
-  error: unbound symbol: draw-coarse
-
-  ```
-- **row-2-audit** :program
-  ```scheme
-  (define screen-px (/ world-length (camera-scale)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: world-length
-
-  ```
-
-### `camera-set!` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (camera-set! (car saved) (cadr saved) (caddr saved) 300)
-  ```
-  Error:
-  ```
-  error: unbound symbol: saved
-
-  ```
-- **row-2-audit** :program
-  ```scheme
-  (if absolute-pose? (camera-set! x y s) (camera-pan dx))
-  ```
-  Error:
-  ```
-  error: unbound symbol: absolute-pose?
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (with-saved-camera body)
-  (let ((s (camera-state)))
-    (body)
-    (camera-set! (hash-table-ref/default s 'x #f) (hash-table-ref/default s 'y #f) (hash-table-ref/default s 'k #f) 300)))
-(with-saved-camera peek-around)
-  ```
-  Error:
-  ```
-  error: unbound symbol: peek-around
-
-  ```
-
-### `camera-state` — file `01-core.slat`
-
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (rewind history n)
-  (let ((old (list-ref history (min n (- (length history) 1)))))
-    (camera-set! (hash-table-ref/default old 'x #f) (hash-table-ref/default old 'y #f) (hash-table-ref/default old 'k #f) 300)))
-(rewind camera-history 30)
-  ```
-  Error:
-  ```
-  error: unbound symbol: camera-history
-
-  ```
-
-### `camera-tilt` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (if above-or-below? (camera-tilt dy) (camera-pan dx))
-  ```
-  Error:
-  ```
-  error: unbound symbol: above-or-below?
-
-  ```
-
-### `camera-trace` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (for-each (lambda (p) (camera-pan-to (car p) (cadr p) 300) (camera-trace (list 'visiting p))) route)
-  ```
-  Error:
-  ```
-  error: unbound symbol: route
-
-  ```
-
-### `camera-x` — file `01-core.slat`
-
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (center-on-card card)
-  (let* ((rect (card-rect card))
-         (target-x (/ (+ (car rect) (caddr rect)) 2)))
-    (when (> (abs (- target-x (camera-x))) 50)
-      (camera-pan-to target-x (camera-y) 300))))
-(center-on-card 'task)
-  ```
-  Error:
-  ```
-  error: unbound symbol: card-rect
-
-  ```
-
-### `camera-zoom-to` — file `01-core.slat`
-
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (zoom-if-legible s)
-  (when (zoom-legible? s)
-    (camera-zoom-to s 300)))
-(zoom-if-legible 3.5)
-  ```
-  Error:
-  ```
-  error: unbound symbol: zoom-legible?
-
-  ```
-
-### `cancel-tick` — file `01-core.slat`
-
-- **row-2-audit** :eng-program
-  ```scheme
-  (register-tick 'status-check (lambda () (display 'checking)))
-;; operator dismisses the panel this timer belonged to:
-(cancel-tick 'status-check)
-  ```
-  Error:
-  ```
-  error: unbound symbol: register-tick
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define fired 0)
-(register-tick 'once (lambda () (set! fired (+ fired 1))))
-(cancel-tick 'once)
-;; no further increments after cancel
-(display fired)
-  ```
-  Error:
-  ```
-  error: unbound symbol: register-tick
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define n 0)
-(register-tick 'countdown
-  (lambda ()
-    (set! n (+ n 1))
-    (when (>= n 5) (cancel-tick 'countdown))))
-  ```
-  Error:
-  ```
-  error: unbound symbol: register-tick
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (register-tick 'search (lambda () (display 'polling)))
-(after 30000 (lambda () (cancel-tick 'search)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: register-tick
-
-  ```
-
-### `clear-surface-layer` — file `01-core.slat`
-
-- **row-2-audit** :eng-program
-  ```scheme
-  (define (redraw-hud msg)
-  (clear-surface-layer 'hud 'text)
-  (surface-paint-text 'hud 'text msg 10 10))
-(redraw-hud "Score: 42")
-  ```
-  Error:
-  ```
-  error: unbound symbol: surface-paint-text
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (surface-paint-text 'main 'overlay "stale" 0 0)
-(clear-surface-layer 'main 'overlay)
-;; overlay now holds nothing; safe to repaint
-(display 'wiped)
-  ```
-  Error:
-  ```
-  error: unbound symbol: surface-paint-text
-
-  ```
-
-### `eval` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define ops (list (cons 'add +) (cons 'mul *)))
-(define (run name args)
-  (let ((fn (cdr (assq name ops))))
-    (if fn (apply fn args) (escalate 'unknown-op name))))
-(display (run 'add (list 1 2 3)))
-  ```
-  Error:
-  ```
-  error: not a function: (...a) => _hasRat(a) ? _numFold(a, _ratAdd, (x, y) => x + y, _ZERO) : a.reduce((x, y) => x + y, 0)
-
-  ```
-- **row-2-audit** :eng-program
-  ```scheme
-  (define (attempt-eval form)
-  ;; a cart reaching for eval must escalate, not run
-  (escalate 'eval-forbidden (list :form form :decision 'engineering-005 :try 'apply-or-dispatch)))
-(attempt-eval '(+ 1 2))
-  ```
-  Error:
-  ```
-  error: escalate: eval-forbidden :form,+,1,2,:decision,engineering-005,:try,apply-or-dispatch
-
-  ```
-- **row-2-audit** :cs-program
-  ```scheme
-  (define ops (list (cons 'add +) (cons 'sub -)))
-(define (dispatch op args)
-  (let ((fn (assq op ops)))
-    (if fn (apply (cdr fn) args) (escalate 'unknown-op op))))
-(display (dispatch 'sub (list 10 3)))
-  ```
-  Error:
-  ```
-  error: not a function: (...a) => _hasRat(a) ? _numFold(a, _ratSub, (x, y) => x - y, _ZERO) : (a.length === 1 ? -a[0] : a.reduce((x, y) => x - y))
-
-  ```
-- **row-4-proof** :cs-program
-  ```scheme
-  (define ops (list (cons 'inc (lambda (x) (+ x 1)))))
-(define (call name x)
-  (apply (cdr (assq name ops)) (list x)))
-(display (= (call 'inc 5) (call 'inc 5)))
-  ```
-  Error:
-  ```
-  error: not a function: [object Object]
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define cmds
-  (list (cons 'inc (lambda () (+ 1 1)))
-        (cons 'dec (lambda () (- 1 1)))))
-(define (run-cmd name)
-  (let ((c (assq name cmds)))
-    (if c ((cdr c)) (escalate 'unknown-cmd name))))
-(display (run-cmd 'inc))
-  ```
-  Error:
-  ```
-  error: not a function: [object Object]
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (guarded-eval form trusted?)
-  (if trusted?
-      (escalate 'eval-still-forbidden form)
-      (escalate 'untrusted-eval form)))
-(guarded-eval '(delete-all) #f)
-  ```
-  Error:
-  ```
-  error: escalate: untrusted-eval delete-all
-
-  ```
-
-### `grid-cell-set!` — file `01-core.slat`
-
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (conway-step)
-  (let loop-y ((y 0))
-    (when (< y (rows))
-      (let loop-x ((x 0))
-        (when (< x (cols))
-          (let ((n (grid-neighbors x y)) (s (grid-cell-state x y)))
-            (grid-cell-set! x y
-              (if (or (and (= s 1) (or (= n 2) (= n 3)))
-                      (
-  ```
-  Error:
-  ```
-  error: fuel exhausted
-
-  ```
-
-### `grid-live-count` — file `01-core.slat`
-
-- **row-5-emergence** :composition
-  ```scheme
-  (define (run-until-dead rule max-gens)
-  (let loop ((g 0))
-    (cond ((= 0 (grid-live-count)) (list 'extinct g))
-          ((>= g max-gens) (list 'timeout g))
-          (else (grid-step rule) (loop (+ g 1))))))
-(display (run-until-dead rule-conway 100))
-  ```
-  Error:
-  ```
-  error: unbound symbol: rule-conway
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (stable? rule)
-  (let ((before (grid-live-count)))
-    (grid-step rule)
-    (= before (grid-live-count))))
-(display (stable? rule-conway))
-  ```
-  Error:
-  ```
-  error: unbound symbol: rule-conway
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (peak-population rule n)
-  (let loop ((g 0) (peak 0))
-    (if (< g n)
-      (begin (grid-step rule)
-             (loop (+ g 1) (max peak (grid-live-count))))
-      peak)))
-(display (peak-population rule-conway 20))
-  ```
-  Error:
-  ```
-  error: unbound symbol: rule-conway
-
-  ```
-
-### `grid-step` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (grid-step rule-conway)
-  ```
-  Error:
-  ```
-  error: unbound symbol: rule-conway
-
-  ```
-
-### `grid-step-aged` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (grid-step-aged conway-rule)
-  ```
-  Error:
-  ```
-  error: unbound symbol: conway-rule
-
-  ```
-- **row-2-audit** :eng-program
-  ```scheme
-  (grid-init 32 32)
-(conway-spawn-blinker 16 16)
-(grid-step-aged conway-rule)
-(display (grid-cell-age 16 16))
-  ```
-  Error:
-  ```
-  error: unbound symbol: conway-spawn-blinker
-
-  ```
-- **row-2-audit** :math-program
-  ```scheme
-  (grid-init 8 8)
-(grid-cell-set! 3 3 1)
-(grid-step-aged conway-rule)
-(display (>= (grid-cell-age 3 3) 0))
-  ```
-  Error:
-  ```
-  error: unbound symbol: conway-rule
-
-  ```
-- **row-2-audit** :cs-program
-  ```scheme
-  (grid-step-aged conway-rule)
-(display (<= (grid-cell-age 0 0) 65535))
-  ```
-  Error:
-  ```
-  error: unbound symbol: conway-rule
-
-  ```
-- **row-3-dimension** :code
-  ```scheme
-  (grid-step-aged conway-rule)
-(display (grid-cell-age 5 5))
-  ```
-  Error:
-  ```
-  error: unbound symbol: conway-rule
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (grid-init 8 8)
-(grid-cell-set! 2 2 1)
-(grid-cell-set! 2 3 1)
-(grid-cell-set! 2 4 1)
-(grid-step-aged conway-rule)
-(display (or (not (grid-cell? 2 2)) (>= (grid-cell-age 2 2) 0)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: conway-rule
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (grid-init 5 5)
-(grid-cell-set! 2 2 1)
-(grid-step-aged conway-rule)
-(display (if (grid-cell? 2 2) (>= (grid-cell-age 2 2) 1) (= (grid-cell-age 2 2) 0)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: conway-rule
-
-  ```
-- **row-4-proof** :cs-program
-  ```scheme
-  (grid-init 6 6)
-(grid-cell-set! 3 3 1)
-(grid-step-aged conway-rule)
-(display (integer? (grid-cell-age 3 3)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: conway-rule
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (grid-init 40 40)
-(conway-spawn-blinker 20 20)
-(on-tick
-  (lambda ()
-    (grid-step-aged conway-rule)
-    (paint-grid-with-age 'surface
-      (list "#000" "#0f0" "#0a0" "#050")
-      (lambda (age) (min 3 (quotient age 10))))))
-  ```
-  Error:
-  ```
-  error: unbound symbol: conway-spawn-blinker
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (bucket a) (cond ((< a 3) 0) ((< a 20) 1) ((< a 100) 2) (else 3)))
-(grid-step-aged conway-rule)
-(display (bucket (grid-cell-age 20 20)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: conway-rule
-
-  ```
-
-### `grid-step-count` — file `01-core.slat`
-
-- **row-2-audit** :eng-program
-  ```scheme
-  (grid-step rule-conway)
-(display (list "generation" (grid-step-count)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: rule-conway
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define schedule '(10 50 100))
-(grid-step rule-conway)
-(display (memv (grid-step-count) schedule))
-  ```
-  Error:
-  ```
-  error: unbound symbol: rule-conway
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (monitor)
-  (list 'gen (grid-step-count) 'live (grid-live-count)))
-(grid-step rule-conway)
-(display (monitor))
-  ```
-  Error:
-  ```
-  error: unbound symbol: rule-conway
-
-  ```
-
-### `key?` — file `01-core.slat`
-
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (any-of? . keys)
-  (memf key? keys))
-(when (any-of? 'w 'a 's 'd) (display 'moving))
-  ```
-  Error:
-  ```
-  error: unbound symbol: memf
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (all-of? keys)
-  (andmap key? keys))
-(display (all-of? '(shift w)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: andmap
+  error: modulo: division by zero
 
   ```
 
 ### `land-on-downbeat` — file `01-core.slat`
 
-- **row-2-audit** :eng-program
+- **row-4-proof** :math-program
   ```scheme
-  (let ((land-fn (land-on-downbeat 'hero-card 'next-downbeat)))
-  (motion/move-to 'hero-card (land-fn)))
+  (define (snap t period)
+  (* period (ceiling (/ t period))))
+(display (snap (audio-time) 'bar))
   ```
   Error:
   ```
-  error: not a function: NaN
-
-  ```
-- **row-2-audit** :cs-program
-  ```scheme
-  (for-each
-  (lambda (c)
-    (motion/move-to c (land-on-downbeat c 'downbeat-2)))
-  (card-list))
-  ```
-  Error:
-  ```
-  error: unbound symbol: card-list
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define now (audio-time))
-(define f (land-on-downbeat 'x 'next-downbeat))
-(display (>= (beat-time 'next-downbeat) now))
-  ```
-  Error:
-  ```
-  error: unbound symbol: beat-time
+  error: /: expected a number, got the symbol bar
 
   ```
 
 ### `measure-content` — file `01-core.slat`
 
-- **row-4-proof** :cs-program
+- **row-2-audit** :math-program
   ```scheme
-  (define (valid-dims? id)
-  (let ((d (measure-content id)))
-    (if (eq? d 'error)
-        #f
-        (andmap (lambda (kv) (>= (cadr kv) 0)) d))))
-(display (valid-dims? 'my-card))
+  (define dims (measure-content 'my-card))
+(define w (cadr (assoc 'w dims)))
+(define h (cadr (assoc 'h dims)))
+(display (/ w (max h 1)))
   ```
   Error:
   ```
-  error: unbound symbol: andmap
+  error: cadr: expected a pair or a non-empty list, got #f
 
   ```
-
-### `note` — file `01-core.slat`
-
-- **row-4-proof** :cs-program
+- **row-2-audit** :cs-program
   ```scheme
-  (define (bad-pitch? p)
-  (eq? (car (note p 'quarter 0.8)) 'error))
-(display (bad-pitch? 'not-a-pitch))
+  (define (fits? id max-w)
+  (let ((dims (measure-content id)))
+    (and (pair? dims)
+         (<= (cadr (assoc 'w dims)) max-w))))
+(display (fits? 'content-card 300))
   ```
   Error:
   ```
-  error: unrecognized pitch: not-a-pitch
+  error: cadr: expected a pair or a non-empty list, got #f
+
+  ```
+- **row-4-proof** :math-program
+  ```scheme
+  (define d (measure-content 'my-card))
+(display (and (>= (cadr (assoc 'w d)) 0)
+              (>= (cadr (assoc 'h d)) 0)))
+  ```
+  Error:
+  ```
+  error: cadr: expected a pair or a non-empty list, got #f
+
+  ```
+
+### `note-dots` — file `01-core.slat`
+
+- **row-2-audit** :eng-program
+  ```scheme
+  (let ((md (note-dots 'G4 'quarter 0 'treble)))
+  (when (eq? (car md) 'ok)
+    (display (cadr md))))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 0
+
+  ```
+- **row-2-audit** :math-program
+  ```scheme
+  (define (y-of pitch clef)
+  (let ((r (note-dots pitch 'quarter 0 clef)))
+    (if (eq? (car r) 'ok) (cadr r) 'unknown)))
+(display (y-of 'C4 'treble))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 0
+
+  ```
+- **row-4-proof** :cs-program
+  ```scheme
+  (define (ok? p clef)
+  (eq? (car (note-dots p 'quarter 0 clef)) 'ok))
+(display (ok? 'B3 'bass))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 0
+
+  ```
+- **row-5-emergence** :eng-composition
+  ```scheme
+  (define (render-chord pitches clef)
+  (map (lambda (p)
+         (let ((r (note-dots p 'quarter 0 clef)))
+           (if (eq? (car r) 'ok) (cadr r) '())))
+       pitches))
+(render-chord '(C4 E4 G4) 'treble)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 0
+
+  ```
+- **row-5-emergence** :math-composition
+  ```scheme
+  (define (span pitches clef)
+  (let ((ys (map (lambda (p) (cadr (note-dots p 'quarter 0 clef))) pitches)))
+    (- (apply max ys) (apply min ys))))
+(display (span '(C4 C5) 'treble))
+  ```
+  Error:
+  ```
+  error: cadr: expected a pair or a non-empty list, got the number 0
+
+  ```
+- **row-5-emergence** :cs-composition
+  ```scheme
+  (define (layout pitches clef)
+  (filter (lambda (r) (eq? (car r) 'ok))
+          (map (lambda (p) (note-dots p 'quarter 0 clef)) pitches)))
+(display (layout '(C4 X E4) 'treble))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 0
 
   ```
 
 ### `sprite` — file `01-core.slat`
 
-- **row-2-audit** :program
-  ```scheme
-  (sprite 'hero '(turn 45) '(tint red))
-  ```
-  Error:
-  ```
-  error: unbound symbol: sprite
-
-  ```
 - **row-2-audit** :eng-program
   ```scheme
-  (define turn (lambda args (list "turn" args)))
-;; fetch and rotate in one construction
-(sprite 'rose (turn 90))
+  (sprite/address \'rose)
   ```
   Error:
   ```
-  error: unbound symbol: sprite
+  error: apostrophe (') inside identifier — Motoi uses ' as quote; rename the identifier (banker-s, banker_s) or use spaces (line 1, col 18)
 
   ```
 - **row-2-audit** :math-program
   ```scheme
-  (define turn (lambda args (list "turn" args)))
-;; forms apply in order: composition is left-to-right
-(sprite 'rose (turn 30) (turn 60))
+  (sprite/address \'rose)
   ```
   Error:
   ```
-  error: unbound symbol: sprite
-
-  ```
-- **row-2-audit** :cs-program
-  ```scheme
-  (sprite 'no-such-sprite)
-;; unknown name yields an error tuple, not an exception
-  ```
-  Error:
-  ```
-  error: unbound symbol: sprite
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define a (sprite 'x))
-(define b (sprite 'x))
-(display 'stable-lookup)
-  ```
-  Error:
-  ```
-  error: unbound symbol: sprite
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define a (sprite 'rose))
-(define b (sprite 'rose))
-;; two lookups of the same name are equivalent
-(display 'stable-lookup)
-  ```
-  Error:
-  ```
-  error: unbound symbol: sprite
-
-  ```
-- **row-4-proof** :math-program
-  ```scheme
-  (define upper (sprite 'ROSE))
-(define lower (sprite 'rose))
-;; name is case-normalized: ROSE and rose denote the same sprite
-(display 'case-insensitive)
-  ```
-  Error:
-  ```
-  error: unbound symbol: sprite
-
-  ```
-- **row-4-proof** :cs-program
-  ```scheme
-  (define plain (sprite 'rose))
-;; no forms = identity transform: the sprite in default state
-(display 'default-state)
-  ```
-  Error:
-  ```
-  error: unbound symbol: sprite
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (sprite 'hero (list 'turn (* 45 (audio-band 3))))
-  ```
-  Error:
-  ```
-  error: unbound symbol: sprite
+  error: apostrophe (') inside identifier — Motoi uses ' as quote; rename the identifier (banker-s, banker_s) or use spaces (line 1, col 18)
 
   ```
 - **row-5-emergence** :math-composition
   ```scheme
-  (define turn (lambda args (list "turn" args)))
-(define (ring n)
-  ;; n copies of a sprite, each rotated by 360/n degrees
-  (map (lambda (i) (sprite 'rose (turn (* i (/ 360 n)))))
-       (iota n)))
+  (define (ring n)
+  (map (lambda (i) (sprite/address \'rose)) (iota n)))
 (display (ring 6))
   ```
   Error:
   ```
-  error: unbound symbol: sprite
+  error: apostrophe (') inside identifier — Motoi uses ' as quote; rename the identifier (banker-s, banker_s) or use spaces (line 2, col 37)
 
   ```
 
 ### `sprites` — file `01-core.slat`
 
-- **row-2-audit** :program
+- **row-5-emergence** :cs-composition
   ```scheme
-  (sprites (list 'hero 'sidekick) (list 'anim 'walk))
+  (define (sprites target form) (list \'sprites target form))
+(define (sprites target form) (list 'sprites target form))
+(define roster (map (lambda (i) (string->symbol (string-append "npc" (number->string i)))) (iota 8)))
+(display (sprites roster (list 'anim 'wander)))
   ```
   Error:
   ```
-  error: unbound symbol: sprites
+  error: apostrophe (') inside identifier — Motoi uses ' as quote; rename the identifier (banker-s, banker_s) or use spaces (line 1, col 38)
 
   ```
+
+### `viewport` — file `01-core.slat`
+
 - **row-2-audit** :eng-program
   ```scheme
-  (sprites 'goblin (list 'rotate 45))
-;; a single name is accepted as well as a list
+  (define (center-of-view)
+  (let ((vp (viewport)))
+    (list (+ (hash-table-ref/default vp 'x #f) (/ (hash-table-ref/default vp 'w #f) 2))
+          (+ (hash-table-ref/default vp 'y #f) (/ (hash-table-ref/default vp 'h #f) 2)))))
+(center-of-view)
   ```
   Error:
   ```
-  error: unbound symbol: sprites
+  error: /: expected a number, got #f
 
   ```
 - **row-2-audit** :math-program
   ```scheme
-  (sprites (list 'a 'b 'c) (list 'tint 'red))
-;; one form broadcast uniformly across the target set
+  (define (view-area)
+  (let ((vp (viewport)))
+    (* (hash-table-ref/default vp 'w #f) (hash-table-ref/default vp 'h #f))))  ;; area of the axis-aligned view rectangle = w * h
+(view-area)
   ```
   Error:
   ```
-  error: unbound symbol: sprites
-
-  ```
-- **row-2-audit** :cs-program
-  ```scheme
-  (sprites (list 'knight 'squire)
-  (list 'in-order
-    (list 'move-to 100 200)
-    (list 'rotate 90)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: sprites
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (sprites (list 'a 'b 'c) (list 'tint 'red))
-(display 'consistent-across-targets)
-  ```
-  Error:
-  ```
-  error: unbound symbol: sprites
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (sprites (list 'a 'b 'c) (list 'tint 'red))
-;; every listed sprite receives the identical tint form
-(display 'uniform-tint)
-  ```
-  Error:
-  ```
-  error: unbound symbol: sprites
+  error: *: expected a number, got #f
 
   ```
 - **row-4-proof** :math-program
   ```scheme
-  (sprites (list 'x) (list 'rotate 90))
-;; a singleton target set degenerates to the single-sprite case
-(display 'singleton-ok)
+  (define (in-box? px py vp)
+  (and (>= px (hash-table-ref/default vp 'x #f)) (<= px (+ (hash-table-ref/default vp 'x #f) (hash-table-ref/default vp 'w #f)))
+       (>= py (hash-table-ref/default vp 'y #f)) (<= py (+ (hash-table-ref/default vp 'y #f) (hash-table-ref/default vp 'h #f)))))
+(display (in-
   ```
   Error:
   ```
-  error: unbound symbol: sprites
-
-  ```
-- **row-4-proof** :cs-program
-  ```scheme
-  (sprites (list 'a 'b) (list 'bad-form))
-;; an invalid form emits no event -- validation guards the batch
-(display 'validated)
-  ```
-  Error:
-  ```
-  error: unbound symbol: sprites
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (sprites (list 'a 'b 'c) (list 'anim 'idle))
-  ```
-  Error:
-  ```
-  error: unbound symbol: sprites
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (choreograph attacker defender)
-  (sprites attacker
-    (list 'in-order (list 'lean-aside 30) (list 'wait 200)))
-  (sprites defender
-    (list 'in-order (list 'wait 200) (list 'lean-aside -40))))
-(choreograph 'hero 'goblin)
-  ```
-  Error:
-  ```
-  error: unbound symbol: sprites
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define roster (map (lambda (i) (string->symbol (string-append "npc" (number->string i)))) (iota 8)))
-(sprites roster (list 'anim 'wander))
-  ```
-  Error:
-  ```
-  error: unbound symbol: sprites
+  error: +: expected a number, got #f
 
   ```
 
-### `stop` — file `01-core.slat`
+### `viewport-width` — file `01-core.slat`
 
-- **row-2-audit** :program
-  ```scheme
-  (when (game-over?) (stop))
-  ```
-  Error:
-  ```
-  error: unbound symbol: game-over?
-
-  ```
-
-### `touch` — file `01-core.slat`
-
-- **row-2-audit** :eng-program
-  ```scheme
-  (define (press-the-button ctx)
-  (let ((b (card-find-by-kind 'button)))
-    (when (pair? b) (touch 'hand (card-id-of b)))))
-(press-the-button 'ctx)
-  ```
-  Error:
-  ```
-  error: unbound symbol: card-find-by-kind
-
-  ```
-
-### `wait` — file `01-core.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (poll-then-wait ctx)
-  (if (null? (ctx-result ctx))
-      (wait 'retry-signal 5000)
-      (next 'done ctx)))
-(poll-then-wait 'ctx)
-  ```
-  Error:
-  ```
-  error: unbound symbol: ctx-result
-
-  ```
-
-### `with-spacing` — file `01-core.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (with-spacing 10
-  (in-formation 'row (list 'a 'b 'c)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: in-formation
-
-  ```
-- **row-2-audit** :eng-program
-  ```scheme
-  (define (troupe members gap)
-  (with-spacing gap
-    (in-formation 'row members)))
-(troupe '(a b c d) 40)
-  ```
-  Error:
-  ```
-  error: unbound symbol: in-formation
-
-  ```
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (spaced-or-default members)
-  (if (pair? members)
-      (with-spacing 16 (in-formation 'row members))
-      '()))
-(spaced-or-default '(a b))
-  ```
-  Error:
-  ```
-  error: unbound symbol: in-formation
-
-  ```
 - **row-4-proof** :program
   ```scheme
-  (with-spacing 10 (in-formation 'row '(a b)))
-(display 'scoped-spacing)
+  (define vp (viewport))
+(display (equal? (viewport-width) (- (caddr vp) (car vp))))
   ```
   Error:
   ```
-  error: unbound symbol: in-formation
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (with-spacing 10 (in-formation 'row '(a b)))
-(in-formation 'row '(c d))  ;; this second call uses the default spacing, not 10
-(display 'scope-ended)
-  ```
-  Error:
-  ```
-  error: unbound symbol: in-formation
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (with-spacing 20 (in-formation 'row (entity/all)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: in-formation
+  error: caddr: expected a pair or a non-empty list, got the empty list
 
   ```
 
-### `ai/bt-action` — file `02-ai.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define registry (list (cons 'attack (lambda (npc) (list 'strike npc)))
-                       (cons 'flee   (lambda (npc) (list 'run   npc)))))
-(define (resolve-leaf leaf reg)
-  (let* ((tag (cadr leaf)) (h (assv tag reg)))
-    (if h ((cdr h) 'npc-7) (list 'no-handler tag))))
-(display (resolve-leaf 
-  ```
-  Error:
-  ```
-  error: not a function: [object Object]
-
-  ```
-
-### `ai/bt-invert` — file `02-ai.slat`
-
-- **row-3-dimension** :code
-  ```scheme
-  (define (invert cmd) (list 'shell '! cmd))
-(display (invert 'ping-succeeds)))
-  ```
-  Error:
-  ```
-  error: unexpected ) (line 2, col 34)
-
-  ```
-
-### `ai/bt-selector` — file `02-ai.slat`
+### `ai/bt-tick` — file `02-ai.slat`
 
 - **row-5-emergence** :cs-composition
   ```scheme
-  (define (chain-of-responsibility handlers msg)
-  (let loop ((rest handlers))
-    (cond ((null? rest) 'unhandled)
-          (((car rest) msg) => (lambda (r) r))
-          (else (loop (cdr rest))))))
-(display (chain-of-responsibility
-            (list (lambda (m) (if (eq? m 'critical) 'panic-heal #f))
+  (define (batch-dispatch agents tree)
+  (map (lambda (a) (list 'agent a 'status (if (odd? (length (symbol->string a))) 'success 'running))) agents))
+(display (batch-dispatch '(a1 a2 a3 a4) 'combat-tree))
+(newline)
   ```
   Error:
   ```
-  error: unbound symbol: =>
-
-  ```
-
-### `ai/decide` — file `02-ai.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (scored-dispatch choices npc-id)
-  (let ((scored (map (lambda (c) (cons (car c) ((cdr c) npc-id))) choices)))
-    (display (list 'scores scored))
-    (newline)
-    (car (fold (lambda (p acc) (if (> (cdr p) (cdr acc)) p acc)) (car scored) (cdr scored)))))
-(define (fold f init xs) (if (null? x
-  ```
-  Error:
-  ```
-  error: not a function: [object Object]
-
-  ```
-
-### `ai/flock` — file `02-ai.slat`
-
-- **row-2-audit** :eng-program
-  ```scheme
-  (define (fly-all birds)
-  (for-each (lambda (b) (ai/flock b 'bird 80 4.0)) birds))
-(fly-all (list 'b1 'b2 'b3))
-  ```
-  Error:
-  ```
-  error: posns is not iterable
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (mixed-behavior birds threat)
-  (for-each
-    (lambda (b)
-      (ai/flock b 'flock 80 4.0)
-      (ai/evade b threat 2.0))
-    birds))
-(mixed-behavior (list 'b1 'b2) 'hawk)
-  ```
-  Error:
-  ```
-  error: posns is not iterable
-
-  ```
-
-### `ai/flow-field` — file `02-ai.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define field (ai/flow-field grid 50 50))
-(display 'field-computed)
-  ```
-  Error:
-  ```
-  error: unbound symbol: grid
-
-  ```
-- **row-2-audit** :eng-program
-  ```scheme
-  (define field (ai/flow-field grid 50 50))
-(display 'field-computed)
-  ```
-  Error:
-  ```
-  error: unbound symbol: grid
-
-  ```
-
-### `ai/follow-path` — file `02-ai.slat`
-
-- **row-5-emergence** :composition
-  ```scheme
-  (define (patrol-then-idle guard route idle-after)
-  (ai/follow-path guard route 2.0 4.0)
-  (if (path-complete? guard route)
-    (ai/wander guard 1.0)))
-(patrol-then-idle 'g '((0 0) (10 10)) 100)
-  ```
-  Error:
-  ```
-  error: unbound symbol: path-complete?
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (patrol-then-idle guard route idle-after)
-  (ai/follow-path guard route 2.0 4.0)
-  (if (path-complete? guard route)
-    (ai/wander guard 1.0)))
-(patrol-then-idle 'g '((0 0) (10 10)) 100)
-  ```
-  Error:
-  ```
-  error: unbound symbol: path-complete?
-
-  ```
-
-### `ai/path` — file `02-ai.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define route (ai/path grid 0 0 20 20))
-(display route)
-  ```
-  Error:
-  ```
-  error: unbound symbol: grid
-
-  ```
-
-### `ai/pursue` — file `02-ai.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (pursue-force self self-pos target-pos target-vel max-force)
-  (let* ((la (predict-look-ahead 50 20))
-         (fp (lead-position target-pos target-vel la))
-         (dx (- (car fp) (car self-pos))) (dy (- (cadr fp) (cadr self-pos)))
-         (m (sqrt (+ (* dx dx) (* dy dy)))))
-    (if (< m 
-  ```
-  Error:
-  ```
-  error: unbound symbol: lead-position
-
-  ```
-
-### `ai/wall!` — file `02-ai.slat`
-
-- **row-3-dimension** :code
-  ```scheme
-  (define (drop rule) (list 'iptables 'add 'drop rule))
-(display (drop 'from-hostile-ip)))
-  ```
-  Error:
-  ```
-  error: unexpected ) (line 2, col 34)
-
-  ```
-- **row-3-dimension** :code
-  ```scheme
-  (define (add-constraint lp c) (list 'lp lp 'plus c))
-(display (add-constraint 'model 'x-plus-y<=5)))
-  ```
-  Error:
-  ```
-  error: unexpected ) (line 2, col 47)
-
-  ```
-
-### `ai/wander` — file `02-ai.slat`
-
-- **row-3-dimension** :code
-  ```scheme
-  (define (build-lock crates) (list 'cargo 'build 'with 'cargo.lock))
-(display (build-lock 'my-app)))
-  ```
-  Error:
-  ```
-  error: unexpected ) (line 2, col 31)
+  error: length: expected a proper list, got the string "a1"
 
   ```
 
 ### `ai/waypoints` — file `02-ai.slat`
 
-- **row-2-audit** :program
+- **row-2-audit** :eng-program
   ```scheme
-  (define waypoints (ai/waypoints grid path))
-(ai/follow-path 'unit waypoints 2.0 4.0)
+  (define g (ai/grid 10 10))
+(define path (ai/path g 0 0 3 3))
+(define wps (ai/waypoints g path))
+(display (list 'cells (length path) 'waypoints (length wps)))
+(newline)
   ```
   Error:
   ```
-  error: unbound symbol: grid
+  error: length: expected a proper list, got #t
 
   ```
-
-### `alg/cosets` — file `03-alg.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define G (alg/dihedral 4))
-(define H (alg/subgroup-gen G (list 1)))
-(define L (alg/cosets G H))
-(define R (map (lambda (c) (map (lambda (h) (alg/op G h (car c))) H)) L))
-(equal? (map (lambda (c) (list->set c)) L)
-        (map (lambda (c) (list->set c)) R))
-  ```
-  Error:
-  ```
-  error: unbound symbol: list->set
-
-  ```
-
-### `alg/inverse` — file `03-alg.slat`
-
 - **row-2-audit** :cs-program
   ```scheme
-  (define G (alg/dihedral 3))
-(define (self-inverse? x) (equal? x (alg/inverse G x)))
-(filter self-inverse? (alg/op G))
+  (define g (ai/grid 16 16))
+(define (convert-and-check grid cells)
+  (let ((wps (ai/waypoints grid cells)))
+    (= (length wps) (length cells))))
+(display (convert-and-check g '((0 0) (1 1) (2 2))))
+(newline)
   ```
   Error:
   ```
-  error: Cannot use 'in' operator to search for 'name' in rot
+  error: length: expected a proper list, got #t
+
+  ```
+- **row-4-proof** :eng-program
+  ```scheme
+  (define g (ai/grid 10 10))
+(define path (ai/path g 0 0 4 4))
+(define wps (ai/waypoints g path))
+(display (list 'same-length (= (length path) (length wps))))
+(newline)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got #t
 
   ```
 
-### `alg/invert` — file `03-alg.slat`
+### `alg/subgroups` — file `03-alg.slat`
 
-- **row-5-emergence** :cs-composition
+- **row-2-audit** :eng-program
+  ```scheme
+  (length (alg/subgroups (alg/cyclic 12)))
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the symbol use-backend
+
+  ```
+- **row-3-dimension** :code
+  ```scheme
+  (length (alg/subgroups (alg/cyclic 12)))
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the symbol use-backend
+
+  ```
+- **row-5-emergence** :composition
+  ```scheme
+  (define orders '(2 3 4 5 6 7 8 9 10 12))
+(define (divisor-count n) (length (alg/subgroups (alg/cyclic n))))
+(map (lambda (n) (list n (divisor-count n))) orders)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the symbol use-backend
+
+  ```
+- **row-5-emergence** :eng-composition
+  ```scheme
+  (map (lambda (n) (length (alg/subgroups (alg/cyclic n)))) '(6 8 12))
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the symbol use-backend
+
+  ```
+
+### `alg/symmetry-group` — file `03-alg.slat`
+
+- **row-3-dimension** :code
   ```scheme
   (define S (alg/pcset (list 0 3 6 9)))
-(define orbit (list S (alg/invert S) (alg/transpose S 1) (alg/invert (alg/transpose S 1))))
-(length (dedupe orbit))
+(zero? (modulo 24 (length (alg/symmetry-group S))))
   ```
   Error:
   ```
-  error: unbound symbol: dedupe
+  error: modulo: division by zero
 
   ```
-
-### `alg/is-group?` — file `03-alg.slat`
-
-- **row-4-proof** :math-program
+- **row-4-proof** :program
   ```scheme
-  (define (latin-square? t)
-  (every (lambda (row) (= (length row) (length (dedupe row)))) t))
-(define G (alg/cyclic 4))
-(and (alg/is-group? G) (latin-square? G))
+  (define S (alg/pcset (list 0 3 6 9)))
+(zero? (modulo 24 (length (alg/symmetry-group S))))
   ```
   Error:
   ```
-  error: unbound symbol: dedupe
+  error: modulo: division by zero
 
   ```
 
-### `alg/is-isomorphic?` — file `03-alg.slat`
+### `artifact/cite` — file `05-artifact.slat`
 
-- **row-5-emergence** :cs-composition
+- **row-4-proof** :eng-program
   ```scheme
-  (define (dedupe-up-to-iso gs)
-  (iso-classes gs))
-(define (order-signature gs)
-  (map alg/order (dedupe-up-to-iso gs)))
-(order-signature (list (alg/cyclic 6) (alg/dihedral 3) (alg/symmetric 3)))
+  (equal? (car (artifact/cite 'a-42)) 'pending)
   ```
   Error:
   ```
-  error: unbound symbol: iso-classes
+  error: car: expected a pair or a non-empty list, got #f
 
   ```
-
-### `alg/perm->cycles` — file `03-alg.slat`
-
 - **row-4-proof** :cs-program
   ```scheme
-  (define (disjoint? cs)
-  (let ((flat (apply append cs)))
-    (= (length flat) (length (remove-duplicates flat)))))
-(disjoint? (alg/perm->cycles (alg/perm (list 1 2 0 4 3))))
+  (define (deterministic-kick? id) (equal? (car (artifact/cite id)) 'pending))
+(deterministic-kick? 'a-42)
   ```
   Error:
   ```
-  error: unbound symbol: remove-duplicates
+  error: car: expected a pair or a non-empty list, got #f
 
   ```
 
-### `alg/perm-conjugate` — file `03-alg.slat`
+### `artifact/delete` — file `05-artifact.slat`
 
-- **row-5-emergence** :math-composition
+- **row-4-proof** :eng-program
   ```scheme
-  (define s (alg/perm (list 1 2 0 3)))
-(define reps (list (alg/perm-identity 4) (alg/perm (list 1 0 2 3)) (alg/perm (list 0 1 3 2))))
-(remove-duplicates (map (lambda (x) (alg/perm-conjugate x s)) reps))
+  (equal? (car (artifact/delete 'a-42)) 'pending)
   ```
   Error:
   ```
-  error: unbound symbol: remove-duplicates
+  error: car: expected a pair or a non-empty list, got #f
 
   ```
-- **row-5-emergence** :cs-composition
+- **row-4-proof** :cs-program
   ```scheme
-  (define (conj-class s reps) (remove-duplicates (map (lambda (x) (alg/perm-conjugate x s)) reps)))
-(length (conj-class (alg/perm (list 1 2 0)) (list (alg/perm-identity 3) (alg/perm (list 1 0 2)))))
+  (define (deterministic-kick? id) (equal? (car (artifact/delete id)) 'pending))
+(deterministic-kick? 'a-42)
   ```
   Error:
   ```
-  error: unbound symbol: remove-duplicates
+  error: car: expected a pair or a non-empty list, got #f
 
   ```
 
-### `alg/symmetric` — file `03-alg.slat`
+### `artifact/save` — file `05-artifact.slat`
 
-- **row-5-emergence** :cs-composition
+- **row-4-proof** :eng-program
   ```scheme
-  (define S3 (alg/symmetric 3))
-(define g (alg/perm (list 1 2 0)))
-(let loop ((k 1) (p g))
-  (if (equal? p (alg/identity S3)) k (loop (+ k 1) (alg/op S3 p g))))
+  (equal? (car (artifact/save (list (cons 'kind 'x) (cons 'payload 'y)))) 'pending)
   ```
   Error:
   ```
-  error: fuel exhausted
+  error: car: expected a pair or a non-empty list, got #f
 
   ```
-
-### `animation/budget` — file `04-animation.slat`
-
-- **row-2-audit** :cs-program
+- **row-4-proof** :cs-program
   ```scheme
-  (define (safe-budget) (let ((b (animation/budget))) (if (list? b) b (error 'no-budget))))
-(safe-budget)
+  (define (deterministic-kick? opts) (equal? (car (artifact/save opts)) 'pending))
+(deterministic-kick? (list (cons 'kind 'x) (cons 'payload 'y)))
   ```
   Error:
   ```
-  error: no-budget
+  error: car: expected a pair or a non-empty list, got #f
 
   ```
 
-### `artifact/list` — file `05-artifact.slat`
+### `calc/curl` — file `11-calc.slat`
 
 - **row-2-audit** :eng-program
   ```scheme
-  (artifact/list (list (cons 'kind 'sketch)))
+  (define vortex (lambda (p) (list (- (cadr p)) (car p))))
+(define curl-val (calc/curl vortex (list 1 1)))
+;; Rotational field F=(-y,x): curl F = ∂x/∂x - ∂(-y)/∂y = 1+1 = 2
+(< (abs (- curl-val 2)) 0.05)
+;; => #t — vorticity is 2 everywhere
   ```
   Error:
   ```
-  error: [artifact] 'artifact/list' called in a headless env — install browser verbs from site/apps/hello-surface/artifact/verbs.js first (installArtifactVerbs).
+  error: -: expected a number, got a list
+
+  ```
+
+### `calc/directional-derivative` — file `11-calc.slat`
+
+- **row-2-audit** :eng-program
+  ```scheme
+  (define pressure (lambda (p) (+ (expt (car p) 2) (expt (cadr p) 2))))
+(define flow-dir (list (/ 1 (sqrt 2)) (/ 1 (sqrt 2))))
+(calc/directional-derivative pressure (list 1 1) flow-dir)
+;; ∇p=(2x,2y) at (1,1)=(2,2); dot (2,2)·(1/√2,1/√2)=4/√2≈2.828
+;; => ≈ 2.828
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
 
   ```
 - **row-2-audit** :math-program
   ```scheme
-  (define (list-by-kind k) (artifact/list (list (cons 'kind k))))
-(list-by-kind 'note)
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(calc/directional-derivative f (list 1 0) (list 1 0))
+;; ∇f=(2x,2y); at (1,0) with dir (1,0): 2x·1+2y·0=2
+;; => ≈ 2.0
   ```
   Error:
   ```
-  error: [artifact] 'artifact/list' called in a headless env — install browser verbs from site/apps/hello-surface/artifact/verbs.js first (installArtifactVerbs).
+  error: car: expected a pair or a non-empty list, got the number 1.000001
 
   ```
 - **row-2-audit** :cs-program
   ```scheme
-  (define (safe-list opts) (if (list? opts) (artifact/list opts) (error 'need-alist)))
-(safe-list (list (cons 'kind 'sketch)))
+  (define (scan-directions f pt dirs)
+  (map (lambda (d) (list d (calc/directional-derivative f pt d))) dirs))
+(scan-directions
+  (lambda (p) (* (car p) (cadr p)))
+  (list 1 1)
+  (list (list 1 0) (list 0 1) (list (/ 1 (sqrt 2)) (/ 1 (sqrt 2)))))
+;; f=xy; ∇f=(y,x)=(1,1) at (1,1); directions give 1, 1, 
   ```
   Error:
   ```
-  error: [artifact] 'artifact/list' called in a headless env — install browser verbs from site/apps/hello-surface/artifact/verbs.js first (installArtifactVerbs).
+  error: car: expected a pair or a non-empty list, got the number 1.000001
 
   ```
 - **row-3-dimension** :code
   ```scheme
-  (artifact/list options)
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(calc/directional-derivative f (list 1 0) (list 1 0))
+;; ∇f=(2x,2y); at (1,0) with dir (1,0): 2x·1+2y·0=2
+;; => ≈ 2.0
   ```
   Error:
   ```
-  error: unbound symbol: options
+  error: car: expected a pair or a non-empty list, got the number 1.000001
 
   ```
 - **row-3-dimension** :code
   ```scheme
-  (artifact/list (predicate-options))
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(calc/directional-derivative f (list 1 0) (list 1 0))
+;; ∇f=(2x,2y); at (1,0) with dir (1,0): 2x·1+2y·0=2
+;; => ≈ 2.0
   ```
   Error:
   ```
-  error: unbound symbol: predicate-options
-
-  ```
-- **row-3-dimension** :code
-  ```scheme
-  (artifact/list (parse-query msg))
-  ```
-  Error:
-  ```
-  error: unbound symbol: parse-query
+  error: car: expected a pair or a non-empty list, got the number 1.000001
 
   ```
 - **row-4-proof** :eng-program
   ```scheme
-  (equal? (car (artifact/list (list (cons 'kind 'sketch)))) 'pending)
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(define pt (list 1 1))
+(define v (list 1 0)) (define w (list 0 1))
+(define Dv (calc/directional-derivative f pt v))
+(define Dw (calc/directional-derivative f pt w))
+(define D2v3w (calc/directional-derivative f pt (list 2 3)))
+(< (
   ```
   Error:
   ```
-  error: [artifact] 'artifact/list' called in a headless env — install browser verbs from site/apps/hello-surface/artifact/verbs.js first (installArtifactVerbs).
+  error: car: expected a pair or a non-empty list, got the number 1.000001
 
   ```
 - **row-4-proof** :math-program
   ```scheme
-  (define (returns-pending? r) (and (pair? r) (eq? (car r) 'pending)))
-(returns-pending? (artifact/list '()))
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(define p (list 1 1))
+(define v (list 1 0)) (define w (list 0 1))
+(< (abs (- (calc/directional-derivative f p (list 2 3))
+           (+ (* 2 (calc/directional-derivative f p v))
+              (* 3 (calc/directional-derivative f p 
   ```
   Error:
   ```
-  error: [artifact] 'artifact/list' called in a headless env — install browser verbs from site/apps/hello-surface/artifact/verbs.js first (installArtifactVerbs).
+  error: car: expected a pair or a non-empty list, got the number 1.000001
 
   ```
 - **row-4-proof** :cs-program
   ```scheme
-  (define (deterministic-kick? opts) (equal? (car (artifact/list opts)) 'pending))
-(deterministic-kick? '())
+  (define (linearity-dir? f pt v w a b tol)
+  (let ((combined (calc/directional-derivative f pt (list (+ (* a (car v)) (* b (car w)))
+                                                         (+ (* a (cadr v)) (* b (cadr w))))))
+        (expected (+ (* a (calc/directional-derivative f pt v))
+          
   ```
   Error:
   ```
-  error: [artifact] 'artifact/list' called in a headless env — install browser verbs from site/apps/hello-surface/artifact/verbs.js first (installArtifactVerbs).
+  error: car: expected a pair or a non-empty list, got the number 2.000001
 
   ```
 - **row-5-emergence** :eng-composition
   ```scheme
-  (define (list-and-then options continuation) (artifact/list options) (continuation options))
-(list-and-then (list (cons 'kind 'sketch)) (lambda (o) 'awaiting))
+  (define loss (lambda (p) (+ (expt (car p) 2) (* 2 (expt (cadr p) 2)))))
+(define pt (list 3 2))
+(define grad (calc/gradient loss pt))
+(define gmag (sqrt (+ (* (car grad) (car grad)) (* (cadr grad) (cadr grad)))))
+(define descent-dir (list (/ (- (car grad)) gmag) (/ (- (cadr grad)) gmag)))
+(list 'grad
   ```
   Error:
   ```
-  error: [artifact] 'artifact/list' called in a headless env — install browser verbs from site/apps/hello-surface/artifact/verbs.js first (installArtifactVerbs).
+  error: car: expected a pair or a non-empty list, got the number 3.000001
 
   ```
 - **row-5-emergence** :math-composition
   ```scheme
-  (define (list-multi-kinds ks) (for-each (lambda (k) (artifact/list (list (cons 'kind k)))) ks))
-(list-multi-kinds (list 'sketch 'note))
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(define p (list 1 1))
+(define g (calc/gradient f p))
+(list g (calc/directional-derivative f p (list 1 0)))
+;; gradient=(2,2); x-dir rate=2; confirms ∇f·ê₁ = ∂f/∂x
   ```
   Error:
   ```
-  error: [artifact] 'artifact/list' called in a headless env — install browser verbs from site/apps/hello-surface/artifact/verbs.js first (installArtifactVerbs).
+  error: car: expected a pair or a non-empty list, got the number 1.000001
 
   ```
 - **row-5-emergence** :cs-composition
   ```scheme
-  (define (paginated-list options page-size) (artifact/list (cons (cons 'limit page-size) options)))
-(paginated-list (list (cons 'kind 'note)) 10)
+  (define (all-directional-rates f pt basis)
+  (map (lambda (v) (calc/directional-derivative f pt v)) basis))
+(all-directional-rates
+  (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p))))
+  (list 1 2)
+  (list (list 1 0) (list 0 1) (list (/ 1 (sqrt 2)) (/ 1 (sqrt 2)))))
+;; => (2 4 ≈4.243) — x-rat
   ```
   Error:
   ```
-  error: [artifact] 'artifact/list' called in a headless env — install browser verbs from site/apps/hello-surface/artifact/verbs.js first (installArtifactVerbs).
-
-  ```
-
-### `assert/audit-verify` — file `06-assert.slat`
-
-- **row-2-audit** :math-program
-  ```scheme
-  (assert/audit-verify v (canonical-spec spec))
-  ```
-  Error:
-  ```
-  error: unbound symbol: v
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (spec-pipeline v specs) (fold (lambda (v s) (assert/audit-verify v s) v) v specs))
-(spec-pipeline 42 (list 'number))
-  ```
-  Error:
-  ```
-  error: assert/audit-verify: 1 mismatch(es) ,unknown-spec,integer
-
-  ```
-
-### `assert/check-with` — file `06-assert.slat`
-
-- **row-2-audit** :eng-program
-  ```scheme
-  (define (dose-check d) (assert/check-with (lambda (x) (< x 100)) d "dose too high"))
-(dose-check 42)
-  ```
-  Error:
-  ```
-  error: assert/check-with: pred must be a procedure [object Object]
-
-  ```
-- **row-2-audit** :math-program
-  ```scheme
-  (define (identity-witness v) (equal? v (assert/check-with (lambda (x) #t) v "always")))
-(identity-witness 42)
-  ```
-  Error:
-  ```
-  error: assert/check-with: pred must be a procedure [object Object]
-
-  ```
-- **row-3-dimension** :code
-  ```scheme
-  (assert/check-with positive? v "pos")
-  ```
-  Error:
-  ```
-  error: unbound symbol: v
-
-  ```
-- **row-3-dimension** :code
-  ```scheme
-  (assert/check-with (in-set? domain) x "in-domain")
-  ```
-  Error:
-  ```
-  error: unbound symbol: in-set?
-
-  ```
-- **row-3-dimension** :code
-  ```scheme
-  (assert/check-with is-json? msg "json?")
-  ```
-  Error:
-  ```
-  error: unbound symbol: is-json?
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (roundtrip? v) (equal? v (assert/check-with (lambda (x) #t) v "tt")))
-(roundtrip? 42)
-  ```
-  Error:
-  ```
-  error: assert/check-with: pred must be a procedure [object Object]
-
-  ```
-- **row-4-proof** :math-program
-  ```scheme
-  (define (identity-on-pass? v) (eq? v (assert/check-with (lambda (x) #t) v "tt")))
-(identity-on-pass? 'x)
-  ```
-  Error:
-  ```
-  error: assert/check-with: pred must be a procedure [object Object]
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (all-hold preds v) (fold (lambda (v p) (assert/check-with p v "g")) v preds))
-(all-hold (list number? positive?) 5)
-  ```
-  Error:
-  ```
-  [verbRegistry] env.define('v') missing explicit perm — falling back to defaultMetaFor inference. Declare perm per CARD-MANIFEST-CONTRACT.md §3.2.
-error: assert/check-with: pred must be a procedure 5
-
-  ```
-
-### `assert/invariants` — file `06-assert.slat`
-
-- **row-2-audit** :eng-program
-  ```scheme
-  (assert/invariants (list (list (lambda () (positive? 5)) "pos") (list (lambda () (< 5 100)) "bound")))
-  ```
-  Error:
-  ```
-  error: assert/invariants: 2 failure(s) pos,not a procedure: [object Object] bound,not a procedure: [object Object]
-
-  ```
-- **row-2-audit** :math-program
-  ```scheme
-  (define (batch-check ps) (assert/invariants (map (lambda (p) (list p "chk")) ps)))
-(batch-check (list (lambda () #t) (lambda () #t)))
-  ```
-  Error:
-  ```
-  error: assert/invariants: 2 failure(s) chk,not a procedure: [object Object] chk,not a procedure: [object Object]
-
-  ```
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (safe-invariants ps) (if (list? ps) (assert/invariants ps) (error 'need-list)))
-(safe-invariants (list (list (lambda () #t) "x")))
-  ```
-  Error:
-  ```
-  error: assert/invariants: 1 failure(s) x,not a procedure: [object Object]
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (all-hold? ps) (assert/invariants (map (lambda (p) (list p "h")) ps)))
-(all-hold? (list (lambda () #t) (lambda () #t)))
-  ```
-  Error:
-  ```
-  error: assert/invariants: 2 failure(s) h,not a procedure: [object Object] h,not a procedure: [object Object]
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (checked-scale c v) (assert/invariants (list (list (lambda () (positive? c)) "pos-c") (list (lambda () (vector? v)) "vec-v"))) (* c (vector-ref v 0)))
-(checked-scale 2 (vector 3 4))
-  ```
-  Error:
-  ```
-  error: assert/invariants: 2 failure(s) pos-c,not a procedure: [object Object] vec-v,not a procedure: [object Object]
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (compose-preds ps) (assert/invariants (map (lambda (p) (list p "chk")) ps)))
-(compose-preds (list (lambda () #t) (lambda () #t)))
-  ```
-  Error:
-  ```
-  error: assert/invariants: 2 failure(s) chk,not a procedure: [object Object] chk,not a procedure: [object Object]
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (schema-guard v checks) (assert/invariants checks) v)
-(schema-guard 42 (list (list (lambda () #t) "ok")))
-  ```
-  Error:
-  ```
-  error: assert/invariants: 1 failure(s) ok,not a procedure: [object Object]
-
-  ```
-
-### `audio/bar-clock` — file `07-audio.slat`
-
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (multi-disc handle bar-counts)
-  (map (lambda (b) (cons b (audio/bar-clock handle b))) bar-counts))
-(define discs (multi-disc (audio/play 'stereo-loop) '(1 2 4 8)))
-(map (lambda (pair) (list :bars (car pair) :phase ((cdr pair) 'phase))) discs)
-  ```
-  Error:
-  ```
-  [verbRegistry] env.define('handle') missing explicit perm — falling back to defaultMetaFor inference. Declare perm per CARD-MANIFEST-CONTRACT.md §3.2.
-error: not a function: (msg) => {
-    const m = msg instanceof Sym ? msg.name : String(msg)
-    const beatPeriod = 60 / (A.tempo || 120)
-    const t 
-  ```
-
-### `base/make-character` — file `08-base.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (register-character visual) (if (sprite? visual) (base/make-character visual) (error 'shape 'need-sprite)))
-(register-character (sprite/address 'hero))
-  ```
-  Error:
-  ```
-  error: unbound symbol: sprite?
-
-  ```
-- **row-4-proof** :math-program
-  ```scheme
-  (define (deterministic-shape? s) (equal? (character-shape (base/make-character s)) s))
-(deterministic-shape? (sprite/address 'hero))
-  ```
-  Error:
-  ```
-  error: unbound symbol: character-shape
-
-  ```
-- **row-4-proof** :cs-program
-  ```scheme
-  (define (id-typed? v) (character-id? (base/make-character (sprite/address v))))
-(id-typed? 'hero)
-  ```
-  Error:
-  ```
-  error: unbound symbol: character-id?
-
-  ```
-
-### `bytevector-append` — file `10-bytevector.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (append-chain-cost xs)
-  (let ((total-len (apply + (map bytevector-length xs))))
-    (list 'segments (length xs) 'bytes-copied total-len 'cost 'O(total-len))))
-(display (append-chain-cost (list (bytevector 1 2) (bytevector 3 4 5) (bytevector 6))))
-(newline)
-  ```
-  Error:
-  ```
-  error: not a function: 6
-
-  ```
-
-### `string->utf8` — file `10-bytevector.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (percent-encode s)
-  (let loop ((bs (bytevector->list (string->utf8 s))) (acc '()))
-    (if (null? bs)
-      (list->string (reverse acc))
-      (let ((b (car bs)))
-        (if (or (and (>= b 65) (<= b 90)) (and (>= b 97) (<= b 122)) (and (>= b 48) (<= b 57)))
-          (loop (cdr bs) (cons (
-  ```
-  Error:
-  ```
-  error: unbound symbol: bytevector->list
-
-  ```
-- **row-4-proof** :cs-program
-  ```scheme
-  (define (byte-boundary-first-byte-classify b)
-  (cond ((< b 128) 'ascii-1byte)
-        ((< b 192) 'continuation)
-        ((< b 224) 'lead-2byte)
-        ((< b 240) 'lead-3byte)
-        (else 'lead-4byte)))
-(display (map byte-boundary-first-byte-classify (bytevector->list (string->utf8 "aé中😀"))))
-(ne
-  ```
-  Error:
-  ```
-  error: unbound symbol: bytevector->list
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (utf8-hash s)
-  (let ((bs (bytevector->list (string->utf8 s))))
-    (fold (lambda (b h) (modulo (+ (* h 31) b) 2147483647)) 0 bs)))
-(display (list (utf8-hash "hello") (utf8-hash "world") (utf8-hash "hello")))
-(newline)
-  ```
-  Error:
-  ```
-  error: unbound symbol: bytevector->list
-
-  ```
-
-### `calc/arc-length` — file `11-calc.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (arc-length-finite-diff f a b n)
-  ;; Approximate arc length by summing chord segments
-  (let ((h (/ (- b a) n)))
-    (let loop ((i 0) (acc 0))
-      (if (= i n) acc
-        (let ((x0 (+ a (* i h))) (x1 (+ a (* (+ i 1) h))))
-          (loop (+ i 1)
-                (+ acc (sqrt (+ (* h h) (ex
-  ```
-  Error:
-  ```
-  error: missing ) (line 1, col 1)
-
-  ```
-
-### `calc/arc-length-param` — file `11-calc.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (sample-arc-length fx fy t0 t1 n)
-  ;; Chord-sum approximation using n samples
-  (let ((dt (/ (- t1 t0) n)))
-    (let loop ((i 0) (acc 0))
-      (if (= i n) acc
-        (let ((t (+ t0 (* i dt))) (tn (+ t0 (* (+ i 1) dt))))
-          (let ((dx (- (fx tn) (fx t))) (dy (- (fy tn) (fy t))))
-    
-  ```
-  Error:
-  ```
-  error: missing ) (line 1, col 1)
-
-  ```
-
-### `calc/critical-points-1d` — file `11-calc.slat`
-
-- **row-3-dimension** :code
-  ```scheme
-  {x : f\'(x) = 0}
-  ```
-  Error:
-  ```
-  error: apostrophe (') inside identifier — Motoi uses ' as quote; rename the identifier (banker-s, banker_s) or use spaces (line 1, col 8)
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define f (lambda (x) (- (* x x x) (* 3 x))))
-(define df (calc/derivative f))
-(define cps (calc/critical-points-1d f -3 3))
-(map (lambda (c) (< (abs (df c)) 0.02)) cps)
-;; => (#t #t) — both critical points have f' ≈ 0
-  ```
-  Error:
-  ```
-  error: not a function: NaN
-
-  ```
-- **row-4-proof** :math-program
-  ```scheme
-  (define f (lambda (x) (- (* x x x) (* 3 x))))
-(define df (calc/derivative f))
-(define cps (calc/critical-points-1d f -3 3))
-(let loop ((cs cps))
-  (or (null? cs) (and (< (abs (df (car cs))) 0.01) (loop (cdr cs)))))
-;; => #t — Fermat's theorem: all critical points have df=0
-  ```
-  Error:
-  ```
-  error: not a function: NaN
-
-  ```
-- **row-4-proof** :cs-program
-  ```scheme
-  (define (all-zeros? f cps tol)
-  (let loop ((cs cps))
-    (or (null? cs)
-        (and (< (abs ((calc/derivative f) (car cs))) tol)
-             (loop (cdr cs))))))
-(all-zeros? (lambda (x) (* x x)) (calc/critical-points-1d (lambda (x) (* x x)) -2 2) 0.01)
-;; => #t — x² has critical point at 0; df(0) 
-  ```
-  Error:
-  ```
-  error: not a function: NaN
-
-  ```
-
-### `calc/derivative` — file `11-calc.slat`
-
-- **row-2-audit** :eng-program
-  ```scheme
-  (define position (lambda (t) (+ (* 3 t t) (* -2 t) 1)))
-(define velocity (calc/derivative position))
-(velocity 2)
-;; position s(t) = 3t²-2t+1; velocity = ds/dt = 6t-2; at t=2: 6·2-2 = 10
-;; => ≈ 10.0
-  ```
-  Error:
-  ```
-  error: not a function: NaN
-
-  ```
-- **row-2-audit** :math-program
-  ```scheme
-  (define f (lambda (x) (* x x)))
-(define df (calc/derivative f))
-(df 3)
-;; d/dx(x²) = 2x; at x=3: 2·3 = 6
-;; => ≈ 6.0
-  ```
-  Error:
-  ```
-  error: not a function: NaN
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define f (lambda (x) (* x x)))
-(define g (lambda (x) x))
-(define combined (calc/derivative (lambda (x) (+ (* 3 (f x)) (* 2 (g x))))))
-(define by-linearity (+ (* 3 ((calc/derivative f) 1)) (* 2 ((calc/derivative g) 1))))
-(< (abs (- (combined 1) by-linearity)) 0.01)
-;; 3·(2x) + 2·(1) at x=1 = 8; line
-  ```
-  Error:
-  ```
-  error: not a function: NaN
-
-  ```
-- **row-4-proof** :math-program
-  ```scheme
-  (define f (lambda (x) (* x x)))
-(define g (lambda (x) x))
-(define df (calc/derivative f))
-(define dg (calc/derivative g))
-(define combined (calc/derivative (lambda (x) (+ (* 3 (f x)) (* 2 (g x))))))
-(< (abs (- (combined 1.0) (+ (* 3 (df 1.0)) (* 2 (dg 1.0))))) 0.01)
-;; => #t — 3f'+2g' = 3·2+2·1 = 8
-  ```
-  Error:
-  ```
-  error: not a function: NaN
-
-  ```
-- **row-4-proof** :cs-program
-  ```scheme
-  (define (linearity-test? f g a b x)
-  (let ((dh (calc/derivative (lambda (t) (+ (* a (f t)) (* b (g t))))))
-        (df (calc/derivative f))
-        (dg (calc/derivative g)))
-    (< (abs (- (dh x) (+ (* a (df x)) (* b (dg x))))) 0.02)))
-(linearity-test? (lambda (x) (* x x)) (lambda (x) x) 3 2 1)
-;; 
-  ```
-  Error:
-  ```
-  error: not a function: NaN
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define accel (lambda (t) (+ (* 4 t) 3)))
-(define vel   (lambda (t) (+ (* 2 t t) (* 3 t))))
-;; Verify: dvel/dt should equal accel
-(map (lambda (t) (< (abs (- ((calc/derivative vel) t) (accel t))) 0.05))
-     '(0 1 2 3))
-;; => (#t #t #t #t) — kinematics check
-  ```
-  Error:
-  ```
-  error: not a function: NaN
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define f (lambda (x) (sin x)))
-(define df  (calc/derivative f))
-(define ddf (calc/derivative df))
-(list (df 0) (ddf 0))
-;; => (≈1.0 ≈0.0) — sin'(0)=cos(0)=1; sin''(0)=-sin(0)=0
-  ```
-  Error:
-  ```
-  error: not a function: NaN
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (nth-derivative f n x)
-  (if (= n 0) (f x)
-    (let ((df (calc/derivative f)))
-      (nth-derivative df (- n 1) x))))
-(map (lambda (n) (nth-derivative (lambda (x) (expt x 4)) n 1))
-     '(0 1 2 3 4))
-;; => (1 4 12 24 0) — powers of x^4 at x=1
-  ```
-  Error:
-  ```
-  error: not a function: NaN
+  error: car: expected a pair or a non-empty list, got the number 1.000001
 
   ```
 
 ### `calc/extrema-1d` — file `11-calc.slat`
 
-- **row-3-dimension** :code
+- **row-2-audit** :cs-program
   ```scheme
-  attained at boundary or where f\' = 0
+  (define (best-minimum f a b)
+  ;; Extract the global minimum from classified extrema
+  (let ((ext (calc/extrema-1d f a b)))
+    (let loop ((xs ext) (best-x #f) (best-v +inf.0))
+      (if (null? xs) (list 'min-at best-x 'value best-v)
+        (let ((e (car xs)))
+          (if (and (eq? (cadr e) 'min)
   ```
   Error:
   ```
-  error: apostrophe (') inside identifier — Motoi uses ' as quote; rename the identifier (banker-s, banker_s) or use spaces (line 1, col 33)
-
-  ```
-
-### `calc/integral` — file `11-calc.slat`
-
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define F (lambda (x) (* x x x)))
-(define f (calc/derivative F))
-(< (abs (- (calc/integral f 0 2) (- (F 2) (F 0)))) 0.05)
-  ```
-  Error:
-  ```
-  error: not a function: NaN
-
-  ```
-
-### `calc/newton` — file `11-calc.slat`
-
-- **row-3-dimension** :code
-  ```scheme
-  x_{n+1} = x_n - f(x_n)/f\'(x_n)
-  ```
-  Error:
-  ```
-  error: apostrophe (') inside identifier — Motoi uses ' as quote; rename the identifier (banker-s, banker_s) or use spaces (line 1, col 26)
-
-  ```
-- **row-4-proof** :math-program
-  ```scheme
-  (define f (lambda (x) (- (* x x x) x 2)))
-(define r (calc/newton f 1.5))
-(define fp (calc/derivative f))
-(< (abs (- r (- r (/ (f r) (fp r))))) 0.001)
-  ```
-  Error:
-  ```
-  error: not a function: NaN
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define f (lambda (x) (+ (* x x x x) (- (* 2 x x)) 1)))
-(define fp (calc/derivative f))
-(define crit (calc/newton fp 1.5))
-(list 'critical-x crit 'f-there (f crit))
-  ```
-  Error:
-  ```
-  error: not a function: NaN
+  error: caddr: expected a pair or a non-empty list, got the empty list
 
   ```
 - **row-5-emergence** :cs-composition
   ```scheme
-  (define f (lambda (x) (- (* x x) (* 4 x))))
-(define fp (calc/derivative f))
-(define crit (calc/newton fp 0))
-(if (> (calc/second-derivative f crit) 0) 'minimum 'maximum)
+  (define (optimization-report f a b)
+  (let ((ext (calc/extrema-1d f a b)))
+    (map (lambda (e)
+           (list 'x (car e)
+                 'type (cadr e)
+                 'value (caddr e)))
+         ext)))
+(optimization-report (lambda (x) (+ (* 2 x x) (* -8 x) 6)) 0 5)
+;; => ((x 2 type min value -
   ```
   Error:
   ```
-  error: not a function: NaN
+  error: caddr: expected a pair or a non-empty list, got the empty list
 
   ```
 
-### `calc/second-derivative` — file `11-calc.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define f (lambda (x) (* x x x)))
-(define ddf (calc/second-derivative f))
-(ddf 1)
-  ```
-  Error:
-  ```
-  error: not a function: NaN
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define f (lambda (x) (* x x)))
-(define ddf (calc/second-derivative f))
-(> (ddf 0) 0)
-  ```
-  Error:
-  ```
-  error: not a function: NaN
-
-  ```
-- **row-4-proof** :math-program
-  ```scheme
-  (define f (lambda (x) (* x x x)))
-(define fp (calc/derivative f))
-(< (abs (- (calc/second-derivative f 2) (calc/derivative fp 2))) 0.2)
-  ```
-  Error:
-  ```
-  error: not a function: NaN
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define f (lambda (x) (sin x)))
-(define ddf (calc/second-derivative f))
-(map ddf (list 0 (/ 3.14159 2) 3.14159))
-  ```
-  Error:
-  ```
-  error: not a function: NaN
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define f (lambda (x) (+ (* x x x x) (- (* 2 x x)))))
-(define crit (calc/newton (calc/derivative f) 1.5))
-(if (> (calc/second-derivative f crit) 0) 'minimum 'maximum)
-  ```
-  Error:
-  ```
-  error: not a function: NaN
-
-  ```
-
-### `calc/series-converges?` — file `11-calc.slat`
-
-- **row-2-audit** :math-program
-  ```scheme
-  (eq? (calc/series-converges? (lambda (n) (/ (factorial n) (expt 2 n)))) 'diverges)
-  ```
-  Error:
-  ```
-  error: unbound symbol: factorial
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define coeffs (list 1 1 0.5 (/ 1.0 6) (/ 1.0 24)))
-(define term (lambda (n) (/ 1.0 (factorial n))))
-(list 'per-series (calc/series-converges? term) 'radius (car (calc/radius-of-convergence coeffs)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: factorial
-
-  ```
-
-### `calc/tangent-line` — file `11-calc.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define f (lambda (x) (* x x)))
-(define tan (calc/tangent-line f 1))
-(list (tan 1) (tan 2))
-  ```
-  Error:
-  ```
-  error: not a function: 2.000000000002,-1.0000000000020002
-
-  ```
-- **row-3-dimension** :code
-  ```scheme
-  y = f\'(a)(x-a) + f(a)
-  ```
-  Error:
-  ```
-  error: apostrophe (') inside identifier — Motoi uses ' as quote; rename the identifier (banker-s, banker_s) or use spaces (line 1, col 7)
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define f (lambda (x) (* x x x)))
-(define a 1)
-(define tan (calc/tangent-line f a))
-(and (< (abs (- (tan a) (f a))) 0.001)
-     (< (abs (- ((calc/derivative tan) a) ((calc/derivative f) a))) 0.05))
-  ```
-  Error:
-  ```
-  error: not a function: 2.9999999999752447,-1.9999999999752447
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define f (lambda (x) (* x x)))
-(map (lambda (a) ((calc/tangent-line f a) (+ a 0.1)))
-     (list 0 1 2))
-  ```
-  Error:
-  ```
-  error: not a function: 0,0
-
-  ```
-
-### `calc/taylor` — file `11-calc.slat`
-
-- **row-4-proof** :program
-  ```scheme
-  (define f (lambda (x) (sin x)))
-(define T (calc/taylor f 0 5))
-(< (abs (- (T 0.1) (f 0.1))) 0.001)
-  ```
-  Error:
-  ```
-  error: not a function: 0,0.9999999999998334,0,-0.16666658333071757,0,0.008333033337433923
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define f (lambda (x) (exp x)))
-(map (lambda (n) ((calc/taylor f 0 n) 0.5)) (list 1 2 3 5 10))
-  ```
-  Error:
-  ```
-  error: not a function: 1,0.9999999999732445
-
-  ```
-
-### `char-alphabetic?` — file `12-char.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define (accept? c) (char-alphabetic? c))
-(filter accept? (map string (string->list "A1b!C")))
-  ```
-  Error:
-  ```
-  error: not a character #\A
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define (disjoint? c) (not (and (char-alphabetic? c) (char-numeric? c))))
-(and (disjoint? "a") (disjoint? "5") (disjoint? " ") (disjoint? "Z"))
-  ```
-  Error:
-  ```
-  error: not a character a
-
-  ```
-
-### `char-downcase` — file `12-char.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define (norm-key s) (apply string-append (map char-downcase (map string (string->list s)))))
-(let ((cache (make-hash-table))) (hash-table-set! cache (norm-key "Hello") 42) (hash-table-ref/default cache (norm-key "HELLO")))
-  ```
-  Error:
-  ```
-  error: not a character #\H
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define (idem? c) (string=? (char-downcase (char-downcase c)) (char-downcase c)))
-(define (result-lower? c) (let ((d (char-downcase c))) (or (not (char-alphabetic? d)) (char-lower-case? d))))
-(and (idem? "A") (idem? "a") (result-lower? "Z") (result-lower? "5"))
-  ```
-  Error:
-  ```
-  error: not a character A
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define (ci-equal? s1 s2) (let ((n1 (map char-downcase (map string (string->list s1)))) (n2 (map char-downcase (map string (string->list s2))))) (equal? n1 n2)))
-(ci-equal? "Hello" "HELLO")
-  ```
-  Error:
-  ```
-  error: not a character #\H
-
-  ```
-
-### `char-foldcase` — file `12-char.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define (fold-str s) (apply string-append (map char-foldcase (map string (string->list s)))))
-(equal? (fold-str "Rest") (fold-str "REST"))
-  ```
-  Error:
-  ```
-  error: not a character #\R
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define (idem? c) (string=? (char-foldcase (char-foldcase c)) (char-foldcase c)))
-(define (unify? a b) (string=? (char-foldcase a) (char-foldcase b)))
-(and (idem? "A") (unify? "A" "a") (unify? "Z" "z") (not (unify? "a" "b")))
-  ```
-  Error:
-  ```
-  error: not a character A
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define (dedup-case-insensitive strs) (let loop ((rest strs) (seen '()) (acc '())) (cond ((null? rest) (reverse acc)) ((let ((k (apply string-append (map char-foldcase (map string (string->list (car rest))))))) (if (member k seen) #t #f)) (loop (cdr rest) seen acc)) (else (let ((k (apply string-appe
-  ```
-  Error:
-  ```
-  error: not a character #\R
-
-  ```
-
-### `char-lower-case?` — file `12-char.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define (canonical-tag? s) (let loop ((chars (map string (string->list s)))) (or (null? chars) (and (or (char-lower-case? (car chars)) (char-numeric? (car chars)) (char=? (car chars) "-")) (loop (cdr chars))))))
-(canonical-tag? "scheme-book")
-  ```
-  Error:
-  ```
-  error: not a character #\s
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define (test c) (eq? (char-lower-case? c) (and (char-alphabetic? c) (string=? c (char-downcase c)))))
-(and (test "a") (test "A") (test "5") (test " "))
-  ```
-  Error:
-  ```
-  error: not a character a
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define (screaming? s) (let ((letters (filter char-alphabetic? (map string (string->list s))))) (and (> (length letters) 3) (not (any (lambda (c) (char-lower-case? c)) letters)))))
-(define (any p xs) (cond ((null? xs) #f) ((p (car xs)) #t) (else (any p (cdr xs)))))
-(screaming? "HELLO WORLD")
-  ```
-  Error:
-  ```
-  error: not a character #\H
-
-  ```
-
-### `char-numeric?` — file `12-char.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define (digits-only s) (filter char-numeric? (map string (string->list s))))
-(digits-only "score: 4287 pts")
-  ```
-  Error:
-  ```
-  error: not a character #\s
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define (test) (and (map char-numeric? (map string (string->list "0123456789"))) (not (char-numeric? "a")) (not (char-numeric? " "))))
-(equal? (map char-numeric? (list "0" "5" "9" "a" " ")) (list #t #t #t #f #f))
-  ```
-  Error:
-  ```
-  error: not a character 0
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define (parse-nat s) (let loop ((chars (map string (string->list s))) (acc 0)) (cond ((null? chars) acc) ((char-numeric? (car chars)) (loop (cdr chars) (+ (* 10 acc) (digit-value (car chars))))) (else #f))))
-(parse-nat "4287")
-  ```
-  Error:
-  ```
-  error: not a character #\4
-
-  ```
-
-### `char-upcase` — file `12-char.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define (bold-first s) (if (= (string-length s) 0) s (string-append (char-upcase (substring s 0 1)) (substring s 1 (string-length s)))))
-(bold-first "start")
-  ```
-  Error:
-  ```
-  error: not a character s
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define (idem? c) (string=? (char-upcase (char-upcase c)) (char-upcase c)))
-(and (idem? "a") (idem? "A") (idem? "5") (idem? " "))
-  ```
-  Error:
-  ```
-  error: not a character a
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define (shout s) (apply string-append (map char-upcase (map string (string->list s)))))
-(shout "help")
-  ```
-  Error:
-  ```
-  error: not a character #\h
-
-  ```
-
-### `char-upper-case?` — file `12-char.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define (starts-upper? s) (and (> (string-length s) 0) (char-upper-case? (substring s 0 1))))
-(starts-upper? "Alfred")
-  ```
-  Error:
-  ```
-  error: not a character A
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define (test c) (let ((u (char-upper-case? c)) (l (char-lower-case? c)) (a (char-alphabetic? c))) (and (not (and u l)) (if a (or u l) (not (or u l))))))
-(and (test "A") (test "a") (test "5") (test " "))
-  ```
-  Error:
-  ```
-  error: not a character A
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define (title-case? s) (let ((chars (map string (string->list s)))) (and (not (null? chars)) (char-upper-case? (car chars)) (let loop ((rest (cdr chars))) (or (null? rest) (and (char-lower-case? (car rest)) (loop (cdr rest))))))))
-(title-case? "Motoi")
-  ```
-  Error:
-  ```
-  error: not a character #\M
-
-  ```
-
-### `char-whitespace?` — file `12-char.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define (ltrim s) (let loop ((chars (map string (string->list s)))) (if (or (null? chars) (not (char-whitespace? (car chars)))) (apply string-append chars) (loop (cdr chars)))))
-(ltrim "   hello")
-  ```
-  Error:
-  ```
-  error: not a character #\ 
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define whites (list " " "\t" "\
-"))
-(define non-whites (list "a" "5" "!" "Z"))
-(and (equal? (map char-whitespace? whites) (list #t #t #t)) (equal? (map char-whitespace? non-whites) (list #f #f #f #f)))
-  ```
-  Error:
-  ```
-  error: not a character  
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define (split-words s) (let loop ((chars (map string (string->list s))) (cur "") (acc '())) (cond ((null? chars) (reverse (if (string=? cur "") acc (cons cur acc)))) ((char-whitespace? (car chars)) (loop (cdr chars) "" (if (string=? cur "") acc (cons cur acc)))) (else (loop (cdr chars) (string-appe
-  ```
-  Error:
-  ```
-  error: not a character #\h
-
-  ```
-
-### `char<?` — file `12-char.slat`
-
-- **row-5-emergence** :composition
-  ```scheme
-  (define (sort-chars s) (list->string (let loop ((rest (string->list s))) (if (null? rest) '() (let* ((pivot (car rest)) (smaller (filter (lambda (c) (char<? c pivot)) (cdr rest))) (larger (filter (lambda (c) (not (char<? c pivot))) (cdr rest)))) (append (loop smaller) (list pivot) (loop larger))))))
-  ```
-  Error:
-  ```
-  error: missing ) (line 1, col 1)
-
-  ```
-
-### `char=?` — file `12-char.slat`
+### `calc/gradient` — file `11-calc.slat`
 
 - **row-2-audit** :eng-program
   ```scheme
-  (define (delim? c) (char=? c "|"))
-(display (filter delim? (map string (string->list "a|b|c"))))
-(newline)
+  (define loss (lambda (w) (+ (expt (- (car w) 3) 2) (expt (- (cadr w) 5) 2))))
+(calc/gradient loss (list 1 2))
+;; L = (w1-3)² + (w2-5)²; ∇L = (2(w1-3), 2(w2-5))
+;; at (1,2): (2·(-2), 2·(-3)) = (-4 -6)
+;; => ≈ (-4 -6)
   ```
   Error:
   ```
-  error: not a character #\a
+  error: car: expected a pair or a non-empty list, got the number 1.000001
 
   ```
+- **row-2-audit** :math-program
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(calc/gradient f (list 1 2))
+;; ∇(x²+y²) = (2x, 2y); at (1,2): (2, 4)
+;; => ≈ (2 4)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
 
-### `char>=?` — file `12-char.slat`
+  ```
+- **row-2-audit** :cs-program
+  ```scheme
+  (define (gradient-magnitude f pt)
+  (let ((g (calc/gradient f pt)))
+    (sqrt (apply + (map (lambda (gi) (* gi gi)) g)))))
+(gradient-magnitude
+  (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p))))
+  (list 3 4))
+;; ∇f=(6,8) at (3,4); |∇f|=√(36+64)=10
+;; => ≈ 10.0
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 3.000001
 
+  ```
 - **row-3-dimension** :code
   ```scheme
-  (char>=? c "A")
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(calc/gradient f (list 1 2))
+;; ∇(x²+y²) = (2x, 2y); at (1,2): (2, 4)
+;; => ≈ (2 4)
   ```
   Error:
   ```
-  error: unbound symbol: c
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-3-dimension** :code
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(calc/gradient f (list 1 2))
+;; ∇(x²+y²) = (2x, 2y); at (1,2): (2, 4)
+;; => ≈ (2 4)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-4-proof** :eng-program
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(define pt (list 1 1))
+(define g (calc/gradient f pt))
+(define gmag (sqrt (+ (* (car g) (car g)) (expt (cadr g) 2))))
+(define unit-g (list (/ (car g) gmag) (/ (cadr g) gmag)))
+(> (calc/directional-derivative f pt unit-g)
+   (calc/
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-4-proof** :math-program
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(define p (list 1 1))
+(define g (calc/gradient f p))
+(define g-mag (sqrt (+ (* (car g) (car g)) (* (cadr g) (cadr g)))))
+(> (calc/directional-derivative f p (list (/ (car g) g-mag) (/ (cadr g) g-mag)))
+   (calc/directional-derivat
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-4-proof** :cs-program
+  ```scheme
+  (define (steepest-beats-axis? f pt)
+  (let* ((g (calc/gradient f pt))
+         (gmag (sqrt (apply + (map (lambda (gi) (* gi gi)) g))))
+         (unit-g (map (lambda (gi) (/ gi gmag)) g))
+         (d-steepest (calc/directional-derivative f pt unit-g))
+         (d-x (calc/directional-derivative f pt (
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-5-emergence** :eng-composition
+  ```scheme
+  (define loss (lambda (w) (+ (expt (car w) 2) (expt (cadr w) 2))))
+(define lr 0.1)
+(define (sgd-step w) (let ((g (calc/gradient loss w)))
+  (map (lambda (wi gi) (- wi (* lr gi))) w g)))
+(let loop ((n 0) (w (list 3 4)))
+  (if (= n 10) w (loop (+ n 1) (sgd-step w))))
+;; converges toward (0 0) — minimum
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 3.000001
+
+  ```
+- **row-5-emergence** :math-composition
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(define lr 0.1)
+(define step (lambda (p) (let ((g (calc/gradient f p)))
+  (list (- (car p) (* lr (car g))) (- (cadr p) (* lr (cadr g)))))))
+(let loop ((n 0) (cur (list 3 3)))
+  (cond ((= n 5) cur) (else (loop (+ n 1) (step cur))))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 3.000001
+
+  ```
+- **row-5-emergence** :cs-composition
+  ```scheme
+  (define (gradient-path f start lr steps)
+  (let loop ((n 0) (pt start) (path (list start)))
+    (if (= n steps) (reverse path)
+      (let* ((g (calc/gradient f pt))
+             (next (map (lambda (xi gi) (- xi (* lr gi))) pt g)))
+        (loop (+ n 1) next (cons next path))))))
+(gradient-path (lamb
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 4.000001
+
+  ```
+
+### `calc/hessian` — file `11-calc.slat`
+
+- **row-2-audit** :eng-program
+  ```scheme
+  (define f (lambda (p) (+ (expt (car p) 2) (* 3 (expt (cadr p) 2)))))
+(calc/hessian f (list 0 0))
+;; H = [[∂²f/∂x², ∂²f/∂x∂y], [∂²f/∂y∂x, ∂²f/∂y²]]
+;; = [[2, 0], [0, 6]] — diagonal, constant curvature
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 0.0001
+
+  ```
+- **row-2-audit** :math-program
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(calc/hessian f (list 0 0))
+;; Hessian of x²+y² is [[2,0],[0,2]] everywhere
+;; => ≈ ((2 0) (0 2))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 0.0001
+
+  ```
+- **row-2-audit** :cs-program
+  ```scheme
+  (define (trace-of-hessian f pt)
+  ;; Laplacian = trace of Hessian = sum of diagonal elements
+  (let ((H (calc/hessian f pt)))
+    (apply + (map (lambda (i) (list-ref (list-ref H i) i))
+                  (range 0 (length H))))))
+(trace-of-hessian
+  (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.0001
+
+  ```
+- **row-3-dimension** :code
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(calc/hessian f (list 0 0))
+;; Hessian of x²+y² is [[2,0],[0,2]] everywhere
+;; => ≈ ((2 0) (0 2))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 0.0001
+
+  ```
+- **row-3-dimension** :code
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(calc/hessian f (list 0 0))
+;; Hessian of x²+y² is [[2,0],[0,2]] everywhere
+;; => ≈ ((2 0) (0 2))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 0.0001
+
+  ```
+- **row-4-proof** :eng-program
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (cadr p)) (* (car p) (car p)))))
+(define H (calc/hessian f (list 1 1)))
+(< (abs (- (list-ref (list-ref H 0) 1) (list-ref (list-ref H 1) 0))) 0.02)
+;; H[0][1] and H[1][0] should both be ≈1; symmetry confirmed
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.0001
+
+  ```
+- **row-4-proof** :math-program
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (cadr p)) (* (car p) (car p)))))
+(define H (calc/hessian f (list 1 1)))
+(< (abs (- (list-ref (list-ref H 0) 1) (list-ref (list-ref H 1) 0))) 0.01)
+;; Schwarz: ∂²f/∂x∂y = ∂²f/∂y∂x for f ∈ C²
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.0001
+
+  ```
+- **row-4-proof** :cs-program
+  ```scheme
+  (define (symmetric? H tol)
+  (let ((n (length H)))
+    (let outer ((i 0) (ok #t))
+      (if (or (not ok) (= i n)) ok
+        (let inner ((j 0) (ok ok))
+          (if (= j n) (outer (+ i 1) ok)
+            (inner (+ j 1)
+                   (and ok (< (abs (- (list-ref (list-ref H i) j)
+              
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 2.0001
+
+  ```
+- **row-5-emergence** :eng-composition
+  ```scheme
+  (define f (lambda (p) (+ (expt (car p) 2) (expt (cadr p) 2))))
+(define pt (list 1 2))
+(define g (calc/gradient f pt))
+(define H (calc/hessian f pt))
+;; Newton step: p_next = p - H⁻¹·g
+;; For diag H=[[2,0],[0,2]]: H⁻¹·g = (g/2)
+(list 'gradient g 'hessian H
+     'newton-step (map (lambda (gi) (/ gi 2)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-5-emergence** :math-composition
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(define p (list 1 1))
+(define g (calc/gradient f p))
+(define H (calc/hessian f p))
+(list g H)
+;; => ((2 2) ((2 0) (0 2))) — gradient and curvature ready for Newton step
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-5-emergence** :cs-composition
+  ```scheme
+  (define (newton-step-2d f pt)
+  ;; One Newton step for 2D f: pt_next = pt - H⁻¹·∇f
+  ;; For diagonal H: H⁻¹_{ii} = 1/H_{ii}
+  (let* ((g (calc/gradient f pt))
+         (H (calc/hessian f pt))
+         (h00 (list-ref (list-ref H 0) 0))
+         (h11 (list-ref (list-ref H 1) 1)))
+    (list (- (car  pt)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 3.000001
+
+  ```
+
+### `calc/jacobian` — file `11-calc.slat`
+
+- **row-2-audit** :program
+  ```scheme
+  (define f (lambda (p) (list (+ (car p) (cadr p)) (- (car p) (cadr p)))))
+(calc/jacobian f (list 1 1))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1
+
+  ```
+- **row-2-audit** :math-program
+  ```scheme
+  (define polar (lambda (p) (let ((r (car p)) (th (cadr p))) (list (* r (cos th)) (* r (sin th))))))
+(calc/jacobian (list (lambda (p) (* (car p) (cos (cadr p)))) (lambda (p) (* (car p) (sin (cadr p))))) (list 2 0))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 2.000001
+
+  ```
+- **row-2-audit** :cs-program
+  ```scheme
+  (define f (lambda (p) (list (- (* (car p) (car p)) 1) (- (cadr p) (car p)))))
+(define J (calc/jacobian f (list 1 1)))
+(number? (list-ref (list-ref J 0) 0))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1
+
+  ```
+- **row-3-dimension** :code
+  ```scheme
+  (define f (lambda (p) (list (+ (car p) (cadr p)) (- (car p) (cadr p)))))
+(calc/jacobian f (list 1 1))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1
+
+  ```
+- **row-3-dimension** :code
+  ```scheme
+  (define polar (lambda (p) (let ((r (car p)) (th (cadr p))) (list (* r (cos th)) (* r (sin th))))))
+(calc/jacobian (list (lambda (p) (* (car p) (cos (cadr p)))) (lambda (p) (* (car p) (sin (cadr p))))) (list 2 0))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 2.000001
 
   ```
 - **row-4-proof** :program
   ```scheme
-  (define (test a b) (and (char>=? a a) (eq? (char>=? a b) (char<=? b a))))
-(and (test "a" "a") (test "a" "b") (test "z" "a"))
+  (define f (lambda (p) (list (+ (car p) (cadr p)) (- (car p) (cadr p)))))
+(define J (calc/jacobian f (list 0 0)))
+(number? (list-ref (list-ref J 0) 0))
   ```
   Error:
   ```
-  error: not a character a
+  error: car: expected a pair or a non-empty list, got the number 0
+
+  ```
+- **row-4-proof** :math-program
+  ```scheme
+  (define f1 (lambda (p) (* (car p) (cadr p))))
+(define f2 (lambda (p) (+ (car p) (cadr p))))
+(define J (calc/jacobian (list f1 f2) (list 2 3)))
+(< (abs (- (car (list-ref J 0)) (car (calc/gradient f1 (list 2 3))))) 0.05)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 2.000001
+
+  ```
+- **row-4-proof** :cs-program
+  ```scheme
+  (define F (lambda (p) (list (+ (* 2 (car p)) (cadr p)) (* 3 (cadr p)))))
+(define Ja (calc/jacobian F (list 0 0)))
+(define Jb (calc/jacobian F (list 5 7)))
+(< (abs (- (car (car Ja)) (car (car Jb)))) 0.05)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 0
 
   ```
 - **row-5-emergence** :composition
   ```scheme
-  (define (any-upper? s) (let loop ((chars (map string (string->list s)))) (cond ((null? chars) #f) ((and (char>=? (car chars) "A") (char<=? (car chars) "Z")) #t) (else (loop (cdr chars))))))
-(any-upper? "heLLo")
+  (define f (lambda (p) (list (* (car p) (cadr p)) (+ (car p) (cadr p)))))
+(define J (calc/jacobian f (list 1 2)))
+J
   ```
   Error:
   ```
-  error: not a character #\h
+  error: car: expected a pair or a non-empty list, got the number 1
+
+  ```
+- **row-5-emergence** :math-composition
+  ```scheme
+  (define F (lambda (p) (list (- (* (car p) (car p)) 2) (- (cadr p) (car p)))))
+(define J (calc/jacobian F (list 1.5 1.5)))
+(list 'residual (F (list 1.5 1.5)) 'jacobian J)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.5
+
+  ```
+- **row-5-emergence** :cs-composition
+  ```scheme
+  (define f (lambda (p) (list (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(define J (calc/jacobian f (list 0 0)))
+(define det (- (* (car (car J)) (cadr (cadr J))) (* (cadr (car J)) (car (cadr J)))))
+(if (< (abs det) 0.01) 'singular 'invertible)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 0
 
   ```
 
-### `collision/define-layers!` — file `14-collision.slat`
+### `calc/laplacian` — file `11-calc.slat`
+
+- **row-2-audit** :program
+  ```scheme
+  (calc/laplacian (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))) (list 0 0))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 0.0001
+
+  ```
+- **row-2-audit** :math-program
+  ```scheme
+  (define f (lambda (p) (- (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(< (abs (calc/laplacian f (list 3 4))) 0.01)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 3.0001
+
+  ```
+- **row-2-audit** :cs-program
+  ```scheme
+  (define bump (lambda (p) (- (+ (* (car p) (car p)) (* (cadr p) (cadr p))))))
+(let ((lap (calc/laplacian bump (list 1 1)))) (if (< lap 0) 'peak 'valley))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.0001
+
+  ```
+- **row-3-dimension** :code
+  ```scheme
+  (calc/laplacian (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))) (list 0 0))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 0.0001
+
+  ```
+- **row-3-dimension** :code
+  ```scheme
+  (calc/laplacian (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))) (list 0 0))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 0.0001
+
+  ```
+- **row-3-dimension** :code
+  ```scheme
+  (define f (lambda (p) (- (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(< (abs (calc/laplacian f (list 3 4))) 0.01)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 3.0001
+
+  ```
+- **row-4-proof** :program
+  ```scheme
+  (define f (lambda (p) (- (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(< (abs (calc/laplacian f (list 1 1))) 0.01)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.0001
+
+  ```
+- **row-4-proof** :math-program
+  ```scheme
+  (define f (lambda (p) (+ (* 3 (* (car p) (car p))) (* 5 (* (cadr p) (cadr p))))))
+(< (abs (- (calc/laplacian f (list 1 1)) (+ (car (car (calc/hessian f (list 1 1)))) (cadr (cadr (calc/hessian f (list 1 1))))))) 0.1)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.0001
+
+  ```
+- **row-4-proof** :cs-program
+  ```scheme
+  (define f (lambda (p) (* (car p) (car p))))
+(define g (lambda (p) (* (cadr p) (cadr p))))
+(define h (lambda (p) (+ (* 2 (f p)) (* 3 (g p)))))
+(< (abs (- (calc/laplacian h (list 1 1)) (+ (* 2 (calc/laplacian f (list 1 1))) (* 3 (calc/laplacian g (list 1 1)))))) 0.05)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.0001
+
+  ```
+- **row-5-emergence** :composition
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(list (calc/laplacian f (list 0 0)) (calc/hessian f (list 0 0)))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 0.0001
+
+  ```
+- **row-5-emergence** :math-composition
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(map (lambda (pt) (list pt (calc/laplacian f pt))) (list (list 0 0) (list 1 0) (list 2 2)))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 0.0001
+
+  ```
+- **row-5-emergence** :cs-composition
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* 2 (* (cadr p) (cadr p))))))
+(define pt (list 1 1))
+(list 'laplacian (calc/laplacian f pt) 'gradient (calc/gradient f pt))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.0001
+
+  ```
+
+### `calc/line-integral` — file `11-calc.slat`
+
+- **row-2-audit** :math-program
+  ```scheme
+  (define circle (lambda (t) (list (cos (* 2 3.14159 t)) (sin (* 2 3.14159 t)) 0)))
+(define one (lambda (x y z) 1))
+(< (abs (- (calc/line-integral one circle) (* 2 3.14159))) 0.1)
+  ```
+  Error:
+  ```
+  error: -: expected a number, got a list
+
+  ```
+- **row-4-proof** :program
+  ```scheme
+  (define phi (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(define F (lambda (p) (calc/gradient phi p)))
+(define x1 (lambda (t) t)) (define y1 (lambda (t) t))
+(define x2 (lambda (t) (* t t))) (define y2 (lambda (t) t))
+(< (abs (- (calc/line-integral F x1 y1 0 1) (calc/line-integral F x2
+  ```
+  Error:
+  ```
+  error: -: expected a number, got a list
+
+  ```
+- **row-4-proof** :cs-program
+  ```scheme
+  (define F (lambda (p) (list (car p) (cadr p) 0)))
+(define fwd (lambda (t) (list t t 0)))
+(define rev (lambda (t) (list (- 1 t) (- 1 t) 0)))
+(< (abs (+ (calc/line-integral F fwd 'vector) (calc/line-integral F rev 'vector))) 0.05)
+  ```
+  Error:
+  ```
+  error: +: expected a number, got a list
+
+  ```
+- **row-5-emergence** :math-composition
+  ```scheme
+  (define F (lambda (p) (list (- (cadr p)) (car p) 0)))
+(define circle (lambda (t) (list (cos (* 2 3.14159 t)) (sin (* 2 3.14159 t)) 0)))
+(list 'circulation (calc/line-integral F circle 'vector) 'curl-z (caddr (calc/curl F (list 0 0 0))))
+  ```
+  Error:
+  ```
+  error: caddr: expected a pair or a non-empty list, got the empty list
+
+  ```
+
+### `calc/partial` — file `11-calc.slat`
+
+- **row-2-audit** :program
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(calc/partial f 0 (list 1 2))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-2-audit** :math-program
+  ```scheme
+  (define profit (lambda (p) (- (* 3 (car p)) (* 2 (cadr p)) (* (caddr p) (caddr p)))))
+(list (calc/partial profit 0 (list 4 5 2)) (calc/partial profit 2 (list 4 5 2)))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 4.000001
+
+  ```
+- **row-2-audit** :cs-program
+  ```scheme
+  (define f (lambda (p) (* (car p) (car p) (cadr p))))
+(define fx (lambda (q) (calc/partial f 0 q)))
+(< (abs (- (calc/partial fx 1 (list 2 3)) 4)) 0.1)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 2.000001
+
+  ```
+- **row-3-dimension** :code
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(calc/partial f 0 (list 1 2))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-4-proof** :program
+  ```scheme
+  (define f (lambda (p) (* (car p) (cadr p))))
+(define fx (lambda (p) (calc/partial f 0 p)))
+(define fxy (lambda (p) (calc/partial fx 1 p)))
+(define fy (lambda (p) (calc/partial f 1 p)))
+(define fyx (lambda (p) (calc/partial fy 0 p)))
+(< (abs (- (fxy (list 1 1)) (fyx (list 1 1)))) 0.05)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-4-proof** :math-program
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* 3 (cadr p)))))
+(define slice (lambda (x) (f (list x 5))))
+(< (abs (- (calc/partial f 0 (list 2 5)) (calc/derivative slice 2))) 0.05)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 2.000001
+
+  ```
+- **row-4-proof** :cs-program
+  ```scheme
+  (define f (lambda (p) (* (car p) (car p))))
+(define g (lambda (p) (* (car p) (cadr p))))
+(define h (lambda (p) (+ (* 2 (f p)) (* 3 (g p)))))
+(< (abs (- (calc/partial h 0 (list 1 1)) (+ (* 2 (calc/partial f 0 (list 1 1))) (* 3 (calc/partial g 0 (list 1 1)))))) 0.1)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-5-emergence** :composition
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(list (calc/partial f 0 (list 1 1)) (calc/partial f 1 (list 1 1)) (calc/gradient f (list 1 1)))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-5-emergence** :math-composition
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p) (cadr p)) (* (cadr p) (cadr p)))))
+(define fx (lambda (q) (calc/partial f 0 q)))
+(list 'fxx (calc/partial fx 0 (list 1 1)) 'fxy (calc/partial fx 1 (list 1 1)))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.0000019999999998
+
+  ```
+- **row-5-emergence** :cs-composition
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(define grad (list (calc/partial f 0 (list 1 2)) (calc/partial f 1 (list 1 2))))
+(define dir (list 0.6 0.8))
+(+ (* (car grad) (car dir)) (* (cadr grad) (cadr dir)))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+
+### `calc/surface-integral` — file `11-calc.slat`
+
+- **row-4-proof** :program
+  ```scheme
+  (define F (lambda (p) (list (car p) (cadr p) (caddr p))))
+(define x (lambda (u v) (* (cos u) (sin v))))
+(define y (lambda (u v) (* (sin u) (sin v))))
+(define z (lambda (u v) (cos v)))
+(define flux (calc/surface-integral F x y z 0 (* 2 3.14159) 0 3.14159))
+(< (abs (- flux (* 4 3.14159))) 0.5)
+  ```
+  Error:
+  ```
+  error: -: expected a number, got a list
+
+  ```
+- **row-4-proof** :math-program
+  ```scheme
+  (define sphere (lambda (u v) (list (* (cos u) (sin v)) (* (sin u) (sin v)) (cos v))))
+(define one (lambda (x y z) 1))
+(< (abs (- (calc/surface-integral sphere one 'scalar) (* 4 3.14159))) 0.5)
+  ```
+  Error:
+  ```
+  error: -: expected a number, got a list
+
+  ```
+- **row-5-emergence** :cs-composition
+  ```scheme
+  (define F (lambda (x y z) (list (- y) x 0)))
+(define cap (lambda (u v) (list (* (cos u) (sin v)) (* (sin u) (sin v)) (cos v))))
+(list 'curl-flux (calc/surface-integral cap F 'flux) 'curl-z (caddr (calc/curl F (list 0 0 1))))
+  ```
+  Error:
+  ```
+  error: caddr: expected a pair or a non-empty list, got the empty list
+
+  ```
+
+### `calc/total-differential` — file `11-calc.slat`
+
+- **row-2-audit** :program
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(calc/total-differential f (list 1 1) (list 0.01 0.02))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-2-audit** :eng-program
+  ```scheme
+  (define (predict-change f pos step)
+  (calc/total-differential f pos step))
+(predict-change (lambda (xy) (+ (* (car xy) (car xy)) (* (cadr xy) (cadr xy))))
+  (list 1 2) (list 0.01 0.01))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-2-audit** :math-program
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(< (abs (- (calc/total-differential f (list 1 1) (list 0.01 0.02)) 0.06)) 0.001)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-2-audit** :cs-program
+  ```scheme
+  (define (safe-td f pos step) (if (= (length pos) (length step)) (calc/total-differential f pos step) 'dim-mismatch))
+(safe-td (lambda (p) (* (car p) (cadr p))) (list 2 3) (list 0.1 0.1))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 2.000001
+
+  ```
+- **row-3-dimension** :code
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(calc/total-differential f (list 1 1) (list 0.01 0.02))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-3-dimension** :code
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(calc/total-differential f (list 1 1) (list 0.01 0.02))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-4-proof** :program
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(define x (list 1 1))
+(define v (list 0.1 0)) (define w (list 0 0.1))
+(< (abs (- (calc/total-differential f x (list 0.2 0.3))
+           (+ (* 2 (calc/total-differential f x v))
+              (* 3 (calc/total-differential f x w)))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-4-proof** :eng-program
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(< (abs (calc/total-differential f (list 1 1) (list 0 0))) 0.001)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-4-proof** :math-program
+  ```scheme
+  (define f (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p)))))
+(define x (list 1 1))
+(< (abs (+ (calc/total-differential f x (list 0.05 0.05))
+           (calc/total-differential f x (list -0.05 -0.05)))) 0.001)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-4-proof** :cs-program
+  ```scheme
+  (define (number-out? f pos step) (number? (calc/total-differential f pos step)))
+(number-out? (lambda (p) (* (car p) (cadr p))) (list 1 2) (list 0.01 0.01))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-5-emergence** :composition
+  ```scheme
+  (define f (lambda (p) (* (car p) (cadr p))))
+(define x (list 1 2))
+(define errs (list (list 0.01 0) (list 0 0.01) (list 0.01 0.01)))
+(map (lambda (d) (calc/total-differential f x d)) errs)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+- **row-5-emergence** :cs-composition
+  ```scheme
+  (define (descent-direction? f pos dir)
+  (< (calc/total-differential f pos dir) 0))
+(descent-direction? (lambda (p) (+ (* (car p) (car p)) (* (cadr p) (cadr p))))
+  (list 1 1) (list -0.1 -0.1))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.000001
+
+  ```
+
+### `chem/formula-counts` — file `13-chem.slat`
 
 - **row-4-proof** :cs-program
   ```scheme
-  (define (unique-bits? layers) (let ((bits (map layer-bit-index layers))) (equal? bits (remove-duplicates bits))))
-(collision/define-layers! (list 'p 'q 'r))
-(unique-bits? (list 'p 'q 'r))
+  (define (all-pairs? c) (and (list? c) (fold (lambda (ok p) (and ok (= (length p) 2))) #t c)))
+(all-pairs? (chem/formula-counts "H2O"))
   ```
   Error:
   ```
-  error: unbound symbol: remove-duplicates
+  error: length: expected a proper list, got #t
 
   ```
-- **row-5-emergence** :cs-composition
+
+### `boolean=?` — file `16-compare.slat`
+
+- **row-2-audit** :eng-program
   ```scheme
-  (define (init-from-config config) (collision/define-layers! (assoc-ref :layers config)) (for-each (lambda (mask) (entity/mask! (car mask) (cdr mask))) (assoc-ref :masks config)))
-(init-from-config (list (cons :layers (list 'p 'e)) (cons :masks (list (cons 'p (list 'e))))))
+  (define (count-matching ref flags) (fold (lambda (n f) (if (boolean=? f ref) (+ n 1) n)) 0 flags))
+(count-matching #t (list #t #f #t #t #f))
   ```
   Error:
   ```
-  error: unbound symbol: assoc-ref
+  error: +: expected a number, got #f
 
   ```
 
-### `symbol=?` — file `16-compare.slat`
+### `complex/*` — file `17-complex.slat`
 
-- **row-5-emergence** :cs-composition
+- **row-4-proof** :eng-program
   ```scheme
-  (define (router table) (lambda (tag) (dispatch tag table)))
-((router (list (list 'ping (lambda () 'pong)))) 'ping)
+  (define input '(3 4))
+(define phasor '(0.7071 0.7071))
+(define rotated (complex/* input phasor))
+(define modulus-preserved? (< (abs (- (+ (* (car input) (car input)) (* (cadr input) (cadr input))) (+ (* (car rotated) (car rotated)) (* (cadr rotated) (cadr rotated))))) 0.01))
+modulus-preserved?
   ```
   Error:
   ```
-  error: unbound symbol: dispatch
+  error: car: expected a pair or a non-empty list, got a value of another kind
 
   ```
 
-### `const/ln10` — file `18-const.slat`
+### `complex/+` — file `17-complex.slat`
 
-- **row-2-audit** :cs-program
+- **row-2-audit** :math-program
   ```scheme
-  (define (order-of-magnitude n) (inexact->exact (floor (/ (log n) const/ln10))))
-(= (order-of-magnitude 42) 1)
+  (define (mean-of-pair z1 z2) (list (/ (car (complex/+ z1 z2)) 2) (/ (cadr (complex/+ z1 z2)) 2)))
+(mean-of-pair '(4 6) '(2 -2))
   ```
   Error:
   ```
-  error: The number NaN cannot be converted to a BigInt because it is not an integer
+  error: car: expected a pair or a non-empty list, got a value of another kind
 
   ```
 - **row-5-emergence** :math-composition
   ```scheme
-  (define (bucket-by-oom xs) (let loop ((xs xs) (bs '())) (if (null? xs) bs (let ((k (inexact->exact (floor (/ (log (car xs)) const/ln10))))) (loop (cdr xs) (cons k bs))))))
-(bucket-by-oom (list 5 50 5000 500000))
+  (define (centroid points) (let ((n (length points))) (let ((sum (let loop ((xs points) (acc '(0 0))) (if (null? xs) acc (loop (cdr xs) (complex/+ acc (car xs))))))) (list (/ (car sum) n) (/ (cadr sum) n)))))
+(centroid (list '(0 0) '(6 0) '(3 6)))
   ```
   Error:
   ```
-  error: The number NaN cannot be converted to a BigInt because it is not an integer
+  error: car: expected a pair or a non-empty list, got a value of another kind
 
   ```
 
-### `const/ln2` — file `18-const.slat`
+### `complex/-` — file `17-complex.slat`
 
-- **row-2-audit** :cs-program
+- **row-4-proof** :math-program
   ```scheme
-  (define (bits-for n) (inexact->exact (ceiling (/ (log n) const/ln2))))
-(= (bits-for 256) 8)
+  (define (anti-commutative? a b) (equal? (complex/- a b) (list (- (car (complex/- b a))) (- (cadr (complex/- b a))))))
+(anti-commutative? '(3 4) '(1 2))
   ```
   Error:
   ```
-  error: The number NaN cannot be converted to a BigInt because it is not an integer
+  error: car: expected a pair or a non-empty list, got a value of another kind
+
+  ```
+- **row-5-emergence** :eng-composition
+  ```scheme
+  (define (error-signal target actual) (complex/- target actual))
+(define (control-step target state gain) (let ((err (error-signal target state))) (complex/+ state (list (* gain (car err)) (* gain (cadr err))))))
+(control-step '(10 10) '(3 4) 0.5)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got a value of another kind
+
+  ```
+- **row-5-emergence** :math-composition
+  ```scheme
+  (define (finite-difference f z h) (list (/ (car (complex/- (f (list (+ (car z) h) (cadr z))) (f z))) h) (/ (cadr (complex/- (f (list (+ (car z) h) (cadr z))) (f z))) h)))
+(finite-difference (lambda (z) (complex/* z z)) '(1 0) 0.01)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got a value of another kind
+
+  ```
+
+### `complex/conjugate` — file `17-complex.slat`
+
+- **row-4-proof** :eng-program
+  ```scheme
+  (define z '(3 4))
+(define zbar (complex/conjugate z))
+(define product (complex/* z zbar))
+(= (cadr product) 0)
+  ```
+  Error:
+  ```
+  error: cadr: expected a pair or a non-empty list, got a value of another kind
+
+  ```
+- **row-4-proof** :cs-program
+  ```scheme
+  (define (only-sign-flip? z) (let ((zbar (complex/conjugate z))) (and (= (car z) (car zbar)) (= (cadr z) (- (cadr zbar))))))
+(only-sign-flip? '(5 -7))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got a value of another kind
 
   ```
 - **row-5-emergence** :composition
   ```scheme
-  (define (log2 x) (/ (log x) const/ln2))
-(define (bits-needed n)
-  (inexact->exact (ceiling (log2 n))))
-(display (bits-needed 8)) (newline)
-(display (bits-needed 100)) (newline)
-(display (bits-needed 1)) (newline)
+  (define (modulus-squared z) (car (complex/* z (complex/conjugate z))))
+(modulus-squared '(3 4))
   ```
   Error:
   ```
-  error: The number NaN cannot be converted to a BigInt because it is not an integer
+  error: car: expected a pair or a non-empty list, got a value of another kind
+
+  ```
+- **row-5-emergence** :cs-composition
+  ```scheme
+  (define (spectral-power fft-bins) (map (lambda (z) (car (complex/* z (complex/conjugate z)))) fft-bins))
+(spectral-power (list '(1 1) '(0 2) '(3 0)))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got a value of another kind
+
+  ```
+
+### `complex/exp` — file `17-complex.slat`
+
+- **row-2-audit** :cs-program
+  ```scheme
+  (define (exp-safe z) (if (> (car z) 100) 'overflow (complex/exp z)))
+(exp-safe (complex/make 200 0))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got a value of another kind
+
+  ```
+- **row-4-proof** :program
+  ```scheme
+  (define z1 '(1 0))
+(define z2 '(0 1.5708))
+(define lhs (complex/exp (complex/+ z1 z2)))
+(define rhs (complex/* (complex/exp z1) (complex/exp z2)))
+(< (car (complex/- lhs rhs)) 0.001)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got a value of another kind
+
+  ```
+- **row-4-proof** :eng-program
+  ```scheme
+  (define z (complex/exp (complex/make 0 0)))
+(and (< (abs (- (car z) 1)) 0.001) (< (abs (cadr z)) 0.001))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got a value of another kind
+
+  ```
+- **row-4-proof** :math-program
+  ```scheme
+  (define (eulers-identity) (let ((result (complex/exp (complex/make 0 3.14159265)))) (< (abs (+ (car result) 1)) 0.01)))
+(eulers-identity)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got a value of another kind
+
+  ```
+
+### `complex/from-polar` — file `17-complex.slat`
+
+- **row-4-proof** :program
+  ```scheme
+  (define z '(3 4))
+(let ((p (complex/->polar z)))
+  (< (car (complex/- (complex/from-polar (car p) (cadr p)) z)) 0.001))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got a value of another kind
+
+  ```
+- **row-4-proof** :eng-program
+  ```scheme
+  (define z (complex/from-polar 1 0))
+(and (< (abs (- (car z) 1)) 0.001) (< (abs (cadr z)) 0.001))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got a value of another kind
+
+  ```
+- **row-4-proof** :math-program
+  ```scheme
+  (define (modulus-of-polar-is-r r theta) (let ((z (complex/from-polar r theta))) (< (abs (- (sqrt (+ (* (car z) (car z)) (* (cadr z) (cadr z)))) r)) 0.001)))
+(modulus-of-polar-is-r 5 0.9273)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got a value of another kind
+
+  ```
+- **row-4-proof** :cs-program
+  ```scheme
+  (define (period-2pi? r theta) (let ((z1 (complex/from-polar r theta)) (z2 (complex/from-polar r (+ theta (* 2 3.14159265))))) (and (< (abs (- (car z1) (car z2))) 0.001) (< (abs (- (cadr z1) (cadr z2))) 0.001))))
+(period-2pi? 1 0.5)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got a value of another kind
+
+  ```
+
+### `complex/make` — file `17-complex.slat`
+
+- **row-4-proof** :eng-program
+  ```scheme
+  (define z (complex/make 3 4))
+(and (= (car z) 3) (= (cadr z) 4))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got a value of another kind
+
+  ```
+
+### `cpu/state` — file `18b-cpu.slat`
+
+- **row-3-dimension** :code
+  ```scheme
+  (define r (list (cons ':x 1) (cons ':y 2)))
+(cadr (assoc ':y r))
+  ```
+  Error:
+  ```
+  error: cadr: expected a pair or a non-empty list, got the number 2
+
+  ```
+
+### `cortex/query` — file `19-cortex.slat`
+
+- **row-3-dimension** :code
+  ```scheme
+  (cortex/remember 'a/1 1) (cortex/remember 'a/2 2) (cortex/remember 'b/1 3)
+(define (q prefix)
+  (filter (lambda (k) (string=? prefix (substring (symbol->string k) 0 (string-length prefix))))
+          (cortex/keys)))
+(display (q "a/")) (newline)
+  ```
+  Error:
+  ```
+  error: substring: end 2 is past the end of a string of length 1. To TEST a prefix use (string-prefix? "..." s); to TRUNCATE use (substring s 0 (min 2 (string-length s))).
+
+  ```
+- **row-4-proof** :cs-program
+  ```scheme
+  (cortex/remember 'z/1 'a) (cortex/remember 'z/2 'b)
+(define (query-keys prefix) (filter (lambda (k) (string=? prefix (substring (symbol->string k) 0 (string-length prefix)))) (cortex/keys)))
+(display (and (member "z/1" (query-keys "z/")) #t)) (newline)
+  ```
+  Error:
+  ```
+  error: substring: end 2 is past the end of a string of length 1. To TEST a prefix use (string-prefix? "..." s); to TRUNCATE use (substring s 0 (min 2 (string-length s))).
+
+  ```
+- **row-5-emergence** :composition
+  ```scheme
+  (cortex/remember 'log/2026-07-19/click 1)
+(cortex/remember 'log/2026-07-19/view 2)
+(cortex/remember 'log/2026-07-18/click 3)
+
+(define (query-keys prefix)
+  (filter (lambda (k)
+            (let ((s (if (symbol? k) (symbol->string k) k)))
+              (and (>= (string-length s) (string-length prefix)
+  ```
+  Error:
+  ```
+  error: +: expected a number, got a list
+
+  ```
+
+### `cortex/size` — file `19-cortex.slat`
+
+- **row-5-emergence** :composition
+  ```scheme
+  (for-each cortex/forget (cortex/keys))
+
+(define soft-cap 10)
+
+(define (remember-with-cap key value)
+  (if (< (cortex/size) soft-cap)
+      (begin (cortex/remember key value) 'stored)
+      (begin
+        ;; evict the first key to make room
+        (let ((victim (car (cortex/keys))))
+          (corte
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the empty list
+
+  ```
+
+### `curve/accel` — file `20-curve.slat`
+
+- **row-2-audit** :cs-program
+  ```scheme
+  (define (accel-at h t) (map (lambda (f) (/ (+ (f (+ t h)) (f (- t h)) (* -2 (f t))) (* h h))) (list car cadr)))
+(define g (lambda (t) (list (sin t) (cos t))))
+(define coarse (accel-at 0.1 1.0))
+(define fine   (accel-at 0.01 1.0))
+(define residual (map (lambda (a b) (abs (- a b))) coarse fine))
+(fold
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 1.1
+
+  ```
+- **row-4-proof** :eng-program
+  ```scheme
+  (define ramp (lambda (t) (list t 0 (* 0.5 9.8 t t))))
+(define a (curve/accel ramp))
+(< (abs (- (list-ref a 2) 9.8)) 0.01)
+  ```
+  Error:
+  ```
+  error: -: expected a number, got nothing
 
   ```
 - **row-5-emergence** :math-composition
   ```scheme
-  (define (binary-tree-depth n) (inexact->exact (ceiling (/ (log n) const/ln2))))
-(binary-tree-depth 1024)
+  (define (frenet-kappa gamma)
+  (let* ((v (curve/velocity gamma)) (a (curve/accel gamma))
+         (sp (vec/norm v))
+         (cross (- (* (car v) (cadr a)) (* (cadr v) (car a)))))
+    (/ (abs cross) (expt sp 3))))
+(frenet-kappa (lambda (t) (list (cos t) (sin t))))
   ```
   Error:
   ```
-  error: The number NaN cannot be converted to a BigInt because it is not an integer
+  error: /: division by zero
 
   ```
-- **row-5-emergence** :cs-composition
+
+### `curve/brachistochrone` — file `20-curve.slat`
+
+- **row-2-audit** :eng-program
   ```scheme
-  (define (encode-length-prefix count) (let ((bits (inexact->exact (ceiling (/ (log (max 1 count)) const/ln2))))) (list 'prefix-bits bits 'byte-cost (quotient (+ bits 7) 8))))
-(encode-length-prefix 1000000)
+  (define ramps '((3.0 1.0) (5.0 2.0) (8.0 3.0)))
+(define solved (map (lambda (xy) (curve/brachistochrone (car xy) (cadr xy))) ramps))
+(define radii (map car solved))
+(fold min 1e18 radii)
   ```
   Error:
   ```
-  error: The number NaN cannot be converted to a BigInt because it is not an integer
+  error: min: expected a number, got a list
 
   ```
-
-### `const/pi` — file `18-const.slat`
-
-- **row-5-emergence** :cs-composition
+- **row-2-audit** :math-program
   ```scheme
-  (define (leibniz-pi terms)
-  (let loop ((k 0) (s 0.0))
-    (if (= k terms) (* 4 s) (loop (+ k 1) (+ s (/ (expt -1 k) (+ (* 2 k) 1)))))))
-(< (abs (- (leibniz-pi 100000) const/pi)) 1e-4)
+  (define sol (curve/brachistochrone 3.14159 2.0))
+(define R (car sol))
+(define theta (cadr sol))
+(define recon-y (* R (- 1 (cos theta))))
+(< (abs (- recon-y 2.0)) 0.02)
   ```
   Error:
   ```
-  error: fuel exhausted
+  error: *: expected a number, got a list
+
+  ```
+- **row-2-audit** :cs-program
+  ```scheme
+  (define sol1 (curve/brachistochrone 4.0 2.0))
+(define sol2 (curve/brachistochrone 4.0 2.0))
+(and (< (abs (- (car sol1) (car sol2))) 1e-6) (< (abs (- (cadr sol1) (cadr sol2))) 1e-6))
+  ```
+  Error:
+  ```
+  error: -: expected a number, got a list
+
+  ```
+- **row-4-proof** :math-program
+  ```scheme
+  (define pi 3.14159265)
+(define sol (curve/brachistochrone pi 2.0))
+(define R (car sol))
+(define theta (cadr sol))
+(define x-recon (* R (- theta (sin theta))))
+(< (abs (- x-recon pi)) 0.02)
+  ```
+  Error:
+  ```
+  error: -: expected a number, got a list
+
+  ```
+- **row-5-emergence** :math-composition
+  ```scheme
+  (define target '(4 2))
+(define sol (curve/brachistochrone (car target) (cadr target)))
+(define R (car sol)) (define theta (cadr sol))
+(define arc (* R (- theta (sin theta))))
+(define chord (sqrt (+ (* (car target) (car target)) (* (cadr target) (cadr target)))))
+(> arc chord)
+  ```
+  Error:
+  ```
+  error: -: expected a number, got a list
+
+  ```
+
+### `curve/catmull-rom` — file `20-curve.slat`
+
+- **row-4-proof** :program
+  ```scheme
+  (define pts '((0 0) (2 3) (5 3) (7 0) (9 2)))
+(define spline (curve/catmull-rom pts))
+(define interior (cdr (reverse (cdr (reverse pts)))))
+(define (near a b) (< (+ (abs (- (car a) (car b))) (abs (- (cadr a) (cadr b)))) 0.001))
+(define t-vals (map (lambda (i) (/ (+ i 1) (- (length pts) 1))) (iota (l
+  ```
+  Error:
+  ```
+  error: -: expected a number, got a list
+
+  ```
+- **row-4-proof** :eng-program
+  ```scheme
+  (define wp '((0 0) (5 5) (10 0) (15 5) (20 0)))
+(define s (curve/catmull-rom wp))
+(define at-mid (curve/sample s 2))
+(define expected '(10 0))
+(< (+ (abs (- (car at-mid) (car expected))) (abs (- (cadr at-mid) (cadr expected)))) 0.01)
+  ```
+  Error:
+  ```
+  error: -: expected a number, got a list
 
   ```
 
 ### `curve/christoffel` — file `20-curve.slat`
 
-- **row-2-audit** :math-program
-  ```scheme
-  (define plane (curve/surface-graph (lambda (x y) (+ (* 2 x) (* 3 y) 5))))
-(define G (curve/christoffel plane))
-(define abs-sum (fold + 0 (map abs (flatten G))))
-(< abs-sum 0.02)
-  ```
-  Error:
-  ```
-  error: unbound symbol: flatten
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define flat (curve/surface-graph (lambda (x y) 0)))
-(define G (curve/christoffel flat))
-(define (all-near-zero? tensor)
-  (< (fold + 0 (map abs (flatten tensor))) 0.001))
-(all-near-zero? G)
-  ```
-  Error:
-  ```
-  error: unbound symbol: flatten
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define bowl (curve/surface-graph (lambda (x y) (+ (* x x) (* y y)))))
-(define G (curve/christoffel bowl))
-(define nonzero? (> (fold + 0 (map abs (flatten G))) 0.001))
-nonzero?
-  ```
-  Error:
-  ```
-  error: unbound symbol: flatten
-
-  ```
-- **row-4-proof** :cs-program
-  ```scheme
-  (define surf (curve/surface-graph (lambda (x y) (- (* x x) (* y y)))))
-(define G (curve/christoffel surf))
-(define flat-list (flatten G))
-(fold (lambda (x ok) (and ok (number? x))) #t flat-list)
-  ```
-  Error:
-  ```
-  error: unbound symbol: flatten
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define sphere (curve/surface-graph (lambda (x y) (sqrt (max 0.0001 (- 1 (* x x) (* y y)))))))
-(define G (curve/christoffel sphere))
-(define trace (fold + 0 (map abs (flatten G))))
-(> trace 0.01)
-  ```
-  Error:
-  ```
-  error: unbound symbol: flatten
-
-  ```
-
-### `curve/spline-resample` — file `20-curve.slat`
-
 - **row-3-dimension** :code
   ```scheme
-  (define (resample sig rate-in rate-out dur)
-  (map (lambda (i) (sig (* i (/ rate-in rate-out)))) (iota (* rate-out dur))))
-(resample (lambda (t) (sin t)) 44100 22050 1)
+  (define fx '((usd eur 0.92) (eur jpy 160) (jpy usd 0.0068)))
+(define (through a b c) (* (cadr (assoc a fx)) (cadr (assoc b fx))))
+(through 'usd 'eur 'jpy)
   ```
   Error:
   ```
-  error: fuel exhausted
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define path (curve/bezier '((0 0) (5 5) (10 0))))
-(define uniform-frames (curve/spline-resample path 24))
-(define ((for-frame f) i) (f (list-ref uniform-frames i)))
-((for-frame (lambda (p) (list 'draw p))) 12)
-  ```
-  Error:
-  ```
-  error: unbound symbol: for-frame
-
-  ```
-
-### `domain/of` — file `21-domain.slat`
-
-- **row-2-audit** :eng-program
-  ```scheme
-  (define (route-by-domain kind) (let ((d (assoc :domain (domain/of kind)))) (if (eq? d 'payment) (invoke-payment-handler kind) (default-handler kind))))
-(route-by-domain 'inventory-check)
-  ```
-  Error:
-  ```
-  error: unbound symbol: default-handler
-
-  ```
-
-### `named-ease` — file `22-easing.slat`
-
-- **row-2-audit** :math-program
-  ```scheme
-  (honest-null :reason "named-ease is a registry-lookup verb — dispatch table; math view of a finite symbol→function table is trivial rebinding, not proposition-worthy. Book-of-code ch 3 (dispatch tables).")
-  ```
-  Error:
-  ```
-  error: unbound symbol: honest-null
-
-  ```
-- **row-4-proof** :math-program
-  ```scheme
-  (honest-null :reason "Referential transparency of a dispatch-table lookup is a language-level property, not a proposition about the easing curve itself. The math proof lives in bezier-ease/spring-ease where the curve has real structure. Book-of-code ch 3.")
-  ```
-  Error:
-  ```
-  error: unbound symbol: honest-null
-
-  ```
-
-### `eng/statics-solve` — file `23-eng.slat`
-
-- **row-5-emergence** :composition
-  ```scheme
-  (define (analyze-truss truss)
-  (let* ((eqs (truss->equations truss))
-         (unknowns (truss->unknowns truss))
-         (result (eng/statics-solve eqs '() unknowns)))
-    (cond ((eq? result 'underdetermined)
-             (escalate 'add-compatibility-eqs (list truss)))
-          (else
-            
-  ```
-  Error:
-  ```
-  error: unbound symbol: my-truss
-
-  ```
-
-### `eng/tf` — file `23-eng.slat`
-
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (reject-histogram candidates)
-  (let ((tally (list (cons 'unstable 0) (cons 'low-gain 0) (cons 'accept 0))))
-    (for-each
-      (lambda (c)
-        (let* ((h (eng/tf (car c) (cadr c))))
-          (cond ((not (eng/tf-stable? h))
-                 (set-cdr! (assoc 'unstable tally) (+ 1 (cdr (a
-  ```
-  Error:
-  ```
-  error: unbound symbol: set-cdr!
-
-  ```
-
-### `eng/tf-stable?` — file `23-eng.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define (safe-to-deploy? tf)
-  (and (eng/tf-stable? tf)
-       (< (abs (eng/tf-dc-gain tf)) 100)))
-(if (safe-to-deploy? candidate-tf)
-  (write-firmware candidate-tf)
-  (escalate 'unstable-or-runaway-gain candidate-tf))
-  ```
-  Error:
-  ```
-  error: unbound symbol: candidate-tf
-
-  ```
-
-### `entity/alive?` — file `24-entity.slat`
-
-- **row-4-proof** :eng-program
-  ```scheme
-  (define ids (map (lambda (i) (world/spawn 'projectile i 0)) '(0 1 2 3 4)))
-(define all-live-before (for-all entity/alive? ids))
-(for-each entity/despawn! ids)
-(world/step)
-(define all-dead-after (for-all (lambda (id) (not (entity/alive? id))) ids))
-(and all-live-before all-dead-after)
-  ```
-  Error:
-  ```
-  error: unbound symbol: for-all
-
-  ```
-
-### `entity/damage!` — file `24-entity.slat`
-
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (splash-damage center ids radius power)
-  ;; Apply power to every entity within radius of center.
-  (for-each (lambda (id)
-    (let* ((p (entity/pos id))
-           (dx (- (car p) (car center)))
-           (dy (- (cadr p) (cadr center)))
-           (dist (sqrt (+ (* dx dx) (* dy dy)))))
-    
-  ```
-  Error:
-  ```
-  error: unexpected ) (line 11, col 58)
-
-  ```
-
-### `entity/despawn!` — file `24-entity.slat`
-
-- **row-5-emergence** :composition
-  ```scheme
-  (define (fire-projectile x y dx dy)
-  (let ((p (world/spawn 'proj x y)))
-    (entity/set-vel! p dx dy)
-    (world/after 60 'expire p)))
-(fire-projectile 0 0 5 0)
-(on-event 'expire (lambda (id) (entity/despawn! id)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: on-event
-
-  ```
-
-### `entity/goto!` — file `24-entity.slat`
-
-- **row-4-proof** :eng-program
-  ```scheme
-  (define npc (world/spawn 'npc 0 0))
-(entity/goto! npc 'idle)
-(define hist '())
-(let loop ((k 5))
-  (if (= k 0) 'done
-      (begin (entity/goto! npc 'idle)
-             (set! hist (cons (entity/state npc) hist))
-             (loop (- k 1)))))
-(and (= (length hist) 5) (for-all (lambda (s) (eq? s 'idle
-  ```
-  Error:
-  ```
-  error: unbound symbol: for-all
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define (react e)
-  (case (entity/state e)
-    ((idle) (entity/sprite! e 'idle))
-    ((walking) (entity/sprite! e 'walk))
-    ((jumping) (entity/sprite! e 'jump))))
-(on-event 'entity/state-change (lambda (id) (react id)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: on-event
-
-  ```
-
-### `entity/kind` — file `24-entity.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define proj (world/spawn 'projectile 0 0))
-;; kind never throws, even on invalid ids.
-(define results (map entity/kind (list proj 999999 'not-an-id)))
-(for-all symbol? results)
-  ```
-  Error:
-  ```
-  error: unbound symbol: for-all
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define ids (map (lambda (i) (world/spawn 'projectile i 0)) '(0 1 2 3)))
-(define kinds (map entity/kind ids))
-;; equivalence class under kind: all elements share one class.
-(and (= (length (filter (lambda (k) (eq? k 'projectile)) kinds)) 4)
-     (for-all (lambda (k) (eq? k (car kinds))) kinds))
-  ```
-  Error:
-  ```
-  error: unbound symbol: for-all
+  error: *: expected a number, got the symbol eur
 
   ```
 
 ### `entity/set!` — file `24-entity.slat`
 
-- **row-4-proof** :eng-program
-  ```scheme
-  (define npc (world/spawn 'npc 0 0))
-(define pairs '((k1 . a) (k2 . b) (k3 . c) (k4 . d)))
-(for-each (lambda (p) (entity/set! npc (car p) (cdr p))) pairs)
-(for-all (lambda (p) (eq? (entity/ref npc (car p)) (cdr p))) pairs)
-  ```
-  Error:
-  ```
-  error: unbound symbol: for-all
-
-  ```
-
-### `entity/set-pos!` — file `24-entity.slat`
-
 - **row-5-emergence** :composition
   ```scheme
-  (define (respawn id)
-  (let ((spawn (entity/ref id 'spawn-point)))
-    (entity/set-pos! id (car spawn) (cadr spawn))
-    (entity/set-vel! id 0 0)
-    (entity/hp! id 100)))
-(entity/set! 'hero 'spawn-point '(100 100))
-(respawn 'hero)
+  (define (award-xp id amount)
+  (let ((current (or (entity/ref id 'xp) 0)))
+    (entity/set! id 'xp (+ current amount))
+    (when (> (entity/ref id 'xp) 100)
+      (entity/set! id 'level (+ (or (entity/ref id 'level) 1) 1))
+      (entity/set! id 'xp 0))))
+(award-xp 'hero 30) (award-xp 'hero 80)
   ```
   Error:
   ```
-  error: Cannot read properties of undefined (reading '0')
-
-  ```
-
-### `entity/sprite!` — file `24-entity.slat`
-
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define ship (world/spawn 'ship 0 0))
-(define frames #('ship-1 'ship-2 'ship-3 'ship-4))
-(define (frame-at t) (vector-ref frames (modulo t 4)))
-(for-each (lambda (t) (entity/sprite! ship (frame-at t))) '(0 1 2 3 4 5))
-  ```
-  Error:
-  ```
-  error: unbound symbol: #
+  error: +: expected a number, got the symbol nan
 
   ```
 
 ### `entity/state` — file `24-entity.slat`
 
-- **row-2-audit** :math-program
-  ```scheme
-  (entity/make 'e 42 7)
-(entity/set-vel! 'e 3 4)
-;; entity/state is a total projection Entity -> (id,x,y,vx,vy,w,h): a 7-tuple
-;; whose numeric components equal the individual axis accessors.
-(let ((s (entity/state 'e)))
-  (and (= (length s) 7)
-       (= (list-ref s 1) 42)
-       (= (list-ref s 2) 7)
-
-  ```
-  Error:
-  ```
-  error: Cannot read properties of undefined (reading 'length')
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (entity/make 'e 42 7)
-(entity/set-vel! 'e 3 4)
-(let ((s (entity/state 'e)))
-  (display (and (= (list-ref s 1) (entity/x 'e))
-                (= (list-ref s 2) (entity/y 'e))
-                (= (list-ref s 3) (car (entity/vel 'e))))))
-  ```
-  Error:
-  ```
-  error: Cannot read properties of undefined (reading '1')
-
-  ```
-- **row-4-proof** :math-program
-  ```scheme
-  (entity/make 'e 5 9)
-(entity/set-vel! 'e 2 -1)
-;; the head is the id; the numeric tail is exactly the axis vector
-;; (x y vx vy w h), so state = id ⊕ (position ++ velocity ++ size).
-(let ((s (entity/state 'e)))
-  (and (string? (car s))
-       (= 6 (length (cdr s)))
-       (for-all number? (cdr s))))
-  ```
-  Error:
-  ```
-  error: Cannot read properties of undefined (reading '0')
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (bounding-box ids)
-  ;; reduce state snapshots to the axis-aligned box enclosing every entity.
-  (fold
-    (lambda (id box)
-      (let* ((s (entity/state id)) (x (list-ref s 1)) (y (list-ref s 2)))
-        (list (min (car box) x) (min (cadr box) y)
-              (max (caddr box) x) (max (cad
-  ```
-  Error:
-  ```
-  error: Cannot read properties of undefined (reading '1')
-
-  ```
-
-### `entity/team!` — file `24-entity.slat`
-
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (partition-by-team ids)
-  ;; fold entities into equivalence classes keyed by their team label.
-  (fold
-    (lambda (id acc)
-      (let* ((k (entity/ref id 'team))
-             (cell (assq k acc)))
-        (if cell
-            (begin (set-cdr! cell (cons id (cdr cell))) acc)
-            (cons
-  ```
-  Error:
-  ```
-  error: unbound symbol: set-cdr!
-
-  ```
-
-### `entity/vel` — file `24-entity.slat`
-
 - **row-4-proof** :eng-program
   ```scheme
-  (define coin (world/spawn 'coin 0 0))
-(define pairs '((3 4) (5 -2) (-1 7) (0 0)))
-(for-all (lambda (p)
-           (entity/set-vel! coin (car p) (cadr p))
-           (equal? (entity/vel coin) p))
-         pairs)
+  (entity/make 'e 10 20)
+(define s1 (entity/state 'e))
+(define s2 (entity/state 'e))
+;; purity: two reads with no mutation between them return equal snapshots,
+;; and each read is a fresh copy — mutating one (via list-set!) cannot corrupt
+;; the entity or the other snapshot.
+(list-set! s1 1 999)
+(and 
   ```
   Error:
   ```
-  error: unbound symbol: for-all
-
-  ```
-
-### `entity/x` — file `24-entity.slat`
-
-- **row-4-proof** :eng-program
-  ```scheme
-  (define balls (map (lambda (i) (world/spawn 'ball i (* 2 i))) '(0 10 20 30)))
-(for-all (lambda (b) (= (entity/x b) (car (entity/pos b)))) balls)
-  ```
-  Error:
-  ```
-  error: unbound symbol: for-all
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define balls (map (lambda (i) (world/spawn 'ball i 0)) '(3 1 4 1 5)))
-(define (sorted-by-x ids)
-  (list-sort (lambda (a b) (< (entity/x a) (entity/x b))) ids))
-(sorted-by-x balls)
-  ```
-  Error:
-  ```
-  error: unbound symbol: list-sort
-
-  ```
-
-### `entity/y` — file `24-entity.slat`
-
-- **row-4-proof** :eng-program
-  ```scheme
-  (define markers (map (lambda (i) (world/spawn 'marker i (* 3 i))) '(0 5 10 15)))
-(for-all (lambda (m) (= (entity/y m) (cadr (entity/pos m)))) markers)
-  ```
-  Error:
-  ```
-  error: unbound symbol: for-all
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define markers (map (lambda (i) (world/spawn 'marker 0 i)) '(5 1 3 8 2)))
-(define (sort-by-y ids)
-  (list-sort (lambda (a b) (< (entity/y a) (entity/y b))) ids))
-(sort-by-y markers)
-  ```
-  Error:
-  ```
-  error: unbound symbol: list-sort
-
-  ```
-
-### `exact/*` — file `25-exact.slat`
-
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (invariant-holds? xs) (fold (lambda (r x) (and r (rational? x))) #t (map (lambda (p) (exact/* (car p) (cdr p))) xs)))
-(invariant-holds? (list (cons (exact/rat 1 2) (exact/rat 2 3))))
-  ```
-  Error:
-  ```
-  error: exact: not a rational or integer: object
-
-  ```
-
-### `exact/+` — file `25-exact.slat`
-
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (total-billing items) (fold exact/+ (exact/rat 0 1) (map item-cost items)))
-(total-billing (list))
-  ```
-  Error:
-  ```
-  error: unbound symbol: item-cost
-
-  ```
-
-### `exact/->string` — file `25-exact.slat`
-
-- **row-4-proof** :math-program
-  ```scheme
-  (define (round-trip? a) (exact/= a (parse-rational-string (exact/->string a))))
-(round-trip? (exact/rat 3 4))
-  ```
-  Error:
-  ```
-  error: unbound symbol: parse-rational-string
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (join-with-comma xs) (fold (lambda (acc x) (if (equal? acc "") (exact/->string x) (string-append acc ", " (exact/->string x)))) "" xs))
-(join-with-comma (list (exact/rat 1 2) (exact/rat 3 4)))
-  ```
-  Error:
-  ```
-  error: exact: not a rational or integer: string
-
-  ```
-
-### `exact/<=` — file `25-exact.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (all-le? xs cap) (fold (lambda (r x) (and r (exact/<= x cap))) #t xs))
-(all-le? (list (exact/rat 1 2)) (exact/rat 1 1))
-  ```
-  Error:
-  ```
-  error: exact: not a rational or integer: boolean
-
-  ```
-
-### `exact/=` — file `25-exact.slat`
-
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (hash-partition xs) (fold (lambda (h x) (let ((k (exact/= x x))) (hash-table-update! h k (lambda (v) (cons x v)) (lambda () '())) h)) (make-hash-table) xs))
-(hash-partition (list (exact/rat 1 2)))
-  ```
-  Error:
-  ```
-  error: exact: not a rational or integer: object
-
-  ```
-
-### `exact/>=` — file `25-exact.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (all-ge? xs floor) (fold (lambda (r x) (and r (exact/>= x floor))) #t xs))
-(all-ge? (list (exact/rat 3 4)) (exact/rat 1 2))
-  ```
-  Error:
-  ```
-  error: exact: not a rational or integer: boolean
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (meets-all mins xs) (every (lambda (m x) (exact/>= x m)) mins xs))
-(meets-all (list (exact/rat 1 1)) (list (exact/rat 1 1)))
-  ```
-  Error:
-  ```
-  error: exact: not a rational or integer: undefined
-
-  ```
-
-### `exact/inverse` — file `25-exact.slat`
-
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (safe-inverses xs) (map (lambda (x) (if (equal? x (exact/rat 0 1)) 'skip (exact/inverse x))) xs))
-(safe-inverses (list (exact/rat 1 2) (exact/rat 0 1)))
-  ```
-  Error:
-  ```
-  error: exact: inverse of zero
-
-  ```
-
-### `game/nim-sum` — file `28-game.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (winning-move-target heaps)
-  ;; Compute the reduction target for each heap in one pass.
-  (let ((s (game/nim-sum heaps)))
-    (map (lambda (h) (list 'heap h 'move-to (bitwise-xor h s) 'valid? (< (bitwise-xor h s) h))) heaps)))
-(winning-move-target '(3 5 7))
-  ```
-  Error:
-  ```
-  error: unbound symbol: bitwise-xor
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define heaps '(3 5 7))
-(define s (game/nim-sum heaps))
-(define (find-winning-move heaps s)
-  (fold (lambda (h acc) (if (or (not (null? acc)) (>= h (bitwise-xor h s))) acc (cons (bitwise-xor h s) acc))) '() heaps))
-(find-winning-move heaps s)
-  ```
-  Error:
-  ```
-  error: unbound symbol: bitwise-xor
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (multi-nim-strategy games-boards)
-  ;; Chain multiple independent Nim games; total value is XOR of per-game nim-sums.
-  (let* ((per-game (map game/nim-sum games-boards))
-         (overall (fold (lambda (b a) (bitwise-xor a b)) 0 per-game)))
-    (list 'per-game per-game 'overall overall 'losi
-  ```
-  Error:
-  ```
-  error: unbound symbol: bitwise-xor
-
-  ```
-
-### `game/star-n` — file `28-game.slat`
-
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (star-n-vs-nim-sum n1 n2)
-  ;; *n1 + *n2 should be equivalent to *(n1 ⊕ n2) by the Sprague-Grundy theorem.
-  (let* ((combined (game/surreal-add (game/star-n n1) (game/star-n n2)))
-         (expected (game/star-n (bitwise-xor n1 n2))))
-    (game/surreal-eq? combined expected)))
-(star-n-vs-nim
-  ```
-  Error:
-  ```
-  error: unbound symbol: bitwise-xor
-
-  ```
-
-### `game/surreal-eq?` — file `28-game.slat`
-
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (test-suite-runner-eq axioms)
-  (map (lambda (ax) (list (car ax) 'result ((cdr ax)))) axioms))
-(test-suite-runner-eq (list (cons 'reflexive (lambda () (game/surreal-eq? (game/surreal-lit 1) (game/surreal-lit 1))))))
-  ```
-  Error:
-  ```
-  error: not a function: [object Object]
-
-  ```
-
-### `game/surreal-is-number?` — file `28-game.slat`
-
-- **row-4-proof** :cs-program
-  ```scheme
-  (define (closed-under-arithmetic? xs)
-  (let loop ((ops '((add . game/surreal-add) (mul . game/surreal-mul))) (results '()))
-    (if (null? ops) results
-        (loop (cdr ops)
-              (cons (cons (car (car ops))
-                          (map (lambda (x) (game/surreal-is-number? ((cdr (car op
-  ```
-  Error:
-  ```
-  error: not a function: .,game/surreal-add
+  error: list-set!: not a list undefined
 
   ```
 
 ### `game/surreal-mul` — file `28-game.slat`
 
-- **row-2-audit** :eng-program
-  ```scheme
-  (define (scale-portfolio scalar values)
-  ;; Scale each surreal value by a common scalar.
-  (map (lambda (v) (game/surreal-mul scalar v)) values))
-(scale-portfolio (game/surreal-lit 2) (list (game/surreal-lit 1) (game/surreal-lit 3) (game/surreal-lit 5)))
-  ```
-  Error:
-  ```
-  <timeout>
-  ```
 - **row-4-proof** :cs-program
   ```scheme
   (define (distributivity-check a b c)
@@ -4137,765 +2105,511 @@ nonzero?
   ```
   <timeout>
   ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define a (game/surreal-lit 2))
-(define b (game/surreal-lit 3))
-(define c (game/surreal-lit 4))
-(define lhs (game/surreal-mul a (game/surreal-add b c)))
-(define rhs (game/surreal-add (game/surreal-mul a b) (game/surreal-mul a c)))
-(game/surreal-eq? lhs rhs)
-  ```
-  Error:
-  ```
-  <timeout>
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (repeated-mul base n)
-  ;; base^n via repeated multiplication.
-  (let loop ((k n) (acc (game/surreal-lit 1)))
-    (if (<= k 0) acc
-        (loop (- k 1) (game/surreal-mul acc base)))))
-(repeated-mul (game/surreal-lit 2) 3)
-  ```
-  Error:
-  ```
-  <timeout>
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (associativity-mul a b c)
-  ;; (a·b)·c = a·(b·c)
-  (game/surreal-eq? (game/surreal-mul (game/surreal-mul a b) c)
-                    (game/surreal-mul a (game/surreal-mul b c))))
-(associativity-mul (game/surreal-lit 2) (game/surreal-lit 3) (game/surreal-lit 4))
-  ```
-  Error:
-  ```
-  <timeout>
-  ```
-
-### `game/surreal-simplest` — file `28-game.slat`
-
-- **row-2-audit** :eng-program
-  ```scheme
-  (define (canonical-mid lo hi)
-  (let ((s (game/surreal-simplest lo hi)))
-    (if (eq? s 'nan) (error 'inverted-interval) s)))
-(canonical-mid 0 1)
-  ```
-  Error:
-  ```
-  <timeout>
-  ```
-- **row-2-audit** :math-program
-  ```scheme
-  (define (born-early? lo hi)
-  ;; Simplest = min-birthday surreal in (lo, hi). Between 0 and 1 the answer is 1/2 (born day 1).
-  (let ((s (game/surreal-simplest lo hi)))
-    (= (game/surreal-birthday s) 1)))
-(born-early? 0 1)
-  ```
-  Error:
-  ```
-  <timeout>
-  ```
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (nan-guard lo hi)
-  (let ((r (game/surreal-simplest lo hi)))
-    (if (eq? r 'nan) 'invalid 'ok)))
-(list (nan-guard 0 1) (nan-guard 1 0))
-  ```
-  Error:
-  ```
-  <timeout>
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (regression-bracketed)
-  (let ((s (game/surreal-simplest 0 1)))
-    (list (game/surreal-le? (game/surreal-lit 0) s)
-          (game/surreal-le? s (game/surreal-lit 1))
-          (not (game/surreal-eq? s (game/surreal-lit 0)))
-          (not (game/surreal-eq? s (game/surreal-lit 1))))))
-(regr
-  ```
-  Error:
-  ```
-  <timeout>
-  ```
-- **row-4-proof** :math-program
-  ```scheme
-  (define (minimality-check lo hi)
-  ;; Minimality of birthday: any strict-between surreal has ≥ this birthday.
-  (let ((s (game/surreal-simplest lo hi)))
-    (>= (game/surreal-birthday (game/surreal-lit (/ (+ lo hi) 4)))
-        (game/surreal-birthday s))))
-(minimality-check 0 1)
-  ```
-  Error:
-  ```
-  <timeout>
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (bisect target n)
-  (let loop ((lo 0) (hi 1) (i 0))
-    (if (>= i n) (game/surreal-simplest lo hi)
-        (let ((m (game/surreal-simplest lo hi)))
-          (if (game/surreal-le? m target)
-              (loop (game/to-real m) hi (+ i 1))
-              (loop lo (game/to-real m) (+ i 1)))))))
-  ```
-  Error:
-  ```
-  <timeout>
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (dyadic-tree depth)
-  ;; Enumerate all dyadics of birth day ≤ depth by iterating simplest.
-  (let loop ((intervals (list (list 0 1))) (d 0) (out '()))
-    (if (>= d depth) (reverse out)
-        (let ((next (fold append '()
-                     (map (lambda (iv)
-                            (l
-  ```
-  Error:
-  ```
-  <timeout>
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (converge target epsilon)
-  (let loop ((lo 0) (hi 1) (steps 0))
-    (if (or (> steps 20) (< (- hi lo) epsilon))
-        (list 'converged steps)
-        (let ((m (game/surreal-simplest lo hi)))
-          (if (game/surreal-le? m target)
-              (loop (game/to-real m) hi (+ steps 1))
-    
-  ```
-  Error:
-  ```
-  <timeout>
-  ```
-
-### `game/surreal-sub` — file `28-game.slat`
-
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (telescoping-sum snapshots)
-  ;; Σ(a_{i+1} − a_i) = a_n − a_0.
-  (let ((deltas (map game/surreal-sub (cdr snapshots) snapshots)))
-    (fold game/surreal-add (game/surreal-lit 0) deltas)))
-(telescoping-sum (map game/surreal-lit '(0 1 3 6 10)))
-  ```
-  Error:
-  ```
-  <timeout>
-  ```
-
-### `on-collision` — file `28-game.slat`
-
-- **row-2-audit** :eng-program
-  ```scheme
-  (on-collision (lambda (a b) (display 'hit)))
-(physics/step)
-  ```
-  Error:
-  ```
-  error: unbound symbol: on-collision
-
-  ```
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (safe-install h)
-  (if (or (procedure? h) (eq? h #f))
-      (begin (on-collision h) 'installed)
-      (error 'need-procedure-or-false h)))
-(safe-install (lambda (a b) 'ok))
-  ```
-  Error:
-  ```
-  error: unbound symbol: on-collision
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (on-collision (lambda (a b) 'x))
-(on-collision #f)
-#t
-  ```
-  Error:
-  ```
-  error: unbound symbol: on-collision
-
-  ```
-- **row-4-proof** :cs-program
-  ```scheme
-  (define (replace-semantics?)
-  (on-collision (lambda (a b) 'first))
-  (on-collision (lambda (a b) 'second))
-  ;; Only 'second remains — verifiable by observing dispatch on a controlled physics/step.
-  #t)
-(replace-semantics?)
-  ```
-  Error:
-  ```
-  error: unbound symbol: on-collision
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define score 0)
-(on-collision (lambda (a b)
-  (when (and (eq? a 'player) (eq? b 'coin)) (set! score (+ score 1)))))
-(physics/step)
-score
-  ```
-  Error:
-  ```
-  error: unbound symbol: on-collision
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (multi-listener handlers)
-  ;; Compose N listeners into one slot by fanout inside the handler.
-  (on-collision (lambda (a b)
-    (for-each (lambda (h) (h a b)) handlers))))
-(multi-listener (list (lambda (a b) 'log)
-                      (lambda (a b) 'damage)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: on-collision
-
-  ```
-
-### `geom/->degrees` — file `29-geom.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (clamp-bearing-deg rad) (modulo (inexact->exact (round (geom/->degrees rad))) 360))
-(clamp-bearing-deg (* 5 math/pi))
-  ```
-  Error:
-  ```
-  error: The number NaN cannot be converted to a BigInt because it is not an integer
-
-  ```
-
-### `geom/arctan` — file `29-geom.slat`
-
-- **row-2-audit** :math-program
-  ```scheme
-  (define (quadrant-safe? y x) (let ((a1 (geom/arctan (/ y x))) (a2 (if (< x 0) (+ a1 3.14159265) a1))) (list 'ratio a1 'quadrant-fixed a2)))
-(quadrant-safe? 1 -1)
-  ```
-  Error:
-  ```
-  error: unbound symbol: a1
-
-  ```
-
-### `geom/interior-angle-deg` — file `29-geom.slat`
-
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (angle-table-cached ns) (let ((tbl (map (lambda (n) (cons n (geom/interior-angle-deg n))) ns))) (lambda (n) (cond ((assoc n tbl) => cdr) (else (geom/interior-angle-deg n))))))
-(let ((look (angle-table-cached (list 3 4 5 6)))) (list (look 4) (look 5) (look 100)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: =>
-
-  ```
-
-### `geom/law-of-cosines-side` — file `29-geom.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (safe-cos-side a b theta) (if (and (> a 0) (> b 0) (> theta 0) (< theta math/pi)) (geom/law-of-cosines-side a b theta) (error 'invalid-triangle-sas)))
-(safe-cos-side 3 4 (/ math/pi 3))
-  ```
-  Error:
-  ```
-  error: invalid-triangle-sas
-
-  ```
-
-### `geom/law-of-sines-side` — file `29-geom.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (safe-sines-side a A B) (if (and (> a 0) (> A 0) (< A math/pi) (> B 0) (< B math/pi) (< (+ A B) math/pi)) (geom/law-of-sines-side a A B) (error 'invalid-triangle-asa)))
-(safe-sines-side 10 (/ math/pi 4) (/ math/pi 3))
-  ```
-  Error:
-  ```
-  error: invalid-triangle-asa
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (chain-solver-with-validation a A B) (cond ((not (and (> A 0) (> B 0))) (error 'nonpositive-angle)) ((>= (+ A B) math/pi) (error 'angle-sum-exceeds-pi)) (else (let* ((C (- math/pi A B)) (b (geom/law-of-sines-side a A B)) (c (geom/law-of-sines-side a A C))) (list a b c)))))
-(chain-solver-with
-  ```
-  Error:
-  ```
-  error: nonpositive-angle
-
-  ```
 
 ### `geom/regular-polygon-vertices` — file `29-geom.slat`
 
-- **row-4-proof** :program
-  ```scheme
-  (define pts (geom/regular-polygon-vertices 8 10 0))
-(every? (lambda (p) (< (abs (- (geom/distance 0 0 (car p) (cadr p)) 10)) 1e-9)) pts)
-  ```
-  Error:
-  ```
-  error: unbound symbol: every?
-
-  ```
-
-### `geom/right-triangle-angle` — file `29-geom.slat`
-
 - **row-5-emergence** :cs-composition
   ```scheme
-  (define (angle-cache-for-hyp hyp) (let ((tbl (list))) (lambda (opp) (cond ((assoc opp tbl) => cdr) (else (let ((v (geom/right-triangle-angle opp hyp))) (set! tbl (cons (cons opp v) tbl)) v))))))
-(let ((f (angle-cache-for-hyp 5))) (list (f 3) (f 3) (f 4)))
+  (define (generator-driven-mesh n radius edge-fn) (let* ((verts (geom/regular-polygon-vertices n radius 0)) (edges (let loop ((vs verts) (acc (list))) (cond ((null? vs) (reverse acc)) ((null? (cdr vs)) (reverse (cons (edge-fn (car vs) (car verts)) acc))) (else (loop (cdr vs) (cons (edge-fn (car vs) (
   ```
   Error:
   ```
-  error: unbound symbol: =>
-
-  ```
-
-### `geom/sector-area` — file `29-geom.slat`
-
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (sector-cache-per-radius radius) (let ((tbl (list))) (lambda (angle-deg) (cond ((assoc angle-deg tbl) => cdr) (else (let ((v (geom/sector-area radius angle-deg))) (set! tbl (cons (cons angle-deg v) tbl)) v))))))
-(let ((s (sector-cache-per-radius 12))) (list (s 60) (s 60) (s 90)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: =>
+  error: length: expected a proper list, got the symbol a
 
   ```
 
 ### `geom/solve-right` — file `29-geom.slat`
 
-- **row-2-audit** :math-program
+- **row-4-proof** :program
   ```scheme
-  (define (pythagoras-holds? config) (let ((r (geom/solve-right config))) (< (abs (- (+ (expt (list-ref r 3) 2) (expt (list-ref r 5) 2)) (expt (list-ref r 1) 2))) 1))
-(pythagoras-holds? (list ':opp 3 ':adj 4))
+  (define r (geom/solve-right '(:opp 3 :adj 4)))
+(< (abs (- (list-ref r 1) 5)) 0.01)
   ```
   Error:
   ```
-  error: missing ) (line 1, col 1)
+  error: -: expected a number, got a list
+
+  ```
+- **row-4-proof** :eng-program
+  ```scheme
+  (define (round-trip-hyp-angle? hyp angle-deg) (let* ((r (geom/solve-right (list ':hyp hyp ':angle angle-deg))) (opp (list-ref r 3)) (adj (list-ref r 5)) (r2 (geom/solve-right (list ':opp opp ':adj adj)))) (< (abs (- (list-ref r2 1) hyp)) 0.01)))
+(round-trip-hyp-angle? 13 75)
+  ```
+  Error:
+  ```
+  error: -: expected a number, got a list
+
+  ```
+- **row-4-proof** :math-program
+  ```scheme
+  (define (angle-plus-comp-is-90? config) (let* ((r (geom/solve-right config)) (theta (list-ref r 7)) (comp (- 90 theta))) (< (abs (- (+ theta comp) 90)) 1e-6)))
+(angle-plus-comp-is-90? '(:opp 3 :adj 4))
+  ```
+  Error:
+  ```
+  error: -: expected a number, got nothing
+
+  ```
+- **row-5-emergence** :eng-composition
+  ```scheme
+  (define (ballistic-launch-range hyp-vel angle-deg) (let* ((r (geom/solve-right (list ':hyp hyp-vel ':angle angle-deg))) (vx (list-ref r 5)) (vy (list-ref r 3)) (g 9.81) (t-flight (/ (* 2 vy) g))) (* vx t-flight)))
+(ballistic-launch-range 30 45)
+  ```
+  Error:
+  ```
+  error: *: expected a number, got a list
 
   ```
 
-### `geom/sphere-volume` — file `29-geom.slat`
+### `grid/flower-pos` — file `30-grid.slat`
+
+- **row-5-emergence** :eng-composition
+  ```scheme
+  (define (sq-dist p tx ty)
+  (+ (* (- (car p) tx) (- (car p) tx))
+     (* (- (cdr p) ty) (- (cdr p) ty))))
+(define (nearest tx ty)
+  (fold (lambda (id best)
+               (let ((p (grid/flower-pos id)))
+                 (if (and p (or (not best) (< (sq-dist p tx ty) (cdr best))))
+                   
+  ```
+  Error:
+  ```
+  error: -: expected a number, got a list
+
+  ```
+- **row-5-emergence** :math-composition
+  ```scheme
+  (define (argmin-dist tx ty)
+  ;; argmin over a squared-distance function across the registry
+  (define (d id) (let ((p (grid/flower-pos id)))
+                   (and p (+ (expt (- (car p) tx) 2) (expt (- (cdr p) ty) 2)))))
+  (fold (lambda (id b)
+               (let ((dd (d id)))
+                 (if
+  ```
+  Error:
+  ```
+  error: -: expected a number, got a list
+
+  ```
+
+### `filter-map` — file `33-higher-order.slat`
 
 - **row-5-emergence** :math-composition
   ```scheme
-  (define (integrate-shells-witness r layers) (let ((dr (/ r layers))) (let loop ((k 0) (acc 0)) (if (= k layers) acc (let* ((r-inner (* k dr)) (shell-vol (* 4 math/pi r-inner r-inner dr))) (loop (+ k 1) (+ acc shell-vol)))))))
-(< (abs (- (integrate-shells-witness 5 10000) (geom/sphere-volume 5))) 0.1
+  (define (rationalize-safe num den)
+  (if (zero? den) #f (/ num den)))
+(define nums '(1 2 3 4 5))
+(define dens '(2 0 4 0 8))
+(filter-map rationalize-safe nums dens)
   ```
   Error:
   ```
-  error: fuel exhausted
+  error: /: expected a number, got nothing
 
   ```
 
-### `geom/transform-polygon` — file `29-geom.slat`
+### `juggle/balls` — file `36-juggle.slat`
 
-- **row-4-proof** :cs-program
+- **row-5-emergence** :math-composition
   ```scheme
-  (define (rotate-360-restores? pts) (let ((r (geom/transform-polygon pts 'geom/rotate 360))) (every? (lambda (pair) (and (< (abs (- (car (car pair))  (car (cadr pair)))) 1e-6) (< (abs (- (cadr (car pair)) (cadr (cadr pair)))) 1e-6))) (map list pts r))))
-(rotate-360-restores? '((0 0) (1 0) (1 1) (0 1)
+  (define catalog '((3) (4 4) (5 3 1) (6 4 4 1) (5 5 5 5 5)))
+(define counts (map juggle/balls catalog))
+(list 'min (apply min counts) 'max (apply max counts))
   ```
   Error:
   ```
-  error: unbound symbol: every?
+  error: min: expected a number, got the symbol nan
 
   ```
 
-### `alist->hash-table` — file `32-hash.slat`
+### `juggle/max-throw` — file `36-juggle.slat`
 
-- **row-2-audit** :cs-program
+- **row-5-emergence** :math-composition
   ```scheme
-  (define (assoc-lookup-cost n) (list 'assoc-cost 'O(n)))
-(define (hash-lookup-cost n) (list 'hash-cost 'O(1)))
-(display (list 'compare (assoc-lookup-cost 1000) (hash-lookup-cost 1000)))
-(newline)
+  (define patterns '((3) (5 3 1) (6 4 4 1)))
+(define maxes (map juggle/max-throw patterns))
+(list 'global-max (apply max maxes) 'global-min (apply min maxes))
   ```
   Error:
   ```
-  error: not a function: 1000
+  error: max: expected a number, got the symbol nan
 
   ```
 
-### `hash-table-set!` — file `32-hash.slat`
+### `linalg/is-orthogonal?` — file `38-linalg.slat`
 
-- **row-3-dimension** :code
+- **row-5-emergence** :cs-composition
   ```scheme
-  (erase-and-write board 'todo "buy milk")
+  (define (svd-compressor A)
+  (let ((decomp (linalg/svd A)))
+    (let ((U (cadr (assoc ':U decomp)))
+          (V (cadr (assoc ':V decomp))))
+      (list ':U-orthogonal? (linalg/is-orthogonal? U)
+            ':V-orthogonal? (linalg/is-orthogonal? V)))))
+(svd-compressor '((3 0)(0 2)))
   ```
   Error:
   ```
-  error: unbound symbol: erase-and-write
-
-  ```
-
-### `linalg/gram-schmidt` — file `38-linalg.slat`
-
-- **row-2-audit** :eng-program
-  ```scheme
-  (define design-cols (list '(1 1 1 1) '(1 2 3 4) '(1 4 9 16)))
-(define orthonormal-cols (linalg/gram-schmidt design-cols))
-orth-cols
-  ```
-  Error:
-  ```
-  error: unbound symbol: orth-cols
+  error: cadr: expected a pair or a non-empty list, got #f
 
   ```
 
 ### `linalg/lu` — file `38-linalg.slat`
 
-- **row-2-audit** :math-program
+- **row-4-proof** :cs-program
   ```scheme
-  (define (lu-recomposition-check A)
+  (define (P-is-permutation? A)
+  (let* ((lu (linalg/lu A))
+         (P (caddr lu))
+         (row0 (list (matrix/get P 0 0) (matrix/get P 0 1)))
+         (row1 (list (matrix/get P 1 0) (matrix/get P 1 1))))
+    (and (= (+ (car row0) (cadr row0)) 1)
+         (= (+ (car row1) (cadr row1)) 1))))
+(P-is-pe
+  ```
+  Error:
+  ```
+  error: caddr: expected a pair or a non-empty list, got the empty list
+
+  ```
+- **row-5-emergence** :math-composition
+  ```scheme
+  (define (solve-with-lu A b)
   (let* ((lu (linalg/lu A))
          (L (car lu)) (U (cadr lu)) (P (caddr lu))
-         (LU (matrix/multiply L U))
-         (PA (matrix/multiply P A))
-         (diff (matrix/sub LU PA)))
-    (< (abs (matrix/get diff 0 0)) 1e-6)))
-(lu-recomposition-check '((2 1)(1 3
+         (Pb (linalg/mv P b))
+         (y (linalg/solve L Pb))
+         (x (linalg/solve U y)))
+    x))
+(solve-with-lu '((2 1)(1 3)) '(5 10))
   ```
   Error:
   ```
-  error: matrix/multiply: shape mismatch (A is 0×0, B is 2×2)
+  error: caddr: expected a pair or a non-empty list, got the empty list
 
   ```
 
-### `linalg/qr` — file `38-linalg.slat`
+### `math/mixed-number` — file `40-math.slat`
 
-- **row-5-emergence** :cs-composition
+- **row-4-proof** :program
   ```scheme
-  (define (orthonormal-basis-extraction vecs)
-  (let* ((A (apply map list vecs))
-         (qr (linalg/qr A))
-         (Q (car qr))
-         (n-cols (length (car Q))))
-    (map (lambda (j) (map (lambda (row) (list-ref row j)) Q))
-         (list 0 (- n-cols 1)))))
-(orthonormal-basis-extraction (list '(1
+  (define m (math/mixed-number '(7 3)))
+(define w (list-ref m 0))
+(define n (list-ref m 1))
+(define d (list-ref m 2))
+(= (/ 7 3) (+ w (/ n d)))
   ```
   Error:
   ```
-  error: Cannot read properties of undefined (reading 'length')
+  error: /: division by zero
+
+  ```
+- **row-4-proof** :eng-program
+  ```scheme
+  (define m (math/mixed-number '(11 4)))
+(= (/ 11 4) (+ (list-ref m 0) (/ (list-ref m 1) (list-ref m 2))))
+  ```
+  Error:
+  ```
+  error: /: division by zero
+
+  ```
+- **row-4-proof** :cs-program
+  ```scheme
+  (define (roundtrip? nd)
+  (let ((m (math/mixed-number nd)))
+    (= (/ (car nd) (cadr nd))
+       (+ (list-ref m 0) (/ (list-ref m 1) (list-ref m 2))))))
+(and (roundtrip? '(7 3)) (roundtrip? '(15 4)))
+  ```
+  Error:
+  ```
+  error: /: division by zero
 
   ```
 
-### `matrix/make` — file `41-matrix.slat`
+### `motion/cadence` — file `42-motion.slat`
+
+- **row-4-proof** :program
+  ```scheme
+  (define (approx a b) (< (abs (- a b)) 0.5))
+(define (check-reciprocity bpm sub factor)
+  (let* ((cad (motion/cadence bpm sub))
+         (p (hash-table-ref/default cad 'periodMs #f))
+         (expected (/ 60000.0 (* bpm factor))))
+    (approx p expected)))
+(and (check-reciprocity 120 'q 1)
+     (chec
+  ```
+  Error:
+  ```
+  error: -: expected a number, got #f
+
+  ```
+- **row-5-emergence** :math-composition
+  ```scheme
+  (define (period-vector bpm subs)
+  (map (lambda (s)
+         (let ((cad (motion/cadence bpm s)))
+           (if (hash-table-ref/default cad 'ok #f) (hash-table-ref/default cad 'periodMs #f) #f)))
+       subs))
+(define (lcm-approx-of xs)
+  (apply max xs))
+(let ((ps (period-vector 120 '(q 8 16))))
+  (
+  ```
+  Error:
+  ```
+  error: max: expected a number, got #f
+
+  ```
+
+### `motion/pocket` — file `42-motion.slat`
 
 - **row-2-audit** :eng-program
   ```scheme
-  (define (import-or-report rows)
-  ;; Import pipelines log OK or REJECT based on the ragged sentinel.
-  (let ((M (matrix/make rows)))
-    (if (equal? M 'ragged)
-        (list ':status 'reject ':reason 'ragged)
-        (list ':status 'ok ':shape (list (matrix/rows M) (matrix/cols M))))))
-(import-or-re
+  (define pockets (motion/pocket 16 5))
+(define (nearest-pocket-to t)
+  (let loop ((ps pockets) (best (car pockets)) (dist (abs (- t (car pockets)))))
+    (cond ((null? ps) best)
+          ((< (abs (- t (car ps))) dist) (loop (cdr ps) (car ps) (abs (- t (car ps)))))
+          (else (loop (cdr ps) best
   ```
   Error:
   ```
-  error: matrix: ragged row 1 (expected 3, got 2)
+  error: -: expected a number, got a list
 
   ```
-- **row-2-audit** :cs-program
+- **row-4-proof** :program
   ```scheme
-  (define (detects-ragged? rows) (equal? (matrix/make rows) 'ragged))
-(list (detects-ragged? '((1 2)(3 4 5))) (detects-ragged? '((1 2)(3 4))))
+  (define pockets (motion/pocket 16 5))
+(define (all-mirrored? xs)
+  (let ((s xs))
+    (let loop ((xs xs))
+      (if (null? xs) #t
+          (if (member (- (car xs)) s) (loop (cdr xs)) #f)))))
+(all-mirrored? pockets)
   ```
   Error:
   ```
-  error: matrix: ragged row 1 (expected 2, got 3)
+  error: -: expected a number, got a list
 
   ```
-- **row-4-proof** :cs-program
+- **row-4-proof** :eng-program
   ```scheme
-  (define (ragged-is-not-a-matrix? rows)
-  ;; A ragged result must not pass as a shaped matrix.
-  (equal? (matrix/make rows) 'ragged))
-(ragged-is-not-a-matrix? '((1 2 3)(4 5)))
+  (define (test-multiple-configs)
+  (let loop ((cfgs '((16 3) (24 5) (32 7))) (all-ok #t))
+    (cond ((null? cfgs) all-ok)
+          (else (let* ((cfg (car cfgs))
+                       (ps (motion/pocket (car cfg) (cadr cfg))))
+                  (loop (cdr cfgs)
+                        (and all-ok
+  
   ```
   Error:
   ```
-  error: matrix: ragged row 1 (expected 3, got 2)
-
-  ```
-
-### `matrix/ref` — file `41-matrix.slat`
-
-- **row-2-audit** :math-program
-  ```scheme
-  (define (out-of-bounds-is-nan? M)
-  ;; Out-of-range access returns the symbol 'nan, not an error.
-  (eq? (matrix/ref M 9 9) 'nan))
-(out-of-bounds-is-nan? '((1 2)(3 4)))
-  ```
-  Error:
-  ```
-  error: Cannot read properties of undefined (reading '9')
-
-  ```
-
-### `motion/drop` — file `42-motion.slat`
-
-- **row-4-proof** :cs-program
-  ```scheme
-  (define (unique-max? xs)
-  (let* ((m (apply max xs))
-         (count (length (filter (lambda (x) (= x m)) xs))))
-    (= count 1)))
-(define d (motion/drop 3 8))
-(unique-max? (hash-table-ref/default d 'articulation #f))
-  ```
-  Error:
-  ```
-  error: lst.filter is not a function
-
-  ```
-
-### `motion/halt` — file `42-motion.slat`
-
-- **row-2-audit** :math-program
-  ```scheme
-  (honest-null :reason "motion/halt is a state-termination operation (cancel active bindings/timers). Its 'math view' would be a projection onto v=0 in phase space — but that's a shape statement, not a proposition. The real content lives in CS (state termination) — see cs-program. Book-of-motion ch 5.
-  ```
-  Error:
-  ```
-  error: unbound symbol: honest-null
+  error: -: expected a number, got a list
 
   ```
 - **row-4-proof** :math-program
   ```scheme
-  (honest-null :reason "Idempotence h∘h=h of state-cancellation is a fixed-point property; the math view is trivial (the fixed set is 'no motion'). The proof lives in CS as a property test — see cs-program.")
+  (define (sum-zero? xs)
+  (let loop ((xs xs) (s 0))
+    (if (null? xs) (< (abs s) 0.001)
+      (loop (cdr xs) (+ s (car xs))))))
+(sum-zero? (motion/pocket 16 5))
   ```
   Error:
   ```
-  error: unbound symbol: honest-null
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (honest-null :reason "The 5-emergence math view of halt-composition would be 'sequential cancellation as identity in the state monoid.' That's a shape-name, not a proposition worth a witness. The real emergent composition lives in eng (evacuate) and cs (checkpoint). Book-of-composition ch 15.")
-  ```
-  Error:
-  ```
-  error: unbound symbol: honest-null
-
-  ```
-
-### `motion/move-to` — file `42-motion.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define descriptor (motion/move-to 'card 200 100 400 'ease-out-cubic))
-(card-do 'card 'animate descriptor)
-  ```
-  Error:
-  ```
-  error: unbound symbol: card-do
-
-  ```
-
-### `motion/with-feel` — file `42-motion.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define feel (motion/with-feel 'sweep-tensor 'staccato))
-(card-do 'card 'animate feel)
-  ```
-  Error:
-  ```
-  error: unbound symbol: card-do
-
-  ```
-- **row-2-audit** :math-program
-  ```scheme
-  (honest-null :reason "motion/with-feel is a combinator-lift: it wraps a tensor with an articulation tag. The mathematical content lives in the underlying tensor + articulation-envelope shape; with-feel itself just packages them. Book-of-motion ch 9.")
-  ```
-  Error:
-  ```
-  error: unbound symbol: honest-null
-
-  ```
-- **row-2-audit** :cs-program
-  ```scheme
-  (define feel (motion/with-feel 'sweep-tensor 'staccato))
-(define (descriptor-shape? d) (or (hash? d) (list? d) (procedure? d)))
-(descriptor-shape? feel)
-  ```
-  Error:
-  ```
-  error: unbound symbol: hash?
-
-  ```
-- **row-4-proof** :math-program
-  ```scheme
-  (honest-null :reason "Duration-invariance under articulation change is a preservation property of the wrapper; the mathematical content is 'wrapping preserves an underlying scalar' which is trivial. Book-of-motion ch 9.")
-  ```
-  Error:
-  ```
-  error: unbound symbol: honest-null
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define (expressive-scene light-cards heavy-cards)
-  (for-each (lambda (c)
-              (card-do c 'animate (motion/with-feel 'light-bounce 'staccato)))
-            light-cards)
-  (for-each (lambda (c)
-              (card-do c 'animate (motion/with-feel 'heavy-bounce 'marcato)))
-            heavy-c
-  ```
-  Error:
-  ```
-  error: unbound symbol: card-do
+  error: +: expected a number, got a list
 
   ```
 - **row-5-emergence** :eng-composition
   ```scheme
-  (define (orchestrate-scene sections)
-  ;; sections = ((tag tensor articulation entities) ...) — apply articulated motion per section.
-  (for-each (lambda (sec)
-              (let ((tensor (cadr sec)) (art (caddr sec)) (ents (cadddr sec)))
-                (for-each (lambda (e) (card-do e 'animate (mo
+  (define (snap-many events pockets)
+  (map (lambda (t)
+         (let loop ((ps pockets) (best (car pockets)) (d (abs (- t (car pockets)))))
+           (cond ((null? ps) (+ t best))
+                 ((< (abs (- t (car ps))) d) (loop (cdr ps) (car ps) (abs (- t (car ps)))))
+                 (else (loop
   ```
   Error:
   ```
-  error: unbound symbol: card-do
+  error: -: expected a number, got a list
 
   ```
 - **row-5-emergence** :math-composition
   ```scheme
-  (honest-null :reason "Emergent composition of with-feel across a partition is 'parallel wrapping preserves per-part duration.' A structural preservation statement, not a proposition with witnesses. Book-of-composition ch 13.")
+  (define (grid-widths pockets)
+  (let loop ((xs pockets) (prev #f) (gaps '()))
+    (cond ((null? xs) (reverse gaps))
+          (prev (loop (cdr xs) (car xs) (cons (- (car xs) prev) gaps)))
+          (else (loop (cdr xs) (car xs) gaps)))))
+(grid-widths (motion/pocket 16 5))
   ```
   Error:
   ```
-  error: unbound symbol: honest-null
+  error: -: expected a number, got a list
 
   ```
-
-### `motion/with-pace` — file `42-motion.slat`
-
-- **row-2-audit** :program
+- **row-5-emergence** :cs-composition
   ```scheme
-  (define energy 30)
-(define intensity (/ energy 100.0))
-(define pace-desc (motion/with-pace 'hero-tensor intensity))
-(card-do 'hero 'animate pace-desc)
+  (define (make-quantizer tol n)
+  (let ((cache (motion/pocket tol n)))
+    (lambda (t)
+      (let loop ((ps cache) (best (car cache)) (d (abs (- t (car cache)))))
+        (cond ((null? ps) best)
+              ((< (abs (- t (car ps))) d) (loop (cdr ps) (car ps) (abs (- t (car ps)))))
+              (el
   ```
   Error:
   ```
-  error: unbound symbol: card-do
+  error: -: expected a number, got a list
 
   ```
+
+### `note/strike` — file `43-note.slat`
+
 - **row-2-audit** :math-program
   ```scheme
-  (honest-null :reason "motion/with-pace is a scalar-multiplication combinator on the underlying tensor's IoI. Its math view — 'time-scaling preserves shape' — is trivial. The real math lives in the tensor itself and the intensity's clamping envelope. Book-of-motion ch 10.")
+  (define (fundamental) (note/strike 'c4 (/ 60 (audio-bpm))))
+(fundamental)
   ```
   Error:
   ```
-  error: unbound symbol: honest-null
+  error: /: expected a number, got #f
 
   ```
-- **row-4-proof** :math-program
-  ```scheme
-  (honest-null :reason "Linearity invariant d(i)·i = base is a trivial algebraic identity (definition of scalar scaling). The proof is by construction — no witness beyond the definition. Book-of-motion ch 10.")
-  ```
-  Error:
-  ```
-  error: unbound symbol: honest-null
 
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (crescendo-scene entities tensor start-i end-i steps)
-  ;; Gradually increase intensity across time — emergent 'building tension.'
-  (let loop ((i 0))
-    (cond ((>= i steps) 'done)
-          (else (let ((intensity (+ start-i (* (/ i (- steps 1)) (- end-i start-i)))))
-                  (for-
-  ```
-  Error:
-  ```
-  error: unbound symbol: card-do
+### `nt/divisor-count` — file `44-nt.slat`
 
-  ```
-- **row-5-emergence** :math-composition
+- **row-2-audit** :math-program
   ```scheme
-  (honest-null :reason "Time-varying scalar composition (intensity as function of state) is a substitution pattern — the composition wraps whatever intensity is emitted. No propositional content beyond 'wrapping preserves evaluation order.' Book-of-composition ch 14.")
+  (define (tau-formula-witness n)
+  ;; τ(n) = ∏(aᵢ+1) via prime factorisation.
+  (let ((pf (nt/prime-factorization n)))
+    (= (nt/divisor-count n)
+       (fold * 1 (map (lambda (p) (+ 1 (cdr p))) pf)))))
+(tau-formula-witness 60)
   ```
   Error:
   ```
-  error: unbound symbol: honest-null
+  error: +: expected a number, got a list
 
   ```
 
 ### `nt/divmod` — file `44-nt.slat`
 
-- **row-5-emergence** :math-composition
+- **row-4-proof** :program
   ```scheme
-  (define (euclid-gcd-via-divmod a b)
-  ;; Chain nt/divmod recursively; base case r=0.
-  (if (zero? b) a
-      (let ((qr (nt/divmod a b)))
-        (euclid-gcd-via-divmod b (cdr (cadr qr))))))
-(euclid-gcd-via-divmod 1729 89)
+  (let* ((qr (nt/divmod 17 5)) (q (cdr (car qr))) (r (cdr (cadr qr))))
+  (= (+ (* q 5) r) 17))
   ```
   Error:
   ```
-  error: fuel exhausted
+  error: *: expected a number, got a list
+
+  ```
+- **row-4-proof** :eng-program
+  ```scheme
+  (define (reconstruct-batch pairs)
+  (map (lambda (p)
+         (let* ((a (car p)) (b (cadr p))
+                (qr (nt/divmod a b))
+                (q (cdr (car qr))) (r (cdr (cadr qr))))
+           (= (+ (* q b) r) a)))
+       pairs))
+(reconstruct-batch (list (list 89 7) (list 561 13) (list 1729 89)
+  ```
+  Error:
+  ```
+  error: *: expected a number, got a list
 
   ```
 
-### `nt/prime?` — file `44-nt.slat`
+### `nt/mod-inverse` — file `44-nt.slat`
+
+- **row-5-emergence** :cs-composition
+  ```scheme
+  (define (safe-modular-solve a b m)
+  ;; Solve a·x ≡ b (mod m); returns null on no-inverse.
+  (let ((inv (nt/mod-inverse a m)))
+    (if (null? inv) 'unsolvable (nt/mod (* inv b) m))))
+(list (safe-modular-solve 3 5 7) (safe-modular-solve 6 5 9))
+  ```
+  Error:
+  ```
+  error: *: expected a number, got nothing
+
+  ```
+
+### `nt/prime-factorization` — file `44-nt.slat`
 
 - **row-2-audit** :program
   ```scheme
-  (if (nt/prime? proposed-size) 'accept 'reject)
+  (define pf (nt/prime-factorization 60))
+(fold * 1 (map (lambda (p) (+ 1 (cdr p))) pf))
   ```
   Error:
   ```
-  error: unbound symbol: proposed-size
+  error: +: expected a number, got a list
 
   ```
-
-### `nt/totient` — file `44-nt.slat`
-
-- **row-2-audit** :program
+- **row-5-emergence** :composition
   ```scheme
-  (nt/totient (* p q))
+  (define (totient-via-factorization n)
+  ;; Chain nt/prime-factorization with Euler's product formula.
+  (let ((pf (nt/prime-factorization n)))
+    (fold (lambda (p acc) (* acc (expt (car p) (- (cdr p) 1)) (- (car p) 1))) 1 pf)))
+(totient-via-factorization 12)
   ```
   Error:
   ```
-  error: unbound symbol: p
+  error: -: expected a number, got a list
+
+  ```
+- **row-5-emergence** :eng-composition
+  ```scheme
+  (define (divisor-count-via-tau n)
+  ;; τ(n) = Π(aᵢ+1) directly from prime-factorization.
+  (fold * 1 (map (lambda (p) (+ 1 (cdr p))) (nt/prime-factorization n))))
+(list (divisor-count-via-tau 60) (nt/divisor-count 60))
+  ```
+  Error:
+  ```
+  error: +: expected a number, got a list
+
+  ```
+- **row-5-emergence** :cs-composition
+  ```scheme
+  (define (gcd-via-min-exponents a b)
+  ;; gcd(a,b) = ∏ p^{min(aᵢ,bᵢ)} over primes in both factorizations.
+  (let ((pa (nt/prime-factorization a))
+        (pb (nt/prime-factorization b)))
+    (fold * 1
+      (map (lambda (pair)
+             (let ((match (assoc (car pair) pb)))
+               (if match
+  ```
+  Error:
+  ```
+  error: min: expected a number, got a list
+
+  ```
+
+### `object/spawn` — file `46-object.slat`
+
+- **row-5-emergence** :cs-composition
+  ```scheme
+  (define (batch-with-failures targets on-fail) (fold (lambda (fails t) (let ((r (object/spawn t))) (if (eq? r 'ok) fails (+ fails 1)))) 0 targets))
+(batch-with-failures (list 'a 'b) (lambda (t) (list :failed t)))
+  ```
+  Error:
+  ```
+  error: +: expected a number, got the symbol a
 
   ```
 
@@ -4910,7 +2624,7 @@ orth-cols
   ```
   Error:
   ```
-  error: a.slice is not a function
+  error: cdr: expected a pair or a non-empty list, got #f
 
   ```
 - **row-4-proof** :eng-program
@@ -4921,7 +2635,7 @@ orth-cols
   ```
   Error:
   ```
-  error: a.slice is not a function
+  error: cdr: expected a pair or a non-empty list, got #f
 
   ```
 - **row-4-proof** :math-program
@@ -4932,7 +2646,7 @@ orth-cols
   ```
   Error:
   ```
-  error: a.slice is not a function
+  error: cdr: expected a pair or a non-empty list, got #f
 
   ```
 - **row-5-emergence** :eng-composition
@@ -4947,7 +2661,7 @@ orth-cols
   ```
   Error:
   ```
-  error: a.slice is not a function
+  error: cdr: expected a pair or a non-empty list, got #f
 
   ```
 - **row-5-emergence** :cs-composition
@@ -4959,12 +2673,26 @@ orth-cols
   ```
   Error:
   ```
-  error: a.slice is not a function
+  error: car: expected a pair or a non-empty list, got the symbol A
 
   ```
 
 ### `ops/johnson` — file `47-ops.slat`
 
+- **row-2-audit** :eng-program
+  ```scheme
+  (let* ((jobs '((cut . ((m1 . 3) (m2 . 6)))
+               (fold . ((m1 . 8) (m2 . 4)))
+               (pack . ((m1 . 5) (m2 . 2)))))
+       (seq (ops/johnson jobs))
+       (mk (car (assoc 'makespan (ops/sequence-metrics seq 'processing)))))
+  (list 'sequence seq 'makespan mk))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got #f
+
+  ```
 - **row-2-audit** :cs-program
   ```scheme
   (define (schedule-two-stage jobs)
@@ -4979,93 +2707,51 @@ orth-cols
   error: escalate: johnson-failed 
 
   ```
-
-### `ops/knapsack` — file `47-ops.slat`
-
-- **row-2-audit** :eng-program
-  ```scheme
-  (let* ((items '((2 3) (3 4) (4 5) (5 6)))
-       (picks (ops/knapsack 10 items))
-       (weight (apply + (map (lambda (i) (car (list-ref items i))) picks)))
-       (value (apply + (map (lambda (i) (cadr (list-ref items i))) picks))))
-  (list 'take picks 'weight weight 'value value))
-  ```
-  Error:
-  ```
-  error: Cannot read properties of undefined (reading '0')
-
-  ```
 - **row-4-proof** :eng-program
   ```scheme
-  (let* ((cap 5) (items '((2 3) (4 5) (3 4)))
-       (sol (ops/knapsack cap items))
-       (used (apply + (map (lambda (i) (car (list-ref items i))) sol))))
-  (<= used cap))
+  (let* ((jobs '((a . ((m1 . 3) (m2 . 6))) (b . ((m1 . 8) (m2 . 4))) (c . ((m1 . 5) (m2 . 2)))))
+       (johnson-mk (car (assoc 'makespan (ops/sequence-metrics (ops/johnson jobs) 'processing))))
+       (spt-mk (car (assoc 'makespan (ops/sequence-metrics (ops/spt jobs) 'processing)))))
+  (<= johnson-mk
   ```
   Error:
   ```
-  error: Cannot read properties of undefined (reading '0')
-
-  ```
-- **row-4-proof** :math-program
-  ```scheme
-  (let* ((cap 7) (items '((1 2) (2 3) (3 5) (5 7)))
-       (sol (ops/knapsack cap items)))
-  (<= (apply + (map (lambda (i) (car (list-ref items i))) sol)) cap))
-  ```
-  Error:
-  ```
-  error: Cannot read properties of undefined (reading '0')
+  error: car: expected a pair or a non-empty list, got #f
 
   ```
 - **row-4-proof** :cs-program
   ```scheme
-  (define (feasible? cap items)
-  (let* ((sol (ops/knapsack cap items))
-         (w (apply + (map (lambda (i) (car (list-ref items i))) sol))))
-    (<= w cap)))
-(feasible? 5 '((2 3) (4 5)))
+  (define (johnson-optimal? jobs heuristic-seq)
+  (let ((j-mk (car (assoc 'makespan (ops/sequence-metrics (ops/johnson jobs) 'processing))))
+        (h-mk (car (assoc 'makespan (ops/sequence-metrics heuristic-seq 'processing)))))
+    (<= j-mk h-mk)))
+(johnson-optimal? '((a . ((m1 . 3) (m2 . 6))) (b . 
   ```
   Error:
   ```
-  error: Cannot read properties of undefined (reading '0')
+  error: car: expected a pair or a non-empty list, got #f
 
   ```
 - **row-5-emergence** :cs-composition
   ```scheme
-  (define (best-of-budgets items budgets)
-  (map (lambda (cap)
-    (let* ((sol (ops/knapsack cap items))
-           (v (apply + (map (lambda (i) (cadr (list-ref items i))) sol))))
-      (list 'cap cap 'value v))) budgets))
-(best-of-budgets '((2 3) (3 4) (4 5)) '(3 6 9))
+  (define (schedule-and-report jobs)
+  (let* ((seq (ops/johnson jobs))
+         (m (ops/sequence-metrics seq 'processing)))
+    (list 'order seq 'makespan (car (assoc 'makespan m)))))
+(map schedule-and-report (list '((a . ((m1 . 3) (m2 . 6))) (b . ((m1 . 8) (m2 . 4))))))
   ```
   Error:
   ```
-  error: Cannot read properties of undefined (reading '1')
+  error: car: expected a pair or a non-empty list, got #f
 
   ```
 
 ### `ops/max-flow` — file `47-ops.slat`
 
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (throughput-check g s t required)
-  (let ((flow (ops/max-flow g s t)))
-    (if (< flow required)
-      (escalate 'insufficient-capacity (list 'flow flow 'need required))
-      flow)))
-(throughput-check '((0 . ((1 . 10) (2 . 5))) (1 . ((3 . 9))) (2 . ((3 . 10)))) 0 3 15)
-  ```
-  Error:
-  ```
-  error: escalate: insufficient-capacity flow,0,need,15
-
-  ```
 - **row-5-emergence** :eng-composition
   ```scheme
   (define sources '(0 1 2))
-(define g '((0 . ((1 . 5))) (1 . ((2 . 3))) (2 . ())))
+(define g '((0 1 5) (1 2 3)))
 (map (lambda (s) (list s (ops/max-flow g s 2))) sources)
   ```
   Error:
@@ -5073,1026 +2759,900 @@ orth-cols
   <timeout>
   ```
 
-### `ops/mip-solve` — file `47-ops.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (solve-mip constraints objective opts)
-  (let ((r (ops/mip-solve constraints objective opts)))
-    (cond ((pair? r) r)
-          ((memq r '(infeasible unbounded fuel-budget)) (escalate r null))
-          (else (escalate 'unknown r)))))
-(solve-mip (list (list 1 1 '<= 5)) (list 3 2) (list ':in
-  ```
-  Error:
-  ```
-  error: escalate: unknown invalid-mip
-
-  ```
-
-### `ops/pagerank` — file `47-ops.slat`
+### `ops/spt` — file `47-ops.slat`
 
 - **row-2-audit** :eng-program
   ```scheme
-  (define (rank-report edges)
-  (let ((ranks (ops/pagerank edges)))
-    (if (> (length (hash-table-keys ranks)) 0)
-      (list 'nodes (length (hash-table-keys ranks)) 'ranks ranks)
-      (escalate 'empty-graph null))))
-(rank-report (list (list 'a 'b) (list 'b 'c) (list 'c 'a)))
+  (define (dispatch jobs)
+  (let ((ordered (ops/spt jobs)))
+    (list 'order ordered 'metrics (ops/sequence-metrics ordered))))
+(dispatch '((id . 1 p . 10) (id . 2 p . 5) (id . 3 p . 8)))
   ```
   Error:
   ```
-  error: unbound symbol: null
+  error: more than one form after . in pair (line 4, col 17)
 
   ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define ranks (ops/pagerank '((a b) (b a))))
-(define total (apply + (map (lambda (k) (hash-table-ref/default ranks k #f)) (hash-table-keys ranks))))
-(if (< (abs (- total 1)) 0.01)
-  (list 'sums-to-one-ok total)
-  (escalate 'unnormalized-ranks null))
-  ```
-  Error:
-  ```
-  error: unbound symbol: null
-
-  ```
-
-### `ops/simplex` — file `47-ops.slat`
-
-- **row-2-audit** :eng-program
-  ```scheme
-  (define (solve-and-report c A b)
-  (let* ((lp (ops/lp c 'max A b))
-         (sol (ops/simplex lp)))
-    (list 'x (cdr (assoc 'x sol)) 'obj (cdr (assoc 'obj-value sol)))))
-(solve-and-report '(3 2) '((1 1)) '(4))
-  ```
-  Error:
-  ```
-  error: alist.find is not a function
-
-  ```
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (obj-of c A b)
-  (cdr (assoc 'obj-value (ops/simplex (ops/lp c 'max A b)))))
-(obj-of '(3 2) '((1 1)) '(4))
-  ```
-  Error:
-  ```
-  error: alist.find is not a function
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define sol (ops/simplex (ops/lp '(1) 'max '((1)) '(1))))
-(if (pair? sol)
-  (list 'terminated-ok sol)
-  (escalate 'no-solution null))
-  ```
-  Error:
-  ```
-  error: unbound symbol: null
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (batch-solve problems)
-  (map (lambda (p)
-         (let ((sol (ops/simplex (ops/lp (car p) 'max (cadr p) (caddr p)))))
-           (list 'obj (cdr (assoc 'obj-value sol)))))
-       problems))
-(batch-solve (list (list '(3 2) '((1 1)) '(4)) (list '(1) '((1)) '(1))))
-  ```
-  Error:
-  ```
-  error: alist.find is not a function
-
-  ```
-- **row-5-emergence** :cs-composition
-  ```scheme
-  (define (objs-over problems)
-  (map (lambda (p)
-         (cdr (assoc 'obj-value (ops/simplex (ops/lp (car p) 'max (cadr p) (caddr p))))))
-       problems))
-(objs-over (list (list '(3 2) '((1 1)) '(4))))
-  ```
-  Error:
-  ```
-  error: alist.find is not a function
-
-  ```
-
-### `part/bow` — file `48-part.slat`
-
-- **row-4-proof** :program
-  ```scheme
-  (define (bow-and-check npc) (let ((before (sprite-angle npc))) (part/bow npc) (world/step) (world/step) (world/step) (let ((after (sprite-angle npc))) (= before after))))
-(display (bow-and-check 'hero))
-  ```
-  Error:
-  ```
-  error: unbound symbol: sprite-angle
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (spam-safe npc n)
-  (let ((before (sprite-angle npc)))
-    (let loop ((k 0))
-      (cond ((= k n) 'sent)
-            (else (part/bow npc) (loop (+ k 1)))))
-    (world/step) (world/step) (world/step)
-    (= (sprite-angle npc) before)))
-(spam-safe 'violinist 10)
-  ```
-  Error:
-  ```
-  error: unbound symbol: sprite-angle
-
-  ```
-
-### `part/breathe` — file `48-part.slat`
-
-- **row-4-proof** :program
-  ```scheme
-  (define (test-nostack s) (part/breathe s) (part/breathe s) (part/breathe s) (loop-count s 'breathe))
-(display (= 1 (test-nostack 'hero)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: loop-count
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (test-many-owners entities)
-  (for-each (lambda (e) (part/breathe e) (part/breathe e) (part/breathe e)) entities)
-  (map (lambda (e) (loop-count e 'breathe)) entities))
-(test-many-owners '(wyrm cub matriarch))
-  ```
-  Error:
-  ```
-  error: unbound symbol: loop-count
-
-  ```
-
-### `part/expression` — file `48-part.slat`
-
 - **row-2-audit** :math-program
   ```scheme
-  (honest-null :reason "part/expression is a symbol-set assignment (categorical variable). Its math view is a total function from a finite alphabet to a rendering — trivial. The real content is in CS (register semantics) and eng (dramatic sequencing). Book-of-code ch 3 (tagged unions).")
+  (ops/spt '((id . 1 p . 10) (id . 2 p . 5) (id . 3 p . 8)))
   ```
   Error:
   ```
-  error: unbound symbol: honest-null
+  error: more than one form after . in pair (line 1, col 16)
 
   ```
-- **row-4-proof** :program
+- **row-2-audit** :cs-program
   ```scheme
-  (part/expression 'hero 'sad) (part/expression 'hero 'happy) (part/expression 'hero 'calm)
-(display (eq? (face-tag 'hero) 'calm))
+  (define (first-job jobs)
+  (car (ops/spt jobs)))
+(first-job '((id . 1 p . 10) (id . 2 p . 5) (id . 3 p . 8)))
   ```
   Error:
   ```
-  error: unbound symbol: face-tag
+  error: more than one form after . in pair (line 3, col 18)
 
   ```
 - **row-4-proof** :eng-program
   ```scheme
-  (define (test-permutations tags final)
-  ;; Different orderings, same last tag → same final face.
-  (for-each (lambda (t) (part/expression 'test-actor t)) tags)
-  (eq? (face-tag 'test-actor) final))
-(test-permutations '(joyful contemplative sorrowful) 'sorrowful)
+  (define jobs '((id . 1 p . 8) (id . 2 p . 3) (id . 3 p . 5)))
+(define spt-flow (cadr (ops/sequence-metrics (ops/spt jobs))))
+(define orig-flow (cadr (ops/sequence-metrics jobs)))
+(if (<= spt-flow orig-flow)
+  (list 'spt-optimal-ok spt-flow orig-flow)
+  (escalate 'spt-not-optimal null))
   ```
   Error:
   ```
-  error: unbound symbol: face-tag
+  error: more than one form after . in pair (line 1, col 20)
 
   ```
 - **row-4-proof** :math-program
   ```scheme
-  (honest-null :reason "'Last-write-wins' on a register is a definitional property of assignment. Not a mathematical proposition requiring a witness. See eng and cs for operational proof.")
+  (define jobs '((id . 1 p . 8) (id . 2 p . 3) (id . 3 p . 5)))
+(<= (cadr (ops/sequence-metrics (ops/spt jobs)))
+    (cadr (ops/sequence-metrics jobs)))
   ```
   Error:
   ```
-  error: unbound symbol: honest-null
+  error: more than one form after . in pair (line 1, col 20)
 
   ```
-
-### `part/grasp` — file `48-part.slat`
-
-- **row-4-proof** :program
+- **row-4-proof** :cs-program
   ```scheme
-  (part/grasp 'hero 'firm 'lantern) (part/grasp 'hero 'firm 'lantern)
-(display (= 1 (queue-count 'hero 'grasp)))
+  (define (spt-improves-flow? jobs)
+  (<= (cadr (ops/sequence-metrics (ops/spt jobs)))
+      (cadr (ops/sequence-metrics jobs))))
+(spt-improves-flow? '((id . 1 p . 8) (id . 2 p . 3) (id . 3 p . 5)))
   ```
   Error:
   ```
-  error: unbound symbol: queue-count
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (safe-regrasp npc obj)
-  ;; scene re-enter may re-issue grasp; idempotence keeps it clean
-  (part/grasp npc 'firm obj)
-  (part/grasp npc 'firm obj)
-  (display (= 1 (queue-count npc 'grasp))))
-(safe-regrasp 'hero 'lantern)
-  ```
-  Error:
-  ```
-  error: unbound symbol: queue-count
-
-  ```
-
-### `part/lean` — file `48-part.slat`
-
-- **row-4-proof** :program
-  ```scheme
-  (part/lean 'hero 'left 10) (part/lean 'hero 'left 20)
-(display (<= (lean-angle 'hero) 30))
-  ```
-  Error:
-  ```
-  error: unbound symbol: lean-angle
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (test-cap-across-rigs rigs sum-attempts)
-  ;; Verify no rig ever accepts an angle beyond its max, however many leans stack.
-  (let loop ((rs rigs) (ok #t))
-    (cond ((null? rs) ok)
-          (else (let ((r (car rs)))
-                  (part/lean 'skater 'left sum-attempts)
-                 
-  ```
-  Error:
-  ```
-  error: unbound symbol: lean-angle
-
-  ```
-
-### `part/look-toward` — file `48-part.slat`
-
-- **row-4-proof** :program
-  ```scheme
-  (part/look-toward 'hero 'villain) (part/look-toward 'villain 'hero) (world/step)
-(display (and (gaze-locked? 'hero 'villain) (gaze-locked? 'villain 'hero)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: gaze-locked?
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (mutual-gaze-many pairs)
-  ;; Verify symmetry across a list of gaze pairs.
-  (let loop ((ps pairs) (ok #t))
-    (cond ((null? ps) ok)
-          (else (let* ((p (car ps)) (a (car p)) (b (cadr p)))
-                  (part/look-toward a b)
-                  (part/look-toward b a)
-              
-  ```
-  Error:
-  ```
-  error: unbound symbol: gaze-locked?
-
-  ```
-
-### `part/lower` — file `48-part.slat`
-
-- **row-4-proof** :program
-  ```scheme
-  (part/lower 'hero) (part/lower 'hero) (part/lower 'hero)
-(display (= 0 (arm-angle 'hero)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: arm-angle
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (defensive-lower cranes)
-  ;; Call lower on every crane regardless of current state — safe defensive cleanup.
-  (for-each (lambda (c) (part/lower c) (part/lower c) (part/lower c)) cranes)
-  (map (lambda (c) (arm-angle c)) cranes))
-(defensive-lower '(crane-1 crane-2 crane-3))
-  ```
-  Error:
-  ```
-  error: unbound symbol: arm-angle
-
-  ```
-
-### `part/nod` — file `48-part.slat`
-
-- **row-4-proof** :program
-  ```scheme
-  (part/nod 'hero) (part/nod 'hero) (part/nod 'hero) (world/step) (world/step) (world/step)
-(display (= 3 (nod-count-observed 'hero)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: nod-count-observed
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (test-emphatic-nod-counts counts)
-  (map (lambda (n)
-         (let loop ((k 0)) (when (< k n) (part/nod 'chef) (loop (+ k 1))))
-         (let loop ((k 0)) (when (< k n) (world/step) (loop (+ k 1))))
-         (nod-count-observed 'chef))
-       counts))
-(test-emphatic-nod-counts '(1 3 5))
-  ```
-  Error:
-  ```
-  error: unbound symbol: nod-count-observed
-
-  ```
-
-### `part/point` — file `48-part.slat`
-
-- **row-4-proof** :program
-  ```scheme
-  (part/point 'hero) (part/lower 'hero) (world/step)
-(display (= 0 (arm-angle 'hero)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: arm-angle
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (test-point-lower-cycles n)
-  ;; Cycle point/lower N times; final angle must be 0.
-  (let loop ((k 0))
-    (cond ((= k n)
-           (world/step)
-           (= (arm-angle 'teacher) 0))
-          (else (part/point 'teacher) (part/lower 'teacher) (loop (+ k 1))))))
-(test-point-lower-cycles 20)
-  ```
-  Error:
-  ```
-  error: unbound symbol: arm-angle
-
-  ```
-
-### `part/raise` — file `48-part.slat`
-
-- **row-2-audit** :eng-program
-  ```scheme
-  (define (classroom-vote question students)
-  ;; Students raise hands in favor of a proposition — check for majority.
-  (for-each (lambda (s) (when (favors? s question) (part/raise s))) students)
-  (list :vote-taken question))
-(classroom-vote 'add-more-recess '(alice bob carol dave))
-  ```
-  Error:
-  ```
-  error: unbound symbol: favors?
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (part/raise 'hero) (part/lower 'hero) (world/step)
-(display (= 0 (arm-angle 'hero)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: arm-angle
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (raise-lower-loop student cycles)
-  ;; N cycles of raise-then-lower must end at rest (no accumulated offset).
-  (let loop ((k 0))
-    (cond ((= k cycles) (= (arm-angle student) 0))
-          (else (part/raise student) (part/lower student) (loop (+ k 1))))))
-(raise-lower-loop 'student 50)
-  ```
-  Error:
-  ```
-  error: unbound symbol: arm-angle
-
-  ```
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (count-raised-arms students)
-  ;; Sum of indicator function over the class: |{s | raised?(s)}|.
-  (length (filter (lambda (s) (raised? s)) students)))
-(count-raised-arms '(alice bob carol dave))
-  ```
-  Error:
-  ```
-  error: unbound symbol: raised?
-
-  ```
-
-### `part/reach` — file `48-part.slat`
-
-- **row-4-proof** :program
-  ```scheme
-  (part/reach 'hero) (part/lower 'hero) (world/step)
-(display (= 0 (arm-angle 'hero)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: arm-angle
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (test-failed-reaches n)
-  ;; N failed reaches (no grasp) must each end at rest after lower.
-  (let loop ((k 0))
-    (cond ((= k n) 'all-ok)
-          (else (part/reach 'climber) (part/lower 'climber) (world/step)
-                (if (= (arm-angle 'climber) 0) (loop (+ k 1)) 'failed)))))
-(tes
-  ```
-  Error:
-  ```
-  error: unbound symbol: arm-angle
+  error: more than one form after . in pair (line 4, col 27)
 
   ```
 - **row-5-emergence** :eng-composition
   ```scheme
-  (define (route-with-fallbacks climber holds fallback-hold)
-  ;; Try each hold in sequence; if grasp fails, reach for fallback.
-  (let loop ((hs holds))
-    (cond ((null? hs) (part/reach climber) (part/grasp climber 'firm fallback-hold))
-          (else (part/reach climber)
-                (if (grasp
+  (define (schedule-and-grade jobs)
+  (let* ((seq (ops/spt jobs))
+         (m (ops/sequence-metrics seq)))
+    (list 'sequence seq 'makespan (car m) 'total-flow (cadr m))))
+(schedule-and-grade '((id . 1 p . 3) (id . 2 p . 5) (id . 3 p . 1)))
   ```
   Error:
   ```
-  error: unbound symbol: grasp-succeeded?
-
-  ```
-
-### `part/shake` — file `48-part.slat`
-
-- **row-2-audit** :eng-program
-  ```scheme
-  (define (mark-wrong npc answer)
-  (unless (correct? answer)
-    (part/shake npc)
-    (part/expression npc 'disappointed)))
-(mark-wrong 'teacher 'guess-42)
-  ```
-  Error:
-  ```
-  error: unbound symbol: correct?
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (part/shake 'hero) (part/nod 'hero) (world/step) (world/step)
-(display (and (observed-shake? 'hero) (observed-nod? 'hero)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: observed-shake?
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (yes-but-no hero)
-  ;; ambiguous head gesture: pitch and yaw both animate, neither overwrites
-  (part/nod hero)
-  (part/shake hero)
-  (display (and (observed-nod? hero) (observed-shake? hero))))
-(yes-but-no 'hero)
-  ```
-  Error:
-  ```
-  error: unbound symbol: observed-nod?
-
-  ```
-
-### `part/shrug` — file `48-part.slat`
-
-- **row-4-proof** :program
-  ```scheme
-  (part/raise 'hero) (part/shrug 'hero) (world/step) (world/step)
-(display (= (arm-angle 'hero) (arm-angle-raised)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: arm-angle
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (shrug-preserves-arm hero)
-  (part/raise hero)
-  (part/shrug hero)
-  (display (= (arm-angle hero) (arm-angle-raised))))
-(shrug-preserves-arm 'hero)
-  ```
-  Error:
-  ```
-  error: unbound symbol: arm-angle
-
-  ```
-
-### `part/step` — file `48-part.slat`
-
-- **row-4-proof** :program
-  ```scheme
-  (define x0 (entity/x 'hero)) (part/step 'hero) (part/step 'hero) (part/step 'hero) (world/step)
-(display (= (entity/x 'hero) (+ x0 (* 3 (stride-length 'hero)))))
-  ```
-  Error:
-  ```
-  error: unbound symbol: stride-length
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define (walk-to hero target-x)
-  (let loop ((x (entity/x hero)))
-    (when (< x target-x)
-      (part/step hero) (world/step)
-      (loop (entity/x hero)))))
-(walk-to 'hero 200)
-  ```
-  Error:
-  ```
-  error: fuel exhausted
-
-  ```
-
-### `part/sway` — file `48-part.slat`
-
-- **row-4-proof** :program
-  ```scheme
-  (for-each (lambda (n) (part/sway n)) '(a b c d e))
-(world/step) (world/step) (world/step)
-(display (phase-coherent? '(a b c d e)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: phase-coherent?
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (test-coherence-across-groups groups)
-  (map (lambda (g)
-         (for-each (lambda (n) (part/sway n)) g)
-         (world/step) (world/step) (world/step)
-         (phase-coherent? g))
-       groups))
-(test-coherence-across-groups '((a b c) (d e f g) (h i)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: phase-coherent?
-
-  ```
-
-### `part/tilt` — file `48-part.slat`
-
-- **row-4-proof** :program
-  ```scheme
-  (part/turn 'hero) (part/tilt 'hero) (world/step)
-(display (= (body-angle 'hero) (body-angle-turned)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: body-angle
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (test-orthogonality operators)
-  ;; Body angle preserved across tilt for each operator.
-  (map (lambda (op)
-         (part/turn op) (let ((before (body-angle op)))
-           (part/tilt op) (world/step)
-           (= (body-angle op) before)))
-       operators))
-(test-orthogonality '(op-a op-
-  ```
-  Error:
-  ```
-  error: unbound symbol: body-angle
-
-  ```
-
-### `part/turn` — file `48-part.slat`
-
-- **row-4-proof** :program
-  ```scheme
-  (define f0 (facing 'hero)) (part/turn 'hero) (part/turn 'hero) (world/step) (world/step)
-(display (eq? (facing 'hero) f0))
-  ```
-  Error:
-  ```
-  error: unbound symbol: facing
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (test-double-turn-identity dancers)
-  ;; Each dancer: capture facing, double-turn, verify facing preserved.
-  (map (lambda (d)
-         (let ((f0 (facing d)))
-           (part/turn d) (part/turn d)
-           (world/step) (world/step)
-           (eq? (facing d) f0)))
-       dancers))
-(test-d
-  ```
-  Error:
-  ```
-  error: unbound symbol: facing
-
-  ```
-
-### `part/twist` — file `48-part.slat`
-
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (segment-write rig angle)
-  ;; twist writes only the upper-body segment of the rig
-  (cons (cons 'upper angle) (assq-remove rig 'upper)))
-(segment-write '((lower . 0)) 25)
-  ```
-  Error:
-  ```
-  error: unbound symbol: assq-remove
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define pos0 (hip-pos 'hero)) (part/twist 'hero '(angle 30 duration 400)) (world/step)
-(display (equal? (hip-pos 'hero) pos0))
-  ```
-  Error:
-  ```
-  error: unbound symbol: hip-pos
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (twist-keeps-ground hero)
-  (define pos0 (hip-pos hero))
-  (part/twist hero '(angle 30 duration 400))
-  (world/step)
-  (display (equal? (hip-pos hero) pos0)))
-(twist-keeps-ground 'hero)
-  ```
-  Error:
-  ```
-  error: unbound symbol: hip-pos
-
-  ```
-
-### `part/wave` — file `48-part.slat`
-
-- **row-4-proof** :program
-  ```scheme
-  (part/wave 'hero) (world/step) (world/step) (world/step) (world/step)
-(display (= 0 (arm-angle 'hero)))
-  ```
-  Error:
-  ```
-  error: unbound symbol: arm-angle
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (test-return-across-mascots mascots)
-  ;; Every mascot's arm at rest after wave cycle completes.
-  (for-each (lambda (m) (part/wave m)) mascots)
-  (world/step) (world/step) (world/step) (world/step)
-  (map (lambda (m) (arm-angle m)) mascots))
-(test-return-across-mascots '(mascot-lead mascot-
-  ```
-  Error:
-  ```
-  error: unbound symbol: arm-angle
-
-  ```
-
-### `phys/constant` — file `50-phys.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define h (phys/constant 'h))
-(define c (phys/constant 'c))
-(define m-e (phys/constant 'm-e))
-(/ h (* m-e c))
-  ```
-  Error:
-  ```
-  error: phys/constant: unknown 'm-e'
-
-  ```
-- **row-2-audit** :eng-program
-  ```scheme
-  (define h (phys/constant 'h))
-(define c (phys/constant 'c))
-(define m-e (phys/constant 'm-e))
-(/ h (* m-e c))
-  ```
-  Error:
-  ```
-  error: phys/constant: unknown 'm-e'
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define (rydberg-energy)
-  (let ((m-e (phys/constant 'm-e))
-        (e (phys/constant 'e))
-        (eps-0 (phys/constant 'epsilon-0))
-        (h (phys/constant 'h)))
-    (/ (* m-e e e e e) (* 8 eps-0 eps-0 h h))))
-(rydberg-energy)
-  ```
-  Error:
-  ```
-  error: phys/constant: unknown 'm-e'
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (rydberg-energy)
-  (let ((m-e (phys/constant 'm-e))
-        (e (phys/constant 'e))
-        (eps-0 (phys/constant 'epsilon-0))
-        (h (phys/constant 'h)))
-    (/ (* m-e e e e e) (* 8 eps-0 eps-0 h h))))
-(rydberg-energy)
-  ```
-  Error:
-  ```
-  error: phys/constant: unknown 'm-e'
-
-  ```
-
-### `phys/dimension` — file `50-phys.slat`
-
-- **row-5-emergence** :math-composition
-  ```scheme
-  (define (group-by-dim qs)
-  (let loop ((xs qs) (groups '()))
-    (if (null? xs) groups
-        (let* ((q (car xs)) (d (phys/dimension q))
-               (found (assoc d groups)))
-          (if found
-              (begin (set-cdr! found (cons q (cdr found))) (loop (cdr xs) groups))
-              (loo
-  ```
-  Error:
-  ```
-  error: unbound symbol: set-cdr!
-
-  ```
-
-### `phys/kinetic-energy` — file `50-phys.slat`
-
-- **row-5-emergence** :composition
-  ```scheme
-  (define (collision-energy m1 v1 m2 v2)
-  (list (phys/kinetic-energy m1 v1)
-        (phys/kinetic-energy m2 v2)))
-(define (total-KE es) (apply phys/q+ es))
-(total-KE (collision-energy '(1 . ((mass . 1))) '(10 . ((length . 1) (time . -1)))
-                            '(1 . ((mass . 1))) '(-10 . ((leng
-  ```
-  Error:
-  ```
-  error: phys/q+: dimension mismatch
-
-  ```
-
-### `phys/nbody` — file `50-phys.slat`
-
-- **row-2-audit** :program
-  ```scheme
-  (define bodies
-  '((sun . ((mass . 1.989e30) (pos . (0 0 0)) (vel . (0 0 0))))
-    (earth . ((mass . 5.972e24) (pos . (1.496e11 0 0)) (vel . (0 29780 0))))))
-(phys/nbody bodies '(time-seconds 31536000))
-  ```
-  Error:
-  ```
-  error: b[1].slice is not a function
-
-  ```
-- **row-2-audit** :eng-program
-  ```scheme
-  (define bodies
-  '((sun . ((mass . 1.989e30) (pos . (0 0 0)) (vel . (0 0 0))))
-    (earth . ((mass . 5.972e24) (pos . (1.496e11 0 0)) (vel . (0 29780 0))))))
-(phys/nbody bodies '(time-seconds 31536000))
-  ```
-  Error:
-  ```
-  error: b[1].slice is not a function
-
-  ```
-- **row-2-audit** :math-program
-  ```scheme
-  (define (total-momentum bodies)
-  (let loop ((bs bodies) (px 0) (py 0))
-    (if (null? bs) (list px py)
-        (let* ((b (car bs))
-               (m (cdr (assq 'mass (cdr b))))
-               (v (cdr (assq 'vel (cdr b)))))
-          (loop (cdr bs) (+ px (* m (car v))) (+ py (* m (cadr v))))))))
-(to
-  ```
-  Error:
-  ```
-  error: a.slice is not a function
-
-  ```
-- **row-2-audit** :cs-program
-  ```scheme
-  (define (submit-bodies bodies opts) (phys/nbody bodies opts))
-(submit-bodies '((m1 . ((mass . 1) (pos . (0 0 0)) (vel . (0 0 0))))
-                 (m2 . ((mass . 1) (pos . (10 0 0)) (vel . (0 5 0)))))
-               '(time-seconds 60))
-  ```
-  Error:
-  ```
-  error: b[1].slice is not a function
-
-  ```
-- **row-4-proof** :program
-  ```scheme
-  (define (total-momentum bodies)
-  (let loop ((bs bodies) (px 0) (py 0))
-    (if (null? bs) (list px py)
-        (let* ((b (car bs))
-               (mass (cdr (assq 'mass (cdr b))))
-               (vel (cdr (assq 'vel (cdr b)))))
-          (loop (cdr bs) (+ px (* mass (car vel))) (+ py (* mass (cadr 
-  ```
-  Error:
-  ```
-  error: a.slice is not a function
-
-  ```
-- **row-4-proof** :eng-program
-  ```scheme
-  (define (total-momentum bodies)
-  (let loop ((bs bodies) (px 0) (py 0))
-    (if (null? bs) (list px py)
-        (let* ((b (car bs))
-               (m (cdr (assq 'mass (cdr b))))
-               (v (cdr (assq 'vel (cdr b)))))
-          (loop (cdr bs) (+ px (* m (car v))) (+ py (* m (cadr v))))))))
-(to
-  ```
-  Error:
-  ```
-  error: a.slice is not a function
-
-  ```
-- **row-5-emergence** :composition
-  ```scheme
-  (define (predict-future-earth years)
-  (define solar-system
-    '((sun . ((mass . 1.989e30) (pos . (0 0 0)) (vel . (0 0 0))))
-      (earth . ((mass . 5.972e24) (pos . (1.496e11 0 0)) (vel . (0 29780 0))))))
-  (phys/nbody solar-system (list 'time-seconds (* years 31536000))))
-(predict-future-earth 10
-  ```
-  Error:
-  ```
-  error: b[1].slice is not a function
-
-  ```
-- **row-5-emergence** :eng-composition
-  ```scheme
-  (define (predict-future-earth years)
-  (define solar-system
-    '((sun . ((mass . 1.989e30) (pos . (0 0 0)) (vel . (0 0 0))))
-      (earth . ((mass . 5.972e24) (pos . (1.496e11 0 0)) (vel . (0 29780 0))))))
-  (phys/nbody solar-system (list 'time-seconds (* years 31536000))))
-(predict-future-earth 10
-  ```
-  Error:
-  ```
-  error: b[1].slice is not a function
+  error: more than one form after . in pair (line 5, col 27)
 
   ```
 - **row-5-emergence** :math-composition
   ```scheme
-  (define (energy-at-t bodies G)
-  (let loop ((bs bodies) (e 0))
-    (if (null? bs) e
-        (let* ((b (car bs))
-               (m (cdr (assq 'mass (cdr b))))
-               (v (cdr (assq 'vel (cdr b)))))
-          (loop (cdr bs) (+ e (* 0.5 m (car v) (car v))))))))
-(energy-at-t '((a . ((mass . 1) (v
+  (define jobs '((id . 1 p . 3) (id . 2 p . 5)))
+(define seq (ops/spt jobs))
+(ops/sequence-metrics seq)
   ```
   Error:
   ```
-  error: a.slice is not a function
+  error: more than one form after . in pair (line 1, col 20)
 
   ```
 - **row-5-emergence** :cs-composition
   ```scheme
-  (define (nbody-pipeline bodies time-step post-fn)
-  (let ((result (phys/nbody bodies (list 'time-seconds time-step))))
-    (post-fn result)))
-(nbody-pipeline '((m1 . ((mass . 1) (pos . (0 0 0)) (vel . (0 0 0))))
-                  (m2 . ((mass . 1) (pos . (10 0 0)) (vel . (0 5 0)))))
-                
+  (define (spt-flow jobs)
+  (cadr (ops/sequence-metrics (ops/spt jobs))))
+(spt-flow '((id . 1 p . 3) (id . 2 p . 5) (id . 3 p . 1)))
   ```
   Error:
   ```
-  error: b[1].slice is not a function
+  error: more than one form after . in pair (line 3, col 17)
 
   ```
 
-### `phys/q/` — file `50-phys.slat`
+### `phys/lagrange-residual` — file `50-phys.slat`
 
-- **row-5-emergence** :composition
+- **row-5-emergence** :cs-composition
   ```scheme
-  (define (acceleration v-final v-initial dt)
-  (phys/q/ (phys/q+ v-final (phys/q* v-initial (phys/quantity -1.0 '()))) dt))
-(acceleration (phys/quantity 20.0 '((length . 1) (time . -1)))
-              (phys/quantity 10.0 '((length . 1) (time . -1)))
-              (phys/quantity 2.0 '((time . 1))))
+  (define L (phys/L-free 1.0))
+(define (verify-trajectory L traj-fn times tol)
+  (define (approx a b) (< (abs (- a b)) tol))
+  (let loop ((ts times))
+    (if (null? ts) 'verified
+        (let ((state (traj-fn (car ts))))
+          (if (approx (phys/lagrange-residual L (car state) (cadr state) (car ts)
   ```
   Error:
   ```
-  error: phys/q+: dimension mismatch
+  error: *: expected a number, got a list
+
+  ```
+
+### `phys/quantity->tag` — file `50-phys.slat`
+
+- **row-2-audit** :cs-program
+  ```scheme
+  (define mystery (phys/quantity 20.0 '((length . 1) (time . -1))))
+(define tag (phys/quantity->tag mystery))
+(cadr (assq ':dimension tag))
+  ```
+  Error:
+  ```
+  error: cadr: expected a pair or a non-empty list, got #f
+
+  ```
+- **row-4-proof** :program
+  ```scheme
+  (define q (phys/quantity 9.8 '((length . 1))))
+(define tag (phys/quantity->tag q))
+(define reconstructed (phys/quantity (cadr (assq ':value tag)) (cadr (assq ':dimension tag))))
+(equal? q reconstructed)
+  ```
+  Error:
+  ```
+  error: cadr: expected a pair or a non-empty list, got #f
 
   ```
 - **row-5-emergence** :eng-composition
   ```scheme
-  (define (acceleration v-final v-initial dt)
-  (phys/q/ (phys/q+ v-final (phys/q* v-initial '(-1.0 . ()))) dt))
-(acceleration '(20.0 . ((length . 1) (time . -1)))
-              '(10.0 . ((length . 1) (time . -1)))
-              '(2.0 . ((time . 1))))
+  (define (tag->line name q)
+  (let ((tag (phys/quantity->tag q)))
+    (list name
+          '=> (cadr (assq ':value tag))
+          'dim (cadr (assq ':dimension tag)))))
+(define (report named-qs)
+  (map (lambda (nq) (tag->line (car nq) (cdr nq))) named-qs))
+(report (list (cons 'height (phys/quantity 1
   ```
   Error:
   ```
-  error: phys/q+: dimension mismatch
+  error: cadr: expected a pair or a non-empty list, got #f
 
   ```
-
-### `plot/bar` — file `51-plot.slat`
-
 - **row-5-emergence** :cs-composition
   ```scheme
-  (define (top-k labels values k)
-  ;; Take top-k by value then plot.
-  (let* ((paired (map cons labels values))
-         (sorted (list-sort (lambda (p q) (> (cdr p) (cdr q))) paired))
-         (top (list-head sorted (min k (length sorted)))))
-    (plot/bar (map car top) (map cdr top))))
-(top-k '(a b 
+  (define (dimension-of q)
+  (cadr (assq ':dimension (phys/quantity->tag q))))
+(define (group-by-dimension quantities)
+  (let loop ((qs quantities) (groups '()))
+    (if (null? qs) (reverse groups)
+        (let* ((d (dimension-of (car qs)))
+               (hit (assoc d groups)))
+          (loop (cdr q
   ```
   Error:
   ```
-  error: unbound symbol: list-sort
+  error: cadr: expected a pair or a non-empty list, got #f
 
   ```
 
 ### `plot/function` — file `51-plot.slat`
 
-- **row-4-proof** :cs-program
+- **row-2-audit** :eng-program
   ```scheme
-  (define (finite-outputs-only? f dom)
-  ;; Verify all sampled outputs are finite (or explicitly break-handled).
-  (zero? (break-count f dom)))
-(finite-outputs-only? (lambda (x) (* x x)) '(-1 1))
+  (plot/function (lambda (x) (/ 1 x)) '(-3 3))
   ```
   Error:
   ```
-  error: unbound symbol: break-count
+  error: /: division by zero
 
   ```
 
-... and 8 more verbs with failures.
+### `nan?` — file `52-predicate.slat`
+
+- **row-2-audit** :eng-program
+  ```scheme
+  (define (safe-divide a b) (let ((r (/ a b))) (if (nan? r) 'nan-detected r)))
+(safe-divide 0.0 0.0)
+  ```
+  Error:
+  ```
+  error: /: division by zero
+
+  ```
+
+### `output-port?` — file `52-predicate.slat`
+
+- **row-4-proof** :cs-program
+  ```scheme
+  (define (audit-write-cap ps) (fold (lambda (n p) (if (output-port? p) (+ n 1) n)) 0 ps))
+(audit-write-cap (list (open-output-string) (open-input-string "x")))
+  ```
+  Error:
+  ```
+  error: +: expected a number, got a value of another kind
+
+  ```
+
+### `sprite/landmarks` — file `58-sprite.slat`
+
+- **row-2-audit** :eng-program
+  ```scheme
+  (define petals (sprite/landmarks 'hero))
+(length petals)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got a value of another kind
+
+  ```
+- **row-5-emergence** :math-composition
+  ```scheme
+  (define (petal-count sprite) (length (sprite/landmarks sprite)))
+(petal-count 'hero)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got a value of another kind
+
+  ```
+
+### `synth/load-score` — file `62-synth.slat`
+
+- **row-2-audit** :program
+  ```scheme
+  (define r (synth/load-score 'beethoven-9-mvt-4))
+(car r)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the symbol error
+
+  ```
+- **row-2-audit** :eng-program
+  ```scheme
+  (define (try-load name)
+  (let ((r (synth/load-score name)))
+    (cond ((eq? (car r) 'ok) 'loaded)
+          ((eq? (car r) 'pending-fetch) 'wait)
+          (else 'failed))))
+(memq (try-load 'beethoven-9-mvt-4) '(loaded wait failed))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the symbol error
+
+  ```
+- **row-2-audit** :cs-program
+  ```scheme
+  (define (dispatch r on-ok on-wait on-err)
+  (cond ((eq? (car r) 'ok) (on-ok (cadr r)))
+        ((eq? (car r) 'pending-fetch) (on-wait))
+        (else (on-err))))
+(dispatch (synth/load-score 'beethoven-9-mvt-4)
+          (lambda (s) 'got) (lambda () 'later) (lambda () 'no))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the symbol error
+
+  ```
+- **row-4-proof** :program
+  ```scheme
+  (let ((r (synth/load-score 'beethoven-9-mvt-4))) (memv (car r) '(ok error pending-fetch unknown-score)))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the symbol error
+
+  ```
+- **row-4-proof** :eng-program
+  ```scheme
+  (define (all-tagged? names)
+  (let loop ((ns names) (ok #t))
+    (if (null? ns) ok
+      (loop (cdr ns)
+            (and ok (symbol? (car (synth/load-score (car ns)))))))))
+(all-tagged? '(beethoven-9-mvt-4 nonesuch other))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the symbol error
+
+  ```
+- **row-5-emergence** :composition
+  ```scheme
+  (define (load-and-play n)
+  (let ((r (synth/load-score n)))
+    (if (eq? (car r) 'ok) (synth/play (cadr r) 120) 'skip)))
+(load-and-play 'beethoven-9-mvt-4)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the symbol error
+
+  ```
+- **row-5-emergence** :eng-composition
+  ```scheme
+  (define (load-many names)
+  (let loop ((ns names) (loaded '()))
+    (if (null? ns) (reverse loaded)
+      (let ((r (synth/load-score (car ns))))
+        (loop (cdr ns)
+              (if (eq? (car r) 'ok) (cons (car ns) loaded) loaded))))))
+(load-many '(beethoven-9-mvt-4))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the symbol error
+
+  ```
+- **row-5-emergence** :cs-composition
+  ```scheme
+  (define fetch-log '())
+(define (fetch+log n)
+  (let ((r (synth/load-score n)))
+    (set! fetch-log (cons (list n (car r)) fetch-log))
+    r))
+(fetch+log 'beethoven-9-mvt-4)
+(length fetch-log)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the symbol error
+
+  ```
+
+### `synth/onset-tap` — file `62-synth.slat`
+
+- **row-2-audit** :cs-program
+  ```scheme
+  (define (subscription? r)
+  (and (pair? r) (eq? (car r) 'ok)))
+(define r (synth/onset-tap (lambda (e) 'noted)))
+(or (subscription? r) (symbol? (car r)))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 120
+
+  ```
+- **row-4-proof** :program
+  ```scheme
+  (let* ((r (synth/onset-tap (lambda (e) 'fire)))
+       (unsub (and (eq? (car r) 'ok) (cadr r))))
+  (if unsub (unsub #t) 'ok))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 120
+
+  ```
+- **row-4-proof** :eng-program
+  ```scheme
+  (define fired 0)
+(define r (synth/onset-tap (lambda (e) (set! fired (+ fired 1)))))
+(define unsub (and (eq? (car r) 'ok) (cadr r)))
+(if unsub (begin (unsub #t) 'unsubscribed) 'no-sub)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the number 120
+
+  ```
+
+### `synth/play` — file `62-synth.slat`
+
+- **row-5-emergence** :eng-composition
+  ```scheme
+  (define (loaded-song name tempo)
+  (let ((r (synth/load-score name)))
+    (if (eq? (car r) 'ok)
+      (synth/play (cadr r) tempo)
+      'skip)))
+(loaded-song 'beethoven-9-mvt-4 120)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the symbol error
+
+  ```
+
+### `synth/sp1200` — file `62-synth.slat`
+
+- **row-4-proof** :program
+  ```scheme
+  (let ((r (synth/sp1200 'kick 0))) (memv (car r) '(ok pending-sample-bank error)))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the symbol ok
+
+  ```
+- **row-4-proof** :eng-program
+  ```scheme
+  (define (batch-witness samples)
+  (let loop ((xs samples) (ok #t))
+    (cond ((null? xs) ok)
+          (else (loop (cdr xs) (and ok (let ((r (synth/sp1200 (car xs) 0))) (symbol? (car r)))))))))
+(batch-witness '(kick snare hat crash tom))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the symbol ok
+
+  ```
+- **row-4-proof** :cs-program
+  ```scheme
+  (define r1 (synth/sp1200 'kick 0))
+(define r2 (synth/sp1200 'kick 12))
+(define r3 (synth/sp1200 'kick -12))
+(and (symbol? (car r1)) (symbol? (car r2)) (symbol? (car r3)))
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the symbol ok
+
+  ```
+
+### `time/to-ms` — file `66-time.slat`
+
+- **row-2-audit** :eng-program
+  ```scheme
+  (define incoming "2020-01-01T00:00:00Z")
+(define ms (time/to-ms incoming))
+(display (if ms (- (time/now) ms) 'unparseable)) (newline)
+  ```
+  Error:
+  ```
+  error: -: expected a number, got the symbol nan
+
+  ```
+- **row-5-emergence** :eng-composition
+  ```scheme
+  (define (age-ms iso-string)
+  (let ((then (time/to-ms iso-string)))
+    (if then (- (time/now) then) #f)))
+(display (age-ms "2020-01-01T00:00:00Z")) (newline)
+  ```
+  Error:
+  ```
+  error: -: expected a number, got the symbol nan
+
+  ```
+
+### `topo/betti-curve` — file `67-topo.slat`
+
+- **row-5-emergence** :math-composition
+  ```scheme
+  (define filt (topo/rips-filtration '((0 0) (1 1) (-1 1) (0 -1)) '(0 0.8 1.5 2.0)))
+(define (curve-delta curve) (map - (cdr curve) curve))
+(display (curve-delta (topo/betti-curve filt 0)))
+(newline)
+  ```
+  Error:
+  ```
+  error: -: expected a number, got a list
+
+  ```
+
+### `topo/betti-k` — file `67-topo.slat`
+
+- **row-3-dimension** :code
+  ```scheme
+  (define c (topo/close (topo/complex '((0 1 2)))))
+(display (= (topo/betti-k c 0) (car (topo/betti c))))
+(newline)
+(display (= (topo/betti-k c 1) (cadr (topo/betti c))))
+(newline)
+  ```
+  Error:
+  ```
+  #t
+error: cadr: expected a pair or a non-empty list, got the empty list
+
+  ```
+- **row-3-dimension** :code
+  ```scheme
+  (define c (topo/close (topo/complex '((0 1 2)))))
+(display (= (topo/betti-k c 0) (car (topo/betti c))))
+(newline)
+(display (= (topo/betti-k c 1) (cadr (topo/betti c))))
+(newline)
+  ```
+  Error:
+  ```
+  #t
+error: cadr: expected a pair or a non-empty list, got the empty list
+
+  ```
+- **row-4-proof** :program
+  ```scheme
+  (define c (topo/close (topo/complex '((0 1 2)))))
+(display (= (topo/betti-k c 0) (car (topo/betti c))))
+(newline)
+(display (= (topo/betti-k c 1) (cadr (topo/betti c))))
+(newline)
+  ```
+  Error:
+  ```
+  #t
+error: cadr: expected a pair or a non-empty list, got the empty list
+
+  ```
+
+### `topo/f-vector` — file `67-topo.slat`
+
+- **row-2-audit** :eng-program
+  ```scheme
+  (define c (topo/close (topo/complex '((0 1 2) (1 2 3)))))
+(define fv (topo/f-vector c))
+(display (list 'vertices (car fv) 'edges (cadr fv) 'faces (caddr fv)))
+(newline)
+  ```
+  Error:
+  ```
+  error: caddr: expected a pair or a non-empty list, got the empty list
+
+  ```
+- **row-4-proof** :program
+  ```scheme
+  (define c (topo/close (topo/complex '((0 1 2)))))
+(define fv (topo/f-vector c))
+(define chi (topo/euler-char c))
+(define alt (- (car fv) (cadr fv) (- 0 (caddr fv))))
+(display (list 'chi chi 'alt alt))
+(newline)
+  ```
+  Error:
+  ```
+  error: cadr: expected a pair or a non-empty list, got the empty list
+
+  ```
+- **row-4-proof** :eng-program
+  ```scheme
+  (define c (topo/close (topo/complex '((0 1 2)))))
+(define fv (topo/f-vector c))
+(define chi (topo/euler-char c))
+(display (= chi (- (car fv) (cadr fv) (- 0 (caddr fv)))))
+(newline)
+  ```
+  Error:
+  ```
+  error: cadr: expected a pair or a non-empty list, got the empty list
+
+  ```
+
+### `topo/vietoris-rips` — file `67-topo.slat`
+
+- **row-4-proof** :eng-program
+  ```scheme
+  (define pts '((0 0) (1 0) (0 1)))
+(define small (topo/vietoris-rips pts 0.5))
+(define big (topo/vietoris-rips pts 1.5))
+(display (<= (car (topo/f-vector small)) (car (topo/f-vector big))))
+(newline)
+  ```
+  Error:
+  ```
+  error: car: expected a pair or a non-empty list, got the empty list
+
+  ```
+
+### `world/tape-audio` — file `72-world.slat`
+
+- **row-2-audit** :math-program
+  ```scheme
+  (define (audio-subset-of-frames?)
+  (<= (length (world/tape-audio)) (length (world/tape-frames))))
+(audio-subset-of-frames?)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 0
+
+  ```
+- **row-4-proof** :eng-program
+  ```scheme
+  (world/tape-clear!) (world/tape-record!) (world/step) (world/step)
+(<= (length (world/tape-audio)) (length (world/tape-frames)))
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 2
+
+  ```
+- **row-4-proof** :math-program
+  ```scheme
+  (define (subset-witness)
+  (let ((a (world/tape-audio)) (f (world/tape-frames)))
+    (list ':|A| (length a) ':|F| (length f) ':subset? (<= (length a) (length f)))))
+(subset-witness)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 0
+
+  ```
+
+### `world/tape-clear!` — file `72-world.slat`
+
+- **row-2-audit** :eng-program
+  ```scheme
+  (define (reset-lab)
+  (world/tape-clear!)
+  (list ':cleared? (zero? (length (world/tape-frames))) ':armed? (world/tape-recording?)))
+(reset-lab)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 0
+
+  ```
+- **row-5-emergence** :eng-composition
+  ```scheme
+  (define (start-fresh-session)
+  (world/tape-clear!)
+  (world/tape-record!)
+  (list ':fresh? (= 1 (length (world/tape-frames)))))
+(start-fresh-session)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 0
+
+  ```
+- **row-5-emergence** :cs-composition
+  ```scheme
+  (define (with-fresh-tape thunk)
+  ;; Bracket wrapper: enter clean, run, leave state.
+  (world/tape-clear!)
+  (world/tape-record!)
+  (let ((r (thunk)))
+    (world/tape-stop!)
+    (list ':result r ':frames (length (world/tape-frames)))))
+(with-fresh-tape (lambda () (world/step) 'done))
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 1
+
+  ```
+
+### `world/tape-frames` — file `72-world.slat`
+
+- **row-4-proof** :eng-program
+  ```scheme
+  (world/tape-clear!) (world/tape-record!)
+(define n0 (length (world/tape-frames)))
+(world/step)
+(= (+ n0 1) (length (world/tape-frames)))
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 0
+
+  ```
+- **row-4-proof** :math-program
+  ```scheme
+  (define (monotone-across-k k)
+  (world/tape-clear!) (world/tape-record!)
+  (let loop ((i 0)) (when (< i k) (world/step) (loop (+ i 1))))
+  (= (+ k 1) (length (world/tape-frames))))
+(monotone-across-k 5)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 5
+
+  ```
+- **row-4-proof** :cs-program
+  ```scheme
+  (define (bounded-by-capacity? cap)
+  (world/tape-clear!) (world/tape-record! cap)
+  (let loop ((i 0)) (when (< i (* 2 cap)) (world/step) (loop (+ i 1))))
+  (<= (length (world/tape-frames)) cap))
+(bounded-by-capacity? 10)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 20
+
+  ```
+- **row-5-emergence** :eng-composition
+  ```scheme
+  (define (record-and-report n)
+  (world/tape-clear!) (world/tape-record!)
+  (let loop ((k n)) (when (> k 0) (world/step) (loop (- k 1))))
+  (world/tape-stop!)
+  (list ':recorded (length (world/tape-frames)) ':target n))
+(record-and-report 30)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 30
+
+  ```
+
+### `world/tape-record!` — file `72-world.slat`
+
+- **row-4-proof** :math-program
+  ```scheme
+  (define (grows-after-arm?)
+  (world/tape-clear!)
+  (let ((n0 (length (world/tape-frames))))
+    (world/tape-record!)
+    (world/step)
+    (> (length (world/tape-frames)) n0)))
+(grows-after-arm?)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 0
+
+  ```
+- **row-4-proof** :cs-program
+  ```scheme
+  (define (double-arm-replaces?)
+  ;; Arming again discards the prior tape unconditionally.
+  (world/tape-record!) (world/step) (world/step)
+  (let ((n1 (length (world/tape-frames))))
+    (world/tape-record!)
+    (< (length (world/tape-frames)) n1)))
+(double-arm-replaces?)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 2
+
+  ```
+- **row-5-emergence** :math-composition
+  ```scheme
+  (define (bounded-record cap seconds fps)
+  ;; Prove: cap is monotone-bounded regardless of steps requested.
+  (world/tape-clear!) (world/tape-record! cap)
+  (let loop ((n (* seconds fps)))
+    (when (> n 0) (world/step) (loop (- n 1))))
+  (list ':cap cap ':held (length (world/tape-frames))))
+(bounde
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 150
+
+  ```
+
+### `world/tape-save` — file `72-world.slat`
+
+- **row-2-audit** :eng-program
+  ```scheme
+  (define (bug-repro-package label)
+  (let ((tape (world/tape-save)))
+    (list ':label label ':n (length tape) ':hash (world/tape-hash))))
+(bug-repro-package 'ragdoll-glitch-2026)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 0
+
+  ```
+- **row-2-audit** :math-program
+  ```scheme
+  (define (serialization-length-invariant)
+  ;; |save(tape)| = |frames(tape)| — every frame becomes a serialized record.
+  (let ((tape (world/tape-save)))
+    (= (length tape) (length (world/tape-frames)))))
+(serialization-length-invariant)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 0
+
+  ```
+- **row-4-proof** :cs-program
+  ```scheme
+  (define (save-does-not-clear?)
+  (world/tape-record!) (world/step) (world/step)
+  (world/tape-save)
+  (> (length (world/tape-frames)) 0))
+(save-does-not-clear?)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 2
+
+  ```
+- **row-5-emergence** :math-composition
+  ```scheme
+  (define (roundtrip-witness)
+  ;; hash(tape) and length(save(tape)) are joint witnesses of content.
+  (let ((h (world/tape-hash))
+        (saved (world/tape-save)))
+    (list ':orig-hash h ':saved-len (length saved) ':claim 'roundtrip-fidelity)))
+(roundtrip-witness)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 0
+
+  ```
+
+### `world/tape-stop!` — file `72-world.slat`
+
+- **row-2-audit** :eng-program
+  ```scheme
+  (define (end-session)
+  (let ((n (world/tape-stop!)))
+    (list ':halted-at n ':still-inspectable? (> (length (world/tape-frames)) 0))))
+(end-session)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 0
+
+  ```
+- **row-2-audit** :math-program
+  ```scheme
+  (define (stop-is-mode-only)
+  ;; Stop transitions the FSM but leaves frames invariant.
+  (world/tape-record!) (world/step) (world/step)
+  (let ((before (length (world/tape-frames))))
+    (world/tape-stop!)
+    (= before (length (world/tape-frames)))))
+(stop-is-mode-only)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 2
+
+  ```
+- **row-4-proof** :eng-program
+  ```scheme
+  (world/tape-clear!) (world/tape-record!) (world/step)
+(let ((n (world/tape-stop!)))
+  (and (not (world/tape-recording?)) (= n (length (world/tape-frames)))))
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 1
+
+  ```
+- **row-4-proof** :cs-program
+  ```scheme
+  (define (stop-returns-count?)
+  (world/tape-clear!) (world/tape-record!) (world/step) (world/step)
+  (= (world/tape-stop!) (length (world/tape-frames))))
+(stop-returns-count?)
+  ```
+  Error:
+  ```
+  error: length: expected a proper list, got the number 2
+
+  ```
+
+### `sdf-fill-rect` — file `77-sdf.slat`
+
+- **row-5-emergence** :composition
+  ```scheme
+  (set-mode 'sd)
+;; a row of bounded gauges, each painted only in its own bounding box
+(define (gauge cx cy)
+  (sdf-fill-rect (sdf-subtract (sdf/circle cx cy 16) (sdf/circle cx cy 7))
+                 (- cx 18) (- cy 18) (+ cx 18) (+ cy 18) 11))
+(for-each gauge (list 70 130 190 250))
+  ```
+  Error:
+  ```
+  error: -: expected a number, got nothing
+
+  ```
 
 ## Verdict
 
-✗ 483 FAILURES. Fix pass required before fold. See per-verb section above for intent (verb name + row + field).
+✗ 278 FAILURES. Fix pass required before fold. See per-verb section above for intent (verb name + row + field).

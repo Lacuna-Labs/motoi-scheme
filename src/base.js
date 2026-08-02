@@ -8,7 +8,7 @@
 import { Env, apply, Closure } from './interp.js'
 import { Sym, Pair } from './reader.js'
 import { makeRational, isRational, liftRational } from '../lib/math/exact.js'
-import { SchemeVector, isVec } from '../lib/base/r7rs-types.js'
+import { SchemeVector, isVec, Ch } from '../lib/base/r7rs-types.js'
 import { registerVerbMeta } from './verbRegistry.js'
 import { seededRandom } from './rng.js'
 import { installSlatVerbs } from './slat-verbs.js'
@@ -72,6 +72,54 @@ export function makeBaseEnv(fuel) {
     ? Math.sign(_toFloat(x) - _toFloat(y))
     : _ratCmp(liftRational(x), liftRational(y))
 
+  // ── The rounding family on exact rationals. ────────────────────────
+  //
+  // `round` / `floor` / `ceiling` / `truncate` / `sqrt` all went straight to
+  // the `Math.*` intrinsics, which see a Rational as a plain object, coerce
+  // it to NaN, and hand back `+nan.0`. `(round 9/10)` answering "not a
+  // number" is indefensible — 1 is exactly representable. Fixed 2026-08-02
+  // per scratch/CONFORMANCE-FIX-DECISIONS-2026-08-02.md.
+  //
+  // A Rational is always in lowest terms with d > 0 (lib/math/exact.js), so
+  // these only have to get the sign convention right. BigInt `/` truncates
+  // toward zero, so floor and ceiling each correct in one direction.
+  //
+  // The results come back as plain JS numbers. Per the same ruling, a JS
+  // integer IS Motoi's exact integer — there is no separate inexact 2 for it
+  // to be confused with — so returning a number keeps the value out of the
+  // Rational-object paths (`Math.floor`, canvas ops) that the ruling protects.
+  const _ratFloor = (r) => {
+    const q = r.n / r.d
+    return Number((r.n % r.d !== 0n && r.n < 0n) ? q - 1n : q)
+  }
+  const _ratCeil = (r) => {
+    const q = r.n / r.d
+    return Number((r.n % r.d !== 0n && r.n > 0n) ? q + 1n : q)
+  }
+  const _ratTrunc = (r) => Number(r.n / r.d)
+  // Half rounds to EVEN, matching the flonum `round` below. The halfway test
+  // is done exactly in BigInt — `2*(r - floor r)` against `1` — so no float
+  // ever touches it.
+  const _ratRound = (r) => {
+    const f = _ratFloor(r)
+    const twice = (r.n - BigInt(f) * r.d) * 2n
+    if (twice < r.d) return f
+    if (twice > r.d) return f + 1
+    return (f % 2 === 0) ? f : f + 1
+  }
+  // Integer square root by Newton's method on BigInt. Returns null for a
+  // negative input. Used only to decide whether an exact rational HAS an
+  // exact square root; when it does, R7RS §6.2.6 says the result should be
+  // exact, so `(sqrt 1/4)` is 1/2 and not 0.5.
+  const _bigISqrt = (v) => {
+    if (v < 0n) return null
+    if (v < 2n) return v
+    let x = v
+    let y = (x + 1n) / 2n
+    while (y < x) { x = y; y = (x + v / x) / 2n }
+    return x
+  }
+
   // The arithmetic verbs used to be the raw JS operators, so `(+ 1 "a")`
   // answered "1a" and `(* 2 'x)` answered NaN — JS coercion leaking through
   // the language. Wrong answers with no error are the failure a learner
@@ -84,6 +132,11 @@ export function makeBaseEnv(fuel) {
     if (typeof x === 'boolean') return x ? '#t' : '#f'
     if (Array.isArray(x)) return x.length === 0 ? 'the empty list' : 'a list'
     if (x instanceof Sym) return `the symbol ${x.name}`
+    // A character is its OWN type (R7RS §6.6), not a one-letter string —
+    // naming it is what tells a caller of `(string=? (string-ref s 0) "a")`
+    // that `char=?` is the verb they wanted.
+    if (x instanceof Ch) return `the character #\\${x.value}`
+    if (isVec(x)) return 'a vector'
     if (x instanceof Pair) return 'a pair'
     if (typeof x === 'function' || x instanceof Closure) return 'a procedure'
     if (_isNum(x)) return `the number ${isRational(x) ? `${x.n}/${x.d}` : x}`
@@ -115,15 +168,70 @@ export function makeBaseEnv(fuel) {
   def('modulo', (x, y) => { _ckNums('modulo', [x, y]); _ckNonZero('modulo', [y]); return ((x % y) + y) % y })
   def('quotient', (x, y) => { _ckNums('quotient', [x, y]); _ckNonZero('quotient', [y]); return Math.trunc(x / y) })   // integer division — standard Scheme
   def('remainder', (x, y) => { _ckNums('remainder', [x, y]); _ckNonZero('remainder', [y]); return x - Math.trunc(x / y) * y })
-  def('max', (...a) => Math.max(..._ckNums('max', a).map(_toFloat)))
-  def('min', (...a) => Math.min(..._ckNums('min', a).map(_toFloat)))
+  // R7RS §6.2.6 spells these `(max x1 x2 …)` — at least one argument. Zero
+  // arguments used to hand back JS's reduce identity, so `(max)` answered
+  // -Infinity and `(min)` answered Infinity: a number where the learner asked
+  // a question that has no answer. (The inexact-contagion rule — "if any
+  // argument is inexact the result is inexact" — is NOT implemented, and is a
+  // documented Motoi limit, not a bug: JS cannot tell 4 from 4.0. See
+  // scratch/CONFORMANCE-FIX-DECISIONS-2026-08-02.md.)
+  const _ckArity1 = (op, a) => {
+    if (a.length === 0) throw new Error(`${op}: expected at least 1 argument, got none`)
+    return a
+  }
+  def('max', (...a) => Math.max(..._ckNums('max', _ckArity1('max', a)).map(_toFloat)))
+  def('min', (...a) => Math.min(..._ckNums('min', _ckArity1('min', a)).map(_toFloat)))
   def('abs', (x) => isRational(x) ? (x.n < 0n ? makeRational(-x.n, x.d) : x) : Math.abs(x))
 
-  def('=', (a, b) => (isRational(a) || isRational(b)) ? _numCmp(a, b) === 0 : a === b)
-  def('<', (a, b) => (isRational(a) || isRational(b)) ? _numCmp(a, b) < 0 : a < b)
-  def('>', (a, b) => (isRational(a) || isRational(b)) ? _numCmp(a, b) > 0 : a > b)
-  def('<=', (a, b) => (isRational(a) || isRational(b)) ? _numCmp(a, b) <= 0 : a <= b)
-  def('>=', (a, b) => (isRational(a) || isRational(b)) ? _numCmp(a, b) >= 0 : a >= b)
+  // R7RS §6.2.6: `= < > <= >=` are N-ARY and hold when EVERY adjacent pair
+  // holds — `(< 1 2 3)` is #t, `(< 1 3 2)` is #f, `(= 1 1 2)` is #f.
+  //
+  // Until 2026-08-02 each was a two-argument JS arrow. JS silently discards
+  // every argument past the declared parameters, so `(= 1 1 2)` compared only
+  // 1 against 1 and answered #t — a wrong answer with no error, which is the
+  // failure a learner cannot debug and the one a beginner meets first. The
+  // `-ci` string family and the char comparisons already looped pairwise;
+  // these now match that shape, as do `max`/`min` directly above with `(...a)`.
+  //
+  // A single argument is a chain with no adjacent pair, so it is vacuously
+  // #t (ruling R2-2: Chez, Guile and Racket all agree). Zero arguments raise —
+  // there is no chain at all to be vacuous about.
+  //
+  // The per-pair test keeps the EXACT semantics the two-argument version had,
+  // including NaN: `(= +nan.0 +nan.0)` stays #f because JS `===` says so.
+  //
+  // R7RS §6.2.6 requires NUMBERS here, and has no "coerce" clause, so
+  // `_ckNums` runs over every argument first (ruling R2-1, 2026-08-02).
+  // Without it `(= 1 'a)` answered #f and `(= 'easy 'easy)` answered #t:
+  // a plausible answer to a question that was never asked, which is worse
+  // than an error because nothing tells the learner they asked the wrong
+  // one. carts/asteroids.sks and carts/space-invaders.sks branch on
+  // `(= DIFFICULTY 'easy)` and so start raising — the carts are wrong, not
+  // the engine; comparing a symbol with `=` is exactly the mistake this
+  // check exists to catch, and `eq?` is the verb they wanted.
+  const _numRel = (rel, x, y) => {
+    if (isRational(x) || isRational(y)) {
+      const c = _numCmp(x, y)
+      return rel === '=' ? c === 0
+        : rel === '<' ? c < 0
+          : rel === '>' ? c > 0
+            : rel === '<=' ? c <= 0 : c >= 0
+    }
+    return rel === '=' ? x === y
+      : rel === '<' ? x < y
+        : rel === '>' ? x > y
+          : rel === '<=' ? x <= y : x >= y
+  }
+  const _numChain = (op, rel) => (...a) => {
+    _ckNums(op, _ckArity1(op, a))
+    for (let i = 0; i + 1 < a.length; i++) if (!_numRel(rel, a[i], a[i + 1])) return false
+    return true
+  }
+  def('=', _numChain('=', '='))
+  def('<', _numChain('<', '<'))
+  def('>', _numChain('>', '>'))
+  def('<=', _numChain('<=', '<='))
+  def('>=', _numChain('>=', '>='))
   def('not', (a) => a === false)
 
   // Internal car/cdr that read either representation. Every derived
@@ -156,6 +264,72 @@ export function makeBaseEnv(fuel) {
   // They report their own name so a short list blames `cadr`, not `car`.
   def('cadr', (a) => _car(_cdr(a, 'cadr'), 'cadr'))
   def('caddr', (a) => _car(_cdr(_cdr(a, 'caddr'), 'caddr'), 'caddr'))
+  // (set-car! pair obj) / (set-cdr! pair obj) — R7RS §6.4. Both were UNBOUND
+  // until 2026-08-02, so every program that mutated a pair died on "unbound
+  // symbol: set-cdr!".
+  //
+  // Motoi carries TWO list representations, and they are handled differently
+  // on purpose rather than papered over:
+  //
+  //   * An improper `Pair` is a two-field cell. Both verbs are a direct field
+  //     write and every case works.
+  //
+  //   * A proper list is a JS array. `set-car!` is `a[0] = v`. `set-cdr!`
+  //     replaces the tail IN PLACE in the same array object, so every other
+  //     binding holding that list sees the change — which is the entire
+  //     observable point of the verb, and the behaviour worth teaching.
+  //
+  // Two cases genuinely cannot be represented by a flat array. They RAISE and
+  // say so, rather than doing something adjacent and looking like they worked:
+  //
+  //   * a non-list tail. `(set-cdr! (list 1 2) 3)` asks for `(1 . 3)`, and an
+  //     array has nowhere to keep an improper tail.
+  //   * a tail that reaches the list itself, i.e. a circular list. An array
+  //     cannot hold the cycle, and the printer would not survive it.
+  //
+  // `(cons a b)` with a non-list `b` DOES mint a real dotted `Pair`, and
+  // `set-cdr!` works on that without restriction — so the capability exists,
+  // it is the array spelling that cannot host it.
+  const _reachesFrom = (start, target) => {
+    const seen = new Set()
+    const walk = (v) => {
+      if (v === target) return true
+      if (v === null || typeof v !== 'object') return false
+      if (seen.has(v)) return false
+      seen.add(v)
+      if (Array.isArray(v)) return v.some(walk)
+      if (v instanceof Pair) return walk(v.car) || walk(v.cdr)
+      return false
+    }
+    return walk(start)
+  }
+  def('set-car!', (p, v) => {
+    if (p instanceof Pair) { p.car = v; return undefined }
+    if (Array.isArray(p) && p.length > 0) { p[0] = v; return undefined }
+    throw new Error(`set-car!: expected a pair or a non-empty list, got ${_describe(p)}`)
+  }, 'state-change')
+  def('set-cdr!', (p, v) => {
+    if (p instanceof Pair) { p.cdr = v; return undefined }
+    if (Array.isArray(p) && p.length > 0) {
+      if (!Array.isArray(v)) {
+        throw new Error(`set-cdr!: cannot make ${_describe(v)} the tail of a list built by (list …). ` +
+          'Motoi spells a proper list as a flat array, which has no cell to hold an improper tail. ' +
+          'To get a dotted pair, build it with cons — (cons x y) with a non-list y is a real pair, ' +
+          'and set-cdr! can change that one freely.')
+      }
+      if (_reachesFrom(v, p)) {
+        throw new Error('set-cdr!: the new tail leads back to this same list, which would make it circular. ' +
+          'Motoi spells a proper list as a flat array and cannot hold a cycle, so this is refused ' +
+          'rather than left half-done.')
+      }
+      const tail = v.slice()
+      p.length = 1
+      for (const x of tail) p.push(x)
+      return undefined
+    }
+    throw new Error(`set-cdr!: expected a pair or a non-empty list, got ${_describe(p)}`)
+  }, 'state-change')
+
   def('null?', (a) => Array.isArray(a) && a.length === 0)
   // R7RS §6.4 / §6.3 / §6.5 — the load-bearing type predicates the spec
   // expects every Scheme to bind. `pair?` is true of a non-empty list
@@ -260,6 +434,14 @@ export function makeBaseEnv(fuel) {
   function _eqQ(a, b) {
     if (a === b) return true
     if (a == null || b == null) return false
+    // R7RS §6.1 guarantees that `eqv?` IMPLIES `equal?` — equal? is defined
+    // to return #t "if eqv? would". Exact rationals are heap objects, so the
+    // `a === b` identity test above misses two separately-allocated 1/2s, and
+    // until 2026-08-02 nothing else here looked at them: `(equal? 1/2 1/2)`
+    // answered #f while `(eqv? 1/2 1/2)` answered #t, inverting the one
+    // ordering the standard promises. Delegate to `_eqvQ`, so the two can
+    // never disagree about a number again.
+    if (isRational(a) || isRational(b)) return _eqvQ(a, b)
     // Sym comparison by .name (reader interns these consistently).
     if (a && b && typeof a === 'object' && typeof b === 'object'
         && 'name' in a && 'name' in b
@@ -320,6 +502,12 @@ export function makeBaseEnv(fuel) {
     if (a === b) return true
     if (a == null || b == null) return false
     if (a instanceof Sym && b instanceof Sym) return a.name === b.name
+    // R7RS §6.1 lists the empty list among the objects `eqv?` must answer #t
+    // for: there is only ONE empty list. Motoi spells it as a JS array, and
+    // every `'()` literal allocates a fresh one, so `===` said #f — which
+    // made `(eq? '() '())` #f and quietly broke the identity a learner leans
+    // on hardest when writing a recursive list walk.
+    if (Array.isArray(a) && Array.isArray(b)) return a.length === 0 && b.length === 0
     // Exact rationals are heap objects, so `===` misses two equal ones.
     // Exactness must still separate them: R7RS says 1/2 and 0.5 are not eqv?.
     if (isRational(a) || isRational(b)) {
@@ -421,6 +609,13 @@ export function makeBaseEnv(fuel) {
     if (v && typeof v === 'object' && v.__promise__ === true) {
       return v.forced ? _displayFormat(v.value) : '<promise>'
     }
+    if (v && typeof v === 'object' && v.__eof__ === true) return '#<eof>'
+    // A Values box reaching display means the program used a multiple-value
+    // producer in single-value position. Show the values rather than falling
+    // through to String(), which printed `[object Object]`.
+    if (v && typeof v === 'object' && Array.isArray(v.vals)) {
+      return v.vals.map(_displayFormat).join(' ')
+    }
     return String(v)
   }
   def('display', (v) => { process.stdout.write(_displayFormat(v)); return undefined })
@@ -475,8 +670,18 @@ export function makeBaseEnv(fuel) {
   // R7RS §6.4: every argument but the last must be a proper list; the last
   // may be any object, and becomes the tail — so `(append '(1) '(2 . 3))`
   // is `(1 2 . 3)`, not a list holding a pair.
+  // Every argument BUT the last must genuinely be a proper list. `[].concat`
+  // wraps a non-list instead of rejecting it, so `(append 7 '(1))` answered
+  // `(7 1)` — silently promoting a number to a one-element list. The learner
+  // then believes `append` cons-es, which is the wrong model of the verb.
   def('append', (...ls) => {
     if (ls.length === 0) return []
+    for (let i = 0; i < ls.length - 1; i++) {
+      if (!Array.isArray(ls[i])) {
+        throw new Error(`append: every argument but the last must be a proper list; ` +
+          `argument ${i + 1} is ${_describe(ls[i])}. Only the LAST argument may be any object.`)
+      }
+    }
     const last = ls[ls.length - 1]
     const front = [].concat(...ls.slice(0, -1))
     if (Array.isArray(last)) return front.concat(last)
@@ -493,7 +698,25 @@ export function makeBaseEnv(fuel) {
   def('nth', (a, i) => a[i])
 
   // ── more math ───────────────────────────────────────────────────────
-  def('sqrt', (x) => Math.sqrt(x))
+  // R7RS §6.2.6: the result is exact when the argument is exact and the root
+  // is exactly representable. `(sqrt 1/4)` is 1/2; `(sqrt 2)` stays inexact.
+  def('sqrt', (x) => {
+    if (isRational(x)) {
+      const sn = _bigISqrt(x.n)
+      const sd = _bigISqrt(x.d)
+      if (sn !== null && sd !== null && sn * sn === x.n && sd * sd === x.d) {
+        return makeRational(sn, sd)
+      }
+      return Math.sqrt(_toFloat(x))
+    }
+    // R7RS §6.2.3 permits a limited tower, and Motoi's stops short of complex
+    // numbers. Returning NaN let `(sqrt -1)` flow onward as a number-shaped
+    // non-number; saying so is the teachable answer.
+    if (typeof x === 'number' && x < 0) {
+      throw new Error(`sqrt: ${x} has no real square root, and Motoi has no complex numbers`)
+    }
+    return Math.sqrt(x)
+  })
   def('cos', (x) => Math.cos(x))
   def('sin', (x) => Math.sin(x))
   def('tan', (x) => Math.tan(x))
@@ -506,19 +729,30 @@ export function makeBaseEnv(fuel) {
   // are pedagogical conveniences the kid picks up in growth-curve carts.
   // Also surfaced as math/* in lib/math/basic.js during Wave 1.
   def('exp', (x) => Math.exp(x))
-  def('log', (x) => Math.log(x))
+  // R7RS §6.2.6: `(log z)` is the natural logarithm; `(log z1 z2)` is the
+  // logarithm of z1 in base z2, defined as (/ (log z1) (log z2)). The
+  // two-argument form was a one-parameter JS arrow until 2026-08-02, so
+  // `(log 8 2)` discarded the base and answered 2.0794…, the natural log of 8
+  // — a plausible-looking number, which is exactly what makes it dangerous.
+  def('log', (x, base) => {
+    _ckNums('log', base === undefined ? [x] : [x, base])
+    const z = Math.log(_toFloat(x))
+    if (base === undefined) return z
+    return z / Math.log(_toFloat(base))
+  })
   def('log2', (x) => Math.log2(x))
   def('log10', (x) => Math.log10(x))
   def('exp2', (x) => Math.pow(2, x))
-  def('floor', (x) => Math.floor(x))
-  def('ceil', (x) => Math.ceil(x))
+  def('floor', (x) => isRational(x) ? _ratFloor(x) : Math.floor(x))
+  def('ceil', (x) => isRational(x) ? _ratCeil(x) : Math.ceil(x))
   // R7RS §6.2.6 spells it `ceiling`. We keep `ceil` as the short-form
   // alias the cart authors learned first; both point to the same impl.
-  def('ceiling', (x) => Math.ceil(x))
+  def('ceiling', (x) => isRational(x) ? _ratCeil(x) : Math.ceil(x))
   // R7RS §6.2.6: `round` returns the closest integer, rounding to EVEN
   // when x is halfway between two integers (banker's rounding).
   // JS Math.round is half-up (2.5=>3), which diverges — so we roll our own.
   def('round', (x) => {
+    if (isRational(x)) return _ratRound(x)
     const f = Math.floor(x)
     const diff = x - f
     if (diff < 0.5) return f
@@ -535,7 +769,17 @@ export function makeBaseEnv(fuel) {
   // for — these used to call Math.random directly and so escaped
   // `(with-seed …)`, which cost three separate fixes to find.
   def('rng-uniform', () => seededRandom())
-  def('randint', (a, b) => a + Math.floor(seededRandom() * (b - a)))
+  // Two bounds, always: [a, b). Called with one argument, `b` was undefined and
+  // the arithmetic quietly produced +nan.0 — which then flows into substring
+  // indices and grid coordinates and fails somewhere else entirely, or worse,
+  // does not fail at all. `(random-int n)` is the one-argument verb.
+  def('randint', (a, b) => {
+    if (!_isNum(a) || !_isNum(b)) {
+      throw new Error('randint: expected two numeric bounds, as (randint a b) — a random integer in [a, b). ' +
+        'For a single upper bound use (random-int n), which draws from 0..n-1.')
+    }
+    return a + Math.floor(seededRandom() * (b - a))
+  })
   // Racket-style aliases — friendlier names that Scheme-ers reach for.
   // `(random-int n)` → 0..n-1.  `(random-range lo hi)` → uniform float
   // in [lo, hi).  `(random-pick lst)` → an element of the list.
@@ -589,17 +833,113 @@ export function makeBaseEnv(fuel) {
   def('zero?', (x) => isRational(x) ? x.n === 0n : x === 0)
   def('positive?', (x) => isRational(x) ? x.n > 0n : x > 0)
   def('negative?', (x) => isRational(x) ? x.n < 0n : x < 0)
-  def('even?', (x) => x % 2 === 0)
-  def('odd?', (x) => Math.abs(x % 2) === 1)
+  // `x % 2` on a Rational object is NaN, so `(even? 4/2)` answered #f even
+  // though 4/2 IS the integer 2. A Rational with denominator 1 is an integer
+  // and its parity is the parity of the numerator; anything else is not an
+  // integer at all and has no parity.
+  // A non-integer NUMBER answers #f — 1.5 is not odd, and that predicate is
+  // total by an earlier deliberate decision (tests/zane-1-bughunt.test.mjs).
+  // A non-number has no parity to report and raises.
+  const _parity = (op, x, want) => {
+    if (isRational(x)) {
+      if (x.d !== 1n) return false
+      return ((x.n % 2n) + 2n) % 2n === want
+    }
+    if (typeof x !== 'number') throw new Error(`${op}: expected a number, got ${_describe(x)}`)
+    if (!Number.isInteger(x)) return false
+    return ((x % 2) + 2) % 2 === Number(want)
+  }
+  def('even?', (x) => _parity('even?', x, 0n))
+  def('odd?', (x) => _parity('odd?', x, 1n))
   def('number?', (x) => typeof x === 'number' || isRational(x))
   def('string?', (x) => typeof x === 'string')
   def('boolean?', (x) => x === true || x === false)
-  def('string-append', (...a) => a.map(String).join(''))
-  def('string-length', (s) => String(s).length)
-  def('string-ref', (s, i) => String(s).charAt(i))   // → single-char string
-  def('string-eq?', (a, b) => String(a) === String(b))
-  def('string=?', (a, b) => String(a) === String(b))
-  def('vector-ref', (v, i) => (isVec(v) ? v.items[i] : Array.isArray(v) ? v[i] : null))
+  // R7RS §6.7 takes strings only. The old `a.map(String)` coerced anything,
+  // and the character case was the damaging one: `(string-append acc (string-ref s i))`
+  // built the literal text `#\a` into the result, so a cart's cipher output or
+  // grid row came out as `#\k#\h#\o` instead of letters — no error, just garbage.
+  def('string-append', (...a) => {
+    for (const x of a) {
+      if (typeof x !== 'string') {
+        throw new Error(`string-append: expected a string, got ${_describe(x)}`)
+      }
+    }
+    return a.join('')
+  })
+  // ── Indexed access: range + type checks. ───────────────────────────
+  //
+  // Until 2026-08-02 every accessor in this group read straight off the
+  // host object, so an out-of-range index answered JS `undefined` and a
+  // wrong-type argument answered whatever JS coercion produced. That is the
+  // most poisonous shape a bug can have here: `(vector-ref v 99)` handed back
+  // a truthy non-value, `(number? …)` on that non-value ALSO answered truthy,
+  // the `(if (number? x) …)` took the number branch, and the arithmetic blew
+  // up several steps later somewhere unrelated to the actual mistake. The
+  // whole point of an error is to fire AT the mistake.
+  //
+  // Every message names the procedure, the bad index, and the valid range,
+  // matching the style `_ckNums` / `_ckNonZero` / `substring` already use.
+  const _ckIndex = (op, i, len, what) => {
+    if (!_isNum(i)) throw new Error(`${op}: expected an integer index, got ${_describe(i)}`)
+    const k = _toFloat(i)
+    if (!Number.isInteger(k)) throw new Error(`${op}: expected an integer index, got ${k}`)
+    if (len === 0) throw new Error(`${op}: index ${k} is out of range — the ${what} is empty, so no index is valid`)
+    if (k < 0 || k >= len) {
+      throw new Error(`${op}: index ${k} is out of range for a ${what} of length ${len}; valid indices are 0 to ${len - 1}`)
+    }
+    return k
+  }
+  def('string-length', (s) => {
+    // `(string-length 5)` used to answer 1 — JS stringified the number and
+    // measured THAT. A length is not a plausible answer to a type error.
+    if (typeof s !== 'string') throw new Error(`string-length: expected a string, got ${_describe(s)}`)
+    return s.length
+  })
+  // → single-char string. (lib/base/r7rs-small.js overrides this with a
+  // character-returning version per R7RS §6.7; the bounds check is repeated
+  // here so the base env alone is never silently wrong.)
+  def('string-ref', (s, i) => {
+    if (typeof s !== 'string') throw new Error(`string-ref: expected a string, got ${_describe(s)}`)
+    return s.charAt(_ckIndex('string-ref', i, s.length, 'string'))
+  })
+  // R7RS §6.7: `string=?` is n-ary and holds when EVERY adjacent pair holds,
+  // exactly like the numeric chain above. It was a two-argument JS arrow until
+  // 2026-08-02, so `(string=? "a" "a" "b")` answered #t. Same defect, same
+  // shape of fix; the `-ci` family in lib/std already loops pairwise.
+  // `string-eq?` is a Motoi-own alias for the same procedure (see the
+  // conformance decisions file) and moves in lockstep, so the two can never
+  // disagree about arity or type again.
+  //
+  // §6.7 requires STRINGS and has no "coerce" clause, so `_ckStrs` runs over
+  // every argument first (ruling R2-1, 2026-08-02). The operands used to go
+  // through `String(x)`, which made `(string=? 5 "5")` answer #t — a
+  // plausible answer to a question nobody asked.
+  //
+  // A CHARACTER IS NOT A STRING (ruling R2-3). `(string=? (string-ref s 0)
+  // "a")` raising is the type system doing its job, and `char=?` is the verb
+  // that line wanted; carts/sokoban-boxes.sks has been silently rendering
+  // garbage on exactly that mistake. No char -> string coercion goes in here
+  // to make it "pass".
+  const _ckStrs = (op, a) => {
+    for (const x of a) {
+      if (typeof x !== 'string') throw new Error(`${op}: expected a string, got ${_describe(x)}`)
+    }
+    return a
+  }
+  const _strChain = (op, ok) => (...a) => {
+    _ckStrs(op, _ckArity1(op, a))
+    for (let i = 0; i + 1 < a.length; i++) {
+      if (!ok(a[i], a[i + 1])) return false
+    }
+    return true
+  }
+  def('string-eq?', _strChain('string-eq?', (x, y) => x === y))
+  def('string=?', _strChain('string=?', (x, y) => x === y))
+  def('vector-ref', (v, i) => {
+    const items = isVec(v) ? v.items : Array.isArray(v) ? v : null
+    if (items === null) throw new Error(`vector-ref: expected a vector, got ${_describe(v)}`)
+    return items[_ckIndex('vector-ref', i, items.length, 'vector')]
+  })
   // (substring s start [end]) — R7RS §6.7, which requires
   // 0 <= start <= end <= (string-length s). This used to be raw JS
   // String.prototype.substring, which instead clamped past the end, clamped
@@ -634,18 +974,89 @@ export function makeBaseEnv(fuel) {
     // Standard Scheme: (number->string n [radix]). Default radix 10.
     // Radix 16 emits lowercase hex (matches the `"#rrggbb"` convention).
     const r = (typeof radix === 'number') ? (radix | 0) : 10
+    // `Number(rational)` is NaN, so `(number->string 1/2)` used to answer the
+    // string "NaN". R7RS §6.2.7 requires the result to read back as the same
+    // number, and `1/2` is exactly what the reader accepts.
+    if (isRational(n)) {
+      if (n.d === 1n) return n.n.toString(r)
+      if (r !== 10) {
+        throw new Error(`number->string: radix ${r} is not supported for the exact rational ${n.n}/${n.d}`)
+      }
+      return `${n.n}/${n.d}`
+    }
+    if (!_isNum(n)) throw new Error(`number->string: expected a number, got ${_describe(n)}`)
     return Number(n).toString(r)
   })
+  // (string->number s [radix]) — R7RS §6.2.7. Default radix 10.
+  //
+  // "Returns a number of the maximally precise representation expressed by
+  // the given string. … If string is not a syntactically valid notation for
+  // a number, or would result in a number that cannot be represented, then
+  // string->number returns #f."
+  //
+  // The WHOLE string must be a number. Until 2026-08-02 this called
+  // `parseFloat`, which stops at the first character it cannot use — so
+  // `(string->number "12abc")` answered 12. A learner testing whether input
+  // is a number got "yes, 12" for "12abc", and the corpus would have been
+  // taught that. `parseFloat` also skips leading whitespace, so `" 12"` was
+  // 12 where the standard requires #f. Both are gone: the string is matched
+  // against the R7RS number grammar first, and only then converted.
+  //
+  // `"1/2"` now yields the exact rational 1/2 rather than 1. Rationals are
+  // already Motoi's exact representation (`(exact 0.5)` is 1/2), so there was
+  // never a representation excuse for dropping the denominator.
+  const _RADIX_DIGITS = { 2: '[01]', 8: '[0-7]', 10: '[0-9]', 16: '[0-9a-fA-F]' }
+  const _digitsToBig = (str, r) => {
+    const neg = str[0] === '-'
+    const body = (str[0] === '+' || str[0] === '-') ? str.slice(1) : str
+    const big = BigInt(r)
+    let acc = 0n
+    for (const c of body) acc = acc * big + BigInt(parseInt(c, r))
+    return neg ? -acc : acc
+  }
   def('string->number', (s, radix) => {
-    // Standard Scheme: (string->number s [radix]). Default radix 10.
-    // Hex parsing supports both bare "ff" and "0xff" forms.
-    const r = (typeof radix === 'number') ? (radix | 0) : 10
-    if (r === 10) {
-      const n = parseFloat(s)
-      return Number.isNaN(n) ? false : n
+    if (typeof s !== 'string') {
+      throw new Error(`string->number: expected a string, got ${_describe(s)}`)
     }
-    const str = String(s).trim()
-    const n = parseInt(str.startsWith('0x') || str.startsWith('0X') ? str.slice(2) : str, r)
+    let r = (typeof radix === 'number') ? (radix | 0) : 10
+    if (!_RADIX_DIGITS[r]) {
+      throw new Error(`string->number: radix must be 2, 8, 10 or 16, got ${r}`)
+    }
+    let str = s
+    // §6.2.5 radix prefixes. An explicit prefix wins over the radix argument.
+    const pfx = /^#([bodxBODX])/.exec(str)
+    if (pfx) {
+      r = { b: 2, o: 8, d: 10, x: 16 }[pfx[1].toLowerCase()]
+      str = str.slice(2)
+    } else if (r === 16 && (str.startsWith('0x') || str.startsWith('0X'))) {
+      // Motoi-own convenience carried over from the pre-2026-08-02 version so
+      // the "#rrggbb" colour code that passes "0xff" keeps parsing.
+      str = str.slice(2)
+    }
+    if (str === '') return false
+    const D = _RADIX_DIGITS[r]
+    // Exact rational — valid in every radix.
+    if (new RegExp(`^[+-]?${D}+/${D}+$`).test(str)) {
+      const [nS, dS] = str.split('/')
+      const d = _digitsToBig(dS, r)
+      if (d === 0n) return false          // 1/0 is not a representable number
+      return makeRational(_digitsToBig(nS, r), d)
+    }
+    // Exact integer.
+    if (new RegExp(`^[+-]?${D}+$`).test(str)) {
+      const v = Number(_digitsToBig(str, r))
+      return Number.isFinite(v) ? v : false
+    }
+    if (r !== 10) return false            // §6.2.5: decimals only in radix 10
+    // Infinities and NaN are part of the numeric grammar in radix 10, and
+    // `display` already writes them back in this spelling — so they have to
+    // read back in, or the round trip is broken.
+    if (str === '+inf.0') return Infinity
+    if (str === '-inf.0') return -Infinity
+    if (str === '+nan.0' || str === '-nan.0') return NaN
+    // Decimal, with an optional exponent. `1.`, `.5` and `1e3` are all legal.
+    if (!/^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)(e[+-]?[0-9]+)?$/i.test(str)) return false
+    const n = Number(str)
     return Number.isNaN(n) ? false : n
   })
   // (hex-byte "#rrggbb" i) → 0..255. Convenience for the conway.sks
@@ -660,12 +1071,43 @@ export function makeBaseEnv(fuel) {
     const v = Math.max(0, Math.min(255, n | 0)).toString(16)
     return v.length === 1 ? '0' + v : v
   })
-  def('list-ref', (a, i) => a[i])
-  def('member', (x, lst) => { const i = lst.findIndex((y) => deepEqual(x, y)); return i < 0 ? false : lst.slice(i) })
+  def('list-ref', (a, i) => {
+    if (!Array.isArray(a)) throw new Error(`list-ref: expected a proper list, got ${_describe(a)}`)
+    return a[_ckIndex('list-ref', i, a.length, 'list')]
+  })
+  // R7RS §6.4: `(member obj list [compare])` and `(assoc obj alist [compare])`.
+  // The optional third argument REPLACES the default `equal?` comparison and
+  // is called as `(compare obj element)` — obj first. Motoi bound both as
+  // two-argument arrows until 2026-08-02, so the comparator was silently
+  // discarded and `(member 2 '(1 2 3) (lambda (a b) #f))` still answered
+  // `(2 3)`: the learner's own predicate had no effect and nothing said so.
+  //
+  // The default is now `_eqQ`, which IS `equal?` — the procedure R7RS names.
+  // (It was a near-identical private `deepEqual`, which additionally missed
+  // vectors and bytevectors.)
+  const _memberEq = (op, cmp) => {
+    if (cmp === undefined) return _eqQ
+    if (typeof cmp !== 'function' && !(cmp instanceof Closure)) {
+      throw new Error(`${op}: the third argument must be a comparison procedure, got ${_describe(cmp)}`)
+    }
+    return (x, y) => apply(cmp, [x, y], fuelBox) !== false
+  }
+  def('member', (x, lst, cmp) => {
+    if (!Array.isArray(lst)) throw new Error(`member: expected a proper list, got ${_describe(lst)}`)
+    const eq = _memberEq('member', cmp)
+    for (let i = 0; i < lst.length; i++) if (eq(x, lst[i])) return lst.slice(i)
+    return false
+  })
   // Entries may be `(k v)` lists or `(k . v)` dotted pairs — match both.
-  def('assoc', (key, alist) => alist.find((pair) =>
-    (pair instanceof Pair ? deepEqual(pair.car, key)
-      : Array.isArray(pair) && deepEqual(pair[0], key))) || false)
+  def('assoc', (key, alist, cmp) => {
+    if (!Array.isArray(alist)) throw new Error(`assoc: expected a proper list of pairs, got ${_describe(alist)}`)
+    const eq = _memberEq('assoc', cmp)
+    for (const pair of alist) {
+      if (pair instanceof Pair) { if (eq(key, pair.car)) return pair }
+      else if (Array.isArray(pair) && pair.length > 0) { if (eq(key, pair[0])) return pair }
+    }
+    return false
+  })
 
   // ── list-builders the layout carts reach for ────────────────────────
   //
@@ -682,8 +1124,9 @@ export function makeBaseEnv(fuel) {
   //   (argmin lst)           → index of the smallest number in lst
   //                            (ties: leftmost wins). The bricklay packer
   //                            uses this to pick the shortest column.
-  //   (sort lst less?)       → a NEW list sorted ascending under the
-  //                            two-arg less? predicate. Stable.
+  //   (sort seq less?)       → a NEW list (or vector, if seq is one) sorted
+  //                            ascending under the two-arg less?
+  //                            predicate. Stable.
   def('make-list', (n, value) => {
     const k = Math.max(0, n | 0)
     const out = new Array(k)
@@ -696,10 +1139,15 @@ export function makeBaseEnv(fuel) {
     if (i >= 0 && i < out.length) out[i] = value
     return out
   })
-  def('list-index', (pred, lst) => {
-    if (!Array.isArray(lst)) return false
-    for (let i = 0; i < lst.length; i++) {
-      if (apply(pred, [lst[i]], fuelBox) !== false) return i
+  // SRFI-1 `list-index` takes ONE OR MORE parallel lists and walks them in
+  // step, stopping at the shortest, exactly like `any`/`every`/`count` above.
+  // The two-argument arrow it used to be discarded every list past the first,
+  // so `(list-index = '(1 2 3) '(4 5 3))` answered on the first list alone.
+  def('list-index', (pred, ...lists) => {
+    if (lists.length === 0 || lists.some((l) => !Array.isArray(l))) return false
+    const n = Math.min(...lists.map((l) => l.length))
+    for (let i = 0; i < n; i++) {
+      if (apply(pred, lists.map((l) => l[i]), fuelBox) !== false) return i
     }
     return false
   })
@@ -712,11 +1160,22 @@ export function makeBaseEnv(fuel) {
     }
     return best
   })
-  def('sort', (lst, less) => {
-    if (!Array.isArray(lst)) return lst
+  // `sort` accepts a LIST or a VECTOR and returns the same kind, freshly
+  // built — the source is never mutated (that would be `sort!`).
+  //
+  // Until 2026-08-02 the guard was `if (!Array.isArray(lst)) return lst`, and
+  // a vector is a SchemeVector, not a JS array, so `(sort (vector 3 1 2) <)`
+  // handed back `#(3 1 2)`: the untouched input, wearing the shape of an
+  // answer, with no error. Silent-wrong of the worst kind — the caller reads
+  // a sorted vector and the first element they trust is the wrong one.
+  // Anything that is neither list nor vector still returns unchanged, which
+  // is the pre-existing behaviour and not this pass's call to change.
+  def('sort', (seq, less) => {
+    const items = isVec(seq) ? seq.items : Array.isArray(seq) ? seq : null
+    if (items === null) return seq
     // Decorate-sort-undecorate so JS Array.sort can be stable on the
     // shared key while honouring the user's less? predicate.
-    const indexed = lst.map((v, i) => [v, i])
+    const indexed = items.map((v, i) => [v, i])
     indexed.sort((a, b) => {
       const ab = apply(less, [a[0], b[0]], fuelBox) !== false
       const ba = apply(less, [b[0], a[0]], fuelBox) !== false
@@ -724,7 +1183,8 @@ export function makeBaseEnv(fuel) {
       if (ba && !ab) return 1
       return a[1] - b[1]   // stable
     })
-    return indexed.map((p) => p[0])
+    const out = indexed.map((p) => p[0])
+    return isVec(seq) ? new SchemeVector(out) : out
   })
 
   // ── bricklay-pack-native — JS-backed bottom-left bin-pack (#414) ─────
@@ -981,12 +1441,13 @@ function registerBaseMetadata() {
     ['max',      [1, Infinity], 'Largest of the given numbers.',                               '(max 3 1 4 1 5) => 5',     'math'],
     ['min',      [1, Infinity], 'Smallest of the given numbers.',                              '(min 3 1 4 1 5) => 1',     'math'],
     ['abs',      1,             'Absolute value.',                                             '(abs -7) => 7',            'math'],
-    ['sqrt',     1,             'Square root.',                                                '(sqrt 9) => 3',            'math'],
+    ['sqrt',     1,             'Square root. Exact when the argument is exact and the root is representable.', '(sqrt 1/4) => 1/2',        'math'],
     ['expt',     2,             'Base raised to the power. (expt b p) => b^p.',                '(expt 2 10) => 1024',      'math'],
     ['floor',    1,             'Round DOWN to an integer.',                                   '(floor 3.7) => 3',         'math'],
     ['ceil',     1,             'Round UP to an integer.',                                     '(ceil 3.2) => 4',          'math'],
     ['ceiling',  1,             'Round UP to an integer (R7RS alias for ceil).',               '(ceiling 3.2) => 4',       'math'],
-    ['round',    1,             'Round to the nearest integer.',                               '(round 3.5) => 4',         'math'],
+    ['round',    1,             'Round to the nearest integer, halfway to even. Works on exact rationals.', '(round 9/10) => 1',        'math'],
+    ['log',      [1, 2],        '(log z) natural logarithm; (log z1 z2) logarithm of z1 in base z2. R7RS §6.2.6.', '(log 8 2) => 3',           'math'],
     ['sign',     1,             '-1, 0, or 1 by the sign of x.',                               '(sign -8) => -1',          'math'],
     ['clamp',    3,             '(clamp x lo hi) — clamp x into [lo, hi].',                    '(clamp 15 0 10) => 10',    'math'],
     ['lerp',     3,             '(lerp a b t) — linear interpolation.',                        '(lerp 0 10 0.5) => 5',     'math'],
@@ -998,11 +1459,11 @@ function registerBaseMetadata() {
     ['mean',     1,             'Arithmetic mean of a list.',                                  '(mean (list 2 4 6)) => 4', 'math'],
 
     // comparisons + logic
-    ['=',        2, 'Numeric equality.',        '(= 3 3) => #t',        'compare'],
-    ['<',        2, 'Less than.',               '(< 1 2) => #t',        'compare'],
-    ['>',        2, 'Greater than.',            '(> 2 1) => #t',        'compare'],
-    ['<=',       2, 'Less than or equal.',      '(<= 3 3) => #t',       'compare'],
-    ['>=',       2, 'Greater than or equal.',   '(>= 3 3) => #t',       'compare'],
+    ['=',        [1, Infinity], 'Numeric equality across the whole chain. R7RS §6.2.6.',        '(= 1 1 2) => #f',      'compare'],
+    ['<',        [1, Infinity], 'Strictly increasing across the whole chain.',                  '(< 1 2 3) => #t',      'compare'],
+    ['>',        [1, Infinity], 'Strictly decreasing across the whole chain.',                  '(> 3 2 1) => #t',      'compare'],
+    ['<=',       [1, Infinity], 'Non-decreasing across the whole chain.',                       '(<= 1 1 2) => #t',     'compare'],
+    ['>=',       [1, Infinity], 'Non-increasing across the whole chain.',                       '(>= 2 2 1) => #t',     'compare'],
     ['not',      1, 'Logical negation of #f/#t.','(not #f) => #t',      'logic'],
     ['=?',       2, 'Smart equality — numbers/strings by value, lists deep, symbols by name.', "(=? '(1 2) '(1 2)) => #t", 'compare'],
     ['eq?',      2, 'Reference / structural equality.',    '(eq? 3 3) => #t',   'compare'],
@@ -1028,6 +1489,8 @@ function registerBaseMetadata() {
     ['cons',    2,             'Prepend a to list b. (cons 1 (list 2 3)) → (1 2 3).', '(cons 1 (list 2 3)) => (1 2 3)', 'list'],
     ['car',     1,             'The first element of a non-empty list.',           '(car (list 1 2 3)) => 1',           'list'],
     ['cdr',     1,             'Everything but the first element.',                '(cdr (list 1 2 3)) => (2 3)',       'list'],
+    ['set-car!', 2,            '(set-car! pair obj) — replace the first element IN PLACE. R7RS §6.4.', '(let ((p (cons 1 2))) (set-car! p 9) p) => (9 . 2)', 'list'],
+    ['set-cdr!', 2,            '(set-cdr! pair obj) — replace the tail IN PLACE. R7RS §6.4.',          '(let ((p (cons 1 2))) (set-cdr! p 3) p) => (1 . 3)', 'list'],
     ['cadr',    1,             'The second element. Alias for (car (cdr x)).',     '(cadr (list 1 2 3)) => 2',          'list'],
     ['caddr',   1,             'The third element. Alias for (car (cdr (cdr x))).', '(caddr (list 1 2 3)) => 3',         'list'],
     ['length',  1,             'How many elements in the list.',                   '(length (list 1 2 3)) => 3',        'list'],
@@ -1038,14 +1501,14 @@ function registerBaseMetadata() {
     ['last',    1,             'Last element.',                                    '(last (list 1 2 3)) => 3',          'list'],
     ['nth',     2,             '(nth lst i) — the i-th element (0-indexed).',      '(nth (list 10 20 30) 1) => 20',     'list'],
     ['list-ref',2,             '(list-ref lst i) — R7RS spelling for nth.',        '(list-ref (list 10 20 30) 1) => 20','list'],
-    ['member',  2,             '(member x lst) → tail beginning at x, or #f.',     "(member 2 '(1 2 3)) => (2 3)",      'list'],
-    ['assoc',   2,             '(assoc key alist) — first pair whose car equals key, or #f.', "(assoc 'a '((a 1)(b 2))) => (a 1)", 'list'],
+    ['member',  [2, 3],        '(member x lst [compare]) → tail beginning at x, or #f. compare replaces equal?.', "(member 2 '(1 2 3)) => (2 3)",      'list'],
+    ['assoc',   [2, 3],        '(assoc key alist [compare]) — first pair whose car equals key, or #f.', "(assoc 'a '((a 1)(b 2))) => (a 1)", 'list'],
     ['make-list', 2,           '(make-list n v) → list of length n filled with v.', '(make-list 3 0) => (0 0 0)',       'list'],
     ['list-set', 3,            '(list-set lst i v) → a NEW list with element i replaced.', '(list-set (list 1 2 3) 1 9) => (1 9 3)', 'list'],
     ['take',    2,             '(take lst n) — first n elements.',                 '(take (list 1 2 3 4) 2) => (1 2)',  'list'],
     ['drop',    2,             '(drop lst n) — everything AFTER the first n.',     '(drop (list 1 2 3 4) 2) => (3 4)',  'list'],
     ['zip',     2,             'Pair up two lists element-wise.',                  '(zip (list 1 2) (list 3 4)) => ((1 3) (2 4))', 'list'],
-    ['sort',    2,             '(sort lst less?) — stable ascending sort.',        '(sort (list 3 1 2) <) => (1 2 3)',  'list'],
+    ['sort',    2,             '(sort seq less?) — stable ascending sort of a list or vector; returns the same kind.', '(sort (list 3 1 2) <) => (1 2 3)',  'list'],
     ['argmin',  1,             'Index of the smallest number in the list.',        '(argmin (list 5 2 8 2)) => 1',      'list'],
 
     // higher-order — the ones the REPL beginner reaches for
@@ -1057,17 +1520,17 @@ function registerBaseMetadata() {
     ['any',      2,            '#t if pred is truthy for some element.',           '(any odd? (list 2 4 5)) => #t',     'higher-order'],
     ['every',    2,            '#t if pred is truthy for every element.',          '(every odd? (list 1 3 5)) => #t',   'higher-order'],
     ['count',    2,            'How many elements satisfy pred.',                  '(count odd? (list 1 2 3 4)) => 2',  'higher-order'],
-    ['list-index', 2,          'Index of the first element where pred is truthy, or #f.', '(list-index odd? (list 2 4 5)) => 2', 'higher-order'],
+    ['list-index', [2, Infinity], 'Index of the first step where pred is truthy across one or more parallel lists, or #f. SRFI-1.', '(list-index odd? (list 2 4 5)) => 2', 'higher-order'],
 
     // strings
     ['string-append',  [0, Infinity], 'Concatenate any number of strings.',                  '(string-append "hi" " " "there") => "hi there"', 'string'],
     ['string-length',  1,             'Character count.',                                    '(string-length "abc") => 3',            'string'],
     ['string-ref',     2,             '(string-ref s i) — the i-th character.',              '(string-ref "abc" 1) => "b"',           'string'],
-    ['string=?',       2,             'String equality.',                                    '(string=? "a" "a") => #t',              'string'],
-    ['string-eq?',     2,             'String equality — same as string=?.',                 '(string-eq? "a" "a") => #t',            'string'],
+    ['string=?',      [1, Infinity], 'String equality across the whole chain. R7RS §6.7.', '(string=? "a" "a" "b") => #f',          'string'],
+    ['string-eq?',    [1, Infinity], 'String equality — Motoi-own alias for string=?.',      '(string-eq? "a" "a") => #t',            'string'],
     ['substring',     [2, 3],         '(substring s a [b]) — the part of s from index a up to (not including) b, or to the end if b is omitted. Conforms to R7RS §6.7: requires 0 <= a <= b <= (string-length s) and RAISES otherwise. It does not clamp. To TEST a prefix reach for string-prefix?, which cannot go out of range; to TRUNCATE to at most n characters write (substring s 0 (min n (string-length s))).', '(substring "hello" 1 4) => "ell"',      'string'],
     ['number->string',[1, 2],         '(number->string n [radix]) — number to string.',      '(number->string 255 16) => "ff"',       'string'],
-    ['string->number',[1, 2],         '(string->number s [radix]) — parse a number.',        '(string->number "42") => 42',           'string'],
+    ['string->number',[1, 2],         '(string->number s [radix]) — parse a number. The WHOLE string must be a number, otherwise #f. Reads exact rationals.', '(string->number "1/2") => 1/2',         'string'],
 
     // I/O
     ['display', 1, 'Print value to stdout (strings unquoted). Returns void.', '(display "hi") ; prints hi',  'io'],
