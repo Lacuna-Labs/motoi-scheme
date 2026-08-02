@@ -105,6 +105,10 @@ export function installLibs(env, opts = {}) {
   runInstaller('module/math-advanced/eng',           () => installEng(env))
   runInstaller('module/math-advanced/ops',           () => installOps(env))
 
+  // Drawing-primitives stack (stages 1–5) is wired in the CORE tier via
+  // installCore(env) → core/index.js (so the CLI's makeCoreEnv sees it).
+  // Do NOT re-wire it here.
+
   const total = modules.reduce((s, m) => s + m.verbs, 0)
   const failed = modules.filter((m) => !m.ok)
 
