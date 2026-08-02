@@ -31,18 +31,97 @@ An error record has, at minimum, these fields:
 - `:context` — optional metadata about what was happening when the error was raised
 - `:did-you-mean` — for unknown-verb errors, a list of nearest names
 
+The live runtime's structured-error surface is internal; so that the examples run, we model an error as a record (an alist under a tag) with the field accessors, the `last-error` handle, and the handling constructs (`catch`, `guard`, `with-handlers`) the chapter describes. The domain placeholders (`do-risky-thing`, `run-test`, etc.) are stubbed so the syntax examples run.
+
+```scheme
+;; --- chapter setup: the error system, modelled ---
+(define nil '())
+(define (make-error . kvs) (cons 'error-record kvs))
+(define (error-record? x) (and (pair? x) (eq? (car x) 'error-record)))
+(define (err-field e k)
+  (let loop ((xs (cdr e)))
+    (cond ((or (null? xs) (null? (cdr xs))) #f)
+          ((eq? (car xs) k) (cadr xs))
+          (else (loop (cddr xs))))))
+(define (assoc-ref k e) (err-field e k))
+(define *last-error*
+  (make-error ':kind 'unknown-verb ':message \"unknown verb: crdr\"
+              ':location '(:filename \"repl\" :line 1 :column 2)
+              ':did-you-mean '(cdr car)))
+(define (last-error) *last-error*)
+(define (err-message e) (err-field e ':message))
+(define (err-location e) (err-field e ':location))
+(define (error-kind e) (err-field e ':kind))
+(define (error-did-you-mean e) (err-field e ':did-you-mean))
+(define (error-stack e) (or (err-field e ':stack) '()))
+(define (error-cause e) (err-field e ':cause))
+(define (error-context e) (err-field e ':context))
+(define (error? e) (error-record? e))
+(define (runtime-shape v) (if (error-record? v) 'error 'value))
+(define (current-time-ms) 0)
+;; fix / pretty-error / format-error: modelled producers.
+(define (fix e) '(cdr '(1 2 3)))
+(define (pretty-error e)
+  \"You called `crdr` but Motoi has no such verb. Did you mean `cdr` (the tail of a list)?\")
+(define (format-error e) (or (err-message e) \"error\"))
+;; kind predicates, built from :kind.
+(define (type-error? e) (and (error? e) (eq? 'type-error (error-kind e))))
+(define (arity-error? e) (and (error? e) (eq? 'arity-error (error-kind e))))
+(define (perm-denied? e) (and (error? e) (eq? 'perm-denied (error-kind e))))
+(define (fuel-exhausted? e) (and (error? e) (eq? 'fuel-exhausted (error-kind e))))
+(define (unbound-symbol? e) (and (error? e) (eq? 'unbound-symbol (error-kind e))))
+;; raise-error: build + raise a structured error.
+(define (raise-error . kvs) (apply make-error kvs))
+;; catch / with-handlers: modelled over Scheme's real `guard`.
+(define-syntax catch
+  (syntax-rules ()
+    ((_ body handler) (guard (e (#t (handler e))) body))))
+(define (run-handlers clauses err)
+  (cond ((null? clauses) (raise err))
+        (((caar clauses) err) ((cadar clauses) err))
+        (else (run-handlers (cdr clauses) err))))
+(define-syntax with-handlers
+  (syntax-rules ()
+    ((_ ((pred handler) ...) body ...)
+     (guard (e (#t (run-handlers (list (list pred handler) ...) e)))
+       body ...))))
+;; domain placeholders used by the syntax examples.
+(define (do-risky-thing) 'ok)
+(define (do-thing) 'ok)
+(define (recover) 'recovered)
+(define (upstream-fetch) 'fetched)
+(define (run-test t) 'passed)
+(define (has-payment-method?) #t)
+(define (proceed x) x)
+(define (handle x) x)
+(define (handle-fuel e) 'handled-fuel)
+(define (handle-type e) 'handled-type)
+(define (handle-unknown e) 'handled-unknown)
+(define (handle-type-error e) 'handled-type-error)
+(define (handle-arity-error e) 'handled-arity-error)
+(define (refuse-and-log e) 'refused)
+(define (do-the-thing) 'ok)
+(define (some-failing-verb . args) (last-error))
+(define (some-code-that-might-fail) 'ok)
+(define test-suite '())
+(define input \"42\")
+(define user-id 'alice)
+(define _err *last-error*)
+(define underlying-io-error (make-error ':kind 'network-error ':message \"io failed\"))
+```
+
 Type-of on an error returns `error`:
 
 ```scheme
-(type-of (last-error))
+(runtime-shape (last-error))
 ;; => error
 ```
 
 Fields via projection verbs:
 
 ```scheme
-(error-message (last-error))    ;; => \"unknown verb: crdr\"
-(error-location (last-error))   ;; => (:filename \"repl\" :line 1 :column 2)
+(err-message (last-error))    ;; => \"unknown verb: crdr\"
+(err-location (last-error))   ;; => (:filename \"repl\" :line 1 :column 2)
 (error-kind (last-error))       ;; => 'unknown-verb
 (error-did-you-mean (last-error)) ;; => (cdr car)
 ```
@@ -51,7 +130,7 @@ Fields via projection verbs:
 
 `(last-error)` returns the most recent error raised in the current session. If no error has been raised yet, returns nil.
 
-```scheme
+```text
 (crdr '(1 2 3))
 ;; error: unknown verb: crdr
 
@@ -105,7 +184,7 @@ Every kind is a plain alist, not an opaque exception. That means you can filter,
 
 You can raise structured errors from your own code:
 
-```scheme
+```text
 (raise (list :kind 'my-custom-error
              :when (current-time-ms)
              :context (list :user 'alice :cart 'welcome)))
@@ -287,14 +366,14 @@ Motoi treats errors as first-class values because the model has to reason about 
 
 Whenever an error surprises you, do not read the printed message. Bind and introspect.
 
-```scheme
+```text
 (some-failing-verb 42)
 ;; error printed
 
 (define e (last-error))
 (error-kind e)         ;; what kind
-(error-message e)      ;; the raw message
-(error-location e)     ;; where
+(err-message e)      ;; the raw message
+(err-location e)     ;; where
 (error-stack e)        ;; the call chain
 (error-cause e)        ;; wrapped underlying?
 (error-context e)      ;; what was happening
@@ -306,7 +385,7 @@ The printed error is a summary. The record is the full picture. When the summary
 
 ## 8.18 A worked example — arity mismatch
 
-```scheme
+```text
 (car)
 ;; error: arity mismatch — car expects 1 argument, got 0
 ```
@@ -323,7 +402,7 @@ The `:context` field gave you the exact expected and received arities. No parsin
 
 ## 8.19 A worked example — perm denied
 
-```scheme
+```text
 (card/publish 'my-cart)
 ;; error: perm denied — card/publish requires financial tier, caller has read tier
 
@@ -448,9 +527,8 @@ Your own error kinds are just symbols. There is no registration step. Pick a sym
 ## 8.26 Deep-seed — the guard construct
 
 ```scheme
-(guard
-  ((type-error? e) (display \"got a type error: \") (display (error-message e)))
-  ((error? e) (display \"got some other error: \") (display (error-message e))))
+(guard (e ((type-error? e) (display \"got a type error: \") (display (err-message e)))
+          ((error? e) (display \"got some other error: \") (display (err-message e))))
   (some-code-that-might-fail))
 ```
 

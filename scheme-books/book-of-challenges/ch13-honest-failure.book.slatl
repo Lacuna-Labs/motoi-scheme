@@ -23,6 +23,71 @@ This is what lets the runtime operate in the real world. Services time out. APIs
 
 ---
 
+## The instrument bench
+
+Every drill in this chapter leans on a small bench of *fallible instruments* — pure functions that stand in for real services. Each can return a value, `'nan` when there's no answer, or an `(escalate ...)` shape on a structural fault. The wall clock is real (`(time/now)` gives milliseconds); the rest are deterministic stand-ins so the drills run the same way every time. Define the bench once and every later program can use it.
+
+```scheme
+;; --- Instrument bench for honest-failure drills (pure Scheme, deterministic). ---
+;; Each stands in for a fallible instrument: returns a value, 'nan, or (escalate ...).
+
+;; wall-clock seconds since epoch (real): (time/now) is ms
+(define (clock/unix-now)
+  (quotient (time/now) 1000))
+
+;; a monotonically-derived \"sample epoch day\" -- stands in for a calendar date
+;; without needing a date string; returns a day-count number
+(define (sample/epoch-day)
+  (quotient (clock/unix-now) 86400))
+
+;; parse a stamp string \"YYYY-MM-DD...\" into a coarse second count; 'nan if unparseable
+(define (clock/parse-stamp s)
+  (if (and (string? s) (>= (string-length s) 10)
+           (string->number (substring s 0 4)))
+      (let ((y (string->number (substring s 0 4)))
+            (m (string->number (substring s 5 7)))
+            (d (string->number (substring s 8 10))))
+        (if (and y m d)
+            (* 86400 (+ (* y 365) (* m 30) d))
+            'nan))
+      'nan))
+
+;; a fresh deterministic token id
+(define token/counter 0)
+(define (token/fresh-id)
+  (set! token/counter (+ token/counter 1))
+  (string-append \"id-\" (number->string (+ 46000 token/counter))))
+
+;; a pure hash to a fixed-width hex-ish string
+(define (digest/hash s)
+  (let ((str (if (string? s) s (number->string s))))
+    (let loop ((i 0) (h 5381))
+      (if (>= i (string-length str))
+          (string-append \"h\" (number->string (modulo h 1000000)))
+          (loop (+ i 1)
+                (modulo (+ (* h 33) (char->integer (string-ref str i))) 999983))))))
+
+;; a pure slug: downcase, spaces/underscores -> dashes
+(define (text/slug s)
+  (if (string? s)
+      (string-downcase
+        (list->string
+          (map (lambda (c) (if (or (char=? c #\\space) (char=? c #\\_)) #\\- c))
+               (string->list (string-trim s)))))
+      'nan))
+
+;; remember a value under a key (real cortex write)
+(define (cortex/remember k v)
+  (cortex/write k v)
+  (list 'stored k))
+
+\"bench ready\"
+```
+
+The clock is genuine; `sample/epoch-day` is a day counter (no calendar needed); the hash, slug, token, and stamp parser are pure. `cortex/remember` writes to real cortex memory. Everything below reads from this bench.
+
+---
+
 ## Guarding One Call
 
 Start simple: one wired verb, one honest check. The verb might succeed, or it might return `'nan`. We call the verb, bind the result, check it, and branch.
@@ -31,7 +96,7 @@ The core idea: never assume. Bind the result to a name, then ask: did this work?
 
 ```scheme
 ;; Call a verb, check for 'nan, return a default if it failed
-(let ((today (system/date-today)))
+(let ((today (sample/epoch-day)))
   (if (eq? today 'nan)
       \"unknown-date\"
       today))
@@ -41,7 +106,7 @@ That's the pattern: bind, check, branch. Let's make it do real work.
 
 ```scheme
 ;; Fetch current Unix timestamp; if it fails, return a sentinel
-(let ((ts (time/unix-now)))
+(let ((ts (clock/unix-now)))
   (if (eq? ts 'nan)
       0  ;; sentinel: we don't know when \"now\" is
       ts))
@@ -51,7 +116,7 @@ Now layer in a second check: what if the result isn't `'nan`, but it's an escala
 
 ```scheme
 ;; Check for both 'nan and escalate, return a safe default
-(let ((ts (time/unix-now)))
+(let ((ts (clock/unix-now)))
   (cond
     ((eq? ts 'nan) 0)
     ((and (pair? ts) (eq? (car ts) 'escalate))
@@ -68,7 +133,7 @@ That's the honest guard: `'nan` means value failure, `escalate` means structural
       (and (pair? x) (eq? (car x) 'escalate))))
 
 ;; Use it to guard a call
-(let ((ts (time/unix-now)))
+(let ((ts (clock/unix-now)))
   (if (failed? ts)
       0
       ts))
@@ -88,9 +153,9 @@ One verb fails — try another. This is a fallback chain: attempt the first opti
   (or (eq? x 'nan)
       (and (pair? x) (eq? (car x) 'escalate))))
 
-(let ((ts (time/unix-now)))
+(let ((ts (clock/unix-now)))
   (if (failed? ts)
-      (let ((fallback (time/parse-iso8601 \"2025-01-01T00:00:00Z\")))
+      (let ((fallback (clock/parse-stamp \"2025-01-01T00:00:00Z\")))
         (if (failed? fallback)
             0  ;; both failed; sentinel
             fallback))
@@ -105,8 +170,8 @@ Nested `let` and `if` — it works, but it's a ladder. Let's make it cleaner wit
   (or (eq? x 'nan)
       (and (pair? x) (eq? (car x) 'escalate))))
 
-(let* ((primary (time/unix-now))
-       (secondary (time/parse-iso8601 \"2025-01-01T00:00:00Z\")))
+(let* ((primary (clock/unix-now))
+       (secondary (clock/parse-stamp \"2025-01-01T00:00:00Z\")))
   (cond
     ((not (failed? primary)) primary)
     ((not (failed? secondary)) secondary)
@@ -121,8 +186,8 @@ Better. Now extend it: three fallbacks.
   (or (eq? x 'nan)
       (and (pair? x) (eq? (car x) 'escalate))))
 
-(let* ((opt1 (time/unix-now))
-       (opt2 (time/parse-iso8601 \"2025-06-15T12:00:00Z\"))
+(let* ((opt1 (clock/unix-now))
+       (opt2 (clock/parse-stamp \"2025-06-15T12:00:00Z\"))
        (opt3 1609459200))  ;; known Unix timestamp as final fallback
   (cond
     ((not (failed? opt1)) opt1)
@@ -144,8 +209,8 @@ Sometimes there's no good default. When every option fails, the honest move is t
   (or (eq? x 'nan)
       (and (pair? x) (eq? (car x) 'escalate))))
 
-(let* ((opt1 (time/unix-now))
-       (opt2 (time/parse-iso8601 \"2025-12-25T00:00:00Z\")))
+(let* ((opt1 (clock/unix-now))
+       (opt2 (clock/parse-stamp \"2025-12-25T00:00:00Z\")))
   (cond
     ((not (failed? opt1)) opt1)
     ((not (failed? opt2)) opt2)
@@ -163,7 +228,7 @@ Let's use this in a real scenario: computing a relative timestamp. We need \"now
       (and (pair? x) (eq? (car x) 'escalate))))
 
 (define (days-since-epoch)
-  (let ((now (time/unix-now))
+  (let ((now (clock/unix-now))
         (epoch 0))  ;; Unix epoch: Jan 1, 1970
     (if (failed? now)
         (list 'escalate 'time-unavailable 'cannot-compute-delta)
@@ -187,8 +252,8 @@ Now compose two verbs: the output of the first becomes the input to the second. 
   (or (eq? x 'nan)
       (and (pair? x) (eq? (car x) 'escalate))))
 
-(let* ((now (time/unix-now))
-       (target (time/parse-iso8601 \"2026-01-01T00:00:00Z\")))
+(let* ((now (clock/unix-now))
+       (target (clock/parse-stamp \"2026-01-01T00:00:00Z\")))
   (cond
     ((failed? now)
      (list 'escalate 'time-unavailable 'now-failed))
@@ -213,8 +278,8 @@ Let's add a third stage: format the result as a human-readable string.
   (or (eq? x 'nan)
       (and (pair? x) (eq? (car x) 'escalate))))
 
-(let* ((now (time/unix-now))
-       (target (time/parse-iso8601 \"2026-07-04T00:00:00Z\")))
+(let* ((now (clock/unix-now))
+       (target (clock/parse-stamp \"2026-07-04T00:00:00Z\")))
   (cond
     ((failed? now)
      (list 'escalate 'time-unavailable 'now-failed))
@@ -227,7 +292,7 @@ Let's add a third stage: format the result as a human-readable string.
           (list 'escalate 'invalid-delta 'target-in-past))
          (else
           (let* ((days (quotient delta 86400))
-                 (slug (system/slugify (string-append (number->string days) \" days until target\"))))
+                 (slug (text/slug (string-append (number->string days) \" days until target\"))))
             (if (failed? slug)
                 (list 'escalate 'slugify-failed 'formatting-error)
                 slug))))))))
@@ -250,7 +315,7 @@ Mastery means choosing the right recovery strategy. Here's one: filter the list,
       (and (pair? x) (eq? (car x) 'escalate))))
 
 (define (parse-timestamp ts-string)
-  (time/parse-iso8601 ts-string))
+  (clock/parse-stamp ts-string))
 
 (define (valid-timestamp? ts-string)
   (let ((parsed (parse-timestamp ts-string)))
@@ -278,7 +343,7 @@ Now extend it: compute the average of the parsed timestamps (as Unix seconds), b
       (and (pair? x) (eq? (car x) 'escalate))))
 
 (define (parse-timestamp ts-string)
-  (time/parse-iso8601 ts-string))
+  (clock/parse-stamp ts-string))
 
 (define (valid-timestamp? ts-string)
   (let ((parsed (parse-timestamp ts-string)))
@@ -321,19 +386,19 @@ Each stage can fail. We check every one.
   (or (eq? x 'nan)
       (and (pair? x) (eq? (car x) 'escalate))))
 
-(let* ((uuid (system/uuid-v4))
+(let* ((uuid (token/fresh-id))
        (hashed (if (failed? uuid)
                    (list 'escalate 'uuid-failed 'stage-1)
-                   (system/sha256 uuid)))
+                   (digest/hash uuid)))
        (slugged (if (failed? hashed)
                     hashed  ;; propagate prior failure
-                    (let ((slug (system/slugify hashed)))
+                    (let ((slug (text/slug hashed)))
                       (if (failed? slug)
                           (list 'escalate 'slugify-failed 'stage-3)
                           slug))))
        (ts (if (failed? slugged)
                slugged  ;; propagate prior failure
-               (let ((now (time/unix-now)))
+               (let ((now (clock/unix-now)))
                  (if (failed? now)
                      (list 'escalate 'time-failed 'stage-4)
                      now)))))
@@ -358,10 +423,10 @@ It works, but it's verbose. Let's refactor with a helper that short-circuits on 
       (f x)))
 
 ;; Five-stage pipeline with short-circuit helper
-(let* ((uuid (system/uuid-v4))
-       (hashed (then (lambda (u) (system/sha256 u)) uuid))
-       (slugged (then (lambda (h) (system/slugify h)) hashed))
-       (ts (then (lambda (s) (time/unix-now)) slugged))
+(let* ((uuid (token/fresh-id))
+       (hashed (then (lambda (u) (digest/hash u)) uuid))
+       (slugged (then (lambda (h) (text/slug h)) hashed))
+       (ts (then (lambda (s) (clock/unix-now)) slugged))
        (result (then (lambda (t) (list 'result slugged t)) ts)))
   result)
 ```
@@ -379,9 +444,9 @@ Now a harder variant: fetch data from a wired verb, transform it, and store the 
 (define (then f x)
   (if (failed? x) x (f x)))
 
-(let* ((uuid (system/uuid-v4))
-       (hashed (then (lambda (u) (system/sha256 u)) uuid))
-       (ts (then (lambda (h) (time/unix-now)) hashed))
+(let* ((uuid (token/fresh-id))
+       (hashed (then (lambda (u) (digest/hash u)) uuid))
+       (ts (then (lambda (h) (clock/unix-now)) hashed))
        (stored (then (lambda (t)
                        (cortex/remember \"pipeline-result\"
                                         (list 'hash hashed 'timestamp t)))
@@ -517,14 +582,14 @@ Sometimes a stage itself is a multi-step pipeline. You have an outer route and a
 
 ;; Inner pipeline: hash a string, then slugify the hash
 (define (hash-and-slug s)
-  (let* ((hashed (system/sha256 s))
-         (slugged (then (lambda (h) (system/slugify h)) hashed)))
+  (let* ((hashed (digest/hash s))
+         (slugged (then (lambda (h) (text/slug h)) hashed)))
     slugged))
 
 ;; Outer pipeline: generate UUID, pass it to inner pipeline, get timestamp
-(let* ((uuid (system/uuid-v4))
+(let* ((uuid (token/fresh-id))
        (processed (then hash-and-slug uuid))
-       (ts (then (lambda (p) (time/unix-now)) processed))
+       (ts (then (lambda (p) (clock/unix-now)) processed))
        (result (then (lambda (t) (list 'final processed t)) ts)))
   result)
 ```
@@ -544,17 +609,17 @@ Now nest deeper: three levels.
 
 ;; Inner: slugify a string
 (define (slugify-safe s)
-  (system/slugify s))
+  (text/slug s))
 
 ;; Middle: hash then slugify
 (define (hash-and-slug s)
-  (let ((hashed (system/sha256 s)))
+  (let ((hashed (digest/hash s)))
     (then slugify-safe hashed)))
 
 ;; Outer: UUID -> hash-and-slug -> timestamp
-(let* ((uuid (system/uuid-v4))
+(let* ((uuid (token/fresh-id))
        (processed (then hash-and-slug uuid))
-       (ts (then (lambda (p) (time/unix-now)) processed))
+       (ts (then (lambda (p) (clock/unix-now)) processed))
        (result (then (lambda (t) (list 'final processed t)) ts)))
   result)
 ```
@@ -585,33 +650,33 @@ Each stage can fail. We handle all of them.
 
 ;; Simulated event (in real code, this would come from a webhook or queue)
 (define event
-  '((id . \"evt-12345\")
-    (timestamp . \"2025-01-15T10:30:00Z\")
-    (type . \"order.created\")))
+  '((id \"evt-12345\")
+    (timestamp \"2025-01-15T10:30:00Z\")
+    (type \"order.created\")))
 
 ;; Extract a field from an alist
 (define (get-field alist key)
   (let ((pair (assoc key alist)))
     (if pair
-        (cdr pair)
+        (cadr pair)
         (list 'escalate 'missing-field key))))
 
 ;; Parse ISO timestamp
 (define (parse-ts ts-string)
   (if (string? ts-string)
-      (time/parse-iso8601 ts-string)
+      (clock/parse-stamp ts-string)
       (list 'escalate 'invalid-input 'not-a-string)))
 
 ;; Compute time delta
 (define (delta-from-now event-ts)
-  (let ((now (time/unix-now)))
+  (let ((now (clock/unix-now)))
     (if (failed? now)
         now
         (- now event-ts))))
 
 ;; The pipeline
 (let* ((event-id (get-field event 'id))
-       (hashed-id (then (lambda (id) (system/sha256 id)) event-id))
+       (hashed-id (then (lambda (id) (digest/hash id)) event-id))
        (ts-string (get-field event 'timestamp))
        (event-ts (then parse-ts ts-string))
        (delta (then delta-from-now event-ts))
@@ -643,9 +708,9 @@ Sometimes you need data from several independent sources. None depends on the ot
   (or (eq? x 'nan)
       (and (pair? x) (eq? (car x) 'escalate))))
 
-(let* ((uuid (system/uuid-v4))
-       (ts (time/unix-now))
-       (date (system/date-today)))
+(let* ((uuid (token/fresh-id))
+       (ts (clock/unix-now))
+       (date (sample/epoch-day)))
   (cond
     ((failed? uuid)
      (list 'escalate 'uuid-failed 'source-1))
@@ -667,9 +732,9 @@ Now extend it: some calls are optional. We want them if they succeed, but we don
   (or (eq? x 'nan)
       (and (pair? x) (eq? (car x) 'escalate))))
 
-(let* ((required-uuid (system/uuid-v4))
-       (required-ts (time/unix-now))
-       (optional-date (system/date-today)))
+(let* ((required-uuid (token/fresh-id))
+       (required-ts (clock/unix-now))
+       (optional-date (sample/epoch-day)))
   (cond
     ((failed? required-uuid)
      (list 'escalate 'uuid-failed 'required))
@@ -709,7 +774,7 @@ Here's a retry helper. It attempts a thunk (a zero-argument function). If it fai
               result)))))  ;; success, return it
 
 ;; Example: retry getting current timestamp up to 3 times
-(retry (lambda () (time/unix-now)) 3)
+(retry (lambda () (clock/unix-now)) 3)
 ```
 
 The loop tracks remaining attempts and the last result. Each iteration calls the thunk. If it succeeds, we return immediately. If it fails, we decrement the counter and try again. When we run out of attempts, we return the last failure.
@@ -732,10 +797,10 @@ Use this for a real route: fetch a UUID, hash it, retry if hashing fails.
               (loop (- remaining 1) result)
               result)))))
 
-(let ((uuid (system/uuid-v4)))
+(let ((uuid (token/fresh-id)))
   (if (failed? uuid)
       uuid
-      (retry (lambda () (system/sha256 uuid)) 3)))
+      (retry (lambda () (digest/hash uuid)) 3)))
 ```
 
 Generate a UUID (no retry on that; it either works or it doesn't). Then retry hashing up to 3 times. If all retries fail, we propagate the failure.
@@ -753,7 +818,7 @@ Sometimes you can't get the ideal data, but you can compute a reasonable fallbac
       (and (pair? x) (eq? (car x) 'escalate))))
 
 (define (days-until target-unix)
-  (let ((now (time/unix-now)))
+  (let ((now (clock/unix-now)))
     (if (failed? now)
         (let ((approx-now 1704067200))  ;; fallback: known recent timestamp
           (list 'degraded
@@ -782,15 +847,15 @@ You have a batch of items. You want to process all of them, but some might fail.
       (and (pair? x) (eq? (car x) 'escalate))))
 
 (define (hash-string s)
-  (system/sha256 s))
+  (digest/hash s))
 
 (define (process-batch items)
   (let loop ((remaining items)
              (successes '())
              (failures '()))
     (if (null? remaining)
-        (list 'successes (reverse successes)
-              'failures (reverse failures))
+        (list (list 'successes (reverse successes))
+              (list 'failures (reverse failures)))
         (let* ((item (car remaining))
                (result (hash-string item)))
           (if (failed? result)
@@ -815,15 +880,15 @@ Now extend it: after processing, decide whether to escalate based on the success
       (and (pair? x) (eq? (car x) 'escalate))))
 
 (define (hash-string s)
-  (system/sha256 s))
+  (digest/hash s))
 
 (define (process-batch items)
   (let loop ((remaining items)
              (successes '())
              (failures '()))
     (if (null? remaining)
-        (list 'successes (reverse successes)
-              'failures (reverse failures))
+        (list (list 'successes (reverse successes))
+              (list 'failures (reverse failures)))
         (let* ((item (car remaining))
                (result (hash-string item)))
           (if (failed? result)
@@ -915,9 +980,9 @@ We've built several helpers: `failed?`, `then`, `retry`. Now compose them into a
   (if (failed? x) fallback x))
 
 ;; Use the toolkit: UUID -> hash with retry -> fallback if all retries fail
-(let* ((uuid (system/uuid-v4))
+(let* ((uuid (token/fresh-id))
        (hashed (then (lambda (u)
-                       (retry (lambda () (system/sha256 u)) 3))
+                       (retry (lambda () (digest/hash u)) 3))
                      uuid))
        (final (or-else hashed \"fallback-hash\")))
   final)
@@ -949,14 +1014,14 @@ Now build a longer route with the toolkit.
 (define (or-else x fallback)
   (if (failed? x) fallback x))
 
-(let* ((uuid (system/uuid-v4))
+(let* ((uuid (token/fresh-id))
        (hashed (then (lambda (u)
-                       (retry (lambda () (system/sha256 u)) 3))
+                       (retry (lambda () (digest/hash u)) 3))
                      uuid))
        (slugged (then (lambda (h)
-                        (system/slugify h))
+                        (text/slug h))
                       hashed))
-       (ts (time/unix-now))
+       (ts (clock/unix-now))
        (final-ts (or-else ts 0))
        (result (if (failed? slugged)
                    (list 'escalate 'pipeline-failed 'slug-stage)
@@ -982,7 +1047,7 @@ Recursion is powerful, but every recursive call is an opportunity for failure. L
   (cond
     ((null? structure) '())
     ((string? structure)
-     (let ((hashed (system/sha256 structure)))
+     (let ((hashed (digest/hash structure)))
        (if (failed? hashed)
            hashed  ;; propagate failure
            hashed)))
@@ -1013,12 +1078,12 @@ Now a harder variant: process a tree where each node has a label and children. H
   (cond
     ((null? tree) '())
     ((string? tree)
-     (system/sha256 tree))  ;; leaf node: hash it
+     (digest/hash tree))  ;; leaf node: hash it
     ((pair? tree)
      (let* ((label (car tree))
             (children (cdr tree))
             (hashed-label (if (string? label)
-                              (system/sha256 label)
+                              (digest/hash label)
                               label)))
        (if (failed? hashed-label)
            hashed-label
@@ -1056,7 +1121,7 @@ Let's do both.
         acc
         (let* ((num (car remaining))
                (str (number->string num))
-               (hashed (system/sha256 str)))
+               (hashed (digest/hash str)))
           (if (failed? hashed)
               (list 'escalate 'hash-failed num)  ;; stop, return failure
               (loop (cdr remaining)
@@ -1083,7 +1148,7 @@ Accumulator pattern: loop through the list, hash each number (converted to strin
         (list 'result acc 'failed failed-count)
         (let* ((num (car remaining))
                (str (number->string num))
-               (hashed (system/sha256 str)))
+               (hashed (digest/hash str)))
           (if (failed? hashed)
               (loop (cdr remaining)
                     acc
@@ -1123,7 +1188,7 @@ What happens when the function can fail?
 
 ;; Example: fold over a list, hashing and concatenating strings
 (define (hash-and-concat acc s)
-  (let ((hashed (system/sha256 s)))
+  (let ((hashed (digest/hash s)))
     (if (failed? hashed)
         hashed
         (string-append acc hashed))))
@@ -1157,7 +1222,7 @@ Now a variant: fold that collects failures but keeps going.
                     errors))))))
 
 (define (hash-and-concat acc s)
-  (let ((hashed (system/sha256 s)))
+  (let ((hashed (digest/hash s)))
     (if (failed? hashed)
         hashed
         (string-append acc hashed))))
@@ -1192,15 +1257,15 @@ Each stage can fail. We check every one, propagate failures cleanly, and return 
   (if (failed? x) x (f x)))
 
 (let* (;; Stage 1: generate UUID
-       (uuid (system/uuid-v4))
+       (uuid (token/fresh-id))
        ;; Stage 2: hash it
-       (hashed (then (lambda (u) (system/sha256 u)) uuid))
+       (hashed (then (lambda (u) (digest/hash u)) uuid))
        ;; Stage 3: slugify the hash
-       (slugged (then (lambda (h) (system/slugify h)) hashed))
+       (slugged (then (lambda (h) (text/slug h)) hashed))
        ;; Stage 4: get current timestamp
-       (now (then (lambda (s) (time/unix-now)) slugged))
+       (now (then (lambda (s) (clock/unix-now)) slugged))
        ;; Stage 5: parse target date
-       (target (then (lambda (n) (time/parse-iso8601 \"2026-01-01T00:00:00Z\")) now))
+       (target (then (lambda (n) (clock/parse-stamp \"2026-01-01T00:00:00Z\")) now))
        ;; Stage 6: compute delta
        (delta (then (lambda (t) (- t now)) target))
        ;; Stage 7: store in cortex
@@ -1257,7 +1322,7 @@ Combine map and fold: map a fallible function over a list, then fold the results
 
 ;; Hash each string, then sum the hash lengths
 (let* ((strings '(\"alpha\" \"beta\" \"gamma\"))
-       (hashes (safe-map (lambda (s) (system/sha256 s)) strings)))
+       (hashes (safe-map (lambda (s) (digest/hash s)) strings)))
   (if (failed? hashes)
       hashes
       (safe-fold (lambda (acc h) (+ acc (string-length h))) 0 hashes)))
@@ -1280,7 +1345,7 @@ Two functions call each other. Each can fail. Propagate failures through both.
 (define (process-even n)
   (if (<= n 0)
       0
-      (let ((hashed (system/sha256 (number->string n))))
+      (let ((hashed (digest/hash (number->string n))))
         (if (failed? hashed)
             hashed
             (let ((next (process-odd (- n 1))))
@@ -1291,7 +1356,7 @@ Two functions call each other. Each can fail. Propagate failures through both.
 (define (process-odd n)
   (if (<= n 0)
       0
-      (let ((slugged (system/slugify (number->string n))))
+      (let ((slugged (text/slug (number->string n))))
         (if (failed? slugged)
             slugged
             (let ((next (process-even (- n 1))))
@@ -1317,8 +1382,8 @@ Sometimes failure isn't about verbs — it's about the *data*. A value is techni
       (and (pair? x) (eq? (car x) 'escalate))))
 
 (define (days-until-target target-iso)
-  (let* ((now (time/unix-now))
-         (target (time/parse-iso8601 target-iso)))
+  (let* ((now (clock/unix-now))
+         (target (clock/parse-stamp target-iso)))
     (cond
       ((failed? now)
        (list 'escalate 'time-unavailable 'now))
@@ -1354,30 +1419,30 @@ Process a nested JSON-like structure (represented as alists). Extract fields, ha
 (define (get-field alist key)
   (let ((pair (assoc key alist)))
     (if pair
-        (cdr pair)
+        (cadr pair)
         (list 'escalate 'missing-field key))))
 
 (define event
-  '((id . \"evt-99\")
-    (user . ((name . \"alice\")
-             (email . \"alice@example.com\")))
-    (timestamp . \"2025-02-10T14:00:00Z\")))
+  '((id \"evt-99\")
+    (user ((name \"alice\")
+             (email \"alice@example.com\")))
+    (timestamp \"2025-02-10T14:00:00Z\")))
 
 (let* ((event-id (get-field event 'id))
        (hashed-id (if (failed? event-id)
                       event-id
-                      (system/sha256 event-id)))
+                      (digest/hash event-id)))
        (user (get-field event 'user))
        (email (if (failed? user)
                   user
                   (get-field user 'email)))
        (hashed-email (if (failed? email)
                          email
-                         (system/sha256 email)))
+                         (digest/hash email)))
        (ts-string (get-field event 'timestamp))
        (ts (if (failed? ts-string)
                ts-string
-               (time/parse-iso8601 ts-string))))
+               (clock/parse-stamp ts-string))))
   (cond
     ((failed? hashed-id) hashed-id)
     ((failed? hashed-email) hashed-email)
@@ -1424,19 +1489,19 @@ The task: process a batch of events. For each event, extract the ID, hash it wit
 (define (get-field alist key)
   (let ((pair (assoc key alist)))
     (if pair
-        (cdr pair)
+        (cadr pair)
         (list 'escalate 'missing-field key))))
 
 (define (process-event event)
   (let* ((event-id (get-field event 'id))
          (hashed-id (if (failed? event-id)
                         event-id
-                        (retry (lambda () (system/sha256 event-id)) 3)))
+                        (retry (lambda () (digest/hash event-id)) 3)))
          (ts-string (get-field event 'timestamp))
          (ts (if (failed? ts-string)
                  ts-string
-                 (time/parse-iso8601 ts-string)))
-         (now (time/unix-now))
+                 (clock/parse-stamp ts-string)))
+         (now (clock/unix-now))
          (age (if (or (failed? ts) (failed? now))
                   (list 'escalate 'age-unavailable 'missing-time-data)
                   (- now ts)))
@@ -1455,8 +1520,8 @@ The task: process a batch of events. For each event, extract the ID, hash it wit
              (successes '())
              (failures '()))
     (if (null? remaining)
-        (list 'successes (reverse successes)
-              'failures (reverse failures))
+        (list (list 'successes (reverse successes))
+              (list 'failures (reverse failures)))
         (let ((result (process-event (car remaining))))
           (if (and (pair? result) (eq? (car result) 'success))
               (loop (cdr remaining)
@@ -1468,10 +1533,10 @@ The task: process a batch of events. For each event, extract the ID, hash it wit
 
 (define events
   (list
-   '((id . \"evt-100\") (timestamp . \"2025-01-10T10:00:00Z\"))
-   '((id . \"evt-101\") (timestamp . \"2025-01-11T11:00:00Z\"))
-   '((id . \"evt-102\") (timestamp . \"invalid-date\"))
-   '((id . \"evt-103\") (timestamp . \"2025-01-13T13:00:00Z\"))))
+   '((id \"evt-100\") (timestamp \"2025-01-10T10:00:00Z\"))
+   '((id \"evt-101\") (timestamp \"2025-01-11T11:00:00Z\"))
+   '((id \"evt-102\") (timestamp \"invalid-date\"))
+   '((id \"evt-103\") (timestamp \"2025-01-13T13:00:00Z\"))))
 
 (let* ((batch-result (process-batch events))
        (successes (cadr (assoc 'successes batch-result)))

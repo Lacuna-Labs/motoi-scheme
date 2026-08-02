@@ -11,194 +11,170 @@
     (:authored-at "2026-07-17"
      :authored-by "book-completion-orchestrator")
   :prose
-"# Chapter 3 — The export statement
+"# Chapter 3 — There is no export statement (but public vs private is real)
 
-Import brings verbs from another module into your program. Export is the other side — it says which of your own verbs are for other programs to use, and which are yours alone.
+Chapter 2 said Motoi has no `import`. Its mirror image: Motoi has no `export` either. In a module-having Scheme, `export` names which of a module's verbs the world may use and which stay private. Typing `(export greet farewell)` in Motoi yields `error: unbound symbol: export` — it is another dialect's word.
 
-The export list is a promise. When you export a verb, you have said to the world: *this verb, at this name, with this shape*. Downstream programs will use it. If you change it, they break. The export list is the module's public API, and everything about it should be deliberate.
+But the *idea* behind export — a public surface versus a private one — is real and useful, and Motoi expresses it with tools it does have: top-level `define` for the public surface, and lexical scope (`let`, internal `define`, closures) for the private interior. This chapter teaches that idea in Motoi's own terms, and marks the `export` form as a dialect boundary along the way.
 
-This chapter covers what to export, what not to export, and how the export list interacts with everything else in the module system.
+## 3.1 The dialect boundary, stated
 
-## 3.1 The plain export form
+In some Schemes you write a module wrapper with an export list:
 
-At its simplest, `export` names verbs.
+`(module manners (export greet farewell) (define (greet name) ...) ...)`
+
+Motoi has neither `module` nor `export`. You write your `define`s at the top level and they are simply available:
 
 ```scheme
-(module manners
-  (export greet farewell)
+(define (greet name)
+  (string-append \"Hello, \" name \".\"))
 
-  (define (greet name)
-    (string-append \"Hello, \" name \".\"))
+(define (farewell name)
+  (string-append \"Goodbye, \" name \".\"))
 
-  (define (farewell name)
-    (string-append \"Goodbye, \" name \".\")))
+(list (greet \"Alfred\") (farewell \"Alfred\"))
+;; ⇒ (\"Hello, Alfred.\" \"Goodbye, Alfred.\")
 ```
 
-`greet` and `farewell` are exported. Any other name defined in the module — say, a helper — is not exported. It stays inside the module's walls.
-
-The export form takes any number of names. You can put them all on one line, or one per line, or grouped. The parser does not care about the shape.
+No wrapper, no export list. The verbs exist because you defined them.
 
 ## 3.2 Public vs private, or why hiding is a kindness
 
-The distinction between exported and unexported verbs is the *public/private* distinction. Every module has some verbs it wants the world to see and some it uses internally to build the public ones.
-
-Making internals private is a kindness to your future self. If you export a helper called `heads-or-tails` because you needed it while debugging, and another program starts using it, you can no longer rename or refactor `heads-or-tails` without breaking that program. The helper is now part of your public API forever. This is a mistake most module authors make once and stop making after.
-
-The rule: **export the smallest set of verbs that makes your module useful.** If in doubt, do not export. It is easier to add an export later than to remove one.
-
-## 3.3 Exporting values, not just verbs
-
-Everything the module defines at the top level can be exported — verbs, constants, records, anything with a name.
+The distinction the `export` list *encoded* — public verbs versus internal helpers — still matters enormously. In Motoi you draw the line with scope instead of a list. A helper you nest inside another definition, or hide in a `let`, is private: nothing outside can reach it.
 
 ```scheme
-(module colors
-  (export red green blue color?)
+(define (flip-run count)
+  ;; heads-or-tails is PRIVATE — defined inside flip-run, invisible outside
+  (define (heads-or-tails n)
+    (if (< n 0.5) 'heads 'tails))
+  (let loop ((n count) (heads 0) (tails 0))
+    (if (= n 0)
+        (list :heads heads :tails tails)
+        (case (heads-or-tails (random))
+          ((heads) (loop (- n 1) (+ heads 1) tails))
+          ((tails) (loop (- n 1) heads (+ tails 1)))))))
 
-  (define red   '(1.0 0.0 0.0))
-  (define green '(0.0 1.0 0.0))
-  (define blue  '(0.0 0.0 1.0))
-
-  (define (color? c)
-    (and (list? c)
-         (= (length c) 3)
-         (every number? c))))
+(length (flip-run 50))
+;; ⇒ 4
 ```
 
-`red`, `green`, `blue` are values. `color?` is a verb. All four are exported. From another program:
+`heads-or-tails` is a private helper: it lives inside `flip-run` and no other code can call it. `flip-run` is your public surface. This is the same public/private kindness the `export` list gave you — refactor the interior freely, because nothing outside depends on it — achieved with plain scope.
+
+The rule still holds: **keep the smallest public surface that makes your code useful.** If in doubt, nest it. It is easier to promote a helper to the top level later than to claw one back once callers depend on it.
+
+## 3.3 Values and constants are just top-level defines
+
+In the other dialect you would list constants in an `export`. In Motoi, a top-level `define` of a value *is* the public surface — there is nothing extra to declare.
 
 ```scheme
-(import colors)
+(define red   '(1.0 0.0 0.0))
+(define green '(0.0 1.0 0.0))
+(define blue  '(0.0 0.0 1.0))
 
-red             ;; ⇒ (1.0 0.0 0.0)
-(color? red)    ;; ⇒ #t
+(define (color? c)
+  (and (list? c)
+       (= (length c) 3)
+       (every number? c)))
+
+(list red (color? red))
+;; ⇒ ((1.0 0.0 0.0) #t)
 ```
 
-Exporting constants is a common pattern. Some modules export nothing but constants — a color palette, a set of tuning notes, a table of currency codes. That is a legitimate use of the module system.
+`red`, `green`, `blue` are values; `color?` is a verb; all four are public simply by being top-level. `every` came from SRFI-1, already loaded.
 
-## 3.4 Exporting records and their operations
+## 3.4 A structure and its operations
 
-If your module defines a record type, you usually want to export both the type and its operations.
+Say you build a little structure — a point — out of a tagged list, with a constructor, a predicate, and accessors. In Motoi they are all public the moment you `define` them; no export list gates them.
 
 ```scheme
-(module point
-  (export
-    make-point
-    point?
-    point-x
-    point-y
-    point-distance)
+(define (make-point x y) (list 'point x y))
+(define (point? p) (and (pair? p) (eq? (car p) 'point)))
+(define (point-x p) (cadr p))
+(define (point-y p) (caddr p))
 
-  (define-record point (x y))
+(define (square n) (* n n))
 
-  (define (point-distance a b)
-    (sqrt (+ (square (- (point-x a) (point-x b)))
-             (square (- (point-y a) (point-y b))))))
+(define (point-distance a b)
+  (sqrt (+ (square (- (point-x a) (point-x b)))
+           (square (- (point-y a) (point-y b))))))
 
-  (define (square n) (* n n)))
+(point-distance (make-point 0 0) (make-point 3 4))
+;; ⇒ 5
 ```
 
-`make-point`, `point?`, `point-x`, `point-y` come from the record definition. `point-distance` is a verb built on top. `square` is a private helper — not exported.
+`make-point`, `point?`, `point-x`, `point-y`, `point-distance` are your public surface. If you wanted `square` private, you would nest it inside `point-distance` as in section 3.2. Here it is fine at the top level because it is harmless. (R7RS-small's `define-record-type` gives a sturdier way to build structures; the tagged list here keeps the example about *public versus private*, not about records.)
 
-The convention: for a record `foo`, export `make-foo`, `foo?`, and every `foo-<field>` accessor you want the world to use. If you want to hide some fields, do not export their accessors. Callers cannot get at them.
+## 3.5 There is no re-export, because there is nothing to re-export
 
-## 3.5 The re-export pattern
-
-Sometimes a module exists mainly to re-package other modules' verbs. This is the *facade* pattern, and Motoi supports it directly.
+The other dialect's *facade* pattern re-exports names from several modules under one umbrella module. Motoi has no modules and no export, so there is no facade form. The Motoi equivalent is simpler: the standard library verbs are already loaded everywhere, so you never need an umbrella to gather them. If you want a shorthand name for something, you `define` an alias:
 
 ```scheme
-(module math
-  (export sin cos tan sqrt log exp pi e))
-  ;; no defines — sin/cos/tan/... are re-exported from motoi/base
+(define hello string-append)
+(hello \"Hi, \" \"Alfred\")
+;; ⇒ \"Hi, Alfred\"
 ```
 
-If a name is not defined in the module's body but is available in scope (usually because `motoi/base` or another module was imported), naming it in `export` re-exports it. The importing program sees the name as coming from `math`, not from wherever it originally came from.
+That is the whole of it — no umbrella, no re-export, just a `define` when a friendlier name helps.
 
-This is how umbrella modules work. An `app/all` module could re-export everything from `app/card`, `app/shop`, `app/radio`, and so on, so a program can `(import app/all)` and get everything at once.
+## 3.6 Renaming — again, just `define`
 
-Use this sparingly. Umbrellas are convenient but they hide the actual dependencies. A program that imports `app/all` and uses one verb from it has still declared a dependency on the whole umbrella. Prefer explicit imports when reasonable.
-
-## 3.6 Export renames
-
-Just as import can rename, export can too. This is useful when the internal name of a verb is not what you want the world to see.
+The other dialect's `export` rename (\"internally `greet-in-english`, publicly `hello`\") maps onto a plain `define` in Motoi:
 
 ```scheme
-(module hellos
-  (export (greet-in-english hello))
+(define (greet-in-english name)
+  (string-append \"Hello, \" name \".\"))
 
-  (define (greet-in-english name)
-    (string-append \"Hello, \" name \".\")))
+(define hello greet-in-english)   ;; the public name
+
+(hello \"Alfred\")
+;; ⇒ \"Hello, Alfred.\"
 ```
 
-Internally, the verb is called `greet-in-english` — a clear, specific name. Externally, it is exported as `hello`. Users of the module see `hello`.
+The verbose internal name is what you read while working; the short alias is the friendly surface. No export form required.
 
-This is useful when the module's internal names are informative but verbose, and you want a cleaner public surface. The internal name is what you read while working on the module. The external name is what everyone else sees.
+## 3.7 What to keep private
 
-## 3.7 What not to export
+The old advice about *what not to export* becomes advice about *what to keep out of the top level*:
 
-Some things are almost always mistakes to export.
+**Helpers.** If a verb only makes sense next to one other verb, nest it (section 3.2). Its ugly name and internal shape stay hidden.
 
-**Helpers.** If a verb is only useful in the context of other verbs in the module, keep it private. It probably has an ugly name, and its shape probably reflects the internal needs of the module, not a general-purpose need.
-
-**Mutable state.** If your module has a top-level variable that changes over time, exporting it is dangerous. Consumers can read and write it and step on each other. Better to expose a verb that reads it and a verb that writes it, so the module controls access.
-
-**Testing stubs.** If you defined a test-only version of a verb, do not export it. It should not exist in production. (Ideally, it should not exist at all — but if it must, keep it private.)
-
-**Everything.** Do not export every top-level name reflexively. Exports are a promise. Fewer promises are easier to keep.
-
-## 3.8 What the export list looks like from outside
-
-From a program that imports the module, the export list is what you see through `module-verbs`:
+**Mutable state.** Do not leave a bare mutable top-level variable that any code can read and write. Wrap it in a closure and hand out reader/writer verbs, so access is controlled:
 
 ```scheme
-(module-verbs 'manners)
-;; ⇒ (greet farewell)
+(define counter
+  (let ((n 0))
+    (lambda () (set! n (+ n 1)) n)))
 
-(module-verbs 'point)
-;; ⇒ (make-point point? point-x point-y point-distance)
+(list (counter) (counter) (counter))
+;; ⇒ (1 2 3)
 ```
 
-This is how a program can introspect what a module offers. Combined with the search path, this gives you the ability to explore modules interactively:
+The variable `n` is sealed inside the closure — private state, reachable only through `counter`.
 
-```scheme
-(module-list)              ;; every module the search path knows about
-(module-verbs 'manners)     ;; every verb this module exports
-```
+**Everything-at-once.** Do not reflexively give every scrap a public top-level name. A small surface is easier to keep stable.
 
-At the REPL, this is the way you learn what is available. In a script, this is how you write module-aware tools — a documentation generator; a linter that warns about unused imports; a security tool that lists every verb every program in a repo depends on.
+## 3.8 There is no `module-verbs` to introspect
 
-## 3.9 Deprecating an export
+The other dialect lets you ask a module for its export list with `module-verbs`, or enumerate modules with `module-list`. Motoi has neither: `(module-verbs 'anything)` yields `error: unbound symbol: module-verbs`, and there is no `module-list`. There are no module objects to enumerate.
 
-Sometimes a verb needs to go away, but you cannot remove it immediately because programs still call it. The pattern:
+How do you learn what is available in Motoi, then? You read the reference manual, and you call verbs at the REPL — if a name is unbound, Motoi says so. Discovery is by documentation and by trying, not by querying a module record.
 
-```scheme
-(module math
-  (export sin cos tan)
-  (export :deprecated tangent)
+## 3.9 There is no `:deprecated` marker
 
-  (define (tangent x)
-    (log/warn \"tangent is deprecated — use tan\")
-    (tan x)))
-```
+The other dialect's `(export :deprecated tangent)` marks a verb as still-present-but-going-away. Motoi's standard library is fixed and small, so it has no deprecation marker in an export list (there is no export list). If your *own* code needs to warn callers off an old verb, you write the warning by hand inside it — the language does not provide an `export`-level marker, because it does not provide `export`.
 
-The `:deprecated` marker means the verb is still exported, but calling it emits a warning. Consumers can see the warning at compile time (via a linter) or runtime (via `log`). They know it is time to migrate.
+## 3.10 The real contract in Motoi
 
-After a suitable deprecation period — usually a major version — the deprecated verb can be removed. Nobody will be surprised.
+Without `import`/`export`, what is the contract between code and its callers? It is plain scope and plain naming:
 
-## 3.10 The import/export contract
+- **What your code offers** — its top-level `define`s.
+- **What it hides** — everything nested in a `let`, closure, or inner `define`.
+- **What callers may assume** — a top-level name means what its definition says; a private helper is not theirs to reach.
 
-Import and export together define the module's contract with the world.
-
-- **What the module offers** — its export list.
-- **How other programs bring those offerings into scope** — their import forms.
-- **What the module hides** — everything not in the export list.
-- **What each side may assume** — the export list is stable within a major version; the import form is a local view.
-
-If both sides honor the contract, modules compose safely. Programs can be reasoned about locally. Dependencies are explicit. Refactoring internals does not break consumers.
-
-If either side cheats — importing private verbs somehow, or exporting things that were never meant to be public — the contract weakens and the whole system pays. Motoi enforces the contract at parse time as strictly as it can. It cannot enforce it perfectly (nothing can), so a great deal rests on your discipline as an author.
+Motoi enforces the private half strictly: lexical scope is not advisory, it is airtight. A name inside a closure genuinely cannot be reached from outside. That is a stronger guarantee than an honor-system export list, and it is built into the language rather than layered on top.
 
 ## 3.11 Try it
 
-Write a module with three exported verbs and two private helpers. Import it from another program. Try to call one of the private helpers — the parser will refuse. Rename an export in the import — call it under the new name. Add `:deprecated` to one of the exports, call it, and watch for the warning.
+Write two top-level verbs that share one private helper — nest the helper inside a `let` that wraps both, or inside one of them. Confirm the helper is unreachable from the top level (calling it yields `unbound symbol`). Then wrap a counter in a closure as in section 3.7 and watch its state stay sealed. That is public-versus-private in Motoi, with no `export` in sight.
 
-Chapter 4 covers discovery — where Motoi actually looks when you ask for a module. Turn the page.")
+Chapter 4 covers *discovery* in the other dialect — where a module system looks for a module — and, for Motoi, why there is nothing to look for. Turn the page.")

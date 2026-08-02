@@ -893,48 +893,59 @@ For each element in `lst1`, map over `lst2` to pair them, then recurse on the ta
 
 ## Deep recursion with wired verbs: recalling memories by pattern
 
-Now we bring in the wired surface. The runtime can recall memories using `cortex/recall-pattern`, which returns a list of matching memories. We'll recurse through that list, extracting just the content field from each.
+Now we bring in the wired surface. The runtime can recall memories using `cortex/search`, which returns a list of matching memory records. Each record is a plist of `(:field value)` pairs. We'll recurse through that list, extracting just the `:key` field from each.
 
 ```scheme
-;; Recall all memories matching a pattern and extract their content.
+;; Search memories matching a pattern and extract the :key of each.
 (define (recall-and-extract pattern)
-  (let ((result (cortex/recall-pattern pattern)))
-    (if (equal? result 'nan)
-        '()
+  (let ((result (cortex/search pattern)))
+    (if (list? result)
         (map (lambda (mem)
-               (let ((content (cdr (assoc 'content mem))))
-                 (if content content \"(no content)\")))
-             result))))
+               (let ((entry (assq ':key mem)))
+                 (if entry (cadr entry) \"(no key)\")))
+             result)
+        '())))
 
 (recall-and-extract \"order-shipped\")
-;; => list of content strings from matched memories, or empty list
+;; => list of keys from matched memory records, or empty list
 ```
 
-ESCAPE: if `cortex/recall-pattern` fails (returns `'nan`), we return an empty list rather than crash. We map over the result, safely extracting the `'content` field from each association list. This is orchestration: a wired verb feeding into list recursion.
+ESCAPE: if `cortex/search` returns something that is not a list, we return an empty list rather than crash. We map over the result, safely extracting the `:key` field from each record plist with `assq`. This is orchestration: a wired verb feeding into list recursion.
 
 ---
 
 ## Counting verb successes: map and filter
 
-Suppose we have a list of shop IDs and we want to count how many have published products. We fetch the product count for each shop, filter out failures, and count the successes.
+Suppose we have a list of shop IDs and we want to count how many have published products. We look up the product list for each shop, filter out failures, and count the successes. Here `shop-products` is a local lookup over an association list — a stand-in for whatever real data source a route would feed in.
 
 ```scheme
+;; A local product table: shop-id -> list of products.
+(define shop-inventory
+  '((\"shop-1\" . (mug tote shirt))
+    (\"shop-2\" . ())
+    (\"shop-3\" . (poster))))
+
+;; Look up a shop's products; 'nan if the shop is unknown.
+(define (shop-products shop-id)
+  (let ((entry (assoc shop-id shop-inventory)))
+    (if entry (cdr entry) 'nan)))
+
 ;; Count how many shops have published products.
 (define (count-shops-with-products shop-ids)
   (let ((counts (map (lambda (shop-id)
-                       (let ((prods (printify/products shop-id)))
+                       (let ((prods (shop-products shop-id)))
                          (if (or (equal? prods 'nan)
-                                 (list? (car prods)))
+                                 (null? prods))
                              'nan
                              (length prods))))
                      shop-ids)))
     (length-rec (filter (lambda (c) (not (equal? c 'nan))) counts))))
 
 (count-shops-with-products '(\"shop-1\" \"shop-2\" \"shop-3\"))
-;; => count of shops that returned valid product lists
+;; => count of shops that returned a non-empty product list
 ```
 
-ESCAPE at every verb call: `printify/products` may return `'nan`, so we check and mark failures as `'nan`. Then we filter those out and count the rest. This is FORWARD: each shop ID → fetch → filter → count.
+ESCAPE at every lookup: `shop-products` may return `'nan` (unknown shop) or an empty list (no products), so we mark those as `'nan`. Then we filter those out and count the rest. This is FORWARD: each shop ID → look up → filter → count.
 
 ---
 
@@ -1029,13 +1040,13 @@ ESCAPE at every verb. FORWARD through search → extract → map → fetch. This
 
 ## Multi-shop inventory sync: recursion across shops and SKUs
 
-Suppose the runtime manages inventory for multiple shops. We'll fetch inventory for each shop, extract the SKUs, and return a summary. If any shop fetch fails, we note it and continue.
+Suppose the runtime manages inventory for multiple shops. We'll look up inventory for each shop, count the SKUs, and return a summary. If any shop lookup fails, we note it and continue. We reuse the `shop-products` helper from above.
 
 ```scheme
-;; Fetch inventory from multiple shops; return summary per shop.
+;; Look up inventory for multiple shops; return summary per shop.
 (define (multi-shop-inventory shop-ids)
   (map (lambda (shop-id)
-         (let ((inv (printify/products shop-id)))
+         (let ((inv (shop-products shop-id)))
            (if (equal? inv 'nan)
                (list (list 'shop_id shop-id)
                      (list 'status 'failed))
@@ -1043,11 +1054,11 @@ Suppose the runtime manages inventory for multiple shops. We'll fetch inventory 
                      (list 'count (length-rec inv))))))
        shop-ids))
 
-;; (multi-shop-inventory '(\"shop-a\" \"shop-b\" \"shop-c\"))
-;; => ((shop_id shop-a count 12) (shop_id shop-b status failed) ...)
+(multi-shop-inventory '(\"shop-1\" \"shop-2\" \"shop-9\"))
+;; => ((shop_id shop-1 count 3) (shop_id shop-2 count 0) (shop_id shop-9 status failed))
 ```
 
-ESCAPE: each failed fetch produces a `'failed` status, not an error. We map and collect, so one failure doesn't block the rest. This is mature recursion: resilient, honest, complete.
+ESCAPE: each failed lookup produces a `'failed` status, not an error. We map and collect, so one failure doesn't block the rest. This is mature recursion: resilient, honest, complete.
 
 ---
 

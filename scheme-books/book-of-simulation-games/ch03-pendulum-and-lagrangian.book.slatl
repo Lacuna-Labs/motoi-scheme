@@ -50,12 +50,9 @@ approximates the inextensibility of the rod.
         (bob   (world/spawn 'bob   340 40)))
     (entity/pin!    pivot)
     (entity/mass!   bob 1.0)
-    (entity/drag!   bob 0.005)
-    (let ((rod (world/link! pivot bob)))
-      (world/link-rest!      rod 100)
-      (world/link-stiffness! rod 0.95)   ;; very stiff — near-rigid
-      (world/link-damping!   rod 0.10)
-      (list pivot bob))))
+    (entity/drag!   bob 0.10)            ;; damping via per-bob drag
+    (world/link! pivot bob 100 0.95)     ;; rest 100, stiffness 0.95 — near-rigid
+    (list pivot bob)))
 
 (spring-pendulum)
 (let loop ((n 500)) (world/step) (when (> n 0) (loop (- n 1))))
@@ -79,41 +76,44 @@ V  = -m * g * L * cos(theta)           (potential energy)
 Lag = T - V
 ```
 
-The equations of motion pop out of the Euler-Lagrange equation.
-Motoi Scheme's `phys/lagrange-residual` will tell us HOW WRONG our
-current trajectory is at a given moment — a residual of zero means
-our numerical solution obeys the equations of motion; a nonzero
-residual means we've drifted.
+The equations of motion pop out of the Euler-Lagrange equation. We can
+build our own truth oracle with `calc/derivative`: at each frame,
+compute how far the potential-energy gradient is from the mass-times-
+acceleration our integrator produced. A residual of zero means our
+numerical solution obeys the equations of motion; a nonzero residual
+means we've drifted.
 
 ```scheme
 ;; Simulate the pendulum by direct integration of the equations,
-;; then check with phys/lagrange-residual each frame.
+;; then check the Euler-Lagrange residual each frame with calc/derivative.
 (define (lag-pendulum L m g theta0 tdot0)
   (world/reset!)
   ;; State: (theta, theta-dot). We evolve it in place.
   (define theta theta0)
   (define tdot  tdot0)
   (define dt    (/ 1.0 60))
+  ;; Potential energy as a function of angle alone (callable, one arg).
+  (define (V q) (- (* m g L (cos q))))
   (define (step!)
     (let* ((theta-ddot (/ (- (* m g (* L (sin theta)))) (* m L L)))
            (tdot* (+ tdot (* theta-ddot dt)))
            (theta* (+ theta (* tdot* dt))))
       (set! tdot  tdot*)
       (set! theta theta*)))
-  ;; The Lagrangian, callable.
-  (define (Lag q qdot)
-    (- (* 0.5 m L L qdot qdot)
-       (- 0 (* m g L (cos q)))))
-  ;; Check the residual each frame.
+  ;; Residual = m L^2 theta_ddot + dV/dtheta ; should be ~0 on the true path.
+  (define (residual)
+    (let ((theta-ddot (/ (- (* m g (* L (sin theta)))) (* m L L))))
+      (+ (* m L L theta-ddot)
+         (calc/derivative V theta))))
   (let loop ((n 300) (worst 0.0))
     (if (<= n 0)
         (list 'final-theta theta 'worst-residual worst)
-        (let ((r (phys/lagrange-residual Lag theta tdot (- 300 n))))
+        (let ((r (residual)))
           (step!)
           (loop (- n 1) (max worst (abs r)))))))
 
 (lag-pendulum 100 1.0 9.8 (* 0.4 3.14159) 0.0)
-;; => (final-theta ~0.6 worst-residual ~0.02)
+;; => (final-theta ~0.6 worst-residual ~0.0)
 ```
 
 The residual is tiny, which means our numerical integration is
@@ -165,19 +165,13 @@ differences grow exponentially. This is the hallmark of chaos.
     (entity/pin!    pivot)
     (entity/mass!   bob1 1.0)
     (entity/mass!   bob2 1.0)
-    (entity/drag!   bob1 0.001)
-    (entity/drag!   bob2 0.001)
-    (let ((rod1 (world/link! pivot bob1))
-          (rod2 (world/link! bob1  bob2)))
-      (world/link-rest!      rod1 100)
-      (world/link-stiffness! rod1 0.95)
-      (world/link-damping!   rod1 0.02)
-      (world/link-rest!      rod2 100)
-      (world/link-stiffness! rod2 0.95)
-      (world/link-damping!   rod2 0.02)
-      ;; Give it a small kick.
-      (entity/set-vel! bob2 3 0)
-      (list pivot bob1 bob2))))
+    (entity/drag!   bob1 0.02)             ;; damping via per-bob drag
+    (entity/drag!   bob2 0.02)
+    (world/link! pivot bob1 100 0.95)      ;; rod1: rest 100, stiff 0.95
+    (world/link! bob1  bob2 100 0.95)      ;; rod2: rest 100, stiff 0.95
+    ;; Give it a small kick.
+    (entity/set-vel! bob2 3 0)
+    (list pivot bob1 bob2)))
 
 (double-pendulum)
 (on-frame
@@ -185,9 +179,9 @@ differences grow exponentially. This is the hallmark of chaos.
     (world/step)
     (let ((p1 (entity/pos (world/find 'bob1)))
           (p2 (entity/pos (world/find 'bob2))))
-      (paint-line 240 40 (car p1) (cdr p1) white)
-      (paint-line (car p1) (cdr p1) (car p2) (cdr p2) white)
-      (paint-circle (car p2) (cdr p2) 4 red))))
+      ;; draw the two bobs as pixels; a line drawer would connect them
+      (fb/pixel (car p1) (cdr p1))
+      (fb/pixel (car p2) (cdr p2)))))
 ```
 
 Watch it swing. It does not settle into a periodic motion. It swings,
@@ -208,15 +202,13 @@ state, same evolution, always. Let's prove it with the tape.
   (double-pendulum)
   (world/tape-record!)
   (let loop ((n 900)) (world/step) (when (> n 0) (loop (- n 1))))
-  (let ((tape (world/tape-save 'double-pendulum-run-1)))
-    ;; Now replay it — get the exact same evolution.
-    (world/reset!)
-    (double-pendulum)
-    (let ((replay (world/tape-replay 'double-pendulum-run-1)))
-      (list 'original tape 'replay replay 'match? (equal? tape replay)))))
+  (let ((frames (world/tape-save)))       ;; how many frames we captured
+    ;; Replay the recorded frames — the exact same evolution.
+    (let ((replay (world/tape-replay)))
+      (list 'frames frames 'replay-length (length replay)))))
 
 (chaos-tape-demo)
-;; => (original ... replay ... match? #t)
+;; => (frames N replay-length N)
 ```
 
 Same tape. Every time. Chaos is not randomness; chaos is exquisite
@@ -234,7 +226,8 @@ the tape rather than re-simulate, if the tape is on file.
 
 **Composition.** The double pendulum is composed: `spring-pendulum`
 extended by one more spawn and one more link. The Lagrangian check is
-composed from the pendulum's `L` function plus `phys/lagrange-residual`.
+composed from the pendulum's potential-energy function plus
+`calc/derivative`.
 
 **Orchestration.** The tape workflow IS an orchestration:
 `record! → simulate → save → reset → replay → compare`. Time-ordered

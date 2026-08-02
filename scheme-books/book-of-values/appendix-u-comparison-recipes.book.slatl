@@ -19,32 +19,55 @@ Chapter 9 said comparison depends on kind. This appendix is the cookbook.
 
 ## Money — same currency, then amount
 
+We represent each typed value as a tagged list and give it a plist accessor. The comparison verbs check the tag/unit first, then the magnitude — returning a Result-error when the kinds don't line up.
+
 ```scheme
-(money< a b)
-;; is a's amount less than b's amount? (after converting to same currency)
+(define (money . fields) (cons 'money fields))
+(define (field record key)
+  (let loop ((xs (cdr record)))
+    (cond ((null? xs) #f)
+          ((eq? (car xs) key) (cadr xs))
+          (else (loop (cddr xs))))))
+(define (result/error sym . ctx) (list 'result/error sym ctx))
+
+(define (money< a b)
+  (if (eq? (field a :currency) (field b :currency))
+      (< (field a :amount) (field b :amount))
+      (result/error 'currency-mismatch
+        :ctx (list :a-currency (field a :currency)
+                   :b-currency (field b :currency)
+                   :hint \"call money-convert first\"))))
 ```
 
-Two money values in different currencies cannot be compared directly. The verb converts to a canonical currency (USD by default), which requires a rate lookup — see the currency table appendix.
+Two money values in different currencies cannot be compared directly. Comparison across currencies would require a canonical currency (USD by default) and a rate lookup — see the currency table appendix.
 
 ```scheme
-(money< (money :amount 1234 :currency USD)
-        (money :amount 1500 :currency USD))
+(money< (money :amount 1234 :currency 'USD)
+        (money :amount 1500 :currency 'USD))
 ;; ⇒ #t
 
-(money< (money :amount 1234 :currency USD)
-        (money :amount 1500 :currency EUR))
-;; ⇒ (result/error 'currency-mismatch
-;;      :ctx (list :a-currency USD :b-currency EUR
-;;                 :hint \"call money-convert first\"))
+(money< (money :amount 1234 :currency 'USD)
+        (money :amount 1500 :currency 'EUR))
+;; ⇒ (result/error currency-mismatch
+;;      (:a-currency USD :b-currency EUR :hint \"call money-convert first\"))
 ```
 
 The error is deliberate. Silent conversion at compare time is a footgun.
 
 ## Time — always by instant
 
+A time value carries its kind (`'instant`, `'calendar-date`) as a tag. `time<` compares only when both are the same kind; mixed kinds return a Result-error.
+
 ```scheme
-(time< a b)
-;; ⇒ #t if a is earlier than b
+(define (t/instant secs) (list 'instant secs))
+(define (t/calendar-date s) (list 'calendar-date s))
+(define (time-kind t) (car t))
+(define (time< a b)
+  (if (eq? (time-kind a) (time-kind b))
+      (if (eq? (time-kind a) 'instant)
+          (< (cadr a) (cadr b))
+          (string<? (cadr a) (cadr b)))
+      (result/error 'time-kind-mismatch)))
 ```
 
 Two calendar dates in the same timezone compare by day. Two local date-times in the same timezone compare by wall clock. Two instants compare by seconds since epoch. Mixing kinds requires you to convert first.
@@ -54,30 +77,48 @@ Two calendar dates in the same timezone compare by day. Two local date-times in 
 ;; ⇒ #t
 
 (time< (t/calendar-date \"2026-07-17\") (t/instant 1720000000))
-;; ⇒ (result/error 'time-kind-mismatch)
+;; ⇒ (result/error time-kind-mismatch ())
 ```
 
 ## Distance — same unit, then value
 
 ```scheme
+(define (distance . fields) (cons 'distance fields))
+(define (distance-unit d) (cadr d))    ;; first keyword names the unit
+(define (distance-value d) (caddr d))
+(define (distance< a b)
+  (if (eq? (distance-unit a) (distance-unit b))
+      (< (distance-value a) (distance-value b))
+      (result/error 'unit-mismatch
+        :ctx (list :a-unit (distance-unit a) :b-unit (distance-unit b)))))
+
 (distance< (distance :meters 1500) (distance :meters 2000))
 ;; ⇒ #t
 
 (distance< (distance :meters 1500) (distance :feet 5000))
-;; ⇒ (result/error 'unit-mismatch :ctx (list :a-unit :meters :b-unit :feet))
+;; ⇒ (result/error unit-mismatch ((:a-unit :meters :b-unit :feet)))
 ```
 
 Convert first, then compare.
 
 ```scheme
+(define (distance/to-meters d)
+  (distance :meters (round (* (distance-value d) 3048/10000))))
+
 (distance< (distance :meters 1500)
            (distance/to-meters (distance :feet 5000)))
-;; ⇒ #t  (5000 feet = ~1524 meters, less than 1500? no, more; result depends on values)
+;; ⇒ #t  (5000 feet ≈ 1524 meters, which is more than 1500)
 ```
 
 ## Percentages — never compare values without bases
 
 ```scheme
+(define (percent value of base) (list 'percent :value value :base base))
+(define (percent-value p) (caddr p))
+(define (percent-base p) (list-ref p 4))
+(define (percent-product p) (* (percent-value p) (percent-base p)))
+(define (percent< a b) (< (percent-product a) (percent-product b)))
+
 (percent< (percent 70 :of 10) (percent 75 :of 100))
 ;; ⇒ #t  (70% of 10 is smaller than 75% of 100)
 ```
@@ -85,6 +126,8 @@ Convert first, then compare.
 Note this compares the *products*, not the percentage values. `percent-value<` (compare values) is a different verb that ignores bases:
 
 ```scheme
+(define (percent-value< a b) (< (percent-value a) (percent-value b)))
+
 (percent-value< (percent 70 :of 10) (percent 75 :of 100))
 ;; ⇒ #t (70 < 75, comparing values only)
 ```
@@ -94,6 +137,18 @@ Both exist because both are meaningful, and picking one silently would be wrong.
 ## Strings — lexicographic vs semantic
 
 ```scheme
+;; string< is the standard R7RS string<? under a shorter local name;
+;; natural-string< pulls the trailing digit runs out and compares them numerically.
+(define (string< a b) (string<? a b))
+(define (digits-tail s)
+  (let loop ((i (- (string-length s) 1)) (acc '()))
+    (if (and (>= i 0) (char-numeric? (string-ref s i)))
+        (loop (- i 1) (cons (string-ref s i) acc))
+        (if (null? acc) #f (string->number (list->string acc))))))
+(define (natural-string< a b)
+  (let ((na (digits-tail a)) (nb (digits-tail b)))
+    (if (and na nb) (< na nb) (string<? a b))))
+
 (string< \"abc\" \"abd\")
 ;; ⇒ #t (lexicographic)
 
@@ -111,6 +166,12 @@ Same strings, opposite answers. Which one you want is a design decision. Neither
 The `sort` verb takes a comparison. Choose the right comparison for the kind.
 
 ```scheme
+(define my-money-list
+  (list (money :amount 1500 :currency 'USD)
+        (money :amount 999  :currency 'USD)))
+(define my-date-list (list (t/instant 1720001000) (t/instant 1720000000)))
+(define my-filename-list (list \"file10\" \"file2\"))
+
 (sort my-money-list money<)
 (sort my-date-list time<)
 (sort my-filename-list natural-string<)
@@ -123,13 +184,25 @@ If you use plain `<` on a list of typed values, you get an error at the first mi
 Equality has its own family.
 
 ```scheme
+(define (money-eq? a b)
+  (and (eq? (field a :currency) (field b :currency))
+       (= (field a :amount) (field b :amount))))
+(define (money-value-eq? a b) (= (field a :amount) (field b :amount)))
+(define (time-eq? a b)
+  (and (eq? (time-kind a) (time-kind b)) (equal? (cadr a) (cadr b))))
+(define (vector-eq? a b) (equal? a b))
+(define (vector-approx? a b eps-key eps)
+  (let loop ((i 0))
+    (cond ((= i (vector-length a)) #t)
+          ((> (abs (- (vector-ref a i) (vector-ref b i))) eps) #f)
+          (else (loop (+ i 1))))))
+
+(define a (money :amount 1234 :currency 'USD))
+(define b (money :amount 1234 :currency 'USD))
 (money-eq? a b)         ;; same currency AND same amount
-(money-value-eq? a b)   ;; same amount regardless of currency (weird — usually you don't want this)
-
-(time-eq? a b)          ;; same instant (or same kind's canonical form)
-
-(vector-eq? a b)        ;; element-wise
-(vector-approx? a b :epsilon 0.001)  ;; within a tolerance
+(money-value-eq? a b)   ;; same amount regardless of currency
+(vector-eq? (vector 1 2) (vector 1 2))        ;; element-wise
+(vector-approx? (vector 1.0 2.0) (vector 1.0005 2.0) :epsilon 0.001)  ;; within a tolerance
 ```
 
 Approximate equality with an explicit epsilon is often what floating-point comparisons need. Plain `=` on floats is a source of bugs; `approx?` with a named tolerance is honest.
@@ -139,6 +212,9 @@ Approximate equality with an explicit epsilon is often what floating-point compa
 If you have a list containing multiple kinds — say, a heterogeneous timeline of events — you cannot use a single comparison verb. Either bucket by kind and sort each bucket, or convert to a common representation (canonical instants, in the timeline case) and sort by that.
 
 ```scheme
+(define (event-instant e) (cadr e))   ;; pulls a canonical instant from any event
+(define timeline (list (list 'event 1720001000) (list 'event 1720000000)))
+
 (sort timeline
       (lambda (a b)
         (< (event-instant a) (event-instant b))))

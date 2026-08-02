@@ -45,19 +45,39 @@ A grid. Each cell is grass-empty, grass-growing, or grass-full.
 Grass-empty becomes grass-growing after a while; grass-growing
 becomes grass-full after more time; grass-full stays until eaten.
 
+The built-in grid stores only live/dead, so for a three-state grass
+field we keep our own vector of cells and index it with two small
+helpers. `grid-ref` reads a cell; `grid-set!` writes one.
+
 ```scheme
-(define ECO-COLS 60)
-(define ECO-ROWS 40)
+;; Smaller than 60x40 so the whole chapter fits inside the step budget;
+;; scale these up when you run the sim on its own.
+(define ECO-COLS 24)
+(define ECO-ROWS 16)
+(define ECO-CELL 20)                    ;; world pixels per grid cell
+
+;; Call thunk n times (no built-in repeat verb).
+(define (repeat n thunk)
+  (when (> n 0) (thunk) (repeat (- n 1) thunk)))
+
+(define grass (make-vector (* ECO-COLS ECO-ROWS) 'grass-empty))
+
+(define (grid-ref c r)
+  (if (and (>= c 0) (< c ECO-COLS) (>= r 0) (< r ECO-ROWS))
+      (vector-ref grass (+ (* r ECO-COLS) c))
+      'grass-empty))
+
+(define (grid-set! c r v)
+  (when (and (>= c 0) (< c ECO-COLS) (>= r 0) (< r ECO-ROWS))
+    (vector-set! grass (+ (* r ECO-COLS) c) v)))
 
 (define (init-ecosystem)
-  (grid-init ECO-COLS ECO-ROWS)
-  ;; Fill 30% with grass-full, rest empty
+  ;; Fill 30% with grass-full, rest empty.
   (let loop-c ((c 0))
     (when (< c ECO-COLS)
       (let loop-r ((r 0))
         (when (< r ECO-ROWS)
-          (when (< (random) 0.3)
-            (grid-set! c r 'grass-full))
+          (grid-set! c r (if (< (random) 0.3) 'grass-full 'grass-empty))
           (loop-r (+ r 1))))
       (loop-c (+ c 1)))))
 ```
@@ -66,7 +86,7 @@ Grass rule: each frame, some fraction of empty cells regrow. Each
 grass-growing cell has a chance to mature.
 
 ```scheme
-(define GRASS-REGROW-PROB 0.005)
+(define GRASS-REGROW-PROB 0.02)
 (define GRASS-MATURE-PROB 0.05)
 
 (define (step-grass)
@@ -107,8 +127,8 @@ grass-growing cell has a chance to mature.
     (- (ai/bb-get sheep 'energy) SHEEP-MOVE-ENERGY-COST))
   ;; If standing on grass-full, eat it
   (let* ((pos (entity/pos sheep))
-         (c   (quotient (car pos) 8))
-         (r   (quotient (cdr pos) 8)))
+         (c   (quotient (car pos) ECO-CELL))
+         (r   (quotient (cadr pos) ECO-CELL)))
     (when (and (>= c 0) (< c ECO-COLS)
                (>= r 0) (< r ECO-ROWS)
                (eq? (grid-ref c r) 'grass-full))
@@ -137,7 +157,8 @@ the other half). If out of energy, it dies. Simple rules.
     (entity/max-speed! w 1.5)
     (ai/wander         w 0.7)
     (ai/bb-set!        w 'energy 40)
-    (ai/pursue         w (world/nearest 'sheep x y))
+    (when (> (world/count 'sheep) 0)
+      (ai/pursue       w (world/nearest 'sheep x y)))
     w))
 
 (define WOLF-EAT-ENERGY 20)
@@ -147,9 +168,9 @@ the other half). If out of energy, it dies. Simple rules.
 (define (step-wolf wolf)
   (ai/bb-set! wolf 'energy
     (- (ai/bb-get wolf 'energy) WOLF-MOVE-ENERGY-COST))
-  ;; Update pursuit to always chase nearest sheep
-  (let ((prey (world/nearest 'sheep (entity/x wolf) (entity/y wolf))))
-    (when prey
+  ;; Update pursuit to always chase nearest sheep (only if any remain)
+  (when (> (world/count 'sheep) 0)
+    (let ((prey (world/nearest 'sheep (entity/x wolf) (entity/y wolf))))
       (ai/pursue wolf prey)
       ;; If close enough, eat
       (when (< (geom/distance (entity/pos wolf) (entity/pos prey)) 6)
@@ -169,11 +190,38 @@ excess energy, die when out.
 ## 15.4 The frame loop
 
 ```scheme
+;; Palette indices: 11 = green, 3 = dark green, 7 = white, 8 = red.
+(define green 11) (define dark-green 3) (define white 7) (define red 8)
+
+;; Render each grass cell in a shade of green; empty cells stay dark.
+(define (paint-grass)
+  (let loop-c ((c 0))
+    (when (< c ECO-COLS)
+      (let loop-r ((r 0))
+        (when (< r ECO-ROWS)
+          (case (grid-ref c r)
+            ((grass-full)    (fb/rect (* c ECO-CELL) (* r ECO-CELL)
+                                      ECO-CELL ECO-CELL green))
+            ((grass-growing) (fb/rect (* c ECO-CELL) (* r ECO-CELL)
+                                      ECO-CELL ECO-CELL dark-green)))
+          (loop-r (+ r 1))))
+      (loop-c (+ c 1)))))
+
+;; A little filled square stands in for a dot.
+(define (paint-dot x y size color)
+  (fb/rect x y size size color))
+
+;; Plot sheep (and wolves) counts over time as a line.
+(define (plot-populations history)
+  (when (pair? history)
+    (let ((sheep (map cadr (reverse history))))
+      (plot/line (iota (length sheep)) sheep))))
+
 (define pop-history '())
 
 (init-ecosystem)
-(repeat 40 (lambda () (spawn-sheep (* (random) 480) (* (random) 320))))
-(repeat 10 (lambda () (spawn-wolf  (* (random) 480) (* (random) 320))))
+(repeat 12 (lambda () (spawn-sheep (* (random) 480) (* (random) 320))))
+(repeat 4  (lambda () (spawn-wolf  (* (random) 480) (* (random) 320))))
 
 (on-frame
   (lambda (t)
@@ -188,9 +236,9 @@ excess energy, die when out.
     ;; Paint
     (paint-grass)
     (world/each 'sheep (lambda (s)
-      (paint-circle (entity/x s) (entity/y s) 3 white)))
+      (paint-dot (entity/x s) (entity/y s) 3 white)))
     (world/each 'wolf (lambda (w)
-      (paint-circle (entity/x w) (entity/y w) 4 red)))
+      (paint-dot (entity/x w) (entity/y w) 4 red)))
     (when (= 0 (modulo t 60))
       (plot-populations pop-history))))
 ```
@@ -218,30 +266,31 @@ rate, on reproduction thresholds.
 
 ## 15.6 The user intervenes
 
+The input verbs differ per surface, so we write the interventions as
+plain functions of a screen position — wire them to clicks and keys on
+whichever surface you run on.
+
 ```scheme
-;; Click a cell: seed grass there.
-(on-input 'mouse-click
-  (lambda (x y)
-    (grid-set! (quotient x 8) (quotient y 8) 'grass-full)))
+;; Seed grass at the cell under (x y).
+(define (intervene-seed-grass x y)
+  (grid-set! (quotient x ECO-CELL) (quotient y ECO-CELL) 'grass-full))
 
-;; Press 's' to add sheep.
-(on-input 'key-s
-  (lambda ()
-    (let ((m (input/mouse-pos)))
-      (spawn-sheep (car m) (cdr m)))))
+;; Add a sheep at (x y).
+(define (intervene-add-sheep x y) (spawn-sheep x y))
 
-;; Press 'w' to add wolf.
-(on-input 'key-w
-  (lambda ()
-    (let ((m (input/mouse-pos)))
-      (spawn-wolf (car m) (cdr m)))))
+;; Add a wolf at (x y).
+(define (intervene-add-wolf x y) (spawn-wolf x y))
 
-;; Press 'r' to remove nearest wolf.
-(on-input 'key-r
-  (lambda ()
-    (let ((m (input/mouse-pos)))
-      (let ((w (world/nearest 'wolf (car m) (cdr m))))
-        (when w (entity/despawn! w))))))
+;; Remove the wolf nearest (x y).
+(define (intervene-remove-wolf x y)
+  (when (> (world/count 'wolf) 0)
+    (entity/despawn! (world/nearest 'wolf x y))))
+
+;; Demonstrate: seed grass, add a sheep, add then remove a wolf.
+(intervene-seed-grass 100 100)
+(intervene-add-sheep  120 120)
+(intervene-add-wolf   200 200)
+(intervene-remove-wolf 200 200)
 ```
 
 Now the user can perturb. Add a wolf; watch the sheep population
@@ -251,26 +300,37 @@ The user is not scoring; they are learning ecology by touch.
 
 ## 15.7 Cortex holds the ecosystem across sessions
 
-```scheme
-;; Save state on exit.
-(on-exit
-  (lambda ()
-    (cortex/write 'ecosystem-state
-      (list :grass  (grid-snapshot)
-            :sheep  (world/snapshot 'sheep)
-            :wolf   (world/snapshot 'wolf)
-            :time   (frame)))))
+A snapshot is just the grass vector plus a snapshot of each species.
+`grid-snapshot` copies the vector out; `grid-restore!` copies a saved
+one back in.
 
-;; Load on startup.
-(on-startup
-  (lambda ()
-    (let ((saved (cortex/read 'ecosystem-state)))
-      (if saved
-          (begin
-            (grid-restore! (cdr (assoc :grass saved)))
-            (world/restore! (cdr (assoc :sheep saved)))
-            (world/restore! (cdr (assoc :wolf  saved))))
-          (init-ecosystem)))))
+```scheme
+(define (grid-snapshot) (vector-copy grass))
+
+(define (grid-restore! saved)
+  (let ((n (min (vector-length saved) (vector-length grass))))
+    (let loop ((i 0))
+      (when (< i n)
+        (vector-set! grass i (vector-ref saved i))
+        (loop (+ i 1))))))
+
+;; Save the whole ecosystem. Cortex stores the keys as keywords.
+(define (save-ecosystem)
+  (cortex/write 'ecosystem-state
+    (list (list :grass (grid-snapshot))
+          (list :sheep (world/snapshot 'sheep))
+          (list :wolf  (world/snapshot 'wolf))
+          (list :time  (frame)))))
+
+;; Load it, or start fresh if there is nothing saved.
+(define (load-ecosystem)
+  (let ((saved (cortex/read 'ecosystem-state)))
+    (if (pair? saved)
+        (grid-restore! (cadr (assoc :grass saved)))
+        (init-ecosystem))))
+
+(save-ecosystem)
+(load-ecosystem)
 ```
 
 Now the ecosystem persists. The user can leave for a week, come

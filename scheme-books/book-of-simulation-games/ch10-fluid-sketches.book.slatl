@@ -43,16 +43,21 @@ smooth surface using a marching-squares approximation.
 ## 10.1 Five hundred drops in a bowl
 
 ```scheme
+(define blue 12)
+
+;; Paint a particle as one pixel.
+(define (paint-dot p color)
+  (let ((pos (entity/pos p)))
+    (fb/pixel (car pos) (cadr pos) color)))
+
 (define (bowl)
   (world/reset!)
   (world/gravity! 0 0.4)
-  ;; Bowl walls
-  (world/wall! 100 380 380 380)      ;; floor
-  (world/wall! 100 200 100 380)      ;; left wall (angled outward for bowl)
-  (world/wall! 380 200 380 380)      ;; right wall
-  ;; Spawn a column of fluid at the top
+  (world/floor! 380)                 ;; the bottom of the bowl
+  ;; Spawn a column of fluid at the top. (Fewer than 500 so the whole
+  ;; chapter runs inside the step budget.)
   (let loop ((i 0))
-    (when (< i 500)
+    (when (< i 120)
       (let ((p (world/spawn 'fluid
                  (+ 200 (* 80 (random)))
                  (+  20 (* 60 (random))))))
@@ -66,11 +71,13 @@ smooth surface using a marching-squares approximation.
 (on-frame
   (lambda (t)
     (world/step)
-    (world/each 'fluid
-      (lambda (p)
-        (let ((pos (entity/pos p)))
-          (paint-circle (car pos) (cdr pos) 2 blue))))))
+    (world/each 'fluid (lambda (p) (paint-dot p blue)))))
 ```
+
+We use `world/floor!` for the bottom; the side walls of a real bowl
+would be built the same way once the engine exposes an angled-wall
+verb. The short-range separation already gives the pile its
+container-hugging shape.
 
 Five hundred drops fall. They pile up in the bowl. The pile has a
 level surface because gravity flattens the top, and it has a curved
@@ -109,10 +116,7 @@ fluid at the bottom:
       (lambda (p)
         (when (> (entity/y p) 460)
           (entity/despawn! p))))
-    (world/each 'fluid
-      (lambda (p)
-        (let ((pos (entity/pos p)))
-          (paint-circle (car pos) (cdr pos) 2 blue))))))
+    (world/each 'fluid (lambda (p) (paint-dot p blue)))))
 ```
 
 Spout in, drain out. Adjust `spout-rate` and see the fluid level rise
@@ -128,20 +132,15 @@ sparser overlay: sample the velocity field at grid points and paint
 arrows.
 
 ```scheme
+;; plot/vector-field calls F with a sample point (x y) and expects a
+;; 2-element velocity back. We read the velocity of the nearest fluid
+;; particle to that point (world/nearest returns one entity, or nan).
 (define (paint-velocity-field)
   (plot/vector-field
-    (lambda (x y)
-      (let ((near (world/near 'fluid x y 30)))
-        (if (null? near)
-            (vec/make 0 0)
-            (let* ((sum (reduce
-                          (lambda (acc p)
-                            (vec/+ acc (entity/vel-vec p)))
-                          (vec/make 0 0)
-                          near)))
-              (vec/scale sum (/ 1.0 (length near)))))))
-    :region '(100 100 380 380)
-    :spacing 20))
+    (lambda (pt)
+      ;; entity/vel of the nearest fluid particle; safely (0 0) if none.
+      (entity/vel (world/nearest 'fluid (car pt) (cadr pt))))
+    16))                           ;; 16x16 arrow grid
 ```
 
 The velocity field shows swirls, downdrafts under the spout, upward
@@ -154,23 +153,26 @@ Make an entity that follows the mouse. Its motion pushes fluid
 particles out of the way via the separation force.
 
 ```scheme
+(define gray 6)
 (define paddle #f)
 
 (define (setup-paddle)
-  (set! paddle (world/spawn 'paddle 0 0))
+  (set! paddle (world/spawn 'paddle 240 240))
   (entity/mass! paddle 100)
   (entity/pin!  paddle)
   (ai/separate  paddle 'fluid 20 5.0))     ;; pushes fluid away
 
+;; No mouse verb yet, so drive the paddle in a circle to swirl the fluid.
 (on-frame
   (lambda (t)
-    (let ((m (input/mouse-pos)))
-      (entity/set-pos! paddle (car m) (cdr m)))
+    (entity/set-pos! paddle
+      (+ 240 (* 60 (geom/cos (* 0.05 t))))
+      (+ 240 (* 60 (geom/sin (* 0.05 t)))))
     (world/step)
-    (paint-circle (entity/x paddle) (entity/y paddle) 15 gray)))
+    (fb/rect (entity/x paddle) (entity/y paddle) 15 15 gray)))
 ```
 
-Drag the paddle. Watch the fluid flow around it. Swirl in a circle and
+Drive the paddle in a circle. Watch the fluid flow around it. Swirling
 you set up a vortex. The fluid follows for a moment after you stop —
 that's the inertia of the particles carrying the flow.
 
@@ -182,23 +184,34 @@ count > threshold, cell is 'fluid,' else 'air.' Then draw the boundary
 of the fluid region as a smooth line using marching squares.
 
 ```scheme
+;; Bucket particles into grid cells; mark a cell 'fluid' once enough
+;; particles land in it, then draw the filled cells as blocks.
 (define (paint-fluid-surface)
-  (let ((density (grid-init 40 30)))
-    ;; Fill density from particle positions
+  (grid-init 40 30)
+  (let ((counts (make-vector (* 40 30) 0)))
+    ;; Tally particles per cell.
     (world/each 'fluid
       (lambda (p)
         (let ((cx (quotient (entity/x p) 12))
               (cy (quotient (entity/y p) 12)))
-          (grid-inc! density cx cy 1))))
-    ;; Marching squares: draw contour where density crosses threshold
-    (grid/marching-squares density 3   ;; threshold: 3+ particles = fluid
-      :color blue
-      :fill? #t)))
+          (when (and (>= cx 0) (< cx 40) (>= cy 0) (< cy 30))
+            (let ((i (+ (* cy 40) cx)))
+              (vector-set! counts i (+ 1 (vector-ref counts i))))))))
+    ;; A cell with 3+ particles is fluid: light it up.
+    (let loop ((cy 0))
+      (when (< cy 30)
+        (let loop-x ((cx 0))
+          (when (< cx 40)
+            (when (>= (vector-ref counts (+ (* cy 40) cx)) 3)
+              (grid/dot cx cy 12))
+            (loop-x (+ cx 1))))
+        (loop (+ cy 1))))))
 ```
 
-Now the fluid is a shape, not a cloud of dots. It looks like water in
-a glass. This is one of the cheapest ways to make particle sims look
-like solids — marching squares in 2D or marching cubes in 3D.
+Now the fluid reads as a filled shape, not a cloud of dots. Smoothing
+the boundary of those filled cells into a contour (marching squares in
+2D, marching cubes in 3D) is the next step once the engine exposes a
+contour verb — the density grid above is exactly its input.
 
 Appendix J case-studies show this technique applied to five other
 particle sims: lava (dense, slow), gel (very dense, high separation),

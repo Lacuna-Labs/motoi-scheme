@@ -100,9 +100,29 @@ Let's see it in the simplest case: **seek**.
 ;; reads as data — the chapter's declarative spawn form, made real.
 (define (spawn-clause? x)
   (and (pair? x) (symbol? (car x)) (memq (car x) '(c-pos c-sprite c-vel c-mass))))
+;; A declarative clause-list is a list of (key value...) forms with keys drawn
+;; from pos/vel/max-speed/kind — the chapter's readable spawn form. It reads as
+;; data and configures a real entity vector over the same primitives.
+(define (decl-clause-list? x)
+  (and (pair? x) (list? x) (pair? (car x)) (symbol? (caar x))
+       (memq (caar x) '(pos vel max-speed kind))))
 (define (world/spawn a . rest)
-  (let ((all (cons a rest)))
-    (if (any spawn-clause? all)
+  (cond
+    ;; (world/spawn '()) — make/return a fresh world handle.
+    ((null? a) '*world*)
+    ;; (world/spawn world CLAUSE-LIST) — declarative form, second arg is data.
+    ((and (pair? rest) (decl-clause-list? (car rest)))
+     (let ((e (vector 'thing (vec/make 0 0) (vec/make 0 0) 1.0 1.0 0.0 \"*\" #f (make-hash-table))))
+       (for-each
+        (lambda (c)
+          (cond ((eq? (car c) 'pos)       (vector-set! e 1 (vec/make (caadr c) (cadadr c))))
+                ((eq? (car c) 'vel)       (vector-set! e 2 (vec/make (caadr c) (cadadr c))))
+                ((eq? (car c) 'max-speed) (hash-table-set! (vector-ref e 8) 'max-speed (cadr c)))
+                ((eq? (car c) 'kind)      (vector-set! e 0 (cadr c))
+                                          (hash-table-set! (vector-ref e 8) 'tag (cadr c)))))
+        (car rest))
+       (set! *world* (cons e *world*)) e))
+    ((any spawn-clause? (cons a rest))
         (let ((e (vector 'thing (vec/make 0 0) (vec/make 0 0) 1.0 1.0 0.0 \"*\" #f (make-hash-table))))
           (for-each
            (lambda (c)
@@ -111,8 +131,9 @@ Let's see it in the simplest case: **seek**.
                      ((eq? (car c) 'c-vel)    (vector-set! e 2 (vec/make (cadr c) (caddr c))))
                      ((eq? (car c) 'c-mass)   (vector-set! e 3 (cadr c)))
                      ((eq? (car c) 'c-sprite) (vector-set! e 0 (cadr c)) (vector-set! e 6 (cadr c))))))
-           all)
-          (set! *world* (cons e *world*)) e)
+           (cons a rest))
+          (set! *world* (cons e *world*)) e))
+    (else
         (let* ((tag (if (num? a) 'thing a))
                (x   (if (num? a) a (car rest)))
                (y   (if (num? a) (car rest) (cadr rest)))
@@ -282,8 +303,31 @@ Let's see it in the simplest case: **seek**.
          (step (vec/scale d (/ 0.3 n))))
     (vector-set! e 2 (vec/add (entity/vel e) step)) (list (car step) (cadr step))))
 (define (ai/wander e . opts)
-  (let ((j (* 0.3 (dsin (* 0.7 (+ *frame* (entity/x e)))))))
-    (vector-set! e 2 (vec/add (entity/vel e) (vec/make j (* 0.5 j)))) 'ok))
+  (let* ((j (* 0.3 (dsin (* 0.7 (+ *frame* (entity/x e))))))
+         (f (vec/make j (* 0.5 j))))
+    (vector-set! e 2 (vec/add (entity/vel e) f)) (list (car f) (cadr f))))
+;; ai/arrive: seek a target but ease the desired speed to zero inside a
+;; slowing-radius. Returns a steering force (fx fy).
+(define (ai/arrive e tx ty slowing-radius)
+  (let* ((p (entity/pos e))
+         (d (vec/sub (vec/make tx ty) p))
+         (dist (vec/norm d))
+         (target-speed (if (< dist slowing-radius)
+                           (* 0.3 (/ dist (max 0.001 slowing-radius)))
+                           0.3))
+         (f (if (< dist 0.001) (vec/make 0 0)
+                (vec/scale d (/ target-speed dist)))))
+    (vector-set! e 2 (vec/add (entity/vel e) f)) (list (car f) (cadr f))))
+;; ai/pursue: seek the target's PREDICTED position lookahead frames ahead.
+(define (ai/pursue e target lookahead)
+  (let* ((tp (entity/pos target)) (tv (entity/vel target))
+         (future (vec/add tp (vec/scale tv lookahead))))
+    (ai/seek e (car future) (cadr future))))
+;; ai/evade: flee the threat's PREDICTED future position.
+(define (ai/evade e threat lookahead)
+  (let* ((tp (entity/pos threat)) (tv (entity/vel threat))
+         (future (vec/add tp (vec/scale tv lookahead))))
+    (ai/flee e (car future) (cadr future))))
 (define (ai/separate e others . opts)
   (let ((push (vec/make 0 0)))
     (for-each (lambda (o)
@@ -518,23 +562,23 @@ Let's see it in the simplest case: **seek**.
     (define (draw)
       (clear-cell)
       (let ((pos (entity/pos entity)))
-        (paint-cell (car pos) (cdr pos) \"🔵\")
-        (paint-cell (car target) (cdr target) \"🎯\")))
+        (paint-cell (car pos) (cadr pos) \"🔵\")
+        (paint-cell (car target) (cadr target) \"🎯\")))
     
     (define (step)
       (let* ((pos (entity/pos entity))
              (vel (entity/vel entity))
              ;; seek: desired velocity points from pos to target, at max speed
              (dx (- (car target) (car pos)))
-             (dy (- (cdr target) (cdr pos)))
+             (dy (- (cadr target) (cadr pos)))
              (dist (dsqrt (+ (* dx dx) (* dy dy))))
              (desired (if (> dist 0.01)
                           (cons (* (/ dx dist) 2.0)   ; normalize, scale to max-speed
                                 (* (/ dy dist) 2.0))
-                          '(0 . 0)))
+                          (list 0 0)))
              ;; steering force = desired − current
              (steer-x (- (car desired) (car vel)))
-             (steer-y (- (cdr desired) (cdr vel))))
+             (steer-y (- (cadr desired) (cadr vel))))
         (entity/accel! entity steer-x steer-y)
         (world/step w)))
     
@@ -579,12 +623,12 @@ Writing the steering math by hand is instructive, but the engine provides it as 
     (define (draw)
       (clear-cell)
       (let ((pos (entity/pos entity)))
-        (paint-cell (car pos) (cdr pos) \"🔵\")
-        (paint-cell (car target) (cdr target) \"🎯\")))
+        (paint-cell (car pos) (cadr pos) \"🔵\")
+        (paint-cell (car target) (cadr target) \"🎯\")))
     
     (define (step)
-      (let* ((steer (ai/seek entity (car target) (cdr target))))
-        (entity/accel! entity (car steer) (cdr steer))
+      (let* ((steer (ai/seek entity (car target) (cadr target))))
+        (entity/accel! entity (car steer) (cadr steer))
         (world/step w)))
     
     (big-bang w
@@ -623,12 +667,12 @@ Writing the steering math by hand is instructive, but the engine provides it as 
     (define (draw)
       (clear-cell)
       (let ((pos (entity/pos entity)))
-        (paint-cell (car pos) (cdr pos) \"🟢\")
+        (paint-cell (car pos) (cadr pos) \"🟢\")
         (paint-cell (car threat) (cdr threat) \"⚠️\")))
     
     (define (step)
       (let ((steer (ai/flee entity (car threat) (cdr threat))))
-        (entity/accel! entity (car steer) (cdr steer))
+        (entity/accel! entity (car steer) (cadr steer))
         (world/step w)))
     
     (big-bang w
@@ -670,12 +714,12 @@ A seeker never stops—it overshoots the target, circles back, overshoots again.
     (define (draw)
       (clear-cell)
       (let ((pos (entity/pos entity)))
-        (paint-cell (car pos) (cdr pos) \"🟣\")
-        (paint-cell (car target) (cdr target) \"🎯\")))
+        (paint-cell (car pos) (cadr pos) \"🟣\")
+        (paint-cell (car target) (cadr target) \"🎯\")))
     
     (define (step)
-      (let ((steer (ai/arrive entity (car target) (cdr target) 5.0)))  ; slowing-radius = 5.0
-        (entity/accel! entity (car steer) (cdr steer))
+      (let ((steer (ai/arrive entity (car target) (cadr target) 5.0)))  ; slowing-radius = 5.0
+        (entity/accel! entity (car steer) (cadr steer))
         (world/step w)))
     
     (big-bang w
@@ -720,7 +764,7 @@ To predict, we need the target's velocity. Let's spawn two entities: a moving ta
     ;; give the target a simple wander so it moves unpredictably
     (define (step-target)
       (let ((wander (ai/wander target 1.0 0.3)))
-        (entity/accel! target (car wander) (cdr wander))))
+        (entity/accel! target (car wander) (cadr wander))))
     
     (define (draw)
       (clear-cell)
@@ -732,7 +776,7 @@ To predict, we need the target's velocity. Let's spawn two entities: a moving ta
     (define (step)
       (step-target)
       (let ((steer (ai/pursue pursuer target 10)))  ; predict 10 frames ahead
-        (entity/accel! pursuer (car steer) (cdr steer))
+        (entity/accel! pursuer (car steer) (cadr steer))
         (world/step w)))
     
     (big-bang w
@@ -840,11 +884,11 @@ The engine provides this as **`ai/wander`**:
     (define (draw)
       (clear-cell)
       (let ((pos (entity/pos wanderer)))
-        (paint-cell (car pos) (cdr pos) \"🦋\")))
+        (paint-cell (car pos) (cadr pos) \"🦋\")))
     
     (define (step)
       (let ((steer (ai/wander wanderer 2.0 0.5)))  ; circle-distance=2.0, circle-radius=0.5
-        (entity/accel! wanderer (car steer) (cdr steer))
+        (entity/accel! wanderer (car steer) (cadr steer))
         (world/step w)))
     
     (big-bang w
@@ -886,7 +930,7 @@ Real creatures don't just wander—they wander *while avoiding obstacles*, or se
     (define (draw)
       (clear-cell)
       (let ((pos (entity/pos creature)))
-        (paint-cell (car pos) (cdr pos) \"🐁\")
+        (paint-cell (car pos) (cadr pos) \"🐁\")
         (paint-cell (car threat) (cdr threat) \"🐍\")))
     
     (define (step)
@@ -900,7 +944,7 @@ Real creatures don't just wander—they wander *while avoiding obstacles*, or se
              (flee-weight (if (< dist 6.0) 3.0 0.0))
              ;; combine
              (total-x (+ (car wander) (* flee-weight (car flee))))
-             (total-y (+ (cdr wander) (* flee-weight (cdr flee)))))
+             (total-y (+ (cadr wander) (* flee-weight (cadr flee)))))
         (entity/accel! creature total-x total-y)
         (world/step w)))
     
@@ -952,7 +996,7 @@ Let's build the chapter's capstone: a creature that **wanders** when you're not 
     (define (draw)
       (clear-cell)
       (let ((pos (entity/pos creature)))
-        (paint-cell (car pos) (cdr pos) \"🐉\")))
+        (paint-cell (car pos) (cadr pos) \"🐉\")))
     
     (define (step)
       ;; check if touch is down
@@ -963,7 +1007,7 @@ Let's build the chapter's capstone: a creature that **wanders** when you're not 
              (steer (if touching
                         (ai/arrive creature touch-x touch-y 3.0)  ; arrive at touch
                         (ai/wander creature 2.0 0.6))))           ; else wander
-        (entity/accel! creature (car steer) (cdr steer))
+        (entity/accel! creature (car steer) (cadr steer))
         (world/step w)))
     
     (big-bang w

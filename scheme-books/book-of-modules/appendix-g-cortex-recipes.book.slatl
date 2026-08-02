@@ -3,7 +3,7 @@
   :audience             programmer-learning-motoi
   :book "Book of Modules"
   :appendix-letter "G"
-  :title "Cortex module-usage query recipes"
+  :title "Cortex recipes — facts you write, not module events you don't have"
   :dialect "motoi"
   :voice "motoi-copilot"
   :training-eligible #t
@@ -12,142 +12,109 @@
     (:authored-at "2026-07-17"
      :authored-by "book-completion-orchestrator")
   :prose
-"# Appendix G — Cortex module-usage recipes
+"# Appendix G — Cortex recipes (real Motoi, not module-event queries)
 
-Ready-to-run queries for common questions about module usage.
+The other dialect's Cortex recipes query an automatic stream of module events — `module-loaded`, `module-resolved`, `module-verified`, `module-call`. **Motoi emits none of those** (Chapter 13): there is no module system to instrument. It also binds none of the fancy query verbs the other dialect uses — `cortex/query-distinct`, `cortex/query-unused-imports`, `cortex/query-first`, and `cortex/query-diff` are all `error: unbound symbol`. What Motoi *does* have is `cortex/write` and `cortex/recall`, plus the whole standard library. This appendix rewrites each recipe using only those real tools: you record the fact, then compute over it with ordinary list verbs.
 
-## Recipe 1 — What modules does my program depend on?
+## Recipe 1 — What libraries did my program use?
 
-```scheme
-(cortex/query :subject :self :predicate 'module-loaded)
-;; ⇒ list of every module the running program has loaded
-```
-
-Group by module name for a deduped list:
+You record it yourself as one fact:
 
 ```scheme
-(cortex/query-distinct
-  :subject :self
-  :predicate 'module-loaded
-  :group-by :object)
+(cortex/write 'deps '(string list hash-table))
+(cortex/recall 'deps)
+;; ⇒ a memory record whose :data is (string list hash-table)
 ```
 
-## Recipe 2 — What versions has this module ever resolved to?
+There is no automatic `module-loaded` list, because nothing loads modules. The honest dependency record is the one you write.
+
+## Recipe 2 — Deduplicate a recorded list
+
+The other dialect's `cortex/query-distinct` is, in Motoi, `delete-duplicates` over a list you kept:
 
 ```scheme
-(cortex/query :predicate 'module-resolved :object 'graphics)
-;; ⇒ ((:pin \"^2.0.0\" :resolved \"2.1.0\" :at 2026-07-01)
-;;    (:pin \"^2.0.0\" :resolved \"2.1.1\" :at 2026-07-15))
+(delete-duplicates '(string string list hash-table list))
+;; ⇒ (string list hash-table)
 ```
 
-Two resolutions of `graphics`. Between them, the version bumped. If your program's behavior changed on 2026-07-15, this points at the cause.
+No special query verb — a standard SRFI-1 verb over your own data.
 
-## Recipe 3 — What imports are unused?
+## Recipe 3 — Which recorded libraries went unused?
+
+The other dialect's `cortex/query-unused-imports` has no basis here (no imports). You compute it: given everything you *had* and everything you *used*, the unused set is a set difference with `filter`/`member`:
 
 ```scheme
-(cortex/query-unused-imports :in :self)
-;; ⇒ (:unused (legacy-helper old-thing))
+(define had  '(string list hash-table random))
+(define used '(string list))
+(filter (lambda (x) (not (member x used))) had)
+;; ⇒ (hash-table random)
 ```
 
-An import with no `module-call` events is a candidate for deletion.
+## Recipe 4 — Did my review pass?
 
-## Recipe 4 — Which modules verified successfully?
+The other dialect queried `module-verified`. Motoi has no verification event; you record your own judgement and read it back:
 
 ```scheme
-(cortex/query :predicate 'module-verified :object :ok #t)
-;; ⇒ list of successful verifications
+(cortex/write 'review-ok #t)
+(cortex/recall 'review-ok)
+;; ⇒ a memory record whose :data is #t
 ```
 
-Flip to `#f` to find failures.
+## Recipe 5 — What did this component use?
 
-## Recipe 5 — What did this cart load?
+Instead of per-cart `module-loaded`, key the fact by component name:
 
 ```scheme
-(cortex/query :subject 'cart-a :predicate 'module-loaded)
-;; ⇒ every module cart-a has ever loaded
+(cortex/write 'component-a-deps '(string random))
+(cortex/recall 'component-a-deps)
+;; ⇒ a memory record whose :data is (string random)
 ```
 
-Multi-cart environments — this is how you tell what each cart depends on.
+## Recipe 6 — Latest value wins
 
-## Recipe 6 — What loaded a specific version?
+`cortex/recall` returns the most recent write for a key — so \"what is the current value\" is free:
 
 ```scheme
-(cortex/query
-  :predicate 'module-loaded
-  :object 'graphics
-  :where (lambda (r) (equal? (getf r :version) \"2.1.0\")))
-;; ⇒ every load event for graphics 2.1.0
+(cortex/write 'current 'v1)
+(cortex/write 'current 'v2)
+(cortex/recall 'current)
+;; ⇒ a memory record whose :data is v2
 ```
 
-Useful when you want to know *who is still on the old version*.
+## Recipe 7 — Diff between two recorded snapshots
 
-## Recipe 7 — When did I first depend on X?
+The other dialect's `cortex/query-diff` becomes two lists and a pair of set differences:
 
 ```scheme
-(cortex/query-first
-  :subject :self
-  :predicate 'module-loaded
-  :object 'graphics)
-;; ⇒ (:at 2025-11-14)
+(define before '(string list))
+(define after  '(string hash-table))
+(define added   (filter (lambda (x) (not (member x before))) after))
+(define removed (filter (lambda (x) (not (member x after)))  before))
+(list :added added :removed removed)
+;; ⇒ (:added (hash-table) :removed (list))
 ```
 
-The first time your program loaded `graphics`. Useful for archaeology.
+That is a full added/removed diff, built from facts you kept and plain list verbs — no `query-diff` verb needed, because Motoi has none.
 
-## Recipe 8 — Diff dependencies between two runs
+## Recipe 8 — A small audit report
+
+Combine the recipes into one verb over your own recorded facts:
 
 ```scheme
-(cortex/query-diff
-  :subject :self
-  :predicate 'module-loaded
-  :between-runs 42 43)
-;; ⇒ (:added ()
-;;    :removed ()
-;;    :updated ((graphics 2.1.0 → 2.1.1)))
+(define (audit-report had used)
+  (list :used     (delete-duplicates used)
+        :unused   (filter (lambda (x) (not (member x used))) had)))
+
+(audit-report '(string list hash-table random) '(string list list))
+;; ⇒ (:used (string list) :unused (hash-table random))
 ```
 
-Run 42 vs run 43. `graphics` updated between them.
+Run it, save the output, compare against last time — the same discipline the other dialect's report gave, built without any module-event stream.
 
-## Recipe 9 — Which authors' modules do I depend on?
+## Cortex is a memory, not a module tracker
 
-```scheme
-(cortex/query-distinct
-  :subject :self
-  :predicate 'module-verified
-  :field :author)
-;; ⇒ (a-friend the-collective some-vendor ...)
-```
+Every recipe here writes a fact you chose to record and computes over it with standard verbs. That is the honest shape of \"auditing usage\" in Motoi: there is no automatic module telemetry (none of `cortex/query-distinct`, `cortex/query-unused-imports`, `cortex/query-first`, `cortex/query-diff` is bound), so you keep the facts you care about and reason over them yourself.
 
-Useful for security audits — every author your program has trusted.
+## Try this
 
-## Recipe 10 — What happened around the time of the bug?
-
-```scheme
-(cortex/query
-  :subject :self
-  :predicate 'module-loaded
-  :within (list :seconds 60 :of bug-timestamp))
-;; ⇒ every module loaded in the minute around the bug
-```
-
-Reproduction aid — narrows the window of what changed.
-
-## Making it a report
-
-Combine multiple recipes into a single audit-report command:
-
-```scheme
-(define (audit-report)
-  (list
-    :dependencies (cortex/query :subject :self :predicate 'module-loaded)
-    :unused (cortex/query-unused-imports :in :self)
-    :failed-verifications
-      (cortex/query :predicate 'module-verified :object :ok #f)
-    :versions-over-time
-      (cortex/query :predicate 'module-resolved)))
-```
-
-Run once a week; save the output; diff against last week.
-
-## Cortex is optional but useful
-
-Everything above assumes Cortex is on. It usually is — the tiny per-event overhead is worth the audit trail. If for some reason you have Cortex off, module-usage queries just return empty. No error.")
+Write a `deps` fact and recall it (Recipe 1). Dedup a list with `delete-duplicates` (Recipe 2). Compute an added/removed diff with `filter`/`member` (Recipe 7). Then confirm `cortex/query-diff` is `error: unbound symbol` — you did its job with two lists and a set difference, because Motoi has no module events to diff.")

@@ -126,16 +126,17 @@ This is what provenance introspection buys you. Not just *what does the program 
 
 ## 10.18 Cortex + LLM
 
-Chapter 13's `reason-about` verb takes a value and reads Cortex for context. If you ask about the user's color preference:
+Chapter 13's `copilot/explain` verb takes a value and produces grounded prose. Feed it the records you pulled from Cortex about the user's color preference:
 
 ```scheme
-(reason-about (cortex/query :subject 'user :predicate 'preferred-color))
-;; => \"The user's preference for red was inferred from three ui-click events between
-;;     16:00 and 17:00. The inference source suggests this is program-derived, not
-;;     user-stated. Confidence: moderate.\"
+(copilot/explain
+  (cortex/query :subject 'user :predicate 'preferred-color))
+;; => a prose explanation, grounded in the records you passed in.
+;;    With no LLM configured you get a docs-based fallback string, never
+;;    a confabulation.
 ```
 
-The LLM read the records and produced prose. Grounded in the actual data, not confabulated.
+The LLM reads the records you hand it and produces prose. Grounded in the actual data, not confabulated. When no model is configured, `copilot/explain` returns a deterministic docs-based string rather than inventing facts.
 
 ## 10.19 Preview of Chapter 11
 
@@ -188,28 +189,36 @@ Turn the page. Chapter 11 opens the registry.
 
 ## 10.23 Deep-seed — one worked provenance walk
 
-Suppose your program shows the user a suggested color. You want to explain why.
+Suppose your program shows the user a suggested color. You want to explain why. First, three small accessors that pull a field out of a Cortex record. A record's payload lives in its `:data` slot, itself an alist of `:subject`, `:predicate`, `:object`, `:at`, `:source`.
+
+```scheme
+(define (cortex-field key rec)
+  (let ((d (assq :data rec)))
+    (and d (let ((kv (assq key (cadr d)))) (and kv (cadr kv))))))
+(define (cortex-object rec) (cortex-field :object rec))
+(define (cortex-predicate rec) (cortex-field :predicate rec))
+(define (cortex-source rec) (cortex-field :source rec))
+```
+
+Now the explanation. `cortex/topk` returns the most-recent records matching a filter, newest first:
 
 ```scheme
 (define (explain-suggestion subject)
-  (define preference
-    (car (cortex/query
-           :subject subject
-           :predicate 'preferred-color
-           :order-by 'at :limit 1)))
-  (define source (cortex/object-source preference))
+  (define hits (cortex/topk 1 :subject subject :predicate 'preferred-color))
+  (define preference (if (pair? hits) (car hits) '()))
+  (define source (cortex-source preference))
   (define supporting
     (cortex/query
       :subject subject
       :predicate 'picked-color
       :source 'ui-click))
   (list
-    :suggestion (cortex/object preference)
+    :suggestion (cortex-object preference)
     :because (list :source source :evidence (length supporting) :records supporting)))
 
 (explain-suggestion 'user)
 ;; => (:suggestion red
-;;     :because (:source inferred-from-3-choices :evidence 3 :records (...)))
+;;     :because (:source ui-click :evidence 3 :records (...)))
 ```
 
 The verb returns a complete explanation — the suggestion, the source, the count of supporting evidence, and the raw records. If the user asks *why do you keep suggesting red?* you have the answer built in.
@@ -229,7 +238,7 @@ Cortex holds facts. The registry holds verbs. They can reference each other.
 ;; join with registry to get docs for each used verb
 (map
   (lambda (r)
-    (let ((v (cortex/object r)))
+    (let ((v (cortex-object r)))
       (list :verb v :doc (doc-of v))))
   verb-usage)
 ```
@@ -253,16 +262,16 @@ Cortex does not have SQL-style aggregation built in. You build it from primitive
 **Group records by a field.**
 
 ```scheme
-(define (group-by field records)
-  (define groups (hash))
+(define (group-by-object records)
+  (define groups (make-hash-table))
   (for-each
     (lambda (r)
-      (let ((k (assoc field r)))
+      (let ((k (cortex-object r)))
         (hash-table-set! groups k (cons r (hash-table-ref/default groups k '())))))
     records)
   groups)
 
-(group-by :object (cortex/query :subject 'user :predicate 'picked-color))
+(group-by-object (cortex/query :subject 'user :predicate 'picked-color))
 ;; => hash of color -> list of records
 ```
 
@@ -270,7 +279,7 @@ Cortex does not have SQL-style aggregation built in. You build it from primitive
 
 ```scheme
 (define (distinct-objects records)
-  (unique (map cortex/object records)))
+  (delete-duplicates (map cortex-object records)))
 
 (distinct-objects (cortex/query :subject 'user :predicate 'picked-color))
 ;; => (red blue green)
@@ -278,22 +287,22 @@ Cortex does not have SQL-style aggregation built in. You build it from primitive
 
 Three tiny helpers built from primitives. Aggregation over Cortex is a filter followed by a fold, always. Once you know the pattern you can build any aggregation you need in a few lines.
 
-## 10.27 Deep-seed — time-range queries
+## 10.27 Deep-seed — time-scoped queries
 
-Cortex supports range predicates on `:at`.
+`cortex/query` filters by exact field match, and `cortex/topk` returns the most-recent records matching a filter (newest first). To scope by time you pull the recent slice with `cortex/topk`, then filter on the `:at` field yourself.
 
 ```scheme
-;; last hour
-(cortex/query :at :gt (- (current-second) 3600))
+;; ten most-recent records about the user
+(cortex/topk 10 :subject 'user)
 
-;; last hour of specific subject
-(cortex/query :subject 'user :at :gt (- (current-second) 3600))
-
-;; between two timestamps
-(cortex/query :at :between (list start-time end-time))
+;; keep only those from the last hour
+(let ((cutoff (- (current-second) 3600)))
+  (filter
+    (lambda (r) (> (cortex-field :at r) cutoff))
+    (cortex/topk 100 :subject 'user)))
 ```
 
-Time-range introspection is what lets you answer questions like *what happened during this specific session?* or *how has the user's behavior changed since we shipped the update?*. Both are one query.
+Time-scoped introspection is what lets you answer questions like *what happened during this specific session?* or *how has the user's behavior changed since we shipped the update?*. Pull the recent slice, then filter on `:at`.
 
 ## 10.28 Deep-seed — the whole graph
 
@@ -304,28 +313,35 @@ If you want to see the whole Cortex graph for a subject:
 ;; every fact ever recorded about the user
 ```
 
-That is often a lot of records. Bulk introspection at this scale needs pagination:
+That is often a lot of records. Bulk introspection at this scale takes the most-recent slice with `cortex/topk`, or pages by hand over the full list:
 
 ```scheme
-(cortex/query :subject 'user :limit 100 :offset 0)
-;; first 100 records
+;; the 100 most-recent records about the user
+(cortex/topk 100 :subject 'user)
 
-(cortex/query :subject 'user :limit 100 :offset 100)
-;; next 100
+;; page by hand over the full list
+(define all-user (cortex/query :subject 'user))
+(define (page lst n offset)
+  (let ((from (list-tail lst (min offset (length lst)))))
+    (list-head from (min n (length from)))))
+(page all-user 100 0)   ;; first 100
 ```
 
-Or just take a summary:
+Or just take a summary. `cortex/topk` gives newest-first, so the newest record is its car and the oldest is the last of the full list ordered by `:at`:
 
 ```scheme
+(define (distinct-predicates records)
+  (delete-duplicates (map cortex-predicate records)))
+
 (define user-summary
-  (list
-    :total-records (length (cortex/query :subject 'user))
-    :predicates (distinct-objects (map cortex/predicate (cortex/query :subject 'user)))
-    :oldest (car (cortex/query :subject 'user :order-by 'at :limit 1))
-    :newest (car (cortex/query :subject 'user :order-by 'at-desc :limit 1))))
+  (let ((recent (cortex/topk 100 :subject 'user)))
+    (list
+      :total-records (length (cortex/query :subject 'user))
+      :predicates (distinct-predicates recent)
+      :newest (if (pair? recent) (car recent) '()))))
 ```
 
-Four fields describing what the program knows about the user, computed from Cortex introspection primitives. Print it and you have a one-screen summary of a subject's whole history.
+A few fields describing what the program knows about the user, computed from Cortex introspection primitives. Print it and you have a one-screen summary of a subject's whole history.
 
 Turn the page.
 
@@ -345,11 +361,7 @@ A common Cortex introspection is *what happened most recently?*. The pattern:
 
 ```scheme
 (define (last-n subject predicate n)
-  (cortex/query
-    :subject subject
-    :predicate predicate
-    :order-by 'at-desc
-    :limit n))
+  (cortex/topk n :subject subject :predicate predicate))
 
 (last-n 'user 'picked-color 5)
 ;; => last five color picks, newest first
@@ -365,8 +377,10 @@ With introspection:
 
 ```scheme
 (define (default-color)
-  (or (cortex/object (car (last-n 'user 'preferred-color 1)))
-      'blue))
+  (let ((hits (last-n 'user 'preferred-color 1)))
+    (if (pair? hits)
+        (or (cortex-object (car hits)) 'blue)
+        'blue)))
 ```
 
 When the program needs a default color, it introspects Cortex first. If the user has ever expressed a preference, use it. Otherwise fall back.

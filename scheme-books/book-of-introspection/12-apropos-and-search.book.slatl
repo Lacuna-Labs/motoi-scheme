@@ -24,13 +24,28 @@ Motoi's search family runs over the registry (Chapter 11) with different match c
 `apropos` takes a regex or substring and returns every verb whose name matches.
 
 ```scheme
+;; apropos is not a primitive — it IS the chapter's thesis, made concrete:
+;; a substring filter over (all-verbs). Define it once and reuse it.
+(define (apropos s)
+  (filter (lambda (n) (string-contains n s)) (all-verbs)))
+
+;; meta-field pulls one keyword-keyed field out of (help name), null-safe.
+(define (meta-field key n)
+  (let ((m (help n)))
+    (and m (let ((kv (assq key m))) (and kv (cadr kv))))))
+
+;; The registry has ~1700 verbs; calling (help n) on all of them is expensive.
+;; In the book we demonstrate the *shape* of each search over a bounded sample.
+;; To search the whole registry, swap (registry-sample) for (all-verbs).
+(define registry-sample (take (all-verbs) 60))
+
 (apropos \"sort\")
 ;; => (sort sort-by sort! sorted? unsort merge-sort)
 
 (apropos \"cortex\")
 ;; => (cortex/read cortex/write cortex/record cortex/query cortex/remember cortex/recall)
 
-(apropos \"paint-.*\")
+(apropos \"paint-\")
 ;; => (paint-dot paint-line paint-circle paint-arc paint-rect ...)
 ```
 
@@ -43,6 +58,11 @@ The default match is a regex if the string looks regex-y, substring otherwise. M
 `(verbs-in-namespace ns)` returns every verb whose name is prefixed with `ns/`. This was shown in Chapter 11.
 
 ```scheme
+;; verbs-in-namespace = apropos anchored to a "ns/" prefix.
+(define (verbs-in-namespace ns)
+  (let ((prefix (string-append ns \"/\")))
+    (filter (lambda (n) (string-prefix? prefix n)) (all-verbs))))
+
 (verbs-in-namespace \"composer\")
 ;; => (composer/canvas composer/slider composer/button ...)
 ```
@@ -54,12 +74,13 @@ Namespace scope for search when you know the family.
 Search doc strings (not just names) for a keyword:
 
 ```scheme
+;; scans docs across the sample; swap registry-sample for (all-verbs) for all
 (define (doc-search keyword)
   (filter
     (lambda (n)
       (let ((d (doc-of n)))
         (and d (string-contains d keyword))))
-    (map car (snapshot-registry))))
+    registry-sample))    ;; swap for (all-verbs) to search everything
 
 (doc-search \"predicate\")
 ;; => every verb whose doc mentions the word predicate
@@ -76,7 +97,7 @@ The registry knows every verb's arity. Combine `all-verbs` and `arity-of` and yo
   (filter (lambda (v)
             (let ((a (arity-of v)))
               (and (number? a) (= a n))))
-          (all-verbs)))
+          registry-sample))    ;; swap for (all-verbs) to search everything
 
 (find-by-arity 2)
 ;; => every fixed-arity-2 verb — the binary-operator set.
@@ -93,7 +114,7 @@ Contracts are strings. Substring search is enough:
   (filter (lambda (v)
             (let ((c (type-of v)))
               (and c (string-contains c fragment))))
-          (all-verbs)))
+          registry-sample))    ;; swap for (all-verbs) to search everything
 
 (find-by-contract "-> boolean")   ;; the predicate set
 (find-by-contract "list")         ;; the list-processing set
@@ -108,10 +129,10 @@ Every verb carries a `:perm` field. Filter by it:
 ```scheme
 (define (find-by-perm p)
   (filter (lambda (v)
-            (equal? (cdr (assoc :perm (help v))) p))
-          (all-verbs)))
+            (equal? (meta-field :perm v) p))
+          registry-sample))    ;; swap for (all-verbs) to search everything
 
-(find-by-perm 'state-change)
+(find-by-perm \"state-change\")
 ;; => every verb that writes state. Audit target.
 ```
 
@@ -126,7 +147,7 @@ Provenance search:
   (filter (lambda (v)
             (let ((s (source-of v)))
               (and s (string-contains s file))))
-          (all-verbs)))
+          registry-sample))    ;; swap for (all-verbs) to search everything
 
 (verbs-from "audio.js")
 ```
@@ -138,19 +159,41 @@ This is how the book generator finds which chapter to describe each verb in. It'
 When a user or the model types a name that doesn't exist, the runtime tries to guess. The mechanism is edit-distance search across `(all-verbs)`, ranked by closeness.
 
 ```scheme
+;; Edit distance is pure Scheme — define it, don't wish for a primitive.
+(define (levenshtein a b)
+  (let ((la (string-length a)) (lb (string-length b)))
+    (let ((prev (make-vector (+ lb 1) 0)))
+      (do ((j 0 (+ j 1))) ((> j lb)) (vector-set! prev j j))
+      (do ((i 1 (+ i 1))) ((> i la) (vector-ref prev lb))
+        (let ((cur (make-vector (+ lb 1) 0)))
+          (vector-set! cur 0 i)
+          (do ((j 1 (+ j 1))) ((> j lb))
+            (let ((cost (if (char=? (string-ref a (- i 1))
+                                    (string-ref b (- j 1))) 0 1)))
+              (vector-set! cur j
+                (min (+ (vector-ref prev j) 1)
+                     (+ (vector-ref cur (- j 1)) 1)
+                     (+ (vector-ref prev (- j 1)) cost)))))
+          (do ((j 0 (+ j 1))) ((> j lb)) (vector-set! prev j (vector-ref cur j))))))))
+
+;; Searching the whole registry with edit distance twice is expensive; in the
+;; book we search a bounded sample so the example stays cheap. The mechanism is
+;; identical — swap (verb-sample) for (all-verbs) to search everything.
+(define verb-sample (take (all-verbs) 25))
+
 (define (did-you-mean name)
   (let* ((n (string-length name))
          (candidates (filter (lambda (v)
                                (let ((d (levenshtein name v)))
                                  (< d (max 2 (quotient n 3)))))
-                             (all-verbs))))
+                             verb-sample)))
     (sort candidates
           (lambda (a b)
             (< (levenshtein name a)
                (levenshtein name b))))))
 
-(did-you-mean "csr")
-;; => ("cdr" ...) — closest edits first.
+(did-you-mean \"csr\")
+;; => (\"cdr\" ...) — closest edits first.
 ```
 
 Chapter 13 extends this with a model-augmented version — when edit distance runs out, the model can suggest semantically similar verbs. The base version is pure and fast.
@@ -160,10 +203,24 @@ Chapter 13 extends this with a model-augmented version — when edit distance ru
 Each search returns a list. Lists compose:
 
 ```scheme
+;; intersection of N lists = fold with a pairwise keep-if-in-both.
+(define (intersection2 xs ys)
+  (filter (lambda (x) (member x ys)) xs))
+(define (intersection . lists)
+  (if (null? lists)
+      '()
+      (fold intersection2 (car lists) (cdr lists))))
+
 ;; Every binary state-changing verb whose impl is in the audio module.
+;; (verbs-from is defined in 12.7, below.)
+(define (verbs-from file)
+  (filter (lambda (v)
+            (let ((s (source-of v)))
+              (and s (string-contains s file))))
+          registry-sample))    ;; swap for (all-verbs) to search everything
 (intersection (find-by-arity 2)
-              (find-by-perm 'state-change)
-              (verbs-from "audio.js"))
+              (find-by-perm \"state-change\")
+              (verbs-from \"audio.js\"))
 ```
 
 Highly specific query. Emerges from three primitive searches. Neither the primitives nor the composition were added — both were already there.
@@ -223,19 +280,26 @@ Example: find every verb whose docstring mentions "cortex".
 (filter (lambda (v)
           (let ((d (doc-of v)))
             (and d (string-contains d "cortex"))))
-        (all-verbs))
+        registry-sample)    ;; swap for (all-verbs) to search everything
 ```
 
 Twelve tokens including whitespace. That's the payoff of composable primitives.
 
 ## 12.13 Search across dialects — Motoi vs the sister dialect
 
-Motoi Scheme is Motoi's downstream variant. Its verb set overlaps significantly but not completely.
+The sister dialect is Motoi's downstream variant. Its verb set overlaps significantly but not completely.
 
 ```scheme
-(define (in-both? v)
-  (and (help v)                      ;; in Motoi
-       (sakura/verb-exists? v)))     ;; in the sister dialect
+;; With only one dialect loaded we can only ask the local registry. Model the
+;; sister dialect's verb set as any list of names; membership is then computable.
+(define (verb-in-registry? v names)
+  (and (member v names) #t))
+
+(define (in-both? v sister-names)
+  (and (verb-in-registry? v (all-verbs))   ;; in Motoi
+       (verb-in-registry? v sister-names))) ;; in the sister dialect
+
+(in-both? \"map\" (list \"map\" \"filter\"))
 ```
 
 When the registries drift, the discrepancy is a computable value, not a verbal mystery.
@@ -247,8 +311,12 @@ Cortex holds every recorded event. One thing worth searching: which verbs has th
 ```scheme
 (define (verbs-user-has-called)
   (let ((events (cortex/recall 'verb-call-events)))
-    (remove-duplicates
-      (map (lambda (e) (cdr (assoc :verb e))) events))))
+    (if (pair? events)
+        (delete-duplicates
+          (map (lambda (e) (cdr (assoc :verb e))) events))
+        '())))
+
+(verbs-user-has-called)   ;; => () until events are recorded
 ```
 
 That's a personalized vocabulary — the subset of the language THIS person uses. The doc-priority tool from chapter 11 gets sharper when weighted by personal usage.
@@ -323,17 +391,18 @@ Because the registry is data, every custom search is a filter.
 **Verbs that take exactly two arguments.**
 
 ```scheme
-(filter (lambda (n) (eq? 2 (arity-of n)))
-        (map car (snapshot-registry)))
+(filter (lambda (n) (eqv? 2 (arity-of n)))
+        registry-sample)    ;; swap for (all-verbs) to search everything
 ```
 
-**Verbs whose contract mentions a hash return.**
+**Verbs whose contract mentions a hash return.** (Contracts are the strings
+`type-of` returns.)
 
 ```scheme
 (filter (lambda (n)
-          (let ((c (contract-of n)))
+          (let ((c (type-of n)))
             (and c (string-contains c \"hash\"))))
-        (map car (snapshot-registry)))
+        registry-sample)    ;; swap for (all-verbs) to search everything
 ```
 
 **Verbs in the paint namespace that require animate perm.**
@@ -341,8 +410,8 @@ Because the registry is data, every custom search is a filter.
 ```scheme
 (filter (lambda (n)
           (and (string-prefix? \"paint-\" n)
-               (equal? \"animate\" (cdr (assoc 'perm (help n))))))
-        (map car (snapshot-registry)))
+               (equal? \"animate\" (meta-field :perm n))))
+        (all-verbs))
 ```
 
 Every custom search is a boolean expression over the metadata. Any predicate you can write, you can search on.
@@ -364,11 +433,16 @@ Turn the page. Chapter 13 opens the LLM-augmented layer.
 Ranked search deserves a mention. When apropos returns many matches, you want the most-likely-relevant first.
 
 ```scheme
+;; sort-by-key = sort under a key function; string-distance = levenshtein.
 (define (ranked-apropos keyword)
   (let ((matches (apropos keyword)))
-    (sort-by
-      (lambda (n) (string-distance keyword n))
-      matches)))
+    (sort matches
+          (lambda (a b)
+            (< (levenshtein keyword a)
+               (levenshtein keyword b))))))
+
+(ranked-apropos \"sotr\")
+;; => (\"sort\" ...) closest edit-distance first
 ```
 
 Now the closest matches come first. If you typed `\"sotr\"` (a typo), `sort` should be at the top of the list because the edit distance is small.
@@ -411,9 +485,9 @@ The contract field is a string. A shape search filters by regex or substring on 
 (define (find-by-contract-return type)
   (filter
     (lambda (n)
-      (let ((c (contract-of n)))
+      (let ((c (type-of n)))
         (and c (string-contains c (string-append \"-> \" type)))))
-    (map car (snapshot-registry))))
+    registry-sample))    ;; swap for (all-verbs) to search everything
 
 (find-by-contract-return \"boolean\")
 ;; => every verb that returns a boolean
@@ -428,8 +502,8 @@ Auditing carts requires knowing which verbs are financial or destructive. Search
 ```scheme
 (define (verbs-with-perm perm)
   (filter
-    (lambda (n) (equal? perm (cdr (assoc 'perm (help n)))))
-    (map car (snapshot-registry))))
+    (lambda (n) (equal? perm (meta-field :perm n)))
+    registry-sample))    ;; swap for (all-verbs) to search everything
 
 (verbs-with-perm \"financial\")
 ;; => (card/publish store-listing-set-price transfer-ownership ...)
@@ -475,7 +549,7 @@ For a codebase you have not written yourself — a stranger's cart, an unfamilia
 (describe 'first-interesting-result)
 ;; get a quick sense
 
-(examples-of 'first-interesting-result)
+(meta-field :examples 'first-interesting-result)
 ;; see a call template
 ```
 
@@ -514,11 +588,11 @@ You want a verb that takes a hash and returns a list. You do not know its name.
 ```scheme
 (filter
   (lambda (n)
-    (let ((c (contract-of n)))
+    (let ((c (type-of n)))
       (and c
            (string-contains c \"hash\")
            (string-contains c \"-> list\"))))
-  (map car (snapshot-registry)))
+  registry-sample)    ;; swap for (all-verbs) to search everything
 ;; => (keys values hash->list hash-entries)
 ```
 

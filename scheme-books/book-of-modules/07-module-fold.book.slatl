@@ -11,121 +11,103 @@
     (:authored-at "2026-07-17"
      :authored-by "book-completion-orchestrator")
   :prose
-"# Chapter 7 — The module fold — one program, many modules
+"# Chapter 7 — The fold — one program, many small pieces
 
-Big programs in Motoi are not built by growing one file to a thousand lines. They are built by combining many small modules that each hold a few verbs. This shape has a name: the **module fold**.
-
-Understanding the module fold is the difference between writing Motoi and writing something-that-looks-like-Motoi-but-collapses-under-its-own-weight.
+Big programs in Motoi are not built by growing one file to a thousand tangled lines. They are built by combining many small pieces — helper verbs, each with one job — and *folding* them together. The other dialect calls these pieces \"modules\"; in Motoi they are just top-level `define`s that call the already-loaded library. The idea of the fold is dialect-independent, and it is one of the most important habits you can build.
 
 ## 7.1 What the fold looks like
 
-A program that uses three modules — `graphics`, `sound`, `input` — folds them into one game:
+Here is a tiny \"frame loop\" folded out of three helpers — one for input, one for drawing, one for sound. In another Scheme each might be its own imported module; in Motoi they are three `define`s, and the library verbs they call (`string-append`, `list`, `when`) were loaded at boot:
 
 ```scheme
-(import graphics :as g)
-(import sound :as s)
-(import input :as i)
+(define (read-keys) (list 'space))                 ; stands in for input
+(define (draw where) (string-append \"drew \" where)) ; stands in for graphics
+(define (play sound) (string-append \"played \" sound))
 
 (define (frame)
-  (let ((keys (i/read-keys)))
-    (when (i/key-down? keys 'space)
-      (s/play 'jump))
-    (g/clear)
-    (g/draw-sprite 'player 100 100))
-  (g/present))
+  (let ((keys (read-keys)))
+    (list (if (memq 'space keys) (play \"jump\") \"silent\")
+          (draw \"player\"))))
 
-(define (main)
-  (i/init)
-  (g/init)
-  (s/init)
-  (forever frame))
-
-(main)
+(frame)
+;; ⇒ (\"played jump\" \"drew player\")
 ```
 
-The program is short. Almost everything it does is delegated to a module. `graphics` handles drawing. `sound` handles playback. `input` handles keys. The program's job is to *fold* them together — to say *here is the sequence of things to call each frame*.
+The `frame` verb is short. Almost everything it does is delegated to a helper. Its own job is thin: call the pieces in a particular order and fold the results together. That is the fold.
 
-## 7.2 Why fold works
+## 7.2 Why the fold works
 
-Because each module has one job, each module is small enough to understand. `graphics` does not need to know about sound. `sound` does not need to know about input. The program is the only thing that knows about all three, and its knowledge is thin — it calls verbs in a particular order.
+Because each piece has one job, each piece is small enough to understand. `draw` does not need to know about sound. `play` does not need to know about input. Only `frame` knows about all three, and its knowledge is thin — an order of calls.
 
-When something goes wrong, you isolate it. Sound is silent? Look at `sound` alone. Input feels laggy? Look at `input` alone. Sprite is invisible? Look at `graphics` alone. You do not have to hold the whole program in your head.
+When something goes wrong, you isolate it. Sound is silent? Look at `play` alone. Sprite invisible? Look at `draw` alone. You do not have to hold the whole program in your head at once.
 
 ## 7.3 The fold vs the pile
 
-The opposite of the fold is the pile: one program with a thousand verbs of its own, no modules, everything in one file. Piles are easier to write on day one and harder to work with on every day after.
+The opposite of the fold is the pile: one verb a thousand lines long, doing everything inline, sharing no structure. Piles are easier to write on day one and harder to work with on every day after.
 
-The choice between fold and pile is often not a deliberate one — programs drift toward the pile because the pile is what you get by default when you keep adding verbs without pausing to ask *should this be a module?*
+Programs drift toward the pile by default, because the pile is what you get when you keep adding lines without pausing to ask *should this be its own verb?* The habit to build: whenever a chunk of logic has its own clear job, cut it into a named helper. Even a two-line helper is worth extracting — it can be reused and tested on its own.
 
-The habit to build: whenever you find yourself writing a helper that has nothing to do with the current program's specific purpose, ask whether it belongs in a module. If it does, cut it. Even a two-verb module is worth the extraction, because a two-verb module can be reused later without any refactoring.
+## 7.4 A fold with setup
 
-## 7.4 A fold with initialization
-
-Modules often need to be initialized — file handles opened, tables precomputed, connections established. The fold handles this explicitly:
+Pieces often need setup — a table precomputed, a value established — before the loop runs. The fold spells the setup order out explicitly, as plain calls in sequence:
 
 ```scheme
-(import graphics :as g)
-(import sound :as s)
-(import input :as i)
+(define (init-input) 'input-ready)
+(define (init-graphics w h) (list 'graphics w h))
+(define (init-sound channels) (list 'sound channels))
 
-(define (main)
-  (i/init)
-  (g/init :width 800 :height 600)
-  (s/init :channels 8)
-  (forever frame))
+(define (setup)
+  (list (init-input)
+        (init-graphics 800 600)
+        (init-sound 8)))
+
+(setup)
+;; ⇒ (input-ready (graphics 800 600) (sound 8))
 ```
 
-`i/init`, `g/init`, `s/init` are the modules' init verbs. The program calls them in the right order. If order matters — say, sound has to init before graphics because graphics wants to hear the sound engine's sample rate — the fold makes that dependency visible.
-
-Init order is one of the places where a pile hides bugs. When everything is in one file, init order is implicit; when everything is in modules, init order is a sequence the fold spells out.
+If order matters — say, sound must be set up before graphics — the fold makes that dependency *visible* as a sequence, instead of hiding it inside one giant verb.
 
 ## 7.5 A fold with teardown
 
-Symmetrically, modules often need cleanup — files to close, connections to drop, memory to free. The fold handles teardown too:
+Symmetrically, pieces often need cleanup, and the common pattern is to tear down in reverse of setup order. Motoi's `dynamic-wind` handles guaranteed cleanup around a body:
 
 ```scheme
-(define (main)
-  (i/init)
-  (g/init)
-  (s/init)
+(define (run-with-cleanup)
   (dynamic-wind
-    (lambda () #f)
-    (lambda () (forever frame))
-    (lambda ()
-      (s/shutdown)
-      (g/shutdown)
-      (i/shutdown))))
+    (lambda () 'set-up)
+    (lambda () (frame))
+    (lambda () 'torn-down)))
+
+(run-with-cleanup)
+;; ⇒ (\"played jump\" \"drew player\")
 ```
 
-The teardown runs in reverse init order. That is a common pattern — you tear down in the opposite order you brought up.
+`dynamic-wind` runs the first thunk (setup), then the body, then the last thunk (teardown) — even if the body errors. Real cleanup would close files or drop connections in reverse init order; the shape is the same.
 
-## 7.6 Sharing state across modules
+## 7.6 Sharing state — through a mediator, not a global
 
-Modules do not share state by default. If `graphics` needs to know the current window size and `input` needs to know it too, the two modules do not share a variable — one of them owns the window and the other asks for it.
-
-The program acts as the mediator:
+Pieces should not reach into each other's private state. If two helpers both need a shared value, one *owns* it and the other receives it — the top-level verb acts as mediator, passing the value explicitly:
 
 ```scheme
-(import graphics :as g)
-(import input :as i)
+(define (make-window w h) (list 'window w h))
+(define (input-using window) (list 'input-bound-to window))
 
-(define (main)
-  (g/init :width 800 :height 600)
-  (i/set-window! (g/current-window)))
+(define (wire-up)
+  (let ((win (make-window 800 600)))   ; graphics owns the window
+    (input-using win)))                ; input receives a reference
+
+(wire-up)
+;; ⇒ (input-bound-to (window 800 600))
 ```
 
-`graphics` owns the window. `input` receives a reference to it. This is verbose compared to a shared global, and it is deliberately verbose. The verbosity makes the dependency visible. If you later want to swap in a different graphics module, you know exactly what `input` needs from it — the current window.
+Passing the window explicitly is more verbose than a shared global — deliberately so. The verbosity makes the dependency visible. Swap in a different window later and you know exactly what `input-using` needs.
 
 ## 7.7 The fold is a spec
 
-The imports and init sequence at the top of a program are, in a real sense, a specification of what the program is made of. Read the top ten lines and you know the shape.
-
-This is one of the reasons the module fold matters more than it looks like it should: it makes programs self-documenting. Not with comments — with structure. A reader who has never seen your program can look at the top and know *this is a game that draws sprites, plays sounds, and reads keys*. That is a lot to know from ten lines.
+The top of a well-folded program — the `setup`, the small `main`, the order of calls — is, in a real sense, a specification of what the program is made of. Read the top and you know the shape, not from comments but from structure. That is a lot to learn from a few lines, and it is why the fold matters more than it looks like it should.
 
 ## 7.8 Try it
 
-Take a small program you have written that has grown past a few hundred lines. Look for verbs that could be their own module — anything general-purpose, anything that has nothing to do with the program's specific job. Extract one into a module. Import it back. Verify the program still works.
+Take a verb you have written that has grown long. Look for a chunk with its own clear job — anything general-purpose, anything not tied to this verb's one purpose. Cut it into a named helper and call it back. Do it again with a second chunk. Watch the original verb shrink into a fold: a short sequence of calls, most of the work delegated to small, testable helpers.
 
-Do it again with a second candidate. Notice how the main file starts to look like a fold — imports at the top, small `main` at the bottom, most of the work delegated.
-
-Chapter 8 covers cross-cart modules — how modules in Curator can span multiple carts without belonging to any one. Turn the page.")
+Chapter 8 covers, in the other dialect, how modules span multiple carts — and, for Motoi, what \"sharing code across carts\" really means when the library is already everywhere. Turn the page.")

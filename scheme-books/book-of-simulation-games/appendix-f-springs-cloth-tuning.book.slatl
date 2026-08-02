@@ -76,17 +76,15 @@ Low `b` rings for a long time; high `b` never oscillates.
       (when (< i n)
         (let ((b (world/spawn 'rope (+ 100 (* i 2)) (+ 20 (* i rest-length)))))
           (entity/mass! b 0.5)
-          (entity/drag! b 0.01)
+          (entity/drag! b 0.08)              ;; rope damping b=0.08 via drag
           (when (= i 0) (entity/pin! b))
           (vector-set! balls i b))
         (loop-i (+ i 1))))
     (let loop-j ((j 0))
       (when (< j (- n 1))
-        (let ((L (world/link! (vector-ref balls j)
-                              (vector-ref balls (+ j 1)))))
-          (world/link-rest!      L rest-length)
-          (world/link-stiffness! L 0.65)     ;; rope preset
-          (world/link-damping!   L 0.08))
+        (world/link! (vector-ref balls j)
+                     (vector-ref balls (+ j 1))
+                     rest-length 0.65)        ;; rest, stiffness 0.65 (rope preset)
         (loop-j (+ j 1))))
     balls))
 
@@ -98,30 +96,46 @@ Low `b` rings for a long time; high `b` never oscillates.
 ## F.4 Cloth
 
 ```scheme
-;; A 15x15 cloth grid, cotton-thread tuned.
-(define (cotton-cloth cols rows spacing)
-  (let ((g (cloth cols rows spacing)))
-    (world/each 'thread
-      (lambda (b)
-        (world/each-link-of b
-          (lambda (L)
-            (world/link-stiffness! L 0.40)
-            (world/link-damping!   L 0.04)))))
+;; A cloth grid tuned at build time. stiff = spring k, b = per-thread drag.
+(define (tuned-cloth cols rows spacing stiff b)
+  (world/reset!)
+  (world/gravity! 0 0.3)
+  (let ((g (make-vector (* cols rows))))
+    ;; spawn a ball at each grid position, pin the top row
+    (let loop-y ((r 0))
+      (when (< r rows)
+        (let loop-x ((c 0))
+          (when (< c cols)
+            (let ((ball (world/spawn 'thread (+ 60 (* c spacing)) (+ 30 (* r spacing)))))
+              (entity/mass! ball 0.3)
+              (entity/drag! ball b)               ;; damping via drag
+              (when (= r 0) (entity/pin! ball))
+              (vector-set! g (+ (* r cols) c) ball))
+            (loop-x (+ c 1))))
+        (loop-y (+ r 1))))
+    ;; horizontal + vertical neighbour springs at stiffness `stiff`
+    (let loop-y ((r 0))
+      (when (< r rows)
+        (let loop-x ((c 0))
+          (when (< c cols)
+            (when (< c (- cols 1))
+              (world/link! (vector-ref g (+ (* r cols) c))
+                           (vector-ref g (+ (* r cols) c 1)) spacing stiff))
+            (when (< r (- rows 1))
+              (world/link! (vector-ref g (+ (* r cols) c))
+                           (vector-ref g (+ (* (+ r 1) cols) c)) spacing stiff))
+            (loop-x (+ c 1))))
+        (loop-y (+ r 1))))
     g))
+
+;; Cotton is soft and drapes: low stiffness, light damping.
+(define (cotton-cloth cols rows spacing) (tuned-cloth cols rows spacing 0.40 0.04))
 ```
 
 Cotton is soft and drapes. Denim is stiffer:
 
 ```scheme
-(define (denim-cloth cols rows spacing)
-  (let ((g (cloth cols rows spacing)))
-    (world/each 'thread
-      (lambda (b)
-        (world/each-link-of b
-          (lambda (L)
-            (world/link-stiffness! L 0.55)
-            (world/link-damping!   L 0.06)))))
-    g))
+(define (denim-cloth cols rows spacing) (tuned-cloth cols rows spacing 0.55 0.06))
 ```
 
 ## F.5 Chain
@@ -133,39 +147,39 @@ Cotton is soft and drapes. Denim is stiffer:
   (when (< i 8)
     (let ((b (world/spawn 'chain-link 240 (+ 40 (* i 20)))))
       (entity/mass! b 2.0)                ;; heavy
-      (entity/drag! b 0.02)
+      (entity/drag! b 0.12)               ;; chain damping b=0.12 via drag
       (when (= i 0) (entity/pin! b))
       (when (not (null? chain-links))
-        (let ((L (world/link! (car chain-links) b)))
-          (world/link-rest!      L 20)
-          (world/link-stiffness! L 0.85)   ;; near-rigid
-          (world/link-damping!   L 0.12)))
+        (world/link! (car chain-links) b 20 0.85))  ;; rest 20, stiffness 0.85 (near-rigid)
       (set! chain-links (cons b chain-links)))
     (loop (+ i 1))))
 ```
 
-## F.6 Tearing
+## F.6 Detecting over-stretch (the tension signal)
 
-Add a stretch threshold: if the spring is stretched past 1.8x rest,
-break it.
+The first half of tearing is DETECTING it: a link is over-stretched
+when the current distance between its two endpoints is much larger
+than its rest length. We measure that directly with `entity/distance`.
 
 ```scheme
-;; After each frame, check for over-stretched links.
+;; Report over-stretched links between neighbouring rope balls.
+(define (over-stretched? a b rest ratio)
+  (> (/ (entity/distance a b) rest) ratio))
+
+;; Build a short rope, then check whether the first link is over-stretched.
+(define rope (rope-segment 5 20))
 (on-frame
   (lambda (t)
     (world/step)
-    (world/each-link
-      (lambda (L)
-        (let* ((rest    (world/link-rest L))
-               (current (world/link-current-length L))
-               (stretch (/ current rest)))
-          (when (> stretch 1.8)
-            (world/link-remove! L)))))))
+    (when (over-stretched? (vector-ref rope 0) (vector-ref rope 1) 20 1.8)
+      (floor/mark! 'torn))))    ;; flag the over-stretch event
 ```
 
-Cloth with a tearing threshold: pull hard on the mouse anchor and
-the cloth rips where tension is highest. Great for fabric-damage
-sims, for cardboard tearing, for skin (in a cartoon sense).
+That is the tension signal: pull hard and the endpoints drift past
+1.8x their rest length. Removing the link to make an actual tear needs
+a link-removal verb Motoi's world API doesn't expose yet — so today we
+detect the over-stretch and flag it, which is enough to drive a
+damage overlay or a warning.
 
 ## F.7 Self-collision
 
@@ -181,7 +195,8 @@ through each other. For realistic cloth, add self-collision:
 Each thread now weakly pushes other nearby threads. Enough to
 prevent visible interpenetration; not enough to disrupt normal
 draping. Costs O(n^2) per frame though — for 225 threads that's
-50K checks. `world/spatial-index` helps.
+50K checks. A spatial hash (bucket threads by grid cell) would cut
+that down.
 
 ## F.8 Air resistance
 
@@ -204,23 +219,23 @@ A grid of 4-neighbor springs allows the cloth to shear (deform into
 parallelograms). To resist shearing, add diagonal springs:
 
 ```scheme
-;; After building 4-neighbor springs, add diagonals.
+;; Build a cloth, then add diagonal springs to resist shearing.
+(define shear-cols 8)
+(define shear-rows 8)
+(define shear-spacing 12)
+(define sheared (tuned-cloth shear-cols shear-rows shear-spacing 0.60 0.06))
+
 (let loop-y ((r 0))
-  (when (< r (- rows 1))
+  (when (< r (- shear-rows 1))
     (let loop-x ((c 0))
-      (when (< c (- cols 1))
-        (let ((L1 (world/link!
-                    (vector-ref g (+ (* r cols) c))
-                    (vector-ref g (+ (* (+ r 1) cols) c 1))))
-              (L2 (world/link!
-                    (vector-ref g (+ (* r cols) c 1))
-                    (vector-ref g (+ (* (+ r 1) cols) c)))))
-          (world/link-rest!      L1 (* spacing 1.414))
-          (world/link-stiffness! L1 0.30)
-          (world/link-damping!   L1 0.05)
-          (world/link-rest!      L2 (* spacing 1.414))
-          (world/link-stiffness! L2 0.30)
-          (world/link-damping!   L2 0.05))
+      (when (< c (- shear-cols 1))
+        ;; diagonals at ~40% stiffness of the axis springs, rest = sqrt(2)*spacing
+        (world/link! (vector-ref sheared (+ (* r shear-cols) c))
+                     (vector-ref sheared (+ (* (+ r 1) shear-cols) c 1))
+                     (* shear-spacing 1.414) 0.30)
+        (world/link! (vector-ref sheared (+ (* r shear-cols) c 1))
+                     (vector-ref sheared (+ (* (+ r 1) shear-cols) c))
+                     (* shear-spacing 1.414) 0.30)
         (loop-x (+ c 1))))
     (loop-y (+ r 1))))
 ```

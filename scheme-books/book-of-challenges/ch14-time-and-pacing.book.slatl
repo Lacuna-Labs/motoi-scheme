@@ -15,42 +15,40 @@
   :prose
 "# Chapter 14 — Time, Pacing & Freshness
 
-Time is the thread every decision pulls. A listing stale for weeks might need a price drop; a review posted this morning wants a same-day reply; inventory that moved yesterday tells a different story than inventory frozen for a month. Mastery here is not just *reading* a timestamp—it's writing programs that **decide by age**, that route one way if data is fresh and another if it has quietly decayed, that pace actions across hours and days with the honesty of a good clock.
+Time is the thread every decision pulls. A sensor reading taken weeks ago might need re-sampling; telemetry captured this second wants immediate analysis; a simulation snapshot from yesterday tells a different story than one frozen for a month. Mastery here is not just *reading* a timestamp—it's writing programs that **decide by age**, that route one way if data is fresh and another if it has quietly decayed, that pace actions across hours and days with the honesty of a good clock.
 
-This chapter drills the `time/*` and `system/*` namespaces into real logic: staleness gates, decay curves, scheduled freshness checks, and pacing routes that honor the rhythm of a working day. We'll start simple—one timestamp read, one age calculation—and ramp to programs that orchestrate multiple verbs across time windows, gating entire routes by how recently something changed.
+This chapter drills the `time/*` namespace into real logic: staleness gates, decay curves, scheduled freshness checks, and pacing routes that honor the rhythm of a measurement cycle. We'll start simple—one timestamp read, one age calculation—and ramp to programs that orchestrate multiple stages across time windows, gating entire routes by how recently something changed.
 
-The technique is **time as data**: Unix seconds, ISO strings, deltas in hours or days, all flowing through the same recursive and conditional machinery we use for lists and numbers. Once you can treat time like any other value, you can build routes that respect it—no more shotgun retries, no more stale reads treated as fresh. The runtime gains **temporal awareness**: she knows when to act, when to wait, and when to escalate because the clock says the moment has passed.
+The technique is **time as data**: Unix seconds, ISO strings, deltas in hours or days, all flowing through the same recursive and conditional machinery we use for lists and numbers. Motoi gives us `(time/now)`—milliseconds since the epoch—as the one true clock read; everything else is arithmetic on top of it. Once you can treat time like any other value, you can build routes that respect it—no more blind re-computation, no more stale reads treated as fresh. The runtime gains **temporal awareness**: it knows when to act, when to wait, and when to escalate because the clock says the moment has passed.
+
+Throughout, we carry timestamps as **Unix seconds** (integers) inside our data—the way real telemetry, log lines, and experiment records store them. A tiny helper turns the millisecond clock into seconds, and a second helper turns any stored second-count into a readable ISO string. No hidden magic: just `(time/now)` and arithmetic.
 
 ---
 
 ## Reading Time, Calculating Age
 
-The foundation: get the current time, parse a timestamp from data, compute the delta. Every freshness decision starts here.
+The foundation: get the current time, take a timestamp from data, compute the delta. Every freshness decision starts here. First, the one helper we'll reuse everywhere—Unix seconds from the millisecond clock:
 
 ```scheme
 ;; Program: read current Unix time and surface it as an integer
-(let ((now-result (time/unix-now)))
-  (if (eq? now-result 'nan)
-      (escalate 'time-unavailable \"Could not read system clock\")
-      now-result))
+(define (unix-now) (quotient (time/now) 1000))
+
+(unix-now)
 ;; Returns e.g. 1704067200 (seconds since epoch)
 ```
 
-That's the floor: one verb, one check, one value. Now let's compute age.
+That's the floor: one clock read, one conversion, one value. Now let's compute age. A sensor record stores when it was captured as Unix seconds; we subtract to get its age:
 
 ```scheme
-;; Program: given an ISO8601 timestamp, compute how many seconds old it is
-(let* ((now (time/unix-now))
-       (target-iso \"2024-01-01T00:00:00Z\")
-       (target-unix (time/parse-iso8601 target-iso)))
-  (if (or (eq? now 'nan) (eq? target-unix 'nan))
-      (escalate 'time-parse-failed \"Could not parse timestamps\")
-      (let ((delta (- now target-unix)))
-        (list 'age-seconds delta))))
+;; Program: given a captured-at Unix timestamp, compute how many seconds old it is
+(let* ((now (unix-now))
+       (captured-at 1704067200))   ;; a stored reading's timestamp
+  (let ((delta (- now captured-at)))
+    (list 'age-seconds delta)))
 ;; Returns e.g. (age-seconds 86400) — one day old
 ```
 
-We parse, we subtract, we surface the delta. The pattern holds for any timestamp: read the clock, parse the target, subtract. If either fails, escalate cleanly.
+We read the clock, subtract the stored time, surface the delta. The pattern holds for any timestamp: read the clock, take the target, subtract. Because both are plain integers, nothing can fail to parse.
 
 ---
 
@@ -59,133 +57,130 @@ We parse, we subtract, we surface the delta. The pattern holds for any timestamp
 Now the real work: **route by age**. If data is fresh, proceed; if stale, take a different path.
 
 ```scheme
-;; Program: check if a timestamp is fresh (within last hour), return status
-(define (fresh-within-hour? iso-string)
-  (let* ((now (time/unix-now))
-         (target (time/parse-iso8601 iso-string)))
-    (if (or (eq? now 'nan) (eq? target 'nan))
-        (escalate 'time-check-failed \"Cannot verify freshness\")
-        (let* ((delta (- now target))
-               (one-hour 3600))
-          (if (<= delta one-hour)
-              (list 'fresh #t 'age-seconds delta)
-              (list 'stale #t 'age-seconds delta))))))
+;; Program: check if a captured-at time is fresh (within last hour), return status
+(define (fresh-within-hour? captured-at)
+  (let ((now (unix-now)))
+    (let* ((delta (- now captured-at))
+           (one-hour 3600))
+      (if (<= delta one-hour)
+          (list 'fresh #t 'age-seconds delta)
+          (list 'stale #t 'age-seconds delta)))))
 
-(fresh-within-hour? \"2024-01-01T12:00:00Z\")
-;; Returns (stale #t age-seconds <large-number>) if called much later
-;; Returns (fresh #t age-seconds 300) if called 5 minutes after noon
+(fresh-within-hour? (- (unix-now) 300))
+;; Returns (fresh #t age-seconds 300) — captured 5 minutes ago
+;; Returns (stale #t age-seconds <large-number>) for an old timestamp
 ```
 
-The gate is explicit: delta ≤ threshold → fresh; else stale. Now we can guard an action:
+The gate is explicit: delta ≤ threshold → fresh; else stale. Now we can guard an *expensive* action—say, re-running a costly sensor-fusion computation only when the cached result has aged out:
 
 ```scheme
-;; Program: fetch a price only if last sync was > 6 hours ago (stale)
-(define (fetch-if-stale last-sync-iso)
-  (let* ((now (time/unix-now))
-         (last-sync (time/parse-iso8601 last-sync-iso)))
-    (if (or (eq? now 'nan) (eq? last-sync 'nan))
-        (escalate 'time-unavailable \"Cannot check staleness\")
-        (let* ((delta (- now last-sync))
-               (six-hours (* 6 3600)))
-          (if (> delta six-hours)
-              ;; Stale: fetch new price
-              (let ((price-data (crm/read '((type . \"price\") (id . \"sku-12345\")))))
-                (if (or (eq? price-data 'nan) (equal? (car price-data) 'escalate))
-                    (escalate 'fetch-failed \"Price read failed\")
-                    (list 'fetched price-data 'age-hours (/ delta 3600.0))))
-              ;; Fresh: skip fetch
-              (list 'skipped 'reason \"Data still fresh\" 'age-hours (/ delta 3600.0)))))))
+;; Program: recompute a sensor fusion only if last sample was > 6 hours ago (stale)
+(define (expensive-fusion) 42)   ;; stands in for a costly recomputation
 
-(fetch-if-stale \"2024-01-01T06:00:00Z\")
-;; If called 8 hours later: (fetched <data> age-hours 8.0)
-;; If called 4 hours later: (skipped reason \"Data still fresh\" age-hours 4.0)
+(define (recompute-if-stale last-sample-at)
+  (let ((now (unix-now)))
+    (let* ((delta (- now last-sample-at))
+           (six-hours (* 6 3600)))
+      (if (> delta six-hours)
+          ;; Stale: pay the cost, recompute
+          (let ((result (expensive-fusion)))
+            (list 'recomputed result 'age-hours (/ delta 3600.0)))
+          ;; Fresh: skip the work
+          (list 'skipped 'reason \"Data still fresh\" 'age-hours (/ delta 3600.0))))))
+
+(recompute-if-stale (- (unix-now) (* 8 3600)))
+;; 8 hours old: (recomputed 42 age-hours 8.0)
+;; 4 hours old: (skipped reason \"Data still fresh\" age-hours 4.0)
 ```
 
-Freshness gates are the first **time-aware route**: the clock decides the path.
+Freshness gates are the first **time-aware route**: the clock decides the path—and, crucially, decides whether we pay for expensive work at all.
 
 ---
 
 ## Days Since: Larger Grain
 
-Sometimes you care about *days*, not seconds. The `time/days-since` verb does the heavy lifting.
+Sometimes you care about *days*, not seconds. One small helper turns a stored Unix timestamp into a day-count, and we reuse it for the rest of the chapter:
 
 ```scheme
-;; Program: compute days since a last-order timestamp and classify customer
-(define (classify-customer-by-recency last-order-iso)
-  (let ((days (time/days-since last-order-iso)))
-    (if (eq? days 'nan)
-        (escalate 'time-parse-failed \"Invalid last-order timestamp\")
-        (cond
-          ((< days 30) (list 'segment \"active\" 'days-since days))
-          ((< days 90) (list 'segment \"cooling\" 'days-since days))
-          (else (list 'segment \"lapsed\" 'days-since days))))))
+;; Program: compute days since a last-calibration timestamp and classify an instrument
+(define (days-since captured-at)
+  (quotient (- (unix-now) captured-at) 86400))
 
-(classify-customer-by-recency \"2023-10-01T00:00:00Z\")
-;; If run in early 2024: (segment \"lapsed\" days-since 90+)
+(define (classify-instrument-by-recency last-calibration)
+  (let ((days (days-since last-calibration)))
+    (cond
+      ((< days 30) (list 'status \"calibrated\" 'days-since days))
+      ((< days 90) (list 'status \"drifting\" 'days-since days))
+      (else (list 'status \"needs-recalibration\" 'days-since days)))))
+
+(classify-instrument-by-recency (- (unix-now) (* 120 86400)))
+;; 120 days since calibration: (status \"needs-recalibration\" days-since 120)
 ```
 
-The cond ladder is a **decay curve**: boundaries at 30, 90 days define the segments. You could add a verb call inside each branch—send an email to \"cooling,\" escalate a win-back offer to \"lapsed,\" do nothing for \"active.\" The structure is the same: time delta drives the route.
+The cond ladder is a **decay curve**: boundaries at 30, 90 days define the states. You could add work inside each branch—schedule a drift-check for \"drifting,\" escalate for \"needs-recalibration,\" do nothing for \"calibrated.\" The structure is the same: time delta drives the route.
 
 ---
 
 ## Relative Time: Human-Friendly Deltas
 
-For logging or display, raw seconds are opaque. `time/relative` gives you \"2 hours ago,\" \"3 days ago.\"
+For logging or display, raw seconds are opaque. A small `humanize` helper turns a second-count into \"2 hours,\" \"3 days\"—the same idea as \"2 hours ago\" once you append \"ago.\"
 
 ```scheme
-;; Program: annotate a list of events with human-readable age
+;; Program: annotate a list of telemetry events with human-readable age
+(define (humanize secs)
+  (cond ((< secs 60)    (list secs 'seconds))
+        ((< secs 3600)  (list (quotient secs 60) 'minutes))
+        ((< secs 86400) (list (quotient secs 3600) 'hours))
+        (else           (list (quotient secs 86400) 'days))))
+
 (define events
-  '((\"review-posted\" . \"2024-01-01T08:00:00Z\")
-    (\"order-placed\" . \"2024-01-01T06:30:00Z\")
-    (\"message-sent\" . \"2024-01-01T09:15:00Z\")))
+  (list (cons \"probe-reading\"  (- (unix-now) 7200))
+        (cons \"packet-logged\"  (- (unix-now) 10800))
+        (cons \"signal-sent\"    (- (unix-now) 3600))))
 
 (define (annotate-event event)
   (let* ((label (car event))
-         (iso (cdr event))
-         (rel (time/relative iso)))
-    (if (eq? rel 'nan)
-        (list label 'age \"unknown\")
-        (list label 'age rel))))
+         (captured-at (cdr event))
+         (rel (humanize (- (unix-now) captured-at))))
+    (list label 'age rel)))
 
 (map annotate-event events)
 ;; Returns e.g.:
-;; ((\"review-posted\" age \"2 hours ago\")
-;;  (\"order-placed\" age \"3 hours ago\")
-;;  (\"message-sent\" age \"1 hour ago\"))
+;; ((\"probe-reading\" age (2 hours))
+;;  (\"packet-logged\" age (3 hours))
+;;  (\"signal-sent\" age (1 hours)))
 ```
 
-The verb hides the arithmetic; you map over data, annotate, surface. It's a gentle intro to **time as metadata**—every event carries its age.
+The helper hides the arithmetic; you map over data, annotate, surface. It's a gentle intro to **time as metadata**—every event carries its age.
 
 ---
 
 ## Multi-Threshold Routing: Pacing by Hour
 
-Now we escalate: **multiple time checks in one route**. Route differently based on *hour of day* and *staleness*.
+Now we escalate: **multiple time checks in one route**. Route differently based on *hour of day* and *staleness*. The wall clock gives us both—hour-of-day is arithmetic on `(time/now)`:
 
 ```scheme
-;; Program: decide whether to send a promotional email based on hour + last-send time
-(define (should-send-promo? last-send-iso)
-  (let ((hour (system/hour-of-day)))
-    (if (eq? hour 'nan)
-        (escalate 'time-unavailable \"Cannot read hour\")
-        (if (or (< hour 9) (> hour 17))
-            ;; Outside 9am-5pm: skip
-            (list 'skip 'reason \"Outside business hours\" 'hour hour)
-            ;; Within hours: check staleness
-            (let ((days (time/days-since last-send-iso)))
-              (if (eq? days 'nan)
-                  (escalate 'time-parse-failed \"Invalid last-send timestamp\")
-                  (if (< days 7)
-                      (list 'skip 'reason \"Sent recently\" 'days-since days)
-                      (list 'send 'reason \"Fresh hour + stale send\" 'days-since days))))))))
+;; Program: run a heavy batch only during off-peak hours, and only if the last run is stale
+(define (hour-of-day) (modulo (quotient (time/now) 3600000) 24))  ;; UTC hour 0-23
 
-(should-send-promo? \"2023-12-20T00:00:00Z\")
-;; If run at 2pm, 2+ weeks later: (send reason \"Fresh hour + stale send\" days-since 14)
-;; If run at 8pm: (skip reason \"Outside business hours\" hour 20)
-;; If run at 10am, only 5 days later: (skip reason \"Sent recently\" days-since 5)
+(define (should-run-batch? last-run-at)
+  (let ((hour (hour-of-day)))
+    (if (and (>= hour 9) (<= hour 17))
+        ;; Peak compute hours: defer heavy work
+        (list 'defer 'reason \"Peak load window\" 'hour hour)
+        ;; Off-peak: check staleness
+        (let ((days (days-since last-run-at)))
+          (if (< days 7)
+              (list 'defer 'reason \"Ran recently\" 'days-since days)
+              (list 'run 'reason \"Off-peak + stale run\" 'days-since days))))))
+
+(should-run-batch? (- (unix-now) (* 14 86400)))
+;; Off-peak, 14 days since last run: (run reason \"Off-peak + stale run\" days-since 14)
+;; During 9-17: (defer reason \"Peak load window\" hour <h>)
+;; Off-peak but only 5 days: (defer reason \"Ran recently\" days-since 5)
 ```
 
-Two verbs (`system/hour-of-day`, `time/days-since`), three gates (hour bounds, staleness threshold), clean escalation if either time read fails. This is **pacing logic**: respect the clock, respect the gap.
+One derived clock read (`hour-of-day`) plus `days-since`, three gates (hour window, staleness threshold), one clean route. This is **pacing logic**: respect the clock, respect the gap.
 
 ---
 
@@ -194,27 +189,25 @@ Two verbs (`system/hour-of-day`, `time/days-since`), three gates (hour bounds, s
 Mastery over lists + time: filter a batch of items, keep only those meeting a freshness rule.
 
 ```scheme
-;; Program: from a list of inventory records, keep only items updated > 14 days ago (stale)
-(define inventory
-  '(((sku . \"A123\") (last-sync . \"2023-12-15T00:00:00Z\"))
-    ((sku . \"B456\") (last-sync . \"2024-01-01T12:00:00Z\"))
-    ((sku . \"C789\") (last-sync . \"2023-11-20T00:00:00Z\"))))
+;; Program: from a list of sensor records, keep only channels sampled > 14 days ago (stale)
+(define sensors
+  (list (list (cons 'channel \"A123\") (cons 'last-sync (- (unix-now) (* 40 86400))))
+        (list (cons 'channel \"B456\") (cons 'last-sync (- (unix-now) (* 3 86400))))
+        (list (cons 'channel \"C789\") (cons 'last-sync (- (unix-now) (* 60 86400))))))
 
 (define (stale? record threshold-days)
   (let* ((last-sync (cdr (assoc 'last-sync record)))
-         (days (time/days-since last-sync)))
-    (if (eq? days 'nan)
-        #f  ;; Parse failed: treat as not stale (safe default)
-        (> days threshold-days))))
+         (days (days-since last-sync)))
+    (> days threshold-days)))
 
 (define (filter-stale records threshold-days)
   (filter (lambda (r) (stale? r threshold-days)) records))
 
-(filter-stale inventory 14)
+(filter-stale sensors 14)
 ;; Returns records for A123 and C789 (both > 14 days old), drops B456
 ```
 
-We map a freshness predicate over a list, filter, return. The pattern extends to any batch: \"which listings haven't sold in 30 days,\" \"which reviews are unresponded after 48 hours.\" Time becomes a **selection criterion**, no different from price or category.
+We map a freshness predicate over a list, filter, return. The pattern extends to any batch: \"which channels haven't reported in 30 days,\" \"which alarms are unacknowledged after 48 hours.\" Time becomes a **selection criterion**, no different from amplitude or channel id.
 
 ---
 
@@ -223,35 +216,30 @@ We map a freshness predicate over a list, filter, return. The pattern extends to
 Sometimes you need to lock \"now\" for a whole computation—so relative calculations stay consistent even if the program runs across a second boundary.
 
 ```scheme
-;; Program: compute time-to-action for a batch of tasks, anchored to a single \"now\"
-(define tasks
-  '(((task . \"reply-review\") (due . \"2024-01-02T10:00:00Z\"))
-    ((task . \"restock-alert\") (due . \"2024-01-02T14:00:00Z\"))
-    ((task . \"price-check\") (due . \"2024-01-02T08:00:00Z\"))))
+;; Program: compute time-to-run for a batch of scheduled jobs, anchored to a single \"now\"
+(define jobs
+  (list (list (cons 'job \"spectrum-scan\") (cons 'due (+ (unix-now) 7200)))
+        (list (cons 'job \"drift-check\")   (cons 'due (+ (unix-now) 3000)))
+        (list (cons 'job \"baseline-read\") (cons 'due (- (unix-now) 1800)))))
 
-(define (time-to-action task now-unix)
-  (let* ((task-name (cdr (assoc 'task task)))
-         (due-iso (cdr (assoc 'due task)))
-         (due-unix (time/parse-iso8601 due-iso)))
-    (if (eq? due-unix 'nan)
-        (list task-name 'status \"invalid-due\")
-        (let ((delta (- due-unix now-unix)))
-          (cond
-            ((< delta 0) (list task-name 'status \"overdue\" 'by-seconds (abs delta)))
-            ((< delta 3600) (list task-name 'status \"urgent\" 'in-seconds delta))
-            (else (list task-name 'status \"scheduled\" 'in-seconds delta)))))))
+(define (time-to-run job now-unix)
+  (let* ((job-name (cdr (assoc 'job job)))
+         (due-unix (cdr (assoc 'due job)))
+         (delta (- due-unix now-unix)))
+    (cond
+      ((< delta 0)    (list job-name 'status \"overdue\" 'by-seconds (abs delta)))
+      ((< delta 3600) (list job-name 'status \"urgent\" 'in-seconds delta))
+      (else           (list job-name 'status \"scheduled\" 'in-seconds delta)))))
 
-(let ((now (time/unix-now)))
-  (if (eq? now 'nan)
-      (escalate 'time-unavailable \"Cannot anchor computation\")
-      (map (lambda (t) (time-to-action t now)) tasks)))
+(let ((now (unix-now)))
+  (map (lambda (j) (time-to-run j now)) jobs))
 ;; Returns e.g.:
-;; ((\"reply-review\" status \"scheduled\" in-seconds 7200)
-;;  (\"restock-alert\" status \"urgent\" in-seconds 3000)
-;;  (\"price-check\" status \"overdue\" by-seconds 1800))
+;; ((\"spectrum-scan\" status \"scheduled\" in-seconds 7200)
+;;  (\"drift-check\" status \"urgent\" in-seconds 3000)
+;;  (\"baseline-read\" status \"overdue\" by-seconds 1800))
 ```
 
-One `time/unix-now` at the top, shared across all tasks—so the classification is consistent. This is **anchored time**: the entire route sees the same \"now.\"
+One `(unix-now)` at the top, shared across all jobs—so the classification is consistent. This is **anchored time**: the entire route sees the same \"now.\"
 
 ---
 
@@ -260,25 +248,21 @@ One `time/unix-now` at the top, shared across all tasks—so the classification 
 Often you care about the gap *between* two timestamps, not just age from now.
 
 ```scheme
-;; Program: compute seconds between order placement and first review, classify response time
-(define (classify-review-lag order-iso review-iso)
-  (let* ((order-unix (time/parse-iso8601 order-iso))
-         (review-unix (time/parse-iso8601 review-iso)))
-    (if (or (eq? order-unix 'nan) (eq? review-unix 'nan))
-        (escalate 'time-parse-failed \"Invalid timestamps\")
-        (let ((delta (time/delta-seconds order-unix review-unix)))
-          (if (eq? delta 'nan)
-              (escalate 'delta-failed \"Cannot compute delta\")
-              (cond
-                ((< delta (* 24 3600)) (list 'response \"same-day\" 'seconds delta))
-                ((< delta (* 7 24 3600)) (list 'response \"within-week\" 'seconds delta))
-                (else (list 'response \"delayed\" 'seconds delta))))))))
+;; Program: compute seconds between stimulus and detected response, classify latency
+(define (delta-seconds a b) (- b a))
 
-(classify-review-lag \"2024-01-01T10:00:00Z\" \"2024-01-01T18:00:00Z\")
-;; Returns (response \"same-day\" seconds 28800) — 8 hours
+(define (classify-latency stimulus-at response-at)
+  (let ((delta (delta-seconds stimulus-at response-at)))
+    (cond
+      ((< delta (* 24 3600))     (list 'latency \"same-day\" 'seconds delta))
+      ((< delta (* 7 24 3600))   (list 'latency \"within-week\" 'seconds delta))
+      (else                      (list 'latency \"delayed\" 'seconds delta)))))
+
+(classify-latency 1704099600 1704128400)
+;; Returns (latency \"same-day\" seconds 28800) — 8 hours
 ```
 
-`time/delta-seconds` does the subtraction; you supply the thresholds. The pattern is clean: parse both, delta, ladder.
+`delta-seconds` is just a subtraction; you supply the thresholds. The pattern is clean: take both, delta, ladder.
 
 ---
 
@@ -287,38 +271,36 @@ Often you care about the gap *between* two timestamps, not just age from now.
 Now we recurse: walk a nested structure (list of lists, alist of alists), check freshness at every leaf, classify the whole tree.
 
 ```scheme
-;; Program: walk a nested inventory structure, count stale items recursively
-(define inventory-tree
-  '((warehouse-a
-     ((sku . \"A1\") (last-sync . \"2023-12-01T00:00:00Z\"))
-     ((sku . \"A2\") (last-sync . \"2024-01-01T00:00:00Z\")))
-    (warehouse-b
-     ((sku . \"B1\") (last-sync . \"2023-11-15T00:00:00Z\"))
-     ((sku . \"B2\") (last-sync . \"2024-01-02T00:00:00Z\")))))
+;; Program: walk a nested sensor-array structure, count stale channels recursively
+(define array-tree
+  (list (list 'array-a
+              (list (cons 'ch \"A1\") (cons 'last-sync (- (unix-now) (* 60 86400))))
+              (list (cons 'ch \"A2\") (cons 'last-sync (- (unix-now) (* 2 86400)))))
+        (list 'array-b
+              (list (cons 'ch \"B1\") (cons 'last-sync (- (unix-now) (* 75 86400))))
+              (list (cons 'ch \"B2\") (cons 'last-sync (- (unix-now) (* 1 86400)))))))
 
-(define (item-stale? item threshold-days)
-  (let* ((last-sync (cdr (assoc 'last-sync item)))
-         (days (time/days-since last-sync)))
-    (if (eq? days 'nan)
-        #f
-        (> days threshold-days))))
+(define (channel-stale? channel threshold-days)
+  (let* ((last-sync (cdr (assoc 'last-sync channel)))
+         (days (days-since last-sync)))
+    (> days threshold-days)))
 
-(define (count-stale-in-warehouse warehouse threshold-days)
-  (let ((items (cdr warehouse)))
-    (length (filter (lambda (i) (item-stale? i threshold-days)) items))))
+(define (count-stale-in-array array threshold-days)
+  (let ((channels (cdr array)))
+    (length (filter (lambda (c) (channel-stale? c threshold-days)) channels))))
 
-(define (count-stale-all warehouses threshold-days)
-  (map (lambda (wh)
-         (list (car wh) 'stale-count (count-stale-in-warehouse wh threshold-days)))
-       warehouses))
+(define (count-stale-all arrays threshold-days)
+  (map (lambda (arr)
+         (list (car arr) 'stale-count (count-stale-in-array arr threshold-days)))
+       arrays))
 
-(count-stale-all inventory-tree 30)
+(count-stale-all array-tree 30)
 ;; Returns e.g.:
-;; ((warehouse-a stale-count 1)  ;; A1 is stale
-;;  (warehouse-b stale-count 1)) ;; B1 is stale
+;; ((array-a stale-count 1)  ;; A1 is stale
+;;  (array-b stale-count 1)) ;; B1 is stale
 ```
 
-We recurse by warehouse, filter items within each, count. The structure is generic: any tree where leaves have timestamps can be walked this way.
+We recurse by array, filter channels within each, count. The structure is generic: any tree where leaves have timestamps can be walked this way.
 
 ---
 
@@ -327,33 +309,26 @@ We recurse by warehouse, filter items within each, count. The structure is gener
 A harder variant: filter events by time *range* (not just \"since now\"), then aggregate.
 
 ```scheme
-;; Program: sum revenue for orders placed within a 7-day window ending yesterday
-(define orders
-  '(((id . \"O1\") (placed . \"2023-12-28T00:00:00Z\") (revenue . 100))
-    ((id . \"O2\") (placed . \"2023-12-30T00:00:00Z\") (revenue . 150))
-    ((id . \"O3\") (placed . \"2024-01-02T00:00:00Z\") (revenue . 200))
-    ((id . \"O4\") (placed . \"2023-12-25T00:00:00Z\") (revenue . 50))))
+;; Program: sum measured energy for samples captured within a fixed time window
+(define samples
+  (list (list (cons 'id \"S1\") (cons 'at 1703721600) (cons 'energy 100))
+        (list (cons 'id \"S2\") (cons 'at 1703894400) (cons 'energy 150))
+        (list (cons 'id \"S3\") (cons 'at 1704153600) (cons 'energy 200))
+        (list (cons 'id \"S4\") (cons 'at 1703462400) (cons 'energy 50))))
 
-(define (in-window? order-iso window-start-unix window-end-unix)
-  (let ((order-unix (time/parse-iso8601 order-iso)))
-    (if (eq? order-unix 'nan)
-        #f
-        (and (>= order-unix window-start-unix)
-             (<= order-unix window-end-unix)))))
+(define (in-window? sample-at window-start window-end)
+  (and (>= sample-at window-start)
+       (<= sample-at window-end)))
 
-(define (sum-revenue-in-window orders window-start-iso window-end-iso)
-  (let* ((start-unix (time/parse-iso8601 window-start-iso))
-         (end-unix (time/parse-iso8601 window-end-iso)))
-    (if (or (eq? start-unix 'nan) (eq? end-unix 'nan))
-        (escalate 'time-parse-failed \"Invalid window bounds\")
-        (let ((in-range (filter (lambda (o)
-                                  (in-window? (cdr (assoc 'placed o)) start-unix end-unix))
-                                orders)))
-          (let ((total (apply + (map (lambda (o) (cdr (assoc 'revenue o))) in-range))))
-            (list 'total-revenue total 'order-count (length in-range)))))))
+(define (sum-energy-in-window samples window-start window-end)
+  (let ((in-range (filter (lambda (s)
+                            (in-window? (cdr (assoc 'at s)) window-start window-end))
+                          samples)))
+    (let ((total (apply + (map (lambda (s) (cdr (assoc 'energy s))) in-range))))
+      (list 'total-energy total 'sample-count (length in-range)))))
 
-(sum-revenue-in-window orders \"2023-12-28T00:00:00Z\" \"2024-01-01T23:59:59Z\")
-;; Returns (total-revenue 250 order-count 2) — O1 + O2
+(sum-energy-in-window samples 1703721600 1704067199)
+;; Returns (total-energy 250 sample-count 2) — S1 + S2
 ```
 
 Two bounds, one filter predicate, fold to sum. This is **windowed aggregation**: a time range becomes a data selector.
@@ -365,27 +340,26 @@ Two bounds, one filter predicate, fold to sum. This is **windowed aggregation**:
 Combine staleness check with a real verb—fetch fresh data only if needed.
 
 ```scheme
-;; Program: check listing staleness, fetch new analytics only if > 24 hours old
-(define (fetch-analytics-if-stale listing-id last-fetch-iso)
-  (let ((days (time/days-since last-fetch-iso)))
-    (if (eq? days 'nan)
-        (escalate 'time-parse-failed \"Cannot verify last fetch time\")
-        (if (< days 1)
-            ;; Fresh: skip
-            (list 'skipped 'reason \"Analytics still fresh\" 'age-days days)
-            ;; Stale: fetch
-            (let ((analytics (analytics/report (list (cons 'listing listing-id)
-                                                     (cons 'metric \"views\")))))
-              (if (or (eq? analytics 'nan) (equal? (car analytics) 'escalate))
-                  (escalate 'analytics-fetch-failed \"Could not retrieve analytics\")
-                  (list 'fetched analytics 'age-days days)))))))
+;; Program: check analysis staleness, recompute summary stats only if > 24 hours old
+(define (compute-summary channel-id)
+  ;; stands in for a costly aggregation over raw samples
+  (list (cons 'channel channel-id) (cons 'mean 3.14) (cons 'n 1000)))
 
-(fetch-analytics-if-stale \"listing-12345\" \"2023-12-30T00:00:00Z\")
-;; If run 2024-01-02: (fetched <analytics-data> age-days 3)
-;; If run 2023-12-30 (same day): (skipped reason \"Analytics still fresh\" age-days 0)
+(define (recompute-analysis-if-stale channel-id last-analysis-at)
+  (let ((days (days-since last-analysis-at)))
+    (if (< days 1)
+        ;; Fresh: skip
+        (list 'skipped 'reason \"Analysis still fresh\" 'age-days days)
+        ;; Stale: recompute
+        (let ((summary (compute-summary channel-id)))
+          (list 'recomputed summary 'age-days days)))))
+
+(recompute-analysis-if-stale \"channel-12345\" (- (unix-now) (* 3 86400)))
+;; 3 days old: (recomputed <summary> age-days 3)
+;; same day: (skipped reason \"Analysis still fresh\" age-days 0)
 ```
 
-The staleness gate **guards the verb**—no wasted call if data is current. This is **lazy freshness**: do the work only when decay demands it.
+The staleness gate **guards the expensive work**—no wasted computation if the result is current. This is **lazy freshness**: do the work only when decay demands it.
 
 ---
 
@@ -394,27 +368,25 @@ The staleness gate **guards the verb**—no wasted call if data is current. This
 Now we chain: fetch data (which includes a timestamp), check its age, route accordingly.
 
 ```scheme
-;; Program: fetch a CRM contact, check last-interaction age, route to engagement tier
-(define (route-contact-by-recency contact-id)
-  (let ((contact (crm/read (list (cons 'id contact-id)))))
-    (if (or (eq? contact 'nan) (equal? (car contact) 'escalate))
-        (escalate 'crm-read-failed \"Contact fetch failed\")
-        (let ((last-interaction (cdr (assoc 'last_interaction contact))))
-          (if (not last-interaction)
-              (list 'tier \"no-history\" 'contact-id contact-id)
-              (let ((days (time/days-since last-interaction)))
-                (if (eq? days 'nan)
-                    (escalate 'time-parse-failed \"Invalid interaction timestamp\")
-                    (cond
-                      ((< days 7) (list 'tier \"hot\" 'days-since days))
-                      ((< days 30) (list 'tier \"warm\" 'days-since days))
-                      (else (list 'tier \"cold\" 'days-since days))))))))))
+;; Program: recall a stored device record, check last-reading age, route to health tier
+;; Seed a record so the recall has something to read (last reading 15 days ago):
+(cortex/write \"device-67890\" (- (unix-now) (* 15 86400)))
 
-(route-contact-by-recency \"contact-67890\")
-;; Returns e.g. (tier \"warm\" days-since 15) if last interaction was 15 days ago
+(define (route-device-by-recency device-id)
+  (let ((last-reading (cortex/recall device-id)))
+    (if (not last-reading)
+        (escalate 'recall-failed \"Device record not found\")
+        (let ((days (days-since (cadr (assoc ':data last-reading)))))
+          (cond
+            ((< days 7)  (list 'tier \"live\" 'days-since days))
+            ((< days 30) (list 'tier \"idle\" 'days-since days))
+            (else        (list 'tier \"dark\" 'days-since days)))))))
+
+(route-device-by-recency \"device-67890\")
+;; Returns e.g. (tier \"idle\" days-since 15) — last reading 15 days ago
 ```
 
-One verb (`crm/read`), extract timestamp, `time/days-since`, cond ladder—three stages, clean escalation at each failure point. This is **verb + time orchestration**: the surface (CRM) and the dimension (time) working together.
+One verb (`cortex/recall`), extract the stored timestamp from its `:data` field, `days-since`, cond ladder—three stages, clean escalation if the record is missing. This is **verb + time orchestration**: storage and the time dimension working together.
 
 ---
 
@@ -423,55 +395,51 @@ One verb (`crm/read`), extract timestamp, `time/days-since`, cond ladder—three
 A sophisticated pattern: if a task failed, check how long it's been *since the failure*, and decide whether to retry based on an exponential backoff curve.
 
 ```scheme
-;; Program: given a failed task with last-attempt timestamp, decide if retry is due
-(define (retry-due? last-attempt-iso attempt-count)
-  (let ((minutes-since (/ (time/days-since last-attempt-iso) 1440.0)))  ;; days -> minutes
-    (if (eq? minutes-since 'nan)
-        (escalate 'time-parse-failed \"Cannot compute retry timing\")
-        (let ((backoff-minutes (expt 2 attempt-count)))  ;; 2^n minutes
-          (if (>= minutes-since backoff-minutes)
-              (list 'retry #t 'next-attempt-in-minutes 0 'backoff-was backoff-minutes)
-              (list 'retry #f 'next-attempt-in-minutes (- backoff-minutes minutes-since)))))))
+;; Program: given a failed measurement with last-attempt time, decide if retry is due
+(define (retry-due? last-attempt-at attempt-count)
+  (let ((minutes-since (/ (- (unix-now) last-attempt-at) 60.0)))  ;; seconds -> minutes
+    (let ((backoff-minutes (expt 2 attempt-count)))               ;; 2^n minutes
+      (if (>= minutes-since backoff-minutes)
+          (list 'retry #t 'next-attempt-in-minutes 0 'backoff-was backoff-minutes)
+          (list 'retry #f 'next-attempt-in-minutes (- backoff-minutes minutes-since))))))
 
-(retry-due? \"2024-01-01T12:00:00Z\" 3)
-;; If 10 minutes have passed: (retry #f next-attempt-in-minutes -2.0) — wait 2 more
-;; If 8 minutes have passed: (retry #t ...) because 2^3 = 8, threshold met
+(retry-due? (- (unix-now) 600) 3)   ;; 600 s = 10 minutes ago
+;; 10 minutes passed, 2^3 = 8: (retry #t ... backoff-was 8) — threshold met
+;; 5 minutes passed: (retry #f next-attempt-in-minutes 3.0) — wait 3 more
 ```
 
-Exponential backoff is a **time-paced retry**: each failure doubles the wait. The program doesn't *execute* the retry—it decides whether one is due. You'd wrap this around a verb call in a real route.
+Exponential backoff is a **time-paced retry**: each failure doubles the wait. The program doesn't *execute* the retry—it decides whether one is due. You'd wrap this around a real computation in a live route.
 
 ---
 
 ## Scheduled Action: Day-of-Week + Hour Guard
 
-Combine `system/day-of-week` and `system/hour-of-day` to gate an action to specific calendar slots.
+Derive both `day-of-week` and `hour-of-day` from the wall clock to gate an action to specific calendar slots. Epoch day 0 (1970-01-01) was a Thursday, so we offset by 4 to make Sunday = 0.
 
 ```scheme
-;; Program: send a weekly report only on Mondays between 8am-10am
-(define (send-weekly-report-if-due)
-  (let* ((day (system/day-of-week))
-         (hour (system/hour-of-day)))
-    (if (or (eq? day 'nan) (eq? hour 'nan))
-        (escalate 'time-unavailable \"Cannot read day/hour\")
-        (if (and (= day 1)  ;; Monday
-                 (>= hour 8)
-                 (< hour 10))
-            ;; Send report
-            (let ((report-result (mail/dispatch (list (cons 'to \"team@example.com\")
-                                                      (cons 'subject \"Weekly Report\")
-                                                      (cons 'body \"See attached.\")))))
-              (if (or (eq? report-result 'nan) (equal? (car report-result) 'escalate))
-                  (escalate 'mail-send-failed \"Could not send report\")
-                  (list 'sent report-result 'day day 'hour hour)))
-            ;; Skip
-            (list 'skipped 'reason \"Not Monday 8-10am\" 'day day 'hour hour)))))
+;; Program: run a weekly maintenance sweep only on Mondays between 8am-10am (UTC)
+(define (day-of-week) (modulo (+ 4 (quotient (time/now) 86400000)) 7))  ;; 0=Sun .. 1=Mon
 
-(send-weekly-report-if-due)
-;; On Monday at 9am: (sent <mail-result> day 1 hour 9)
-;; On Tuesday at 9am: (skipped reason \"Not Monday 8-10am\" day 2 hour 9)
+(define (run-maintenance) (list 'swept 'checks 12))  ;; the actual weekly work
+
+(define (run-weekly-sweep-if-due)
+  (let* ((day (day-of-week))
+         (hour (hour-of-day)))
+    (if (and (= day 1)  ;; Monday
+             (>= hour 8)
+             (< hour 10))
+        ;; Run the sweep
+        (let ((result (run-maintenance)))
+          (list 'ran result 'day day 'hour hour))
+        ;; Skip
+        (list 'skipped 'reason \"Not Monday 8-10am\" 'day day 'hour hour))))
+
+(run-weekly-sweep-if-due)
+;; On Monday at 9am: (ran (swept checks 12) day 1 hour 9)
+;; Otherwise: (skipped reason \"Not Monday 8-10am\" day <d> hour <h>)
 ```
 
-Two time verbs, two boundaries, one verb call inside the gate. This is **calendar-aware routing**: the program knows the week.
+Two derived clock reads, two boundaries, one action inside the gate. This is **calendar-aware routing**: the program knows the week.
 
 ---
 
@@ -480,21 +448,19 @@ Two time verbs, two boundaries, one verb call inside the gate. This is **calenda
 Sometimes you want a *score* that decays smoothly with age, not a hard threshold.
 
 ```scheme
-;; Program: compute a relevance score for a listing that decays with days since last sale
-(define (relevance-score last-sale-iso base-score)
-  (let ((days (time/days-since last-sale-iso)))
-    (if (eq? days 'nan)
-        (escalate 'time-parse-failed \"Cannot compute age\")
-        (let ((decay-factor (exp (/ (- days) 30.0))))  ;; e^(-days/30)
-          (let ((score (* base-score decay-factor)))
-            (list 'score score 'days-since days 'decay-factor decay-factor))))))
+;; Program: compute a confidence score for a track that decays with days since last detection
+(define (confidence-score last-detection base-score)
+  (let ((days (days-since last-detection)))
+    (let ((decay-factor (exp (/ (- days) 30.0))))  ;; e^(-days/30)
+      (let ((score (* base-score decay-factor)))
+        (list 'score score 'days-since days 'decay-factor decay-factor)))))
 
-(relevance-score \"2023-12-01T00:00:00Z\" 100)
-;; If 30 days old: score ≈ 36.8 (100 * e^-1)
-;; If 60 days old: score ≈ 13.5 (100 * e^-2)
+(confidence-score (- (unix-now) (* 30 86400)) 100)
+;; 30 days old: score ≈ 36.8 (100 * e^-1)
+;; 60 days old: score ≈ 13.5 (100 * e^-2)
 ```
 
-Exponential decay is smooth; the score drops gracefully. You could use this to rank listings, prioritize tasks, or blend freshness into a multi-factor score. The technique is **continuous time-weighting**: age is a coefficient, not a gate.
+Exponential decay is smooth; the score drops gracefully. You could use this to rank tracks, prioritize follow-ups, or blend freshness into a multi-factor score. The technique is **continuous time-weighting**: age is a coefficient, not a gate.
 
 ---
 
@@ -503,23 +469,21 @@ Exponential decay is smooth; the score drops gracefully. You could use this to r
 Walk a batch, classify each by freshness, count the distribution.
 
 ```scheme
-;; Program: classify a batch of listings by staleness, report distribution
-(define listings
-  '(((id . \"L1\") (last-updated . \"2024-01-01T00:00:00Z\"))
-    ((id . \"L2\") (last-updated . \"2023-12-20T00:00:00Z\"))
-    ((id . \"L3\") (last-updated . \"2023-11-10T00:00:00Z\"))
-    ((id . \"L4\") (last-updated . \"2024-01-02T00:00:00Z\"))))
+;; Program: classify a batch of datasets by staleness, report distribution
+(define datasets
+  (list (list (cons 'id \"L1\") (cons 'last-updated (- (unix-now) (* 2 86400))))
+        (list (cons 'id \"L2\") (cons 'last-updated (- (unix-now) (* 15 86400))))
+        (list (cons 'id \"L3\") (cons 'last-updated (- (unix-now) (* 55 86400))))
+        (list (cons 'id \"L4\") (cons 'last-updated (- (unix-now) (* 1 86400))))))
 
-(define (classify-listing listing)
-  (let* ((id (cdr (assoc 'id listing)))
-         (last-updated (cdr (assoc 'last-updated listing)))
-         (days (time/days-since last-updated)))
-    (if (eq? days 'nan)
-        (list id 'tier \"unknown\")
-        (cond
-          ((< days 7) (list id 'tier \"fresh\"))
-          ((< days 30) (list id 'tier \"aging\"))
-          (else (list id 'tier \"stale\"))))))
+(define (classify-dataset dataset)
+  (let* ((id (cdr (assoc 'id dataset)))
+         (last-updated (cdr (assoc 'last-updated dataset)))
+         (days (days-since last-updated)))
+    (cond
+      ((< days 7)  (list id 'tier \"fresh\"))
+      ((< days 30) (list id 'tier \"aging\"))
+      (else        (list id 'tier \"stale\")))))
 
 (define (count-by-tier classified)
   (let ((fresh (length (filter (lambda (c) (equal? (caddr c) \"fresh\")) classified)))
@@ -527,7 +491,7 @@ Walk a batch, classify each by freshness, count the distribution.
         (stale (length (filter (lambda (c) (equal? (caddr c) \"stale\")) classified))))
     (list (cons 'fresh fresh) (cons 'aging aging) (cons 'stale stale))))
 
-(let ((classified (map classify-listing listings)))
+(let ((classified (map classify-dataset datasets)))
   (list 'distribution (count-by-tier classified)
         'details classified))
 ;; Returns:
@@ -545,72 +509,67 @@ A more advanced control flow: loop (via named `let`) processing items, but **sto
 
 ```scheme
 ;; Program: process tasks one by one, stop if we hit a hard deadline (max runtime)
-(define tasks '(\"task-a\" \"task-b\" \"task-c\" \"task-d\"))
+(define work-items '(\"item-a\" \"item-b\" \"item-c\" \"item-d\"))
 
-(define (process-until-deadline tasks deadline-unix)
-  (let loop ((remaining tasks)
+(define (process-until-deadline items deadline-unix)
+  (let loop ((remaining items)
              (processed '()))
-    (let ((now (time/unix-now)))
-      (if (eq? now 'nan)
-          (escalate 'time-unavailable \"Cannot check time during loop\")
-          (if (>= now deadline-unix)
-              ;; Deadline hit: stop
-              (list 'stopped 'processed (reverse processed) 'remaining remaining)
-              ;; Still time: process next
-              (if (null? remaining)
-                  ;; All done
-                  (list 'completed 'processed (reverse processed))
-                  (let* ((task (car remaining))
-                         (result (string-append \"processed-\" task)))
-                    (loop (cdr remaining)
-                          (cons result processed)))))))))
+    (let ((now (unix-now)))
+      (if (>= now deadline-unix)
+          ;; Deadline hit: stop
+          (list 'stopped 'processed (reverse processed) 'remaining remaining)
+          ;; Still time: process next
+          (if (null? remaining)
+              ;; All done
+              (list 'completed 'processed (reverse processed))
+              (let* ((item (car remaining))
+                     (result (string-append \"processed-\" item)))
+                (loop (cdr remaining)
+                      (cons result processed))))))))
 
-(let* ((now (time/unix-now))
+(let* ((now (unix-now))
        (deadline (+ now 10)))  ;; 10 seconds from now
-  (if (eq? now 'nan)
-      (escalate 'time-unavailable \"Cannot set deadline\")
-      (process-until-deadline tasks deadline)))
-;; If tasks finish in < 10s: (completed processed (\"processed-task-a\" ...))
-;; If deadline hits mid-loop: (stopped processed (...) remaining (\"task-c\" \"task-d\"))
+  (process-until-deadline work-items deadline))
+;; If items finish in < 10s: (completed processed (\"processed-item-a\" ...))
+;; If deadline hits mid-loop: (stopped processed (...) remaining (\"item-c\" \"item-d\"))
 ```
 
-Named `let` for recursion, `time/unix-now` inside the loop, comparison to deadline. This is **time-bounded iteration**: the clock can short-circuit the recursion.
+Named `let` for recursion, `(unix-now)` inside the loop, comparison to deadline. This is **time-bounded iteration**: the clock can short-circuit the recursion.
 
 ---
 
 ## Orchestrate Fetch + Age + Multi-Stage Route
 
-Now we bring it all together: fetch data with `cortex/read`, extract timestamp, check age, route through multiple verbs based on freshness.
+Now we bring it all together: fetch data with `cortex/recall`, extract the stored timestamp, check age, route through multiple stages based on freshness.
 
 ```scheme
-;; Program: fetch a stored campaign record, check age, send reminder if stale, log if fresh
-(define (campaign-reminder-route campaign-id)
-  (let ((record (cortex/read (list (cons 'key (string-append \"campaign-\" campaign-id))))))
-    (if (or (eq? record 'nan) (equal? (car record) 'escalate))
-        (escalate 'cortex-read-failed \"Could not fetch campaign record\")
-        (let ((last-sent (cdr (assoc 'last_sent record))))
-          (if (not last-sent)
-              (escalate 'missing-timestamp \"Campaign has no last_sent field\")
-              (let ((days (time/days-since last-sent)))
-                (if (eq? days 'nan)
-                    (escalate 'time-parse-failed \"Invalid last_sent timestamp\")
-                    (if (> days 14)
-                        ;; Stale: send reminder
-                        (let ((mail-result (mail/dispatch (list (cons 'to \"customer@example.com\")
-                                                                (cons 'subject \"Reminder\")
-                                                                (cons 'body \"Check our campaign!\")))))
-                          (if (or (eq? mail-result 'nan) (equal? (car mail-result) 'escalate))
-                              (escalate 'mail-failed \"Reminder send failed\")
-                              (list 'reminder-sent 'campaign-id campaign-id 'days-since days)))
-                        ;; Fresh: log and skip
-                        (list 'skipped 'reason \"Sent recently\" 'days-since days)))))))))
+;; Program: recall a monitor record, check age, trigger a recalibration if stale, skip if fresh
+(cortex/write \"monitor-spring\" (- (unix-now) (* 20 86400)))   ;; last check 20 days ago
 
-(campaign-reminder-route \"spring-promo\")
-;; If last_sent > 14 days ago: (reminder-sent campaign-id \"spring-promo\" days-since 20)
-;; If last_sent < 14 days ago: (skipped reason \"Sent recently\" days-since 10)
+(define (run-recalibration id)   ;; the real action a stale monitor triggers
+  (list 'recalibrated id 'checks 8))
+
+(define (monitor-recheck-route monitor-id)
+  (let ((record (cortex/recall (string-append \"monitor-\" monitor-id))))
+    (if (not record)
+        (escalate 'recall-failed \"Could not fetch monitor record\")
+        (let ((last-check (cadr (assoc ':data record))))
+          (if (not last-check)
+              (escalate 'missing-timestamp \"Monitor has no last-check field\")
+              (let ((days (days-since last-check)))
+                (if (> days 14)
+                    ;; Stale: recalibrate
+                    (let ((result (run-recalibration monitor-id)))
+                      (list 'rechecked result 'monitor-id monitor-id 'days-since days))
+                    ;; Fresh: skip
+                    (list 'skipped 'reason \"Checked recently\" 'days-since days))))))))
+
+(monitor-recheck-route \"spring\")
+;; last-check > 14 days ago: (rechecked (recalibrated \"spring\" checks 8) monitor-id \"spring\" days-since 20)
+;; last-check < 14 days ago: (skipped reason \"Checked recently\" days-since 10)
 ```
 
-Three verbs (`cortex/read`, `time/days-since`, `mail/dispatch`), four escalation points, one time-gated route. This is **full orchestration**: storage, time, action, failure—all in one flow.
+Three verbs (`cortex/recall`, `days-since`, a real recalibration), clean escalation at each failure point, one time-gated route. This is **full orchestration**: storage, time, action, failure—all in one flow.
 
 ---
 
@@ -620,22 +579,21 @@ Sometimes you need to *produce* an ISO8601 string for logging or storage.
 
 ```scheme
 ;; Program: log an event with current timestamp in ISO8601 format
+;; time/iso takes milliseconds; (time/now) is already ms.
 (define (log-event event-type detail)
-  (let ((iso-now (time/iso8601-now)))
-    (if (eq? iso-now 'nan)
-        (escalate 'time-unavailable \"Cannot generate timestamp\")
-        (list (cons 'timestamp iso-now)
-              (cons 'event event-type)
-              (cons 'detail detail)))))
+  (let ((iso-now (time/iso (time/now))))
+    (list (cons 'timestamp iso-now)
+          (cons 'event event-type)
+          (cons 'detail detail))))
 
-(log-event \"price-updated\" \"SKU A123 repriced to $29.99\")
+(log-event \"gain-adjusted\" \"channel A123 gain set to 2.0x\")
 ;; Returns e.g.:
-;; ((timestamp . \"2024-01-02T14:35:22Z\")
-;;  (event . \"price-updated\")
-;;  (detail . \"SKU A123 repriced to $29.99\"))
+;; ((timestamp . \"2024-01-02T14:35:22.000Z\")
+;;  (event . \"gain-adjusted\")
+;;  (detail . \"channel A123 gain set to 2.0x\"))
 ```
 
-One verb, one structure. You'd write this to `cortex/write` or append to a log list. The pattern is **timestamped logging**: every event knows when it happened.
+One verb, one structure. You'd write this with `cortex/write` or append to a log list. The pattern is **timestamped logging**: every event knows when it happened.
 
 ---
 
@@ -644,74 +602,68 @@ One verb, one structure. You'd write this to `cortex/write` or append to a log l
 Compute human-readable delta between two past timestamps (not \"now\").
 
 ```scheme
-;; Program: compute relative time between order and shipment
-(define (shipment-lag order-iso shipment-iso)
-  (let* ((order-unix (time/parse-iso8601 order-iso))
-         (shipment-unix (time/parse-iso8601 shipment-iso)))
-    (if (or (eq? order-unix 'nan) (eq? shipment-unix 'nan))
-        (escalate 'time-parse-failed \"Cannot parse order or shipment time\")
-        (let ((delta (time/relative-delta order-unix shipment-unix)))
-          (if (eq? delta 'nan)
-              (escalate 'delta-failed \"Cannot compute lag\")
-              (list 'lag delta 'order order-iso 'shipment shipment-iso))))))
+;; Program: compute relative time between an experiment's start and its result
+(define (phase-lag start-at result-at)
+  (let ((delta (humanize (- result-at start-at))))
+    (list 'lag delta 'start start-at 'result result-at)))
 
-(shipment-lag \"2024-01-01T10:00:00Z\" \"2024-01-03T14:30:00Z\")
-;; Returns e.g. (lag \"2 days\" order \"...\" shipment \"...\")
+(phase-lag 1704099600 1704292200)
+;; Returns e.g. (lag (2 days) start 1704099600 result 1704292200)
 ```
 
-`time/relative-delta` gives you \"2 days,\" \"3 hours,\" etc. between any two points. Use it to annotate fulfillment speed, response time, anything with a start and end.
+Feeding the second-difference through `humanize` gives you \"2 days,\" \"3 hours,\" etc. between any two points. Use it to annotate settling time, response latency, anything with a start and an end.
 
 ---
 
 ## After-Verb: Schedule a Future Action
 
-`time/after` lets you express \"X seconds from now\" as a Unix timestamp—useful for scheduling.
+A tiny `after` helper expresses \"X seconds from now\" as a Unix timestamp—useful for scheduling.
 
 ```scheme
-;; Program: compute a future timestamp 7 days from now for a scheduled task
-(define (schedule-task-in-days days)
-  (let ((future (time/after (* days 24 3600))))
-    (if (eq? future 'nan)
-        (escalate 'time-unavailable \"Cannot compute future time\")
-        (let ((future-iso (time/iso8601 future)))
-          (if (eq? future-iso 'nan)
-              (escalate 'time-format-failed \"Cannot format future time\")
-              (list 'scheduled-for future-iso 'unix future))))))
+;; Program: compute a future timestamp 7 days from now for a scheduled calibration
+(define (after secs) (+ (unix-now) secs))
 
-(schedule-task-in-days 7)
-;; Returns e.g. (scheduled-for \"2024-01-09T14:35:22Z\" unix 1704812122)
+(define (schedule-calibration-in-days days)
+  (let* ((future (after (* days 24 3600)))
+         (future-iso (time/iso (* future 1000))))   ;; seconds -> ms for time/iso
+    (list 'scheduled-for future-iso 'unix future)))
+
+(schedule-calibration-in-days 7)
+;; Returns e.g. (scheduled-for \"2024-01-09T14:35:22.000Z\" unix 1704812122)
 ```
 
-Compute future Unix time, format as ISO—now you have a due date. You could write this to a task queue or CRM field.
+Compute future Unix time, format as ISO—now you have a due date. You could write this to a task queue or a stored record.
 
 ---
 
 ## Multi-Listing Freshness Audit with Cortex
 
-Fetch a batch of listing records from cortex, check each for staleness, return a report.
+Fetch a batch of sensor records from cortex, check each for staleness, return a report.
 
 ```scheme
-;; Program: audit freshness of multiple listings stored in cortex
-(define listing-ids '(\"L001\" \"L002\" \"L003\"))
+;; Program: audit freshness of multiple sensor records stored in cortex
+;; Seed two records; leave the third absent so its recall fails cleanly.
+(cortex/write \"sensor-L001\" (- (unix-now) (* 10 86400)))
+(cortex/write \"sensor-L002\" (- (unix-now) (* 45 86400)))
 
-(define (fetch-and-check-listing id)
-  (let ((record (cortex/read (list (cons 'key (string-append \"listing-\" id))))))
-    (if (or (eq? record 'nan) (equal? (car record) 'escalate))
+(define sensor-ids '(\"L001\" \"L002\" \"L003\"))
+
+(define (fetch-and-check-sensor id)
+  (let ((record (cortex/recall (string-append \"sensor-\" id))))
+    (if (not record)
         (list id 'status \"fetch-failed\")
-        (let ((last-sync (cdr (assoc 'last_sync record))))
+        (let ((last-sync (cadr (assoc ':data record))))
           (if (not last-sync)
               (list id 'status \"no-timestamp\")
-              (let ((days (time/days-since last-sync)))
-                (if (eq? days 'nan)
-                    (list id 'status \"parse-failed\")
-                    (if (> days 30)
-                        (list id 'status \"stale\" 'days days)
-                        (list id 'status \"fresh\" 'days days)))))))))
+              (let ((days (days-since last-sync)))
+                (if (> days 30)
+                    (list id 'status \"stale\" 'days days)
+                    (list id 'status \"fresh\" 'days days))))))))
 
-(define (audit-listings ids)
-  (map fetch-and-check-listing ids))
+(define (audit-sensors ids)
+  (map fetch-and-check-sensor ids))
 
-(audit-listings listing-ids)
+(audit-sensors sensor-ids)
 ;; Returns e.g.:
 ;; ((\"L001\" status \"fresh\" days 10)
 ;;  (\"L002\" status \"stale\" days 45)
@@ -727,35 +679,31 @@ Map over IDs, fetch, check, surface. This is **audit by freshness**: you can see
 Send emails to a list, but throttle by ensuring a minimum gap since the last send.
 
 ```scheme
-;; Program: send emails to contacts, skip if contacted within last 3 days
-(define contacts
-  '(((email . \"alice@example.com\") (last-contact . \"2024-01-01T00:00:00Z\"))
-    ((email . \"bob@example.com\") (last-contact . \"2023-12-28T00:00:00Z\"))
-    ((email . \"carol@example.com\") (last-contact . \"2024-01-02T00:00:00Z\"))))
+;; Program: ping probe nodes, skip if pinged within last 3 days
+(define nodes
+  (list (list (cons 'node \"alpha\") (cons 'last-ping (- (unix-now) (* 1 86400))))
+        (list (cons 'node \"beta\")  (cons 'last-ping (- (unix-now) (* 5 86400))))
+        (list (cons 'node \"gamma\") (cons 'last-ping (- (unix-now) (* 0 86400))))))
 
-(define (send-if-eligible contact min-gap-days)
-  (let* ((email (cdr (assoc 'email contact)))
-         (last-contact (cdr (assoc 'last-contact contact)))
-         (days (time/days-since last-contact)))
-    (if (eq? days 'nan)
-        (list email 'result \"parse-failed\")
-        (if (< days min-gap-days)
-            (list email 'result \"skipped\" 'reason \"contacted-recently\" 'days-since days)
-            (let ((mail-result (mail/dispatch (list (cons 'to email)
-                                                    (cons 'subject \"Hello\")
-                                                    (cons 'body \"Update for you\")))))
-              (if (or (eq? mail-result 'nan) (equal? (car mail-result) 'escalate))
-                  (list email 'result \"send-failed\")
-                  (list email 'result \"sent\" 'days-since days)))))))
+(define (ping node) (list 'ack node))   ;; the real action
 
-(map (lambda (c) (send-if-eligible c 3)) contacts)
+(define (ping-if-eligible entry min-gap-days)
+  (let* ((node (cdr (assoc 'node entry)))
+         (last-ping (cdr (assoc 'last-ping entry)))
+         (days (days-since last-ping)))
+    (if (< days min-gap-days)
+        (list node 'result \"skipped\" 'reason \"pinged-recently\" 'days-since days)
+        (let ((ack (ping node)))
+          (list node 'result \"pinged\" 'ack ack 'days-since days)))))
+
+(map (lambda (n) (ping-if-eligible n 3)) nodes)
 ;; Returns e.g.:
-;; ((\"alice@example.com\" result \"skipped\" reason \"contacted-recently\" days-since 1)
-;;  (\"bob@example.com\" result \"sent\" days-since 5)
-;;  (\"carol@example.com\" result \"skipped\" reason \"contacted-recently\" days-since 0))
+;; ((\"alpha\" result \"skipped\" reason \"pinged-recently\" days-since 1)
+;;  (\"beta\" result \"pinged\" ack (ack \"beta\") days-since 5)
+;;  (\"gamma\" result \"skipped\" reason \"pinged-recently\" days-since 0))
 ```
 
-Time acts as a **send throttle**: no spam, no redundant contact. The pattern extends to any action you want to pace—repricing, restocking alerts, social posts.
+Time acts as a **throttle**: no flooding, no redundant work. The pattern extends to any action you want to pace—resampling, health checks, telemetry pushes.
 
 ---
 
@@ -764,34 +712,32 @@ Time acts as a **send throttle**: no spam, no redundant contact. The pattern ext
 Combine age with a base priority score to compute a final priority.
 
 ```scheme
-;; Program: prioritize support tickets by base priority + age boost
-(define tickets
-  '(((id . \"T1\") (priority . 5) (created . \"2024-01-01T00:00:00Z\"))
-    ((id . \"T2\") (priority . 3) (created . \"2023-12-30T00:00:00Z\"))
-    ((id . \"T3\") (priority . 7) (created . \"2024-01-02T00:00:00Z\"))))
+;; Program: prioritize anomaly alerts by base severity + age boost
+(define alerts
+  (list (list (cons 'id \"T1\") (cons 'severity 5) (cons 'raised (- (unix-now) (* 2 86400))))
+        (list (cons 'id \"T2\") (cons 'severity 3) (cons 'raised (- (unix-now) (* 4 86400))))
+        (list (cons 'id \"T3\") (cons 'severity 7) (cons 'raised (- (unix-now) (* 0 86400))))))
 
-(define (compute-priority ticket)
-  (let* ((id (cdr (assoc 'id ticket)))
-         (base (cdr (assoc 'priority ticket)))
-         (created (cdr (assoc 'created ticket)))
-         (days (time/days-since created)))
-    (if (eq? days 'nan)
-        (list id 'priority base 'age-boost 0)
-        (let ((age-boost (* days 0.5)))  ;; +0.5 per day
-          (list id 'priority (+ base age-boost) 'age-boost age-boost)))))
+(define (compute-priority alert)
+  (let* ((id (cdr (assoc 'id alert)))
+         (base (cdr (assoc 'severity alert)))
+         (raised (cdr (assoc 'raised alert)))
+         (days (days-since raised))
+         (age-boost (* days 0.5)))  ;; +0.5 per day
+    (list id 'priority (+ base age-boost) 'age-boost age-boost)))
 
-(define (sort-by-priority tickets)
-  (let ((scored (map compute-priority tickets)))
+(define (sort-by-priority alerts)
+  (let ((scored (map compute-priority alerts)))
     (sort scored (lambda (a b) (> (caddr a) (caddr b))))))
 
-(sort-by-priority tickets)
-;; Returns tickets sorted by priority + age, e.g.:
-;; ((T2 priority 5.0 age-boost 2.0)  ;; 3 + 4 days * 0.5
-;;  (T1 priority 6.0 age-boost 1.0)  ;; 5 + 2 days * 0.5
-;;  (T3 priority 7.0 age-boost 0.0)) ;; 7 + 0 days
+(sort-by-priority alerts)
+;; Returns alerts sorted by severity + age, e.g.:
+;; ((\"T2\" priority 5.0 age-boost 2.0)  ;; 3 + 4 days * 0.5
+;;  (\"T1\" priority 6.0 age-boost 1.0)  ;; 5 + 2 days * 0.5
+;;  (\"T3\" priority 7.0 age-boost 0.0)) ;; 7 + 0 days
 ```
 
-Age becomes an **urgency multiplier**: old tickets rise in the queue. You could use this to route support, prioritize restocks, or schedule content.
+Age becomes an **urgency multiplier**: old alerts rise in the queue. You could use this to route responders, prioritize re-samples, or schedule follow-ups.
 
 ---
 
@@ -800,40 +746,44 @@ Age becomes an **urgency multiplier**: old tickets rise in the queue. You could 
 A harder pattern: recursively check a resource, refresh if stale, stop if fresh.
 
 ```scheme
-;; Program: recursively check inventory staleness, refresh once if needed, return status
-(define (ensure-fresh-inventory sku max-age-days)
+;; Program: recursively check reading staleness, refresh once if needed, return status
+;; Seed a stale record (last sync 40 days ago) so the first pass triggers a refresh:
+(cortex/write \"reading-A123\" (- (unix-now) (* 40 86400)))
+
+(define (resync-reading! key)
+  ;; the refresh action: stamp the record with 'now' and report ok
+  (cortex/write key (unix-now))
+  (list 'ok key))
+
+(define (ensure-fresh-reading channel max-age-days)
   (letrec ((check-and-refresh
             (lambda (attempt)
               (if (> attempt 1)
                   ;; Already refreshed once; don't loop forever
-                  (escalate 'refresh-failed \"Inventory still stale after refresh\")
-                  (let ((record (cortex/read (list (cons 'key (string-append \"inv-\" sku))))))
-                    (if (or (eq? record 'nan) (equal? (car record) 'escalate))
-                        (escalate 'cortex-read-failed \"Cannot fetch inventory record\")
-                        (let ((last-sync (cdr (assoc 'last_sync record))))
+                  (escalate 'refresh-failed \"Reading still stale after refresh\")
+                  (let* ((key (string-append \"reading-\" channel))
+                         (record (cortex/recall key)))
+                    (if (not record)
+                        (escalate 'recall-failed \"Cannot fetch reading record\")
+                        (let ((last-sync (cadr (assoc ':data record))))
                           (if (not last-sync)
-                              (escalate 'missing-timestamp \"No last_sync in record\")
-                              (let ((days (time/days-since last-sync)))
-                                (if (eq? days 'nan)
-                                    (escalate 'time-parse-failed \"Invalid timestamp\")
-                                    (if (> days max-age-days)
-                                        ;; Stale: trigger refresh
-                                        (let ((refresh-result (stock/adjust (list (cons 'sku sku)
-                                                                                  (cons 'delta 0)))))
-                                          (if (or (eq? refresh-result 'nan) (equal? (car refresh-result) 'escalate))
-                                              (escalate 'refresh-verb-failed \"Refresh call failed\")
-                                              ;; Recurse to check again
-                                              (check-and-refresh (+ attempt 1))))
-                                        ;; Fresh: done
-                                        (list 'fresh sku 'days-since days)))))))))))
+                              (escalate 'missing-timestamp \"No last-sync in record\")
+                              (let ((days (days-since last-sync)))
+                                (if (> days max-age-days)
+                                    ;; Stale: trigger refresh, then recheck
+                                    (let ((refresh-result (resync-reading! key)))
+                                      (if (equal? (car refresh-result) 'ok)
+                                          (check-and-refresh (+ attempt 1))
+                                          (escalate 'refresh-verb-failed \"Refresh call failed\")))
+                                    ;; Fresh: done
+                                    (list 'fresh channel 'days-since days)))))))))))
     (check-and-refresh 0)))
 
-(ensure-fresh-inventory \"A123\" 7)
-;; If fresh: (fresh \"A123\" days-since 3)
-;; If stale: triggers refresh, checks again, returns fresh or escalates if still stale
+(ensure-fresh-reading \"A123\" 7)
+;; Starts stale, refreshes once, rechecks fresh: (fresh \"A123\" days-since 0)
 ```
 
-`letrec` for mutual recursion, attempt counter to prevent infinite loops, verb call inside the recursion. This is **self-healing staleness**: the program detects and corrects decay.
+`letrec` for self-recursion, attempt counter to prevent infinite loops, an action inside the recursion. This is **self-healing staleness**: the program detects and corrects decay.
 
 ---
 
@@ -842,40 +792,41 @@ A harder pattern: recursively check a resource, refresh if stale, stop if fresh.
 Chain three verbs in sequence, each gated by the previous stage's result and a time check.
 
 ```scheme
-;; Program: fetch listing, check age, reprice if stale, log result
-(define (auto-reprice-if-stale listing-id)
-  (let ((listing (etsy/listing (list (cons 'listing_id listing-id)))))
-    (if (or (eq? listing 'nan) (equal? (car listing) 'escalate))
-        (escalate 'listing-fetch-failed \"Could not fetch listing\")
-        (let ((last-price-update (cdr (assoc 'last_modified_tsz listing))))
-          (if (not last-price-update)
-              (escalate 'missing-timestamp \"Listing has no last_modified_tsz\")
-              (let ((days (time/days-since last-price-update)))
-                (if (eq? days 'nan)
-                    (escalate 'time-parse-failed \"Invalid timestamp\")
-                    (if (> days 30)
-                        ;; Stale: reprice
-                        (let ((reprice-result (etsy/reprice (list (cons 'listing_id listing-id)
-                                                                  (cons 'price \"25.00\")))))
-                          (if (or (eq? reprice-result 'nan) (equal? (car reprice-result) 'escalate))
-                              (escalate 'reprice-failed \"Reprice verb failed\")
-                              ;; Log success
-                              (let ((log (cortex/write (list (cons 'key (string-append \"log-reprice-\" listing-id))
-                                                             (cons 'value (list (cons 'timestamp (time/iso8601-now))
-                                                                                (cons 'listing listing-id)
-                                                                                (cons 'action \"repriced\")))))))
-                                (if (or (eq? log 'nan) (equal? (car log) 'escalate))
-                                    (list 'repriced 'logged #f)
-                                    (list 'repriced 'logged #t)))))
-                        ;; Fresh: skip
-                        (list 'skipped 'reason \"Price updated recently\" 'days-since days)))))))))
+;; Program: recall a filter config, check age, re-tune if stale, log result
+;; Seed a stale config (last tuned 40 days ago):
+(cortex/write \"config-node9\" (- (unix-now) (* 40 86400)))
 
-(auto-reprice-if-stale 123456789)
-;; If listing stale: (repriced logged #t)
-;; If fresh: (skipped reason \"Price updated recently\" days-since 10)
+(define (retune-filter node-id)   ;; the real tuning action
+  (list 'ok node-id))
+
+(define (auto-retune-if-stale node-id)
+  (let ((config (cortex/recall (string-append \"config-\" node-id))))
+    (if (not config)
+        (escalate 'config-fetch-failed \"Could not fetch config\")
+        (let ((last-tune (cadr (assoc ':data config))))
+          (if (not last-tune)
+              (escalate 'missing-timestamp \"Config has no last-tune field\")
+              (let ((days (days-since last-tune)))
+                (if (> days 30)
+                    ;; Stale: re-tune
+                    (let ((tune-result (retune-filter node-id)))
+                      (if (equal? (car tune-result) 'ok)
+                          ;; Log success by stamping a log record
+                          (let ((log (cortex/write (string-append \"log-tune-\" node-id)
+                                                   (list (cons 'timestamp (time/iso (time/now)))
+                                                         (cons 'node node-id)
+                                                         (cons 'action \"retuned\")))))
+                            (list 'retuned 'logged (if log #t #f)))
+                          (escalate 'retune-failed \"Retune action failed\")))
+                    ;; Fresh: skip
+                    (list 'skipped 'reason \"Tuned recently\" 'days-since days))))))))
+
+(auto-retune-if-stale \"node9\")
+;; Config stale: (retuned logged #t)
+;; Fresh: (skipped reason \"Tuned recently\" days-since 10)
 ```
 
-Four verbs (`etsy/listing`, `time/days-since`, `etsy/reprice`, `cortex/write`), five escalation checks, one time gate. This is **multi-stage orchestration**: fetch, decide by age, act, log.
+Four verbs (`cortex/recall`, `days-since`, a real re-tune, `cortex/write`), clean escalation checks, one time gate. This is **multi-stage orchestration**: fetch, decide by age, act, log.
 
 ---
 
@@ -884,41 +835,41 @@ Four verbs (`etsy/listing`, `time/days-since`, `etsy/reprice`, `cortex/write`), 
 A harder aggregation: group orders by day, sum revenue per day.
 
 ```scheme
-;; Program: group orders by calendar day, sum revenue for each day
-(define orders
-  '(((id . \"O1\") (placed . \"2024-01-01T08:00:00Z\") (revenue . 100))
-    ((id . \"O2\") (placed . \"2024-01-01T14:00:00Z\") (revenue . 150))
-    ((id . \"O3\") (placed . \"2024-01-02T10:00:00Z\") (revenue . 200))
-    ((id . \"O4\") (placed . \"2024-01-02T16:00:00Z\") (revenue . 50))))
+;; Program: group samples by calendar day, sum measured counts for each day
+(define daily-samples
+  '(((id . \"O1\") (at . \"2024-01-01T08:00:00Z\") (counts . 100))
+    ((id . \"O2\") (at . \"2024-01-01T14:00:00Z\") (counts . 150))
+    ((id . \"O3\") (at . \"2024-01-02T10:00:00Z\") (counts . 200))
+    ((id . \"O4\") (at . \"2024-01-02T16:00:00Z\") (counts . 50))))
 
 (define (extract-date iso)
-  ;; Extract YYYY-MM-DD prefix from ISO8601
+  ;; Extract YYYY-MM-DD prefix from an ISO8601 string
   (substring iso 0 10))
 
-(define (group-by-day orders)
-  (let loop ((remaining orders)
+(define (group-by-day samples)
+  (let loop ((remaining samples)
              (acc '()))
     (if (null? remaining)
         acc
-        (let* ((order (car remaining))
-               (placed (cdr (assoc 'placed order)))
-               (revenue (cdr (assoc 'revenue order)))
-               (day (extract-date placed))
+        (let* ((sample (car remaining))
+               (at (cdr (assoc 'at sample)))
+               (counts (cdr (assoc 'counts sample)))
+               (day (extract-date at))
                (existing (assoc day acc)))
           (if existing
               (loop (cdr remaining)
-                    (cons (cons day (+ (cdr existing) revenue))
+                    (cons (cons day (+ (cdr existing) counts))
                           (filter (lambda (p) (not (equal? (car p) day))) acc)))
               (loop (cdr remaining)
-                    (cons (cons day revenue) acc)))))))
+                    (cons (cons day counts) acc)))))))
 
-(group-by-day orders)
+(group-by-day daily-samples)
 ;; Returns e.g.:
 ;; ((\"2024-01-02\" . 250)
 ;;  (\"2024-01-01\" . 250))
 ```
 
-We extract date, accumulate by day using an alist, sum revenues. This is **temporal grouping**: time becomes a partition key.
+We extract the date prefix, accumulate by day using an alist, sum counts. This is **temporal grouping**: time becomes a partition key.
 
 ---
 
@@ -927,42 +878,38 @@ We extract date, accumulate by day using an alist, sum revenues. This is **tempo
 Check staleness at two levels: warehouse-level and item-level.
 
 ```scheme
-;; Program: audit warehouse staleness (warehouse updated recently?) and item staleness within
-(define warehouse
-  (list (cons 'warehouse-id \"WH-A\")
-        (cons 'last-audit \"2023-12-01T00:00:00Z\")
-        (cons 'items
-              '(((sku . \"I1\") (last-sync . \"2024-01-01T00:00:00Z\"))
-                ((sku . \"I2\") (last-sync . \"2023-11-15T00:00:00Z\"))))))
+;; Program: audit subsystem staleness (audited recently?) and channel staleness within
+(define subsystem
+  (list (cons 'subsystem-id \"SS-A\")
+        (cons 'last-audit (- (unix-now) (* 62 86400)))
+        (cons 'channels
+              (list (list (cons 'ch \"I1\") (cons 'last-sync (- (unix-now) (* 1 86400))))
+                    (list (cons 'ch \"I2\") (cons 'last-sync (- (unix-now) (* 47 86400))))))))
 
-(define (audit-warehouse wh)
-  (let* ((wh-id (cdr (assoc 'warehouse-id wh)))
-         (last-audit (cdr (assoc 'last-audit wh)))
-         (items (cdr (assoc 'items wh)))
-         (wh-days (time/days-since last-audit)))
-    (if (eq? wh-days 'nan)
-        (escalate 'time-parse-failed \"Invalid warehouse audit timestamp\")
-        (let ((wh-status (if (> wh-days 60) \"stale-warehouse\" \"fresh-warehouse\"))
-              (item-statuses (map (lambda (item)
-                                    (let* ((sku (cdr (assoc 'sku item)))
-                                           (last-sync (cdr (assoc 'last-sync item)))
-                                           (item-days (time/days-since last-sync)))
-                                      (if (eq? item-days 'nan)
-                                          (list sku 'status \"parse-failed\")
-                                          (if (> item-days 30)
-                                              (list sku 'status \"stale-item\" 'days item-days)
-                                              (list sku 'status \"fresh-item\" 'days item-days)))))
-                                  items)))
-          (list 'warehouse wh-id 'warehouse-status wh-status 'wh-days wh-days 'items item-statuses)))))
+(define (audit-subsystem ss)
+  (let* ((ss-id (cdr (assoc 'subsystem-id ss)))
+         (last-audit (cdr (assoc 'last-audit ss)))
+         (channels (cdr (assoc 'channels ss)))
+         (ss-days (days-since last-audit)))
+    (let ((ss-status (if (> ss-days 60) \"stale-subsystem\" \"fresh-subsystem\"))
+          (channel-statuses (map (lambda (channel)
+                                   (let* ((ch (cdr (assoc 'ch channel)))
+                                          (last-sync (cdr (assoc 'last-sync channel)))
+                                          (ch-days (days-since last-sync)))
+                                     (if (> ch-days 30)
+                                         (list ch 'status \"stale-channel\" 'days ch-days)
+                                         (list ch 'status \"fresh-channel\" 'days ch-days))))
+                                 channels)))
+      (list 'subsystem ss-id 'subsystem-status ss-status 'ss-days ss-days 'channels channel-statuses))))
 
-(audit-warehouse warehouse)
+(audit-subsystem subsystem)
 ;; Returns e.g.:
-;; (warehouse \"WH-A\" warehouse-status \"stale-warehouse\" wh-days 62
-;;  items ((\"I1\" status \"fresh-item\" days 1)
-;;         (\"I2\" status \"stale-item\" days 47)))
+;; (subsystem \"SS-A\" subsystem-status \"stale-subsystem\" ss-days 62
+;;  channels ((\"I1\" status \"fresh-channel\" days 1)
+;;            (\"I2\" status \"stale-channel\" days 47)))
 ```
 
-Two levels of time checks: warehouse and items. This is **hierarchical freshness**: decay can happen at multiple granularities.
+Two levels of time checks: subsystem and channels. This is **hierarchical freshness**: decay can happen at multiple granularities.
 
 ---
 
@@ -971,24 +918,21 @@ Two levels of time checks: warehouse and items. This is **hierarchical freshness
 A simple but powerful pattern: enable a feature only after a certain date.
 
 ```scheme
-;; Program: check if a feature should be enabled based on launch date
-(define (feature-enabled? feature-name launch-iso)
-  (let ((now (time/unix-now)))
-    (if (eq? now 'nan)
-        (escalate 'time-unavailable \"Cannot check feature flag timing\")
-        (let ((launch-unix (time/parse-iso8601 launch-iso)))
-          (if (eq? launch-unix 'nan)
-              (escalate 'time-parse-failed \"Invalid launch date\")
-              (if (>= now launch-unix)
-                  (list 'feature feature-name 'enabled #t)
-                  (list 'feature feature-name 'enabled #f 'launches-in-seconds (- launch-unix now))))))))
+;; Program: check if a pipeline stage should be enabled based on its activation time
+(define (stage-enabled? stage-name activate-at)
+  (let ((now (unix-now)))
+    (if (>= now activate-at)
+        (list 'stage stage-name 'enabled #t)
+        (list 'stage stage-name 'enabled #f 'activates-in-seconds (- activate-at now)))))
 
-(feature-enabled? \"new-checkout\" \"2024-02-01T00:00:00Z\")
-;; If run before Feb 1: (feature \"new-checkout\" enabled #f launches-in-seconds 123456)
-;; If run after Feb 1: (feature \"new-checkout\" enabled #t)
+(stage-enabled? \"new-decoder\" (+ (unix-now) 123456))
+;; Activation in the future: (stage \"new-decoder\" enabled #f activates-in-seconds 123456)
+
+(stage-enabled? \"old-decoder\" (- (unix-now) 100))
+;; Activation in the past: (stage \"old-decoder\" enabled #t)
 ```
 
-Time as a **feature gate**: the clock controls rollout. You could extend this to staged rollouts (10% after date A, 50% after date B, 100% after date C).
+Time as a **stage gate**: the clock controls rollout. You could extend this to staged rollouts (10% after time A, 50% after time B, 100% after time C).
 
 ---
 
@@ -997,39 +941,36 @@ Time as a **feature gate**: the clock controls rollout. You could extend this to
 Walk a tree of records, stop recursion as soon as a stale node is found.
 
 ```scheme
-;; Program: recursively search a tree of inventory nodes, return first stale node
-(define inventory-tree
-  '((warehouse-a
-     ((sku . \"A1\") (last-sync . \"2024-01-01T00:00:00Z\"))
-     ((sku . \"A2\") (last-sync . \"2023-11-01T00:00:00Z\")))
-    (warehouse-b
-     ((sku . \"B1\") (last-sync . \"2024-01-02T00:00:00Z\"))
-     ((sku . \"B2\") (last-sync . \"2023-10-15T00:00:00Z\")))))
+;; Program: recursively search a tree of sensor nodes, return first stale node
+(define array-tree
+  (list (cons 'array-a
+              (list (list (cons 'ch \"A1\") (cons 'last-sync (- (unix-now) (* 2 86400))))
+                    (list (cons 'ch \"A2\") (cons 'last-sync (- (unix-now) (* 91 86400))))))
+        (cons 'array-b
+              (list (list (cons 'ch \"B1\") (cons 'last-sync (- (unix-now) (* 1 86400))))
+                    (list (cons 'ch \"B2\") (cons 'last-sync (- (unix-now) (* 100 86400))))))))
 
 (define (find-first-stale tree max-age-days)
   (let loop ((nodes tree))
     (if (null? nodes)
         'none
         (let ((node (car nodes)))
-          (if (pair? (car node))
-              ;; It's a warehouse: recurse into items
-              (let ((wh-name (car node))
-                    (items (cdr node)))
-                (let ((result (loop items)))
+          (if (symbol? (car node))
+              ;; It's an array (its head is a symbol tag): recurse into channels
+              (let ((channels (cdr node)))
+                (let ((result (loop channels)))
                   (if (eq? result 'none)
                       (loop (cdr nodes))
                       result)))
-              ;; It's an item: check staleness
-              (let* ((sku (cdr (assoc 'sku node)))
+              ;; It's a channel (an alist): check staleness
+              (let* ((ch (cdr (assoc 'ch node)))
                      (last-sync (cdr (assoc 'last-sync node)))
-                     (days (time/days-since last-sync)))
-                (if (eq? days 'nan)
-                    (loop (cdr nodes))  ;; Skip unparseable
-                    (if (> days max-age-days)
-                        (list 'stale-node sku 'days days)
-                        (loop (cdr nodes))))))))))
+                     (days (days-since last-sync)))
+                (if (> days max-age-days)
+                    (list 'stale-node ch 'days days)
+                    (loop (cdr nodes)))))))))
 
-(find-first-stale inventory-tree 60)
+(find-first-stale array-tree 60)
 ;; Returns e.g. (stale-node \"A2\" days 91) — first node > 60 days old
 ```
 
@@ -1042,23 +983,18 @@ Named `let` recursion through a tree, early exit on first stale match. This is *
 Given an event timestamp and a pacing rule (e.g., \"wait 7 days\"), compute when the next action is due.
 
 ```scheme
-;; Program: given last email send time, compute next send time (7 days later)
-(define (next-send-time last-send-iso interval-days)
-  (let ((last-send-unix (time/parse-iso8601 last-send-iso)))
-    (if (eq? last-send-unix 'nan)
-        (escalate 'time-parse-failed \"Invalid last-send timestamp\")
-        (let* ((interval-seconds (* interval-days 24 3600))
-               (next-send-unix (+ last-send-unix interval-seconds))
-               (next-send-iso (time/iso8601 next-send-unix)))
-          (if (eq? next-send-iso 'nan)
-              (escalate 'time-format-failed \"Cannot format next send time\")
-              (list 'next-send next-send-iso 'unix next-send-unix))))))
+;; Program: given last sample time, compute next sample time (7 days later)
+(define (next-sample-time last-sample-unix interval-days)
+  (let* ((interval-seconds (* interval-days 24 3600))
+         (next-sample-unix (+ last-sample-unix interval-seconds))
+         (next-sample-iso (time/iso (* next-sample-unix 1000))))  ;; seconds -> ms
+    (list 'next-sample next-sample-iso 'unix next-sample-unix)))
 
-(next-send-time \"2024-01-01T00:00:00Z\" 7)
-;; Returns (next-send \"2024-01-08T00:00:00Z\" unix 1704672000)
+(next-sample-time 1704067200 7)
+;; Returns (next-sample \"2024-01-08T00:00:00.000Z\" unix 1704672000)
 ```
 
-Parse, add offset, format back. This is **scheduled pacing**: you know exactly when the next action is due.
+Take the time, add offset, format back. This is **scheduled pacing**: you know exactly when the next action is due.
 
 ---
 
@@ -1067,43 +1003,44 @@ Parse, add offset, format back. This is **scheduled pacing**: you know exactly w
 The hardest pattern so far: five stages, all time-aware, all escalating cleanly.
 
 ```scheme
-;; Program: fetch subscriber record, check engagement age, send re-engagement email if stale, log result
-(define (re-engage-subscriber email)
-  (let ((subscriber (email/list-read (list (cons 'email email)))))
-    (if (or (eq? subscriber 'nan) (equal? (car subscriber) 'escalate))
-        (escalate 'subscriber-fetch-failed \"Cannot fetch subscriber\")
-        (let ((last-open (cdr (assoc 'last_open_date subscriber))))
-          (if (not last-open)
-              (escalate 'missing-timestamp \"No last_open_date in subscriber record\")
-              (let ((days (time/days-since last-open)))
-                (if (eq? days 'nan)
-                    (escalate 'time-parse-failed \"Invalid last_open_date\")
-                    (if (> days 90)
-                        ;; Stale: re-engage
-                        (let ((campaign (email/campaign-read (list (cons 'id \"re-engagement-2024\")))))
-                          (if (or (eq? campaign 'nan) (equal? (car campaign) 'escalate))
-                              (escalate 'campaign-fetch-failed \"Cannot fetch campaign\")
-                              (let ((send-result (mail/dispatch (list (cons 'to email)
-                                                                      (cons 'subject \"We miss you!\")
-                                                                      (cons 'body \"Come back!\")))))
-                                (if (or (eq? send-result 'nan) (equal? (car send-result) 'escalate))
-                                    (escalate 'mail-send-failed \"Re-engagement send failed\")
-                                    (let ((log (cortex/write (list (cons 'key (string-append \"re-engage-log-\" email))
-                                                                   (cons 'value (list (cons 'timestamp (time/iso8601-now))
-                                                                                      (cons 'email email)
-                                                                                      (cons 'days-since days)))))))
-                                      (if (or (eq? log 'nan) (equal? (car log) 'escalate))
-                                          (list 're-engaged 'logged #f 'email email)
-                                          (list 're-engaged 'logged #t 'email email)))))))
-                        ;; Fresh: skip
-                        (list 'skipped 'reason \"Recently engaged\" 'days-since days)))))))))
+;; Program: fetch node record, check last-report age, run reactivation if stale, log result
+;; Seed a stale node (last report 120 days ago) and its reactivation profile:
+(cortex/write \"node-probe7\" (- (unix-now) (* 120 86400)))
+(cortex/write \"profile-reactivate\" (list (cons 'power \"high\") (cons 'retries 3)))
 
-(re-engage-subscriber \"customer@example.com\")
-;; If subscriber stale: (re-engaged logged #t email \"customer@example.com\")
-;; If fresh: (skipped reason \"Recently engaged\" days-since 30)
+(define (send-wake profile node-id)   ;; the real reactivation action
+  (list 'woke node-id 'with profile))
+
+(define (reactivate-node node-id)
+  (let ((node (cortex/recall (string-append \"node-\" node-id))))
+    (if (not node)
+        (escalate 'node-fetch-failed \"Cannot fetch node\")
+        (let ((last-report (cadr (assoc ':data node))))
+          (if (not last-report)
+              (escalate 'missing-timestamp \"No last-report in node record\")
+              (let ((days (days-since last-report)))
+                (if (> days 90)
+                    ;; Stale: reactivate
+                    (let ((profile (cortex/recall \"profile-reactivate\")))
+                      (if (not profile)
+                          (escalate 'profile-fetch-failed \"Cannot fetch profile\")
+                          (let ((wake-result (send-wake (cadr (assoc ':data profile)) node-id)))
+                            (if (equal? (car wake-result) 'woke)
+                                (let ((log (cortex/write (string-append \"reactivate-log-\" node-id)
+                                                         (list (cons 'timestamp (time/iso (time/now)))
+                                                               (cons 'node node-id)
+                                                               (cons 'days-since days)))))
+                                  (list 'reactivated 'logged (if log #t #f) 'node node-id))
+                                (escalate 'wake-failed \"Reactivation failed\")))))
+                    ;; Fresh: skip
+                    (list 'skipped 'reason \"Recently active\" 'days-since days))))))))
+
+(reactivate-node \"probe7\")
+;; If node stale: (reactivated logged #t node \"probe7\")
+;; If fresh: (skipped reason \"Recently active\" days-since 30)
 ```
 
-Six verbs (`email/list-read`, `time/days-since`, `email/campaign-read`, `mail/dispatch`, `time/iso8601-now`, `cortex/write`), seven escalation points, one time gate. This is **full mastery**: data fetch, time logic, conditional action, logging, all honest.
+Six verbs (`cortex/recall` twice, `days-since`, a real wake action, `time/iso`, `cortex/write`), clean escalation at every stage, one time gate. This is **full mastery**: data fetch, time logic, conditional action, logging, all honest.
 
 ---
 
@@ -1111,19 +1048,19 @@ Six verbs (`email/list-read`, `time/days-since`, `email/campaign-read`, `mail/di
 
 You've seen time drive routes, gate verbs, compute decay, and orchestrate multi-stage flows. Now build your own.
 
-1. **Inventory decay alert**: Write a program that fetches a batch of SKUs from `cortex/read`, computes days since last restock for each, and sends a `notify/push` alert listing all SKUs stale for > 60 days. Return the count of alerted SKUs and the list.
+1. **Channel decay alert**: Write a program that recalls a batch of channel records with `cortex/recall`, computes days since last sample for each, and builds an alert listing all channels stale for > 60 days. Return the count of alerted channels and the list.
 
-2. **Scheduled promotion activator**: Given a list of promotions (each with a `start_date` ISO string), compute which ones should be active right now (start date ≤ now, end date ≥ now). For each active promo, call `merchant/promotions-create` to enable it. Return a list of activated promo IDs.
+2. **Scheduled stage activator**: Given a list of pipeline stages (each with an `activate-at` Unix timestamp), compute which ones should be active right now (activate ≤ now, expire ≥ now). For each active stage, run its enable step. Return a list of activated stage IDs.
 
-3. **Multi-tier subscriber segmentation**: Fetch a list of email subscribers via `email/list-members`, classify each by days-since-last-open into \"hot\" (< 7 days), \"warm\" (7-30 days), \"cold\" (30-90 days), \"frozen\" (> 90 days). Return a distribution count and the full list of classified subscribers.
+3. **Multi-tier node segmentation**: Given a list of monitoring nodes (each with a last-report timestamp), classify each by days-since-last-report into \"live\" (< 7 days), \"idle\" (7-30 days), \"quiet\" (30-90 days), \"dark\" (> 90 days). Return a distribution count and the full list of classified nodes.
 
-4. **Time-bounded batch processor**: Write a recursive function that processes a list of tasks (each task is a SKU to reprice via `etsy/reprice`), but stops processing if the current time exceeds a deadline (passed as a Unix timestamp). Return the list of processed SKUs and the list of remaining SKUs if the deadline was hit.
+4. **Time-bounded batch processor**: Write a recursive function that processes a list of tasks (each task is a channel to re-tune), but stops processing if the current time exceeds a deadline (passed as a Unix timestamp). Return the list of processed channels and the list of remaining channels if the deadline was hit.
 
-5. **Freshness-gated analytics fetch**: For a given listing ID, check when analytics were last fetched (stored in `cortex/read` under key `analytics-timestamp-<id>`). If > 24 hours old, fetch fresh analytics via `analytics/report`, write the new timestamp to cortex, and return the analytics. If fresh, skip the fetch and return a \"cache hit\" message.
+5. **Freshness-gated recomputation**: For a given channel ID, check when its summary was last computed (stored via `cortex/recall` under key `summary-timestamp-<id>`). If > 24 hours old, recompute the summary, write the new timestamp with `cortex/write`, and return the summary. If fresh, skip the work and return a \"cache hit\" message.
 
-6. **Exponential decay scorer**: Given a list of support tickets (each with a `created` timestamp and a `base_priority` score), compute a final priority for each that includes exponential decay: `priority = base_priority * e^(-days_old / 10)`. Sort the list by final priority (descending) and return the top 5 tickets.
+6. **Exponential decay scorer**: Given a list of anomaly alerts (each with a `raised` timestamp and a `base_severity` score), compute a final priority for each that includes exponential decay: `priority = base_severity * e^(-days_old / 10)`. Sort the list by final priority (descending) and return the top 5 alerts.
 
-7. **Paced email campaign**: Write a program that loops through a list of contacts (each with `email` and `last_contacted` timestamp). For each contact, send an email via `mail/dispatch` only if `days-since-last-contact > 14`. Track how many emails were sent and how many were skipped, and return both counts plus the timestamp of the campaign run.
+7. **Paced probe campaign**: Write a program that loops through a list of probe nodes (each with a `node` id and `last_pinged` timestamp). For each node, run a ping only if `days-since-last-ping > 14`. Track how many pings were sent and how many were skipped, and return both counts plus the timestamp of the campaign run.
 
-8. **Multi-warehouse staleness audit with escalation**: Fetch inventory records for 3 warehouses via `cortex/read`. For each warehouse, count how many items have `last_sync > 30 days` ago. If *any* warehouse has > 5 stale items, escalate with the warehouse ID and stale count. Otherwise, return a summary of all warehouses with their stale counts.
+8. **Multi-subsystem staleness audit with escalation**: Recall channel records for 3 subsystems via `cortex/recall`. For each subsystem, count how many channels have `last-sync > 30 days` ago. If *any* subsystem has > 5 stale channels, escalate with the subsystem ID and stale count. Otherwise, return a summary of all subsystems with their stale counts.
 ")

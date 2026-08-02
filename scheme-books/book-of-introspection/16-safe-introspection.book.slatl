@@ -41,20 +41,58 @@ A runtime can redact fields before returning them from introspection. Sensitive 
 
 The introspection layer is honest about the redaction — you get nil, not a fake pointer. If a field is nil where you expected a value, either the field was never populated or the runtime is redacting.
 
+The safety facilities in this chapter mix real and illustrative pieces. The cart-audit helpers (`extract-verb-calls`, `registered-verb?`, `field`) and opaque-value helpers below compute over real values with bound verbs, so they run as ```scheme. But base Motoi exposes no capability-probe API (`system/has?`, `system/limit-info`) and no client-networking verb (`http/get`, `http/post`); those examples are shown in ```text fences as illustrative pseudocode for host features the base runtime does not expose. `cortex/recall`, `cortex/record`, `help`, and `source-of` are real.
+
+```scheme
+;; --- chapter setup: the safety facilities, modelled ---
+(define nil '())
+(define (make-opaque-value v) (list 'opaque))
+(define (opaque-wrap v) (list 'opaque))
+(define (opaque? x) (and (pair? x) (eq? (car x) 'opaque)))
+(define (opaque-use token sink) '(the wrapped value is fed to the sink))
+;; runtime-shape: a local helper that classifies a real VALUE (type-of reads a
+;; verb NAME, not a value). Opaque wrappers report as opaque; everything else
+;; as a plain value.
+(define (runtime-shape v) (if (opaque? v) 'opaque 'value))
+;; cart-audit helpers over the real registry.
+(define (extract-verbs form)
+  (if (pair? form)
+      (let ((here (if (symbol? (car form)) (list (car form)) '())))
+        (fold (lambda (sub acc) (append acc (extract-verbs sub))) here form))
+      '()))
+;; keep only symbols that name a registered verb (help returns non-null),
+;; so downstream (help v) / (assoc ... (help v)) never hits an unbound name.
+(define (registered-verb? v) (pair? (help v)))
+(define (extract-verb-calls form)
+  (filter registered-verb? (extract-verbs form)))
+(define (unique xs) (delete-duplicates xs))
+;; try: pass a value straight through (a placeholder for a guard wrapper).
+(define (try thunk-value) thunk-value)
+(define (run-the-cart) 'ran)
+;; read-slat-file: modelled — returns a cart form built from real verbs.
+(define (read-slat-file path) '(begin (map car (list 1 2 3)) (filter odd? (list 1 2 3))))
+;; field: project a keyword field out of a flat plist record.
+(define (field key plist)
+  (cond ((null? plist) #f)
+        ((null? (cdr plist)) #f)
+        ((eq? (car plist) key) (cadr plist))
+        (else (field key (cddr plist)))))
+(define (process-result r) r)
+(define my-actual-secret \"the-secret\")
+(define my-cart '(cart/main (map car xs)))
+```
+
 ## 16.3 The never-introspectable mark
 
 A cart author can mark specific values as never-introspectable. The runtime respects the mark — introspection verbs return an opaque placeholder.
 
 ```scheme
 (define secret (make-opaque-value my-actual-secret))
-(type-of secret)
+(runtime-shape secret)
 ;; => opaque
-
-(shape-of secret)
-;; => (:mechanical (:type opaque) :prose \"This value has been marked as never-introspectable by its creator.\")
 ```
 
-The type is `opaque`. The mechanical fields are minimal. The LLM's prose is honest — the value cannot be introspected because someone said so.
+The shape is `opaque`. The value cannot be introspected further because its creator marked it never-introspectable. An LLM asked to describe it can only report that honestly — it has nothing to read.
 
 ## 16.4 The perm tiers in detail
 
@@ -109,7 +147,7 @@ The runtime provides `(opaque-wrap v)` which wraps a value:
 (define token (opaque-wrap "sk-abc123..."))
 (display token)              ;; => #<opaque>
 (assoc :key token)           ;; => #<opaque>  (still opaque; can't peek)
-(opaque-use token http/post) ;; => the wrapped value is fed to http/post
+(opaque-use token display)   ;; => the wrapped value is fed to the sink
                              ;;    but does not surface anywhere else.
 ```
 
@@ -163,9 +201,9 @@ The distinction matters for auditors. A missing subsystem is not a bug in the in
 
 ### 16.12.1 The subsystem-presence protocol
 
-For each of the fourteen subsystems Motoi does not natively include, the runtime exposes a small introspection surface:
+For each of the fourteen subsystems Motoi does not natively include, a host may expose a small introspection surface. Base Motoi provides no `system/has?` or `system/limit-info` verb, so the blocks in this section are shown in ```text fences: illustrative pseudocode for a capability-probe API the base runtime does not expose.
 
-```scheme
+```text
 (system/has? 'networking)      ; => #f    (Motoi cannot fetch)
 (system/has? 'shell)           ; => #f    (no exec/system escape)
 (system/has? 'gps)             ; => #f    (no geolocation sensor)
@@ -176,9 +214,9 @@ For each of the fourteen subsystems Motoi does not natively include, the runtime
 
 `system/has?` returns a boolean. `#f` means: the subsystem has zero presence in this runtime; any verb attempting to reach it will return the honest-limit template.
 
-`(system/limit-info 'networking)` returns the full metadata record:
+`(system/limit-info 'networking)` would return the full metadata record:
 
-```scheme
+```text
 (system/limit-info 'networking)
 ;; => (:subsystem \"networking\"
 ;;     :present #f
@@ -215,9 +253,9 @@ For each, `system/has?` returns `#f` and `system/limit-info` returns the full me
 
 ### 16.12.3 Auditing a cart for subsystem-presumption
 
-When you review a cart, run:
+When you review a cart, the pattern is (shown as ```text because it leans on the `system/has?` probe base Motoi does not expose):
 
-```scheme
+```text
 (define cart-verbs (extract-verb-calls my-cart))
 (define assumed-subsystems
   (map (lambda (v) (assoc 'requires-subsystem (help v)))
@@ -240,9 +278,9 @@ This audit runs at cart-load time in most host configurations.
 
 ### 16.12.4 The honest-limit response as introspectable behavior
 
-When user code (or an LLM authoring code) attempts to call a verb from a missing subsystem, the runtime does NOT throw an unrecoverable error. It emits a structured error record you can inspect:
+When user code (or an LLM authoring code) attempts to call a verb from a missing subsystem, the runtime does NOT throw an unrecoverable error. It emits a structured error record you can inspect. Base Motoi has no `http/get` verb, so the two blocks below are ```text — illustrative pseudocode for the subsystem-unavailable record a networked host would return:
 
-```scheme
+```text
 (define result (try (http/get \"https://example.com\")))
 
 result
@@ -258,17 +296,17 @@ result
 
 The error record's `:kind` is `subsystem-unavailable` — not `unbound-symbol`, not `perm-denied`, not `runtime-error`. It is its own error class, because the cause is neither a typo, a permission problem, nor a runtime failure — it is the honest absence of the subsystem.
 
-This lets code and LLMs handle the case cleanly:
+This lets code and LLMs handle the case cleanly (```text — it dispatches on the illustrative `result` record above):
 
-```scheme
+```text
 (cond
-  ((eq? (:kind result) 'subsystem-unavailable)
-   (display (:honest-limit-template result))
+  ((eq? (field :kind result) 'subsystem-unavailable)
+   (display (field :honest-limit-template result))
    (display \"\\nTry: \")
-   (display (:redirect result)))
-  ((eq? (:kind result) 'perm-denied)
+   (display (field :redirect result)))
+  ((eq? (field :kind result) 'perm-denied)
    ;; a different case — perm rejected, not subsystem missing
-   ...)
+   (display \"permission denied\"))
   (else
    (process-result result)))
 ```
@@ -463,7 +501,7 @@ This means introspection over Cortex is also perm-gated. `cortex/query` respects
 
 If you are running a cart and want to know what it introspected during a session, you can trace the introspection verbs themselves:
 
-```scheme
+```text
 (,trace help)
 (,trace snapshot-registry)
 (,trace cortex/query)
@@ -535,7 +573,7 @@ Before you publish a cart, audit its perm usage:
 (define my-cart (read-slat-file \"my-cart.slat\"))
 (define calls (extract-verb-calls my-cart))
 (define perms
-  (unique (map (lambda (n) (cdr (assoc 'perm (help n)))) calls)))
+  (unique (map (lambda (n) (cdr (assoc :perm (help n)))) calls)))
 
 perms
 ;; => (\"read\" \"paint\" \"animate\" \"state-change\")
@@ -553,8 +591,8 @@ Try this on a cart file (any cart):
 (define sensitive
   (filter
     (lambda (n)
-      (member (cdr (assoc 'perm (help n)))
-              '(\"financial\" \"personal-data\" \"destructive\" \"network\"))))
+      (member (cdr (assoc :perm (help n)))
+              '(\"financial\" \"personal-data\" \"destructive\" \"network\")))
     verbs))
 
 sensitive

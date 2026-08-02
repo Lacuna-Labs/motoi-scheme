@@ -36,24 +36,31 @@ would have caught before you ran the sim.
 
 ## B.1 phys/quantity and friends
 
+A quantity is a value plus a dimension alist — e.g. `((length 1))` is
+metres, `((time 1))` is seconds. `phys/q*` and `phys/q/` combine the
+dimensions for you.
+
 ```scheme
-(define distance (phys/quantity 5 :unit 'meter))
-(define time     (phys/quantity 2 :unit 'second))
+(define distance (phys/quantity 5 '((length 1))))   ;; 5 metres
+(define time     (phys/quantity 2 '((time 1))))     ;; 2 seconds
 (define velocity (phys/q/ distance time))
 (phys/dimension velocity)
-;; => (:length 1 :time -1)      -> meters per second, correct
+;; => ((length 1) (time -1))      -> metres per second, correct
 
-(phys/same-dimension? velocity (phys/quantity 3 :unit 'm/s))
+(phys/same-dimension? velocity (phys/quantity 3 '((length 1) (time -1))))
 ;; => #t
 ```
 
-`phys/q+`, `phys/q-`, `phys/q*`, `phys/q/` all propagate units and
-check compatibility. Adding meters to seconds is an error caught
-before evaluation.
+`phys/q+`, `phys/q*`, `phys/q/` all propagate dimensions and check
+compatibility. Adding metres to seconds is an error caught before the
+sim ever runs — `phys/same-dimension?` returns `#f` so you can guard:
 
 ```scheme
-(phys/q+ distance time)
-;; => ERROR: incompatible dimensions (:length 1) and (:time 1)
+;; Guard instead of blindly adding: are these even the same dimension?
+(if (phys/same-dimension? distance time)
+    (phys/q+ distance time)
+    (list 'refused 'incompatible (phys/dimension distance) (phys/dimension time)))
+;; => (refused incompatible ((length 1)) ((time 1)))
 ```
 
 ## B.2 Ten worked bugs
@@ -61,21 +68,23 @@ before evaluation.
 ### Bug 1: The 3600 factor.
 
 ```scheme
-;; WRONG:
-(define speed 60)                       ;; kilometers per hour
-(define distance-covered (* speed 30))  ;; 30 seconds later
-;; => 1800 ??? "the car went 1800 kilometers in 30 seconds"
+;; WRONG: a bare number hides the units.
+(define speed-raw 60)                       ;; kilometres per hour? per second?
+(define distance-raw (* speed-raw 30))      ;; 30 later
+;; => 1800 ??? "the car went 1800 km in 30 seconds"
 
-;; RIGHT:
-(define speed (phys/quantity 60 :unit 'km/hr))
-(define time  (phys/quantity 30 :unit 'second))
-(define distance-covered (phys/q* speed time))
-;; => 0.5 km    (correct!)
+;; RIGHT: tag speed as length/time so the dimension of the product is checked.
+;; (Convert 60 km/hr to km/s first: 60/3600 = 0.01667 km/s.)
+(define speed-q (phys/quantity (/ 60 3600) '((length 1) (time -1))))
+(define time-q  (phys/quantity 30 '((time 1))))
+(define distance-q (phys/q* speed-q time-q))
+(list (phys/dimension distance-q))          ;; => (((length 1)))  -> a length!
 ```
 
-The units force the conversion: 60 km/hr * 30 s = 60/3600 km/s * 30 s
-= 0.5 km. Without units the '60' was interpreted as km/frame or
-whatever your sim used, and the answer was wildly wrong.
+The dimensions force you to be honest: km/hr is `length * time^-1`,
+and multiplying by a time leaves `length`. Do the numeric conversion
+(60 km/hr = 0.01667 km/s) at the boundary, then let the dimension
+alist confirm the RESULT is a distance, not a distance-times-time.
 
 ### Bug 2: Radians vs degrees.
 
@@ -85,7 +94,7 @@ whatever your sim used, and the answer was wildly wrong.
 ;; when you meant the sine of 30 DEGREES = 0.5
 
 ;; RIGHT:
-(sin (phys/degrees->radians 30))
+(sin (geom/->radians 30))
 ;; => 0.5
 ```
 
@@ -95,15 +104,15 @@ answers.
 ### Bug 3: Mass vs weight.
 
 ```scheme
-;; WRONG:
-(entity/mass! b 150)   ;; setting weight of 150 pounds as mass
-;; -> the sim treats a person as 150 kg (mass), not 150 lbs (weight)
+;; WRONG: use a weight (a force) where a mass belongs.
+;;   (entity/mass! b 150)   ;; treats 150 lb-force as if it were 150 kg
+;; mass = weight / g. First convert 150 lbf to newtons: 150 * 4.448 = 667 N.
 
-;; RIGHT:
-(define weight (phys/quantity 150 :unit 'lb-force))
-(define mass   (phys/q/ weight (phys/quantity 9.81 :unit 'm/s^2)))
-(entity/mass! b (phys/value-in-unit mass 'kg))
-;; => ~68 kg  (correct!)
+;; RIGHT: divide force by acceleration -> a mass, and check the dimension.
+(define weight (phys/quantity (* 150 4.448) '((mass 1) (length 1) (time -2))))  ;; newtons
+(define g      (phys/quantity 9.81 '((length 1) (time -2))))                    ;; m/s^2
+(define mass   (phys/q/ weight g))
+(list (phys/dimension mass))     ;; => (((mass 1)))  -> a mass, ~68 kg
 ```
 
 Weight is a force; mass is a mass. Conflating them is a factor-of-g
@@ -115,15 +124,14 @@ error, which for Earth is about 10.
 ;; WRONG:
 (define bulb-consumption 60)                ;; watts
 (define hours-on         8)
-(define bill              (* bulb-consumption hours-on))
+(define bill-raw         (* bulb-consumption hours-on))
 ;; => 480 ... watts? watt-hours? kilowatt-hours?
 
-;; RIGHT:
-(define bulb (phys/quantity 60 :unit 'watt))
-(define time (phys/quantity 8 :unit 'hour))
-(define usage (phys/q* bulb time))
-(phys/value-in-unit usage 'kwh)
-;; => 0.48 kilowatt-hours
+;; RIGHT: power is energy/time (mass*length^2*time^-3); times a time -> energy.
+(define bulb (phys/quantity 60 '((mass 1) (length 2) (time -3))))  ;; watts
+(define on   (phys/quantity (* 8 3600) '((time 1))))               ;; 8 hr in seconds
+(define usage (phys/q* bulb on))
+(list (phys/dimension usage))    ;; => (((mass 1) (length 2) (time -2)))  -> energy (joules)
 ```
 
 Watts are joules per second. Watt-hours are joules. Kilowatt-hours
@@ -138,13 +146,16 @@ costs money.
 ;; k needs to be rescaled.
 
 ;; WRONG:
-(world/link-stiffness! spring 100)     ;; treated as sim-units, absurdly stiff
+;;   (world/link! anchor bob 100 100)   ;; k=100 in sim-units, absurdly stiff
 
-;; RIGHT: pre-convert.
-(define k-physical (phys/quantity 100 :unit 'N/m))
-(define scale     (phys/quantity 100 :unit 'px/m))  ;; 100 pixels per meter
-(define k-sim     (phys/value-in-sim-units k-physical scale))
-(world/link-stiffness! spring k-sim)
+;; RIGHT: pre-convert k from N/m to sim-units at the boundary, once.
+(define k-physical 100)                 ;; N/m
+(define px-per-m   100)                 ;; 100 pixels per metre
+(define frames-per-s 60)
+;; k has units force/length = mass/time^2; rescale time (frames) and length (px):
+(define k-sim (/ k-physical (* frames-per-s frames-per-s)))
+;; then use k-sim as the stiffness argument to world/link!
+(list 'k-sim k-sim)
 ```
 
 Whenever your sim uses non-SI units (pixels, frames), you need a
@@ -154,12 +165,14 @@ through your code.
 ### Bug 6: Angular velocity.
 
 ```scheme
-;; WRONG:
-(entity/angular-vel! b 360)     ;; 360 ... degrees per second? rotations?
-;; -> 360 rad/s is very fast; 360 deg/s is one revolution/s
+;; WRONG: is 360 in degrees/second, radians/second, or rotations/second?
+;;   360 rad/s is very fast; 360 deg/s is one revolution per second.
 
-;; RIGHT:
-(entity/angular-vel! b (phys/quantity 360 :unit 'deg/s))
+;; RIGHT: decide the unit, then convert to the radians the engine expects.
+(define spin-deg-per-s 360)
+(define spin-rad-per-s (geom/->radians spin-deg-per-s))
+;; => ~6.283 rad/s  (one revolution per second)
+(list 'spin spin-rad-per-s)
 ```
 
 ### Bug 7: Gravitational constant.
@@ -182,10 +195,11 @@ through your code.
 ;; Torque is a rotational force. Energy is joules.
 ;; Motoi's phys/dimension will report the same for both, so you must
 ;; label at the semantic level:
-(define torque (phys/quantity 5 :unit 'Nm-torque))
-(define energy (phys/quantity 5 :unit 'joule))
-;; The unit system treats them as compatible dimensionally but the
-;; :unit tag preserves the semantic distinction.
+(define torque (phys/quantity 5 '((mass 1) (length 2) (time -2))))
+(define energy (phys/quantity 5 '((mass 1) (length 2) (time -2))))
+(phys/same-dimension? torque energy)   ;; => #t  (dimensionally identical!)
+;; They share a dimension, so the alist can't tell them apart. Keep the
+;; semantic distinction in your own naming; the dimension check won't.
 ```
 
 ### Bug 9: Off by 2*pi in Fourier.
@@ -195,10 +209,11 @@ through your code.
 ;; the 2 pi, your natural frequency is off by 6.28. If you tune
 ;; a resonance chart, you're at the wrong pole.
 
-;; RIGHT: label explicitly.
-(define omega (phys/quantity 6.28 :unit 'rad/s))
-(define f     (phys/q/ omega (phys/quantity (* 2 3.14159) :unit 'rad/cycle)))
-(phys/value-in-unit f 'hz)   ;; => 1
+;; RIGHT: keep the 2*pi explicit. f = omega / (2*pi).
+(define omega 6.28)                       ;; rad/s
+(define f (/ omega (* 2 3.14159)))        ;; cycles/s = Hz
+;; => ~1 Hz
+(list 'frequency-hz f)
 ```
 
 ### Bug 10: Newtons in a screen-pixel-per-frame world.
@@ -210,14 +225,15 @@ through your code.
 ;;              = 10 / 3600 * 100 = 0.278 px/frame^2
 
 ;; WRONG:
-(world/impulse! b 10 0)   ;; treated as 10 px/frame velocity impulse. WAY too much.
+;;   (world/impulse! b 10 0)   ;; 10 taken as px/frame impulse. WAY too much.
 
-;; RIGHT:
-(define F (phys/quantity 10 :unit 'N))
-(define m (phys/quantity  1 :unit 'kg))
-(define dt (phys/quantity 1 :unit 'frame))
-(define impulse (phys/q* F dt))
-(entity/apply-impulse! b (phys/value-in-sim impulse))
+;; RIGHT: convert 10 N acting for one frame into a sim-unit acceleration.
+;;   a = F/m = 10 m/s^2 ; in sim: /(60 frames/s)^2 * (100 px/m)
+(define F 10)   (define m 1)
+(define a-si  (/ F m))                             ;; 10 m/s^2
+(define a-sim (* (/ a-si (* 60 60)) 100))          ;; ~0.278 px/frame^2
+;; then apply a-sim as the per-frame acceleration in sim units
+(list 'a-sim a-sim)
 ```
 
 ---

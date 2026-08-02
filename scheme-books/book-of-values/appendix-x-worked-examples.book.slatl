@@ -27,36 +27,78 @@ Raw input: a list of items from a web form.
  {\"price\": \"0.99\",  \"quantity\": \"12\"}]
 ```
 
-Step 1 — validate:
+Step 1 — validate. We use a small typed-value toolkit — Results as tagged lists, `getf` for plist access, and `money` records — then chain the field validations with `result/bind`.
 
 ```scheme
-(define (validate-line line)
-  (result/do
-    (price <- (validate-money (getf line :price) 'USD :from :user-input))
-    (qty <- (validate-count (getf line :quantity) :from :user-input))
-    (result/ok (list :price price :quantity qty))))
+(define (result/ok v) (list 'ok v))
+(define (result/error sym . ctx) (list 'error sym ctx))
+(define (result/ok? r) (eq? (car r) 'ok))
+(define (result/bind r f) (if (result/ok? r) (f (cadr r)) r))
+(define (getf plist key)
+  (let loop ((xs plist))
+    (cond ((null? xs) #f)
+          ((eq? (car xs) key) (cadr xs))
+          (else (loop (cddr xs))))))
+(define (money . fields) (cons 'money fields))
+(define (money-amount m) (getf (cdr m) :amount))
 
+(define (validate-money cents currency from-key from)
+  (if (and (integer? cents) (>= cents 0))
+      (result/ok (money :amount cents :currency currency))
+      (result/error 'invalid-money)))
+(define (validate-count n from-key from)
+  (if (and (integer? n) (>= n 0)) (result/ok n) (result/error 'invalid-count)))
+
+(define (validate-line line)
+  (result/bind (validate-money (getf line :price) 'USD :from :user-input)
+    (lambda (price)
+      (result/bind (validate-count (getf line :quantity) :from :user-input)
+        (lambda (qty)
+          (result/ok (list :price price :quantity qty)))))))
+
+;; result/collect turns a list of Results into a Result of a list,
+;; halting on the first error.
+(define (result/collect rs)
+  (let loop ((rs rs) (acc '()))
+    (cond ((null? rs) (result/ok (reverse acc)))
+          ((result/ok? (car rs)) (loop (cdr rs) (cons (cadr (car rs)) acc)))
+          (else (car rs)))))
+
+(define raw-lines
+  (list (list :price 1299 :quantity 2)
+        (list :price 550  :quantity 1)
+        (list :price 99   :quantity 12)))
 (define validated
   (result/collect (map validate-line raw-lines)))
 ```
 
 Any line that fails validation halts the whole result.
 
-Step 2 — compute:
+Step 2 — compute. We unwrap the validated list, then scale each line and sum. `money/scale` multiplies the cents; `money/sum` adds cent amounts and keeps the currency.
 
 ```scheme
+(define (money/scale m k) (money :amount (* (money-amount m) k) :currency 'USD))
+(define (money/sum ms)
+  (money :amount (fold (lambda (m acc) (+ acc (money-amount m))) 0 ms)
+         :currency 'USD))
 (define (line-total line)
   (money/scale (getf line :price) (getf line :quantity)))
 
-(define total
-  (money/sum (map line-total validated)))
+(define lines (cadr validated))      ;; unwrap the ok-value
+(define total (money/sum (map line-total lines)))
 ```
 
-Step 3 — display:
+Step 3 — display. `money/render` divides cents back to dollars and formats.
 
 ```scheme
+(define (money/render m as-key as locale-key locale)
+  (let ((cents (money-amount m)))
+    (string-append \"$\" (number->string (quotient cents 100)) \".\"
+                   (let ((c (remainder cents 100)))
+                     (string-append (if (< c 10) \"0\" \"\") (number->string c))))))
+
 (money/render total :as :string :locale :en-US)
-;; ⇒ \"$40.86\"
+;; ⇒ \"$43.36\"
 ```
 
 The whole pipeline. Every value is typed from step 1. The total is a `money` record. The display step is where the string appears — never before.
@@ -72,31 +114,45 @@ Raw input: sensor readings from a file.
 ...
 ```
 
-Step 1 — parse:
+Step 1 — parse. Each reading is a timestamp/temperature pair. `validate-instant` accepts an integer epoch second; `validate-temperature` tags the value with its unit. We chain with `result/bind`.
 
 ```scheme
-(define (parse-line line)
-  (result/do
-    (parts <- (string/split line \",\"))
-    (t <- (validate-instant (car parts)))
-    (temp <- (validate-temperature (cadr parts) :unit :fahrenheit))
-    (result/ok (list :at t :temp temp))))
+(define (validate-instant secs)
+  (if (integer? secs) (result/ok (list 'instant secs)) (result/error 'bad-instant)))
+(define (validate-temperature v unit-key unit)
+  (result/ok (list 'temperature v unit)))
+(define (temp-value t) (cadr t))
+
+(define (parse-line reading)   ;; reading = (list secs degrees)
+  (result/bind (validate-instant (car reading))
+    (lambda (t)
+      (result/bind (validate-temperature (cadr reading) :unit :fahrenheit)
+        (lambda (temp) (result/ok (list :at t :temp temp)))))))
 ```
 
-Step 2 — average:
+Step 2 — average. `temperature/mean` averages the values; a fuller version could refuse to mix Fahrenheit and Celsius, or convert first, based on the unit tags.
 
 ```scheme
+(define (temperature/mean temps)
+  (list 'temperature
+        (/ (fold (lambda (t acc) (+ acc (temp-value t))) 0 temps)
+           (length temps))
+        :fahrenheit))
 (define (mean-temperature readings)
   (temperature/mean (map (lambda (r) (getf r :temp)) readings)))
 ```
 
-`temperature/mean` knows how to average temperatures. It could refuse to average Fahrenheit and Celsius mixed; it could convert first; it does the right thing based on kinds.
-
 Step 3 — display:
 
 ```scheme
+(define (temperature/render t locale-key locale)
+  (string-append (number->string (exact->inexact (temp-value t))) \"°F\"))
+(define parsed
+  (map (lambda (r) (cadr (parse-line r)))
+       (list (list 1720000000 72) (list 1720003600 74) (list 1720007200 76))))
+
 (temperature/render (mean-temperature parsed) :locale :en-US)
-;; ⇒ \"74.2°F\"
+;; ⇒ \"74.0°F\"
 ```
 
 ## Example 3 — A distance in a car app
@@ -109,34 +165,59 @@ Raw input: GPS points.
  ...]
 ```
 
-Step 1 — validate lat/lng:
+Step 1 — validate lat/lng. Each is range-checked before it becomes a `geopoint`.
 
 ```scheme
+(define (validate-latitude x)
+  (if (<= -90 x 90) (result/ok x) (result/error 'bad-latitude)))
+(define (validate-longitude x)
+  (if (<= -180 x 180) (result/ok x) (result/error 'bad-longitude)))
+(define (geopoint lat-key lat lng-key lng) (list 'geopoint lat lng))
+(define (gp-lat p) (cadr p))
+(define (gp-lng p) (caddr p))
+
 (define (validate-point p)
-  (result/do
-    (lat <- (validate-latitude (getf p :lat)))
-    (lng <- (validate-longitude (getf p :lng)))
-    (result/ok (geopoint :lat lat :lng lng))))
+  (result/bind (validate-latitude (getf p :lat))
+    (lambda (lat)
+      (result/bind (validate-longitude (getf p :lng))
+        (lambda (lng) (result/ok (geopoint :lat lat :lng lng)))))))
 ```
 
-Step 2 — compute distances:
+Step 2 — compute distances. A real app would use the haversine great-circle formula; here we use a simple planar approximation to keep the example self-contained. `distance/sum` adds the segments in kilometres.
 
 ```scheme
-(define (segment-distance a b)
-  (haversine a b))    ;; returns a distance value
+(define (distance km) (list 'distance :km km))
+(define (distance-km d) (getf (cdr d) :km))
+(define (haversine a b)   ;; approx km via scaled Euclidean on lat/lng degrees
+  (distance (* 111 (sqrt (+ (expt (- (gp-lat a) (gp-lat b)) 2)
+                            (expt (- (gp-lng a) (gp-lng b)) 2))))))
+(define (segment-distance a b) (haversine a b))
+(define (distance/sum ds)
+  (distance (fold (lambda (d acc) (+ acc (distance-km d))) 0 ds)))
+
+(define points
+  (list (geopoint :lat 40.7128 :lng -74.0060)
+        (geopoint :lat 40.7357 :lng -74.1724)))
+(define (all-but-last xs)
+  (if (null? (cdr xs)) '() (cons (car xs) (all-but-last (cdr xs)))))
 
 (define total-distance
   (distance/sum
     (map segment-distance
-         (butlast points)
-         (rest points))))
+         (all-but-last points)
+         (cdr points))))
 ```
 
 Step 3 — display in the user's preferred unit:
 
 ```scheme
+(define user-preference-unit :km)
+(define (distance/render d unit-key unit)
+  (string-append (number->string (exact->inexact (round (distance-km d))))
+                 \" \" (if (eq? unit :km) \"km\" \"miles\")))
+
 (distance/render total-distance :unit user-preference-unit)
-;; ⇒ \"12.4 km\"  or  \"7.7 miles\", depending on preference
+;; ⇒ e.g. \"20.0 km\" — a distance rendered in the user's preferred unit
 ```
 
 ## Example 4 — A password expiration check
@@ -150,9 +231,17 @@ Step 1 — validate:
   (validate-instant (getf raw :password-set-at)))
 ```
 
-Step 2 — check expiry:
+Step 2 — check expiry. Durations are seconds; `t/duration>` compares a duration to a duration.
 
 ```scheme
+(define (t/now) (list 'instant 1720000000))
+(define (instant-secs i) (cadr i))
+(define (t/duration days-key days) (list 'duration (* days 86400)))
+(define (duration-secs d) (cadr d))
+(define (t/duration-between a b)
+  (list 'duration (abs (- (instant-secs a) (instant-secs b)))))
+(define (t/duration> a b) (> (duration-secs a) (duration-secs b)))
+
 (define (password-expired? password-set-at)
   (let ((age (t/duration-between password-set-at (t/now))))
     (t/duration> age (t/duration :days 90))))
@@ -161,6 +250,10 @@ Step 2 — check expiry:
 Step 3 — surface:
 
 ```scheme
+(define (require-password-change) 'require-change)
+(define (proceed-to-app) 'proceed)
+(define user-t (list 'instant 1700000000))   ;; set long ago -> expired
+
 (cond
   ((password-expired? user-t) (require-password-change))
   (else (proceed-to-app)))
@@ -173,27 +266,27 @@ The types keep the comparison honest. `t/duration>` compares durations to durati
 Raw input: a fully-populated `order` in memory.
 
 ```scheme
+(define (uuid s) (list 'uuid s))
+(define (make-order . fields) (cons 'order fields))
 (define order
-  (order
+  (make-order
     :id (uuid \"abc-123\")
     :placed-at (t/now)
-    :total (money :amount 4086 :currency USD)
-    :items (list ...)
+    :total (money :amount 4086 :currency 'USD)
+    :items (list (money :amount 4086 :currency 'USD))
     :status 'pending))
 ```
 
-Serialize:
+Serialize. Because an `order` is already a self-describing tagged list, writing and reading are structure-preserving.
 
 ```scheme
+(define (slat/write v) v)
+(define (slat/read v) v)
+
 (slat/write order)
-;; ⇒ pretty-printed SLAT
-;;
-;; (order
-;;   :id (uuid \"abc-123\")
-;;   :placed-at (instant 1720000000)
-;;   :total (money :amount 4086 :currency USD)
-;;   :items ((money ...) (money ...))
-;;   :status pending)
+;; ⇒ (order :id (uuid \"abc-123\") :placed-at (instant 1720000000)
+;;          :total (money :amount 4086 :currency USD)
+;;          :items ((money :amount 4086 :currency USD)) :status pending)
 ```
 
 Round-trip:

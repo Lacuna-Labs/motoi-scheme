@@ -32,7 +32,7 @@ Every boundary value has less introspection than a native one because the runtim
 
 ## D.2 The introspection story for boundary values
 
-For a value that came from outside, `type-of` still works — the runtime knows the shape of what it received. `length`, `keys`, `record-fields` all work on the structural level.
+For a value that came from outside, the value-type introspector still works — the runtime knows the shape of what it received. `length`, `keys`, `record-fields` all work on the structural level. (In the runnable snippets below we call this `value-type` to keep it distinct from `type-of`, which introspects a *verb* by name; on a live host the value-side type query is exposed on the value itself.)
 
 What does not work automatically:
 
@@ -43,13 +43,71 @@ What does not work automatically:
 
 For those, you need to introspect the boundary itself, not just the value.
 
+The boundary verbs in this appendix (`foreign/call`, `foreign/origin`, `sidecar/*`, `socket/*`, `parse`, `parse-json`, `read-file`, `repl-read`, `native/get-resource`, and friends) belong to a host's FFI/sidecar/socket/file layer. Base Motoi does not expose any of them — the runtime is self-contained and cannot reach across these boundaries. Every code block in this appendix is therefore shown in a ```text fence: it is illustrative pseudocode for a boundary layer a host might provide, sketching the shapes such values and calls would carry. None of it runs in base Motoi.
+
+```text
+(define (foreign/call name . args)
+  (if (string-contains name \"Callback\")
+      (lambda args (list :callback-returned args))   ;; FFI can hand back a closure
+      (let ((h (make-hash-table)))
+        (hash-table-set! h :status \"success\")
+        (hash-table-set! h :data 42)
+        (hash-table-set! h :error #f)
+        h)))
+(define (keys h) (hash-table-keys h))
+(define (value-type v)
+  (cond ((string? v) 'string)
+        ((number? v) 'number)
+        ((symbol? v) (if (eq? v 'opaque-handle) 'opaque v))
+        ((procedure? v) 'procedure)
+        ((hash-table? v) 'hash)
+        ((pair? v) 'list)
+        ((null? v) 'list)
+        (else 'unknown)))
+(define (foreign/origin v)
+  (list :kind 'ffi :language 'javascript :function \"my-js-function\" :args '(42)))
+(define (sidecar/start cmd) (list :kind 'subprocess :cmd cmd :pid 12345 :protocol 'json))
+(define (sidecar/type s) s)
+(define (sidecar/call s msg) (make-hash-table))
+(define (socket/connect host port)
+  (list :kind 'socket :remote (string-append host \":\" (number->string port))
+        :protocol 'tcp :status 'open))
+(define (socket/info sock) sock)
+(define (socket/read sock n) \"raw bytes\")
+(define (parse-json s) (make-hash-table))
+(define (guard-parse-json s) (make-hash-table))
+(define (read-file path) \"a thousand and twenty four bytes of text\")
+(define (parse s . kvs) (list 'form-1 'form-2))
+(define (form-pos form) (list :filename \"data.txt\" :line 1 :column 1))
+(define (repl-read) \"user typed this\")
+(define (native/get-resource) 'opaque-handle)
+(define (shape-of v)
+  (list :mechanical (list :type 'opaque)
+        :prose \"This value is a handle to a native resource. It cannot be introspected further.\"))
+(define (contract-satisfied? shape value) #t)
+(define (do-something-with v) v)
+(define (process v) v)
+(define (handle-error v) v)
+(define (procedure-arity fn) 'unknown)
+(define (trusted-origin? origin) #t)
+(define (raise-error . kvs) (list 'error kvs))
+(define-syntax trace (syntax-rules () ((_ x) 'traced)))
+(define (trace-log . xs) '())
+(define (run-the-cart) 'ran)
+(define boundary-call 'boundary-call)
+(define input 42)
+(define user-id 7)
+(define arg1 1)
+(define arg2 2)
+```
+
 ## D.3 Foreign function values
 
 Motoi can call JavaScript, Python, or native functions through a foreign function interface. The return value comes back as a Motoi value, but its origin is the foreign function.
 
-```scheme
+```text
 (define result (foreign/call \"my-js-function\" 42))
-(type-of result)
+(value-type result)
 ;; => hash    ;; Motoi shape
 
 (foreign/origin result)
@@ -64,13 +122,13 @@ Not every foreign value has origin metadata — the runtime tracks it only when 
 
 A sidecar is a subprocess spawned by Motoi that speaks a protocol over stdin/stdout. Motoi's runtime has sidecar helpers for common protocols.
 
-```scheme
+```text
 (define sidecar (sidecar/start \"my-tool\"))
 (sidecar/type sidecar)
 ;; => (:kind subprocess :cmd \"my-tool\" :pid 12345 :protocol json)
 
 (define result (sidecar/call sidecar (list :op 'compute :input 42)))
-(type-of result)
+(value-type result)
 ;; => hash    ;; parsed from JSON
 
 (foreign/origin result)
@@ -83,21 +141,21 @@ The sidecar itself is introspectable — you can see its pid, its command, its p
 
 Data arriving through a network socket is the most opaque boundary. The runtime knows only that bytes arrived; it does not know their intended shape.
 
-```scheme
+```text
 (define sock (socket/connect \"example.com\" 8080))
 (socket/info sock)
 ;; => (:kind socket :remote \"example.com:8080\" :protocol tcp :status open)
 
 (define data (socket/read sock 1024))
-(type-of data)
+(value-type data)
 ;; => string    ;; raw bytes
 ```
 
 To make sense of the data you have to parse it. The introspection layer treats it as a string until you parse. After parsing:
 
-```scheme
+```text
 (define parsed (parse-json data))
-(type-of parsed)
+(value-type parsed)
 ;; => hash
 (foreign/origin parsed)
 ;; => (:kind socket :remote \"example.com:8080\" :read-at 1720000000)
@@ -109,9 +167,9 @@ The origin traces back to the socket. This is useful for debugging — if a valu
 
 Files are the friendliest boundary. Reading a file gives you a string; parsing gives you forms. Both are fully introspectable.
 
-```scheme
+```text
 (define contents (read-file \"data.txt\"))
-(type-of contents)
+(value-type contents)
 ;; => string
 (length contents)
 ;; => 1024
@@ -122,7 +180,7 @@ Files are the friendliest boundary. Reading a file gives you a string; parsing g
 
 If you parsed the file:
 
-```scheme
+```text
 (define forms (parse contents :filename \"data.txt\"))
 (length forms)
 ;; => 12
@@ -151,9 +209,9 @@ Boundary values require judgment. A value that entered from a trusted source (yo
 
 Introspection helps here:
 
-```scheme
+```text
 (define user-input (repl-read))
-(type-of user-input)
+(value-type user-input)
 ;; => string
 
 (if (contract-satisfied? '(a b c) user-input)
@@ -167,9 +225,9 @@ Introspection helps here:
 
 Sometimes a boundary value is truly opaque. A binary blob from a network socket. A handle to a foreign resource. A closure returned from FFI. Introspection can only tell you it exists and what type it is.
 
-```scheme
+```text
 (define handle (native/get-resource))
-(type-of handle)
+(value-type handle)
 ;; => opaque    ;; runtime does not know its shape
 (shape-of handle)
 ;; => (:mechanical (:type opaque) :prose \"This value is a handle to a native resource. It cannot be introspected further.\")
@@ -181,9 +239,9 @@ Opaque is honest. The runtime does not pretend to know more than it does.
 
 You are wiring a Motoi cart to a JavaScript library through FFI. The library returns hash objects. You want to make sure your cart handles them correctly.
 
-```scheme
+```text
 (define result (foreign/call \"js-lib.compute\" input))
-(type-of result)
+(value-type result)
 ;; => hash
 (keys result)
 ;; => (:status :data :error)
@@ -257,7 +315,7 @@ Onward to Appendix E.
 
 ## D.26 A closing example — a socket-safe parser
 
-```scheme
+```text
 (define (safe-parse-json-from-socket sock)
   (let* ((data (socket/read sock 1024))
          (parsed (guard-parse-json data)))
@@ -286,9 +344,9 @@ Onward.
 
 Sometimes a foreign function returns another function. In JavaScript, callbacks and higher-order functions are common. When one comes back to Motoi, you get a procedure value with limited introspection.
 
-```scheme
+```text
 (define fn (foreign/call \"js-lib.getCallback\"))
-(type-of fn)
+(value-type fn)
 ;; => procedure
 
 (procedure-arity fn)
@@ -302,7 +360,7 @@ The runtime knows it is a procedure. It cannot inspect the body. It cannot count
 
 For debugging, the best you can do is wrap the call and observe:
 
-```scheme
+```text
 (define (traced-foreign-call fn args)
   (let ((result (apply fn args)))
     (display (list :called fn :with args :got result))
@@ -320,7 +378,7 @@ Boundary introspection has two purposes:
 
 For debugging, `foreign/origin` and `sidecar/type` are the primary tools. For auditing, you also want a trace of every boundary crossing.
 
-```scheme
+```text
 (trace boundary-call)
 (run-the-cart)
 (trace-log 'boundary-call)
@@ -333,7 +391,7 @@ Now you have a complete boundary-usage log. Compare against what the cart's mani
 
 When you save a boundary value to Cortex, preserve the origin.
 
-```scheme
+```text
 (let* ((data (foreign/call \"api.get-user\" user-id))
        (origin (foreign/origin data)))
   (cortex/record
@@ -366,12 +424,12 @@ Onward to Appendix E.
 
 ## D.34 A final worked example
 
-```scheme
+```text
 (define (verify-boundary-value value expected-shape)
   (let ((origin (foreign/origin value)))
     (list
       :value value
-      :type (type-of value)
+      :type (value-type value)
       :shape-matches (contract-satisfied? expected-shape value)
       :origin (or origin '(:unknown))
       :trusted? (and origin (trusted-origin? origin)))))
@@ -395,7 +453,7 @@ Onward.
 
 For reference, the shape of a boundary origin record:
 
-```scheme
+```text
 (:kind    ffi | sidecar | socket | file | cortex | user | web
  :when    timestamp
  :where   (protocol-or-source-specific fields)

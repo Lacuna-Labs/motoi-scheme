@@ -34,6 +34,111 @@ Why this matters: even a single write-recall pair is a *stateful route*. The pro
 ### Program 1: Write and recall a customer preference
 
 ```scheme
+;; Chapter 9 helpers: adapt base Motoi cortex verbs to Sakura-style patterns.
+;;
+;; Internal: extract :data or :text value from a raw cortex memory record.
+(define (_ch9-raw-cortex-data raw)
+  (if (not raw) #f
+      (let loop ((pairs raw))
+        (cond ((null? pairs) #f)
+              ((equal? (car (car pairs)) :data) (cadr (car pairs)))
+              ((equal? (car (car pairs)) :text) (cadr (car pairs)))
+              (else (loop (cdr pairs)))))))
+
+;; Internal: convert a keyword like :email to symbol 'email.
+(define (_ch9-kw->sym k)
+  (let ((s (symbol->string k)))
+    (if (and (> (string-length s) 0) (string=? (substring s 0 1) \":\"))
+        (string->symbol (substring s 1 (string-length s)))
+        k)))
+
+;; Internal: normalize alist so keyword keys become symbol keys.
+(define (_ch9-normalize-alist alist)
+  (if (and (list? alist)
+           (not (null? alist))
+           (list? (car alist))
+           (not (null? (car alist)))
+           (symbol? (caar alist)))
+      (map (lambda (pair) (cons (_ch9-kw->sym (car pair)) (cdr pair)))
+           alist)
+      alist))
+
+;; Wrap cortex/recall so it:
+;;   - returns 'nan when a key is missing (Sakura pattern);
+;;   - transparently unwraps the stored value from the memory record;
+;;   - normalizes keyword keys (:k) to symbol keys ('k) in alist values.
+(define _orig-cortex-recall cortex/recall)
+(define (cortex/recall key)
+  (let ((raw (_orig-cortex-recall key)))
+    (if (not raw)
+        'nan
+        (let ((d (_ch9-raw-cortex-data raw)))
+          (if (not d)
+              'nan
+              (_ch9-normalize-alist d))))))
+
+;; cortex/recall-default k d: return the stored value or default d.
+(define (cortex/recall-default key default)
+  (let ((v (cortex/recall key)))
+    (if (eq? v 'nan) default v)))
+
+;; cortex/scan prefix: return stored keys matching prefix.
+;; Uses a local registry updated by cortex/write.
+(define *cortex-key-registry* '())
+(define _orig-cortex-write cortex/write)
+(define (cortex/write key value . rest)
+  (when (string? key)
+    (set! *cortex-key-registry* (delete-duplicates (cons key *cortex-key-registry*))))
+  (if (null? rest)
+      (_orig-cortex-write key value)
+      (_orig-cortex-write key value (car rest))))
+(define (cortex/scan prefix)
+  (filter (lambda (k)
+             (and (string? k)
+                  (>= (string-length k) (string-length prefix))
+                  (string=? (substring k 0 (string-length prefix)) prefix)))
+           *cortex-key-registry*))
+
+;; Wrap cortex/lookup so it returns 'nan (not #f) when no associations exist.
+(define _orig-cortex-lookup cortex/lookup)
+(define (cortex/lookup key rel)
+  (let ((r (_orig-cortex-lookup key rel)))
+    (if r r 'nan)))
+
+;; Wrap cortex/topk to return ((key . score) ...) pairs like Sakura.
+;; Base Motoi has no real embedding model, so semantic search is not meaningful.
+;; Return an empty list — callers handle '() gracefully via their null-checks.
+(define (cortex/topk embed k) '())
+
+;; Stubs for Sakura-only verbs not present in base Motoi.
+;; system/uuid: returns a unique-ish string ID.
+(define _ch9-uuid-counter 0)
+(define (system/uuid)
+  (set! _ch9-uuid-counter (+ _ch9-uuid-counter 1))
+  (string-append \"uuid-\" (number->string (time/now)) \"-\" (number->string _ch9-uuid-counter)))
+;; time/unix-now: current time in seconds (Motoi time/now returns ms).
+(define (time/unix-now) (quotient (time/now) 1000))
+;; time/iso8601 ts: convert unix-seconds timestamp to \"YYYY-MM\" prefix string.
+(define (time/iso8601 ts)
+  ;; Approximate: just return a plausible ISO prefix so substring 0 7 gives month.
+  \"2024-01-01T00:00:00Z\")
+;; math/round n digits: round n to given decimal places.
+(define (math/round n digits)
+  (let ((factor (expt 10 digits)))
+    (/ (round (* n factor)) factor)))
+;; model/fast prompt: stub inference — returns a plausible tier decision.
+(define (model/fast prompt) \"tier-2: Handled by specialist.\")
+;; model/draft prompt: stub generation — returns a short product description.
+(define (model/draft prompt) \"A high-quality product.\")
+;; crm/read id: stub CRM fetch — returns a dummy customer record.
+(define (crm/read customer-id)
+  (list (cons 'email (string-append customer-id \"@example.com\"))
+        (cons 'updated-at 0)))
+
+;; embedding/text stub: returns a fixed dummy vector.
+;; Base Motoi has no text-embedding model.
+(define (embedding/text s) '(0.1 0.2 0.3))
+
 ;; Write a customer's favorite color to cortex, then recall it.
 ;; Returns the recalled value or an honest failure.
 
@@ -377,6 +482,11 @@ The hardest programs walk through *multiple* cortex records, reconciling each on
                           write-res
                           (loop (cdr ids)
                                 (cons (cons prod-id new-price) results)))))))))))
+
+;; Seed prices so the example call has data to work with:
+(cortex/write \"price:lamp-01\" 35.0)
+(cortex/write \"price:lamp-02\" 60.0)
+(cortex/write \"price:lamp-03\" 25.0)
 
 ;; Example call:
 (batch-reprice '(\"lamp-01\" \"lamp-02\" \"lamp-03\") 10.0)
@@ -1005,10 +1115,13 @@ The masterwork pattern: periodically re-run inferences for stored records, and u
                     (reverse refreshed)
                     (let ((record (cortex/recall (car keys))))
                       (if (or (eq? record 'nan)
-                              (and (pair? record) (eq? (car record) 'escalate)))
+                              (and (pair? record) (eq? (car record) 'escalate))
+                              (not (and (pair? record) (pair? (car record)))))
+                          ;; Skip missing, error, or non-alist records
                           (loop (cdr keys) refreshed)
-                          (let ((last-updated (cdr (assoc 'last-updated record)))
+                          (let ((last-updated-entry (assoc 'last-updated record))
                                 (prod-name (cdr (assoc 'name record))))
+                            (let ((last-updated (if last-updated-entry (cadr last-updated-entry) 0)))
                             (if (< last-updated cutoff)
                                 ;; Stale—regenerate description
                                 (let ((prompt (string-append \"Write a product description for: \" prod-name)))
@@ -1027,7 +1140,7 @@ The masterwork pattern: periodically re-run inferences for stored records, and u
                                                 (loop (cdr keys) refreshed)
                                                 (loop (cdr keys) (cons (car keys) refreshed))))))))
                                 ;; Fresh—skip
-                                (loop (cdr keys) refreshed))))))))))))
+                                (loop (cdr keys) refreshed)))))))))))))
 
 ;; Example call:
 (refresh-stale-descriptions 90)
@@ -1061,10 +1174,13 @@ The ultimate orchestration: read from cortex, fetch external data (e.g., from an
                 (if (and (pair? crm-data) (eq? (car crm-data) 'escalate))
                     crm-data
                     ;; Step 3: extract emails and timestamps
-                    (let ((stored-email (if (eq? stored 'nan) #f (cdr (assoc 'email stored))))
-                          (stored-ts (if (eq? stored 'nan) 0 (cdr (assoc 'email-updated stored))))
-                          (crm-email (cdr (assoc 'email crm-data)))
-                          (crm-ts (cdr (assoc 'updated-at crm-data))))
+                    ;; Use safe-assoc so missing fields default to #f / 0.
+                    (let* ((email-entry   (and (pair? stored) (assoc 'email stored)))
+                           (ts-entry      (and (pair? stored) (assoc 'email-updated stored)))
+                           (stored-email  (and email-entry (cadr email-entry)))
+                           (stored-ts     (if ts-entry (cadr ts-entry) 0))
+                           (crm-email (cadr (assoc 'email crm-data)))
+                           (crm-ts    (cadr (assoc 'updated-at crm-data))))
                       ;; Step 4: reconcile—CRM wins if its timestamp is newer
                       (if (> crm-ts stored-ts)
                           ;; Update cortex
@@ -1107,7 +1223,7 @@ The ultimate orchestration: read from cortex, fetch external data (e.g., from an
                         (let ((write-res (cortex/write cortex-key new-stock)))
                           (if (and (pair? write-res) (eq? (car write-res) 'escalate))
                               write-res
-                              (loop (cdr ids) (cons (cons prod-id new-stock) synced))))))))))))))
+                              (loop (cdr ids) (cons (cons prod-id new-stock) synced)))))))))))))
 
 ;; Stub: fetch-marketplace-stock would call a real API verb
 (define (fetch-marketplace-stock prod-id)

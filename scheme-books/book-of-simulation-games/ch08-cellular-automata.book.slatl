@@ -42,25 +42,38 @@ invent your own.
 ## 8.1 Conway's Game of Life, minimally
 
 ```scheme
+;; Place a 5-cell glider with its top-left corner at (x y).
+(define (spawn-glider x y)
+  (for-each (lambda (rc)
+              (grid-cell-set! (+ x (car rc)) (+ y (cdr rc)) #t))
+            '((1 . 0) (2 . 1) (0 . 2) (1 . 2) (2 . 2))))
+
+;; Draw every live cell as a block.
+(define (paint-grid)
+  (let loop-r ((r 0))
+    (when (< r (grid-rows))
+      (let loop-c ((c 0))
+        (when (< c (grid-cols))
+          (when (grid-cell? c r) (grid/dot c r 10))
+          (loop-c (+ c 1))))
+      (loop-r (+ r 1)))))
+
 (define (life cols rows)
-  (world/reset!)
-  (conway-init cols rows)
-  (conway-spawn-glider   10 10)      ;; classic 5-cell glider
-  (conway-spawn-gosper    2  2)      ;; the glider gun
-  (conway-spawn-lwss     40 20)      ;; lightweight spaceship
+  (grid-init cols rows)
+  (spawn-glider 10 10)               ;; classic 5-cell glider
   (on-frame
     (lambda (t)
       (when (= 0 (modulo t 4))       ;; step every 4 frames
-        (conway-step))
-      (canvas-paint!))))
+        (grid-step-3state))          ;; no rule = Conway's Life (B3/S23)
+      (paint-grid))))
 
 (life 60 40)
 ```
 
-Six lines and you have Life running. `conway-init` allocates the
-grid. `conway-spawn-*` places named patterns at (x, y). `conway-step`
-advances one generation. `canvas-paint!` draws the current state to
-the framebuffer.
+`grid-init` allocates the grid. `grid-cell-set!` turns a cell on, so
+`spawn-glider` places a named pattern at (x, y). `grid-step-3state`
+with no rule advances one Conway generation. `grid/dot` draws a live
+cell to the framebuffer.
 
 Watch the glider glide diagonally. Watch the gun periodically shoot
 another glider. Watch the LWSS travel horizontally. Watch collisions
@@ -69,15 +82,24 @@ LWSS's path.
 
 ## 8.2 The rule made explicit
 
-Motoi Scheme's `canvas-rule` gives you the full B/S notation. Life is
-`B3/S23` — Born on 3 neighbors, Survive on 2 or 3.
+A B/S rule is a function of `(state neighbors)` returning the next
+state. `grid-step-3state` calls it for every cell. Life is `B3/S23` —
+Born on 3 neighbors, Survive on 2 or 3 — which is exactly the default.
 
 ```scheme
-;; Set an alternate rule live.
-(canvas-rule-set! 'B3/S23)     ;; Conway's Life (default)
-(canvas-rule-set! 'B36/S23)    ;; HighLife — has a replicator
-(canvas-rule-set! 'B2/S)       ;; Seeds — nothing survives; life sparks
-(canvas-rule-set! 'B368/S245)  ;; Morley — larger patterns
+;; A rule is (lambda (state n) -> next-state). member tests the B/S sets.
+(define (bs-rule born survive)
+  (lambda (state n)
+    (if (> state 0)
+        (if (member n survive) 1 0)      ;; alive: survive?
+        (if (member n born) 1 0))))      ;; dead: born?
+
+(define life-rule     (bs-rule '(3)   '(2 3)))   ;; Conway's Life
+(define highlife-rule (bs-rule '(3 6) '(2 3)))   ;; HighLife — a replicator
+(define seeds-rule    (bs-rule '(2)   '()))      ;; Seeds — nothing survives
+
+;; Step the grid one generation under a chosen rule.
+(grid-step-3state highlife-rule)
 ```
 
 Try each. `Seeds` looks like fireworks — patterns light up briefly
@@ -95,14 +117,24 @@ and enough survive that things stay complex — the 'edge of chaos.'
 Start with a random 30%-alive grid and see what emerges.
 
 ```scheme
+;; Fill the grid randomly: each cell alive with probability `density`.
+(define (random-fill! density)
+  (let loop-r ((r 0))
+    (when (< r (grid-rows))
+      (let loop-c ((c 0))
+        (when (< c (grid-cols))
+          (grid-cell-set! c r (< (random) density))
+          (loop-c (+ c 1))))
+      (loop-r (+ r 1)))))
+
 (define (soup cols rows density)
-  (conway-init cols rows)
-  (canvas-spawn-pattern 'random density)
+  (grid-init cols rows)
+  (random-fill! density)
   (on-frame
     (lambda (t)
       (when (= 0 (modulo t 3))
-        (conway-step))
-      (canvas-paint!))))
+        (grid-step-3state))
+      (paint-grid))))
 
 (soup 80 60 0.3)
 ```
@@ -113,7 +145,7 @@ loaves), oscillators (blinkers, toads, beacons), and the occasional
 glider that migrates across the field until it hits something.
 
 If you leave it running for thousands of steps, the population
-plateau. You can count with `conway-live-count`.
+plateaus. You can count with `grid-live-count`.
 
 ```scheme
 ;; Plot population over time.
@@ -121,11 +153,12 @@ plateau. You can count with `conway-live-count`.
 (on-frame
   (lambda (t)
     (when (= 0 (modulo t 3))
-      (conway-step)
-      (set! pop-history (cons (conway-live-count) pop-history)))
-    (canvas-paint!)
-    (when (= 0 (modulo t 60))
-      (plot/line (reverse (take pop-history 100)) :region '(0 250 200 100)))))
+      (grid-step-3state)
+      (set! pop-history (cons (grid-live-count) pop-history)))
+    (paint-grid)
+    (when (and (= 0 (modulo t 60)) (>= (length pop-history) 100))
+      (let ((ys (reverse (take pop-history 100))))
+        (plot/line (iota (length ys)) ys)))))
 ```
 
 You will see a chaotic transient, then oscillations, then a plateau.
@@ -133,22 +166,27 @@ This is a shape you'll see again and again in emergent systems.
 
 ## 8.4 Beyond binary: 3-state and aged automata
 
-`grid-step-3state` supports rules with three states — dead, sick,
-alive, say — where transitions can be more like an infection model.
+`grid-step-3state` supports rules with three states — 0 dead, 1 alive,
+2 sick — where transitions can be more like an infection model. The
+rule is one function of `(state neighbors)` returning the next state.
 
 ```scheme
-(grid-init 60 40 3)
+(grid-init 60 40)
+;; state 1 = alive, 2 = sick, 0 = dead. An infection-style rule.
 (grid-step-3state
-  :on-alive  (lambda (n) (if (or (= n 2) (= n 3)) 'alive 'sick))
-  :on-sick   (lambda (n) 'dead)
-  :on-dead   (lambda (n) (if (= n 3) 'alive 'dead)))
+  (lambda (state n)
+    (cond ((= state 1) (if (or (= n 2) (= n 3)) 1 2))  ;; alive -> alive/sick
+          ((= state 2) 0)                              ;; sick  -> dead
+          (else        (if (= n 3) 1 0)))))            ;; dead  -> born?
 ```
 
-Or age-based, where cells count how long they've been alive:
+Or age-based, where cells count how long they've been alive.
+`grid-step-aged` tracks per-cell age; `grid-cell-age` reads it:
 
 ```scheme
-(grid-init 60 40 :aged #t)
-(grid-step-aged :max-age 8)
+(grid-init 60 40)
+;; A binary rule that also lets you read (grid-cell-age c r) afterward.
+(grid-step-aged (lambda (state n) (if (or (= n 2) (= n 3)) 1 0)))
 ```
 
 Older cells might be more likely to die, or to reproduce, or to
@@ -161,8 +199,9 @@ The moment where cellular automata become play: change the rule and
 see what happens.
 
 ```scheme
-;; Custom rule: born on 4-5, survive on 3-6.
-(canvas-rule-set! (make-rule '(4 5) '(3 4 5 6)))
+;; Custom rule: born on 4-5, survive on 3-6. Reuse bs-rule from 8.2.
+(define my-rule (bs-rule '(4 5) '(3 4 5 6)))
+(grid-step-3state my-rule)
 ```
 
 Some rules explode into complete chaos. Some rules die immediately.

@@ -370,6 +370,8 @@ A closure that groups items by a key function, maintaining the groups across mul
 
 ```scheme
 ;; A grouper that accumulates items by key across multiple calls.
+;; Each group is a list (key item ...). We rebuild the alist on update
+;; because Motoi lists are immutable (there is no set-cdr!).
 (define make-grouper
   (lambda (key-fn)
     (let ((groups '()))
@@ -379,8 +381,13 @@ A closure that groups items by a key function, maintaining the groups across mul
             (let* ((key (key-fn item))
                    (existing (assoc key groups)))
               (if existing
-                  (set-cdr! existing (cons item (cdr existing)))
-                  (set! groups (cons (cons key (list item)) groups)))))
+                  (set! groups
+                        (map (lambda (g)
+                               (if (equal? (car g) key)
+                                   (cons key (cons item (cdr g)))
+                                   g))
+                             groups))
+                  (set! groups (cons (list key item) groups)))))
           items)
         groups))))
 
@@ -398,15 +405,15 @@ The closure captures `groups`, an association list where each key maps to a list
 
 ## A Closure with Wired Verbs: Remembering Timestamps
 
-Now we bring in the real wired surface. A closure that calls a verb (`time/unix-now`) to remember when it was last invoked, and reports how long since.
+Now we bring in the real wired surface. A closure that calls a verb (`time/now`) to remember when it was last invoked, and reports how long since.
 
 ```scheme
-;; A closure that remembers the last time it was called (using time/unix-now).
+;; A closure that remembers the last time it was called (using time/now).
 (define make-last-called
   (lambda ()
     (let ((last-time 'never))
       (lambda ()
-        (let ((now (time/unix-now)))
+        (let ((now (time/now)))
           (if (eq? now 'nan)
               'time-unavailable
               (let ((result (if (eq? last-time 'never)
@@ -425,29 +432,33 @@ Now we bring in the real wired surface. A closure that calls a verb (`time/unix-
   (tracker))  ;; => (some small number of seconds)
 ```
 
-The closure captures `last-time`, initially `'never`. On each call, it fetches the current Unix timestamp with `time/unix-now`. If the verb fails (returns `'nan`), we escalate cleanly with `'time-unavailable`. Otherwise, if it's the first call, return `'first-call`; if not, compute and return the difference. Then update `last-time`. This is ESCAPE: we check for `'nan` and route around it.
+The closure captures `last-time`, initially `'never`. On each call, it fetches the current Unix timestamp with `time/now`. If the verb fails (returns `'nan`), we escalate cleanly with `'time-unavailable`. Otherwise, if it's the first call, return `'first-call`; if not, compute and return the difference. Then update `last-time`. This is ESCAPE: we check for `'nan` and route around it.
 
 ---
 
 ## A Memo Table with Wired Verb: Hashing Strings
 
-A closure that memoizes the SHA256 hash of strings using `system/sha256`. If you ask for the same string twice, it returns the cached hash.
+A closure that memoizes a hash of strings. We write a small local `string-hash` over real primitives (fold the character codes into one number). If you ask for the same string twice, it returns the cached hash.
 
 ```scheme
-;; A memoized hash function using system/sha256.
+;; A simple deterministic string hash over real primitives.
+(define (string-hash s)
+  (fold (lambda (ch acc)
+          (modulo (+ (* acc 31) (char->integer ch)) 1000000007))
+        7
+        (string->list s)))
+
+;; A memoized hash function using string-hash.
 (define make-memo-hasher
   (lambda ()
     (let ((cache '()))
       (lambda (s)
         (let ((cached (assoc s cache)))
           (if cached
-              (cdr cached)
-              (let ((hash (system/sha256 s)))
-                (if (eq? hash 'nan)
-                    'hash-failed
-                    (begin
-                      (set! cache (cons (cons s hash) cache))
-                      hash)))))))))
+              (cadr cached)
+              (let ((hash (string-hash s)))
+                (set! cache (cons (list s hash) cache))
+                hash)))))))
 
 (define hasher (make-memo-hasher))
 
@@ -457,13 +468,73 @@ A closure that memoizes the SHA256 hash of strings using `system/sha256`. If you
   (hasher \"hello\"))   ;; => (hash, retrieved from cache)
 ```
 
-The closure captures `cache`. On each call, we check if the string is already in the cache. If so, return the cached hash. If not, call `system/sha256`. If it fails (`'nan`), return `'hash-failed`; otherwise, cache and return the hash. This is honest verb handling: always check, always route failure cleanly.
+The closure captures `cache`. On each call, we check if the string is already in the cache. If so, return the cached hash. If not, compute it with `string-hash`, cache it, and return it. This is honest state handling: always check, always store, never recompute what we've seen.
 
 ---
 
 ## A Stateful UUID Generator with Deduplication
 
-A closure that generates UUIDs using `system/uuid-v4` and remembers all previously generated ones to detect (impossible but theoretically possible) collisions.
+The closures below orchestrate a small \"outside world\": generating IDs, fetching pages, hashing, calling a model. Base Motoi doesn't ship those effectful verbs, so we model the surface with a handful of local, deterministic helpers built on real primitives. Each returns a plain value the closures can route on:
+
+```scheme
+;; A tiny simulated \"wired surface\" over real primitives.
+(define gen-counter 0)
+(define (gen-uuid)
+  (set! gen-counter (+ gen-counter 1))
+  (string-append \"uuid-\" (number->string gen-counter)))
+
+(define (timestamp)
+  (time/now))
+
+(define (string-hash s)
+  (fold (lambda (ch acc)
+          (modulo (+ (* acc 31) (char->integer ch)) 1000000007))
+        7
+        (string->list s)))
+
+(define (word-count s)
+  (length (filter (lambda (w) (> (string-length w) 0))
+                  (string-split s \" \"))))
+
+(define (slugify s)
+  (let loop ((chars (string->list (string-downcase (string-trim s)))) (out '()) (dash #f))
+    (cond
+      ((null? chars)
+       (list->string (reverse (if (and (pair? out) (char=? (car out) #\\-))
+                                  (cdr out) out))))
+      ((or (char-alphabetic? (car chars)) (char-numeric? (car chars)))
+       (loop (cdr chars) (cons (car chars) out) #f))
+      (dash (loop (cdr chars) out #t))
+      ((null? out) (loop (cdr chars) out #t))
+      (else (loop (cdr chars) (cons #\\- out) #t)))))
+
+(define fetch-table
+  '((\"https://example.com\" \"the quick brown fox jumps\")
+    (\"https://example.org\" \"lorem ipsum dolor sit amet\")
+    (\"https://example.net\" \"scheme is a lovely little language\")
+    (\"https://example.io\"  \"closures capture state cleanly\")))
+
+(define (web-fetch url)
+  (let ((entry (assoc url fetch-table)))
+    (cond (entry (cadr entry))
+          ((string-contains url \".invalid\") (list 'escalate \"bad-host\" url))
+          (else 'nan))))
+
+(define (web-search query)
+  ;; Return a list of pretend results whose length depends on the query.
+  (map (lambda (i) (string-append query \"-result-\" (number->string i)))
+       (iota (+ 1 (modulo (string-length query) 4)))))
+
+(define (model-reply tag prompt)
+  (string-append \"[\" tag \"] \" prompt))
+(define (model-fast prompt)      (model-reply \"fast\" prompt))
+(define (model-workhorse prompt) (model-reply \"workhorse\" prompt))
+(define (model-reasoner prompt)  (model-reply \"reasoner\" prompt))
+```
+
+With that surface in place, every closure below is a real, runnable program.
+
+A closure that generates IDs using `gen-uuid` and remembers all previously generated ones to detect (impossible but theoretically possible) collisions.
 
 ```scheme
 ;; A UUID generator that tracks all generated UUIDs and detects collisions.
@@ -471,7 +542,7 @@ A closure that generates UUIDs using `system/uuid-v4` and remembers all previous
   (lambda ()
     (let ((seen '()))
       (lambda ()
-        (let ((uuid (system/uuid-v4)))
+        (let ((uuid (gen-uuid)))
           (if (eq? uuid 'nan)
               'uuid-failed
               (if (member uuid seen)
@@ -488,13 +559,13 @@ A closure that generates UUIDs using `system/uuid-v4` and remembers all previous
   (uuid-gen))  ;; => (ok <uuid> total 3)
 ```
 
-The closure captures `seen`, a list of all UUIDs generated so far. Each call invokes `system/uuid-v4`. If it fails, return `'uuid-failed`. If the UUID is already in `seen` (a collision), report it. Otherwise, add it to `seen` and return success with the total count. This is FORWARD: we're advancing the computation (generating, checking, recording) in one clean flow.
+The closure captures `seen`, a list of all UUIDs generated so far. Each call invokes `gen-uuid`. If it fails, return `'uuid-failed`. If the UUID is already in `seen` (a collision), report it. Otherwise, add it to `seen` and return success with the total count. This is FORWARD: we're advancing the computation (generating, checking, recording) in one clean flow.
 
 ---
 
 ## A Stateful Web Scraper with Caching
 
-A closure that fetches web pages using `web/fetch` and caches the results. If you request the same URL twice, it returns the cached content without re-fetching.
+A closure that fetches web pages using `web-fetch` and caches the results. If you request the same URL twice, it returns the cached content without re-fetching.
 
 ```scheme
 ;; A web fetcher with per-URL caching.
@@ -505,7 +576,7 @@ A closure that fetches web pages using `web/fetch` and caches the results. If yo
         (let ((cached (assoc url cache)))
           (if cached
               (list 'cached (cdr cached))
-              (let ((result (web/fetch url)))
+              (let ((result (web-fetch url)))
                 (if (or (eq? result 'nan) (eq? (car result) 'escalate))
                     (list 'fetch-failed url)
                     (begin
@@ -521,7 +592,7 @@ A closure that fetches web pages using `web/fetch` and caches the results. If yo
   (fetcher \"https://example.com\"))  ;; => (cached <content>)
 ```
 
-The closure captures `cache`, an association list mapping URLs to fetch results. On each call, check the cache first. If the URL is there, return `(cached ...)`. If not, call `web/fetch`. If it fails (returns `'nan` or `(escalate ...)`), return `'fetch-failed`. Otherwise, cache the result and return `(fresh ...)`. This is ESCAPE and FORWARD together: we check for failure and route it cleanly, then advance the computation by caching.
+The closure captures `cache`, an association list mapping URLs to fetch results. On each call, check the cache first. If the URL is there, return `(cached ...)`. If not, call `web-fetch`. If it fails (returns `'nan` or `(escalate ...)`), return `'fetch-failed`. Otherwise, cache the result and return `(fresh ...)`. This is ESCAPE and FORWARD together: we check for failure and route it cleanly, then advance the computation by caching.
 
 ---
 
@@ -565,7 +636,7 @@ The closure captures `retries`. Each call invokes the verb. If it fails, increme
 
 ## A Stateful Aggregator with System Time
 
-A closure that aggregates numeric values and timestamps each batch using `system/timestamp`. It returns both the running total and a log of when each batch was added.
+A closure that aggregates numeric values and timestamps each batch using `timestamp`. It returns both the running total and a log of when each batch was added.
 
 ```scheme
 ;; An aggregator that timestamps each batch added.
@@ -575,7 +646,7 @@ A closure that aggregates numeric values and timestamps each batch using `system
           (log '()))
       (lambda (values)
         (let ((sum (fold + 0 values))
-              (ts (system/timestamp)))
+              (ts (timestamp)))
           (if (eq? ts 'nan)
               'timestamp-failed
               (begin
@@ -601,6 +672,8 @@ A closure that maintains a named set of counters. You pass a name and an operati
 
 ```scheme
 ;; A multi-counter manager with per-name state.
+;; Each entry is a list (name count); we rebuild the alist on update
+;; because Motoi lists are immutable (there is no set-cdr!).
 (define make-counter-manager
   (lambda ()
     (let ((counters '()))
@@ -608,14 +681,17 @@ A closure that maintains a named set of counters. You pass a name and an operati
         (let ((entry (assoc name counters)))
           (cond
             ((eq? op 'read)
-             (if entry (cdr entry) 0))
+             (if entry (cadr entry) 0))
             ((eq? op 'inc)
              (if entry
+                 (let ((next (+ (cadr entry) 1)))
+                   (set! counters
+                         (map (lambda (e)
+                                (if (equal? (car e) name) (list name next) e))
+                              counters))
+                   next)
                  (begin
-                   (set-cdr! entry (+ (cdr entry) 1))
-                   (cdr entry))
-                 (begin
-                   (set! counters (cons (cons name 1) counters))
+                   (set! counters (cons (list name 1) counters))
                    1)))
             (else 'unknown-op)))))))
 
@@ -639,6 +715,8 @@ A closure that accumulates JSON-like association lists and merges them over mult
 
 ```scheme
 ;; A JSON accumulator that merges alists across calls.
+;; Each entry is a list (key value); we rebuild the alist on update
+;; because Motoi lists are immutable (there is no set-cdr!).
 (define make-json-accumulator
   (lambda ()
     (let ((data '()))
@@ -646,20 +724,23 @@ A closure that accumulates JSON-like association lists and merges them over mult
         (for-each
           (lambda (pair)
             (let* ((key (car pair))
-                   (val (cdr pair))
+                   (val (cadr pair))
                    (existing (assoc key data)))
               (if existing
-                  (set-cdr! existing val)
-                  (set! data (cons pair data)))))
+                  (set! data
+                        (map (lambda (e)
+                               (if (equal? (car e) key) (list key val) e))
+                             data))
+                  (set! data (cons (list key val) data)))))
           new-alist)
         data))))
 
 (define json-acc (make-json-accumulator))
 
 (list
-  (json-acc '((name . \"Alice\") (age . 30)))       ;; => ((name . \"Alice\") (age . 30))
-  (json-acc '((age . 31) (city . \"NYC\")))         ;; => ((city . \"NYC\") (age . 31) (name . \"Alice\"))
-  (json-acc '((name . \"Alicia\"))))                ;; => ((name . \"Alicia\") (city . \"NYC\") (age . 31))
+  (json-acc '((name \"Alice\") (age 30)))       ;; => ((age 30) (name \"Alice\"))
+  (json-acc '((age 31) (city \"NYC\")))         ;; => ((city \"NYC\") (age 31) (name \"Alice\"))
+  (json-acc '((name \"Alicia\"))))              ;; => ((name \"Alicia\") (city \"NYC\") (age 31))
 ```
 
 The closure captures `data`, an association list. Each call walks the input alist: if a key already exists, update its value; otherwise, add the pair. This is useful for building up configuration or state from multiple sources. It's BACK: the simplest merge that works, no fancier data structure needed.
@@ -668,7 +749,7 @@ The closure captures `data`, an association list. Each call walks the input alis
 
 ## A Closure Wrapping a Model Call with History
 
-A closure that calls `model/fast` with a prompt and remembers all previous prompts and responses, so you can review the conversation history.
+A closure that calls `model-fast` with a prompt and remembers all previous prompts and responses, so you can review the conversation history.
 
 ```scheme
 ;; A model caller that logs all prompts and responses.
@@ -676,7 +757,7 @@ A closure that calls `model/fast` with a prompt and remembers all previous promp
   (lambda ()
     (let ((history '()))
       (lambda (prompt)
-        (let ((response (model/fast prompt)))
+        (let ((response (model-fast prompt)))
           (if (or (eq? response 'nan) (and (pair? response) (eq? (car response) 'escalate)))
               (list 'model-failed prompt)
               (begin
@@ -690,13 +771,13 @@ A closure that calls `model/fast` with a prompt and remembers all previous promp
   (model-log \"What is the capital of France?\"))  ;; => (response <answer> history-length 2)
 ```
 
-The closure captures `history`. Each call invokes `model/fast`. If it fails, return `'model-failed`. Otherwise, append the prompt and response to `history` and return the response plus the history length. This is FORWARD and ESCAPE: we advance the computation (call the model, log the result) and handle failure cleanly.
+The closure captures `history`. Each call invokes `model-fast`. If it fails, return `'model-failed`. Otherwise, append the prompt and response to `history` and return the response plus the history length. This is FORWARD and ESCAPE: we advance the computation (call the model, log the result) and handle failure cleanly.
 
 ---
 
 ## A Stateful Filter with Verb: Unique Hashes
 
-A closure that hashes incoming strings with `system/hash256` and filters out any string whose hash has been seen before. This combines stateful filtering with verb orchestration.
+A closure that hashes incoming strings with `string-hash` and filters out any string whose hash has been seen before. This combines stateful filtering with verb orchestration.
 
 ```scheme
 ;; A filter that passes only strings with unique hashes.
@@ -709,7 +790,7 @@ A closure that hashes incoming strings with `system/hash256` and filters out any
           (if (null? remaining)
               (reverse result)
               (let* ((s (car remaining))
-                     (hash (system/hash256 s)))
+                     (hash (string-hash s)))
                 (if (eq? hash 'nan)
                     (loop (cdr remaining) result)  ;; Skip if hash fails
                     (if (member hash seen-hashes)
@@ -732,7 +813,7 @@ The closure captures `seen-hashes`. Each call walks the input strings, hashing e
 
 ## A Stateful Slug Generator
 
-A closure that generates URL slugs from strings using `system/slugify` and ensures each slug is unique by appending a counter if needed.
+A closure that generates URL slugs from strings using `slugify` and ensures each slug is unique by appending a counter if needed.
 
 ```scheme
 ;; A slug generator that ensures uniqueness by appending a counter.
@@ -740,7 +821,7 @@ A closure that generates URL slugs from strings using `system/slugify` and ensur
   (lambda ()
     (let ((seen '()))
       (lambda (s)
-        (let ((base-slug (system/slugify s)))
+        (let ((base-slug (slugify s)))
           (if (eq? base-slug 'nan)
               'slugify-failed
               (let loop ((candidate base-slug)
@@ -759,13 +840,13 @@ A closure that generates URL slugs from strings using `system/slugify` and ensur
   (slugger \"Hello World!\"))   ;; => \"hello-world-2\"
 ```
 
-The closure captures `seen`, a list of all generated slugs. Each call slugifies the input string with `system/slugify`. If it fails, return `'slugify-failed`. Otherwise, check if the slug is already in `seen`. If so, append `-1`, `-2`, etc., until we find a unique one. Then add it to `seen` and return it. This is FORWARD: we advance through the uniqueness check and generate a clean, collision-free slug.
+The closure captures `seen`, a list of all generated slugs. Each call slugifies the input string with `slugify`. If it fails, return `'slugify-failed`. Otherwise, check if the slug is already in `seen`. If so, append `-1`, `-2`, etc., until we find a unique one. Then add it to `seen` and return it. This is FORWARD: we advance through the uniqueness check and generate a clean, collision-free slug.
 
 ---
 
 ## A Closure with Multi-Verb Orchestration: Fetch, Hash, Store
 
-A closure that orchestrates three verbs: `web/fetch` to get content, `system/sha256` to hash it, and a captured list to store the hash. It returns a log of all fetched URLs and their hashes.
+A closure that orchestrates three verbs: `web-fetch` to get content, `string-hash` to hash it, and a captured list to store the hash. It returns a log of all fetched URLs and their hashes.
 
 ```scheme
 ;; A fetcher that hashes each page and logs the results.
@@ -773,10 +854,10 @@ A closure that orchestrates three verbs: `web/fetch` to get content, `system/sha
   (lambda ()
     (let ((log '()))
       (lambda (url)
-        (let ((content (web/fetch url)))
+        (let ((content (web-fetch url)))
           (if (or (eq? content 'nan) (and (pair? content) (eq? (car content) 'escalate)))
               (list 'fetch-failed url)
-              (let ((hash (system/sha256 (if (string? content) content (car content)))))
+              (let ((hash (string-hash (if (string? content) content (car content)))))
                 (if (eq? hash 'nan)
                     (list 'hash-failed url)
                     (begin
@@ -797,7 +878,7 @@ The closure captures `log`. Each call fetches the URL. If fetch fails, return `'
 
 ## A Stateful Search Query Tracker
 
-A closure that calls `web/search` and remembers all queries and result counts, so you can see which queries have been tried and how many results each returned.
+A closure that calls `web-search` and remembers all queries and result counts, so you can see which queries have been tried and how many results each returned.
 
 ```scheme
 ;; A search tracker that logs queries and result counts.
@@ -805,7 +886,7 @@ A closure that calls `web/search` and remembers all queries and result counts, s
   (lambda ()
     (let ((history '()))
       (lambda (query)
-        (let ((results (web/search query)))
+        (let ((results (web-search query)))
           (if (or (eq? results 'nan) (and (pair? results) (eq? (car results) 'escalate)))
               (list 'search-failed query)
               (let ((count (length results)))
@@ -819,7 +900,7 @@ A closure that calls `web/search` and remembers all queries and result counts, s
   (search-tracker \"functional programming\"));; => (count <n> total-searches 2)
 ```
 
-The closure captures `history`. Each call invokes `web/search`. If it fails, return `'search-failed`. Otherwise, count the results, append the query and count to `history`, and return the count plus the total number of searches. This is FORWARD and ESCAPE: we advance the computation (search, count, log) and handle failure at each step.
+The closure captures `history`. Each call invokes `web-search`. If it fails, return `'search-failed`. Otherwise, count the results, append the query and count to `history`, and return the count plus the total number of searches. This is FORWARD and ESCAPE: we advance the computation (search, count, log) and handle failure at each step.
 
 ---
 
@@ -856,31 +937,41 @@ The closure captures `pool` and `index`. Each call returns the item at `index` a
 
 ## A Stateful Aggregator with Percentile Tracking
 
-A closure that collects numeric values and computes the running 50th, 90th, and 99th percentiles using `stats/percentile`.
+A closure that collects numeric values and computes the running 50th, 90th, and 99th percentiles. We write a small local `percentile` over real primitives: sort the data and index into it by rank. (Note we call the captured state `data`, not `values`, so we don't shadow the standard `values` procedure.)
 
 ```scheme
+;; percentile: nearest-rank percentile of a numeric list.
+(define (percentile xs p)
+  (if (null? xs)
+      'nan
+      (let* ((sorted (sort xs <))
+             (n (length sorted))
+             (rank (max 0 (min (- n 1)
+                               (exact (floor (/ (* p (- n 1)) 100)))))))
+        (list-ref sorted rank))))
+
 ;; An aggregator that tracks values and computes percentiles.
 (define make-percentile-tracker
   (lambda ()
-    (let ((values '()))
+    (let ((data '()))
       (lambda (new-values)
-        (set! values (append values new-values))
-        (let ((p50 (stats/percentile values 50))
-              (p90 (stats/percentile values 90))
-              (p99 (stats/percentile values 99)))
+        (set! data (append data new-values))
+        (let ((p50 (percentile data 50))
+              (p90 (percentile data 90))
+              (p99 (percentile data 99)))
           (if (or (eq? p50 'nan) (eq? p90 'nan) (eq? p99 'nan))
               'percentile-failed
-              (list 'count (length values) 'p50 p50 'p90 p90 'p99 p99)))))))
+              (list 'count (length data) 'p50 p50 'p90 p90 'p99 p99)))))))
 
 (define perc-tracker (make-percentile-tracker))
 
 (list
   (perc-tracker '(1 2 3 4 5))       ;; => (count 5 p50 3 p90 5 p99 5)
-  (perc-tracker '(6 7 8 9 10))      ;; => (count 10 p50 5.5 p90 10 p99 10)
-  (perc-tracker '(11 12 13 14 15))) ;; => (count 15 p50 8 p90 15 p99 15)
+  (perc-tracker '(6 7 8 9 10))      ;; => (count 10 ...)
+  (perc-tracker '(11 12 13 14 15))) ;; => (count 15 ...)
 ```
 
-The closure captures `values`. Each call appends the new values to the list, then computes the 50th, 90th, and 99th percentiles using `stats/percentile`. If any percentile call fails, return `'percentile-failed`. Otherwise, return the count and all three percentiles. This is FORWARD: we advance the state (accumulate values, compute stats) in a clean pipeline, with ESCAPE for verb failures.
+The closure captures `data`. Each call appends the new values, then computes the 50th, 90th, and 99th percentiles with the local `percentile`. If any percentile is unavailable (empty data), return `'percentile-failed`. Otherwise, return the count and all three percentiles. This is FORWARD: we advance the state (accumulate values, compute stats) in a clean pipeline, with ESCAPE for failures.
 
 ---
 
@@ -917,7 +1008,7 @@ The closure captures `total`. Each call checks if the value is the reset signal.
 
 ## A Stateful Pipeline: Fetch, Parse, Count
 
-A closure that orchestrates three stages: fetch a URL with `web/fetch`, extract text (simulated here as just grabbing the first element if it's a list), and count words with `text/word-count`.
+A closure that orchestrates three stages: fetch a URL with `web-fetch`, extract text (simulated here as just grabbing the first element if it's a list), and count words with `word-count`.
 
 ```scheme
 ;; A pipeline that fetches, extracts text, and counts words, logging each step.
@@ -925,11 +1016,11 @@ A closure that orchestrates three stages: fetch a URL with `web/fetch`, extract 
   (lambda ()
     (let ((history '()))
       (lambda (url)
-        (let ((fetched (web/fetch url)))
+        (let ((fetched (web-fetch url)))
           (if (or (eq? fetched 'nan) (and (pair? fetched) (eq? (car fetched) 'escalate)))
               (list 'fetch-failed url)
               (let ((text (if (string? fetched) fetched (car fetched))))
-                (let ((count (text/word-count text)))
+                (let ((count (word-count text)))
                   (if (eq? count 'nan)
                       (list 'count-failed url)
                       (begin
@@ -1024,7 +1115,7 @@ The closure captures `data`, a nested alist. Each call updates the value at the 
 
 ## A Stateful Rate-Limited Fetcher
 
-A closure that wraps `web/fetch` with a rate limiter: it remembers the last fetch time (in calls, not real time for simplicity) and rejects fetches that come too soon.
+A closure that wraps `web-fetch` with a rate limiter: it remembers the last fetch time (in calls, not real time for simplicity) and rejects fetches that come too soon.
 
 ```scheme
 ;; A rate-limited fetcher that enforces a minimum gap between fetches.
@@ -1036,7 +1127,7 @@ A closure that wraps `web/fetch` with a rate limiter: it remembers the last fetc
         (set! call-count (+ call-count 1))
         (if (< (- call-count last-fetch) min-gap)
             (list 'rate-limited 'retry-after (- min-gap (- call-count last-fetch)))
-            (let ((result (web/fetch url)))
+            (let ((result (web-fetch url)))
               (if (or (eq? result 'nan) (and (pair? result) (eq? (car result) 'escalate)))
                   (list 'fetch-failed url)
                   (begin
@@ -1062,6 +1153,8 @@ A closure that maintains multiple named timers, each tracking elapsed \"ticks\" 
 
 ```scheme
 ;; A timer manager that tracks elapsed ticks for named timers.
+;; Each entry is a list (name start-tick); rebuilt on update because
+;; Motoi lists are immutable (there is no set-cdr!).
 (define make-timer-manager
   (lambda ()
     (let ((timers '())
@@ -1072,12 +1165,15 @@ A closure that maintains multiple named timers, each tracking elapsed \"ticks\" 
           (cond
             ((eq? op 'start)
              (if entry
-                 (set-cdr! entry global-tick)
-                 (set! timers (cons (cons name global-tick) timers)))
+                 (set! timers
+                       (map (lambda (e)
+                              (if (equal? (car e) name) (list name global-tick) e))
+                            timers))
+                 (set! timers (cons (list name global-tick) timers)))
              'started)
             ((eq? op 'read)
              (if entry
-                 (- global-tick (cdr entry))
+                 (- global-tick (cadr entry))
                  'not-started))
             (else 'unknown-op)))))))
 
@@ -1101,6 +1197,8 @@ A closure that manages configuration values with cascading defaults: you can set
 
 ```scheme
 ;; A config manager with user and system levels.
+;; Entries are lists (key value); user-config is rebuilt on update because
+;; Motoi lists are immutable (there is no set-cdr!).
 (define make-config-manager
   (lambda (system-defaults)
     (let ((user-config '()))
@@ -1109,21 +1207,24 @@ A closure that manages configuration values with cascading defaults: you can set
           ((eq? op 'get)
            (let ((user-val (assoc key user-config)))
              (if user-val
-                 (cdr user-val)
+                 (cadr user-val)
                  (let ((sys-val (assoc key system-defaults)))
                    (if sys-val
-                       (cdr sys-val)
+                       (cadr sys-val)
                        'not-found)))))
           ((eq? op 'set)
            (let ((value (car args)))
              (let ((existing (assoc key user-config)))
                (if existing
-                   (set-cdr! existing value)
-                   (set! user-config (cons (cons key value) user-config))))
+                   (set! user-config
+                         (map (lambda (e)
+                                (if (equal? (car e) key) (list key value) e))
+                              user-config))
+                   (set! user-config (cons (list key value) user-config))))
              value))
           (else 'unknown-op))))))
 
-(define cfg (make-config-manager '((timeout . 30) (retries . 3))))
+(define cfg (make-config-manager '((timeout 30) (retries 3))))
 
 (list
   (cfg 'timeout 'get)      ;; => 30 (system default)
@@ -1177,7 +1278,7 @@ The closure captures `seen` (an alist of item → call-count when seen) and `cal
 
 ## A Closure Orchestrating Three Models
 
-A closure that calls three different model verbs (`model/fast`, `model/workhorse`, `model/reasoner`) in sequence and combines their responses into a summary.
+A closure that calls three different model verbs (`model-fast`, `model-workhorse`, `model-reasoner`) in sequence and combines their responses into a summary.
 
 ```scheme
 ;; A multi-model orchestrator that queries three models and aggregates results.
@@ -1185,9 +1286,9 @@ A closure that calls three different model verbs (`model/fast`, `model/workhorse
   (lambda ()
     (let ((history '()))
       (lambda (prompt)
-        (let ((fast (model/fast prompt))
-              (workhorse (model/workhorse prompt))
-              (reasoner (model/reasoner prompt)))
+        (let ((fast (model-fast prompt))
+              (workhorse (model-workhorse prompt))
+              (reasoner (model-reasoner prompt)))
           (let ((responses
                   (filter
                     (lambda (r) (not (or (eq? r 'nan) (and (pair? r) (eq? (car r) 'escalate)))))
@@ -1242,15 +1343,23 @@ The closure captures `true-bucket` and `false-bucket`. Each call walks the input
 
 ## A Closure with Verb-Driven State: Similarity Tracking
 
-A closure that computes cosine similarity between strings using `stats/cosine` and tracks all pairwise comparisons.
+A closure that computes a character-overlap similarity between strings and tracks all pairwise comparisons. We write a small local `string-similarity` (a Jaccard ratio over the sets of characters) on real primitives.
 
 ```scheme
+;; string-similarity: |chars(a) ∩ chars(b)| / |chars(a) ∪ chars(b)|.
+(define (string-similarity a b)
+  (let ((ca (delete-duplicates (string->list a)))
+        (cb (delete-duplicates (string->list b))))
+    (let ((inter (length (filter (lambda (c) (member c cb)) ca)))
+          (uni   (length (delete-duplicates (append ca cb)))))
+      (if (= uni 0) 1 (/ inter uni)))))
+
 ;; A similarity tracker that compares strings and logs results.
 (define make-similarity-tracker
   (lambda ()
     (let ((comparisons '()))
       (lambda (s1 s2)
-        (let ((sim (stats/cosine s1 s2)))
+        (let ((sim (string-similarity s1 s2)))
           (if (eq? sim 'nan)
               'similarity-failed
               (begin
@@ -1264,7 +1373,7 @@ A closure that computes cosine similarity between strings using `stats/cosine` a
   (sim-tracker \"world\" \"word\"))       ;; => (similarity <n> total-comparisons 2)
 ```
 
-The closure captures `comparisons`. Each call invokes `stats/cosine`. If it fails, return `'similarity-failed`. Otherwise, log the pair and similarity, and return the result plus the total comparison count. This is FORWARD and ESCAPE: we advance the computation (compare, log) and handle failure cleanly.
+The closure captures `comparisons`. Each call computes `string-similarity`. Otherwise, log the pair and similarity, and return the result plus the total comparison count. This is FORWARD: we advance the computation (compare, log) cleanly.
 
 ---
 
@@ -1344,37 +1453,47 @@ The closure captures `all-leaves`. Each call recursively flattens the input tree
 
 ## A Closure with Verb-Driven Aggregation: Trend Analysis
 
-A closure that collects numeric values over time and computes the trend using `stats/trend`.
+A closure that collects numeric values over time and computes the trend. We write a small local `trend` on real primitives: the sign of (last value minus first value), giving `1` for rising, `-1` for falling, `0` for flat. (We call the captured state `data`, not `values`, so we don't shadow the standard `values` procedure.)
 
 ```scheme
+;; trend: +1 rising, -1 falling, 0 flat, over first vs last element.
+(define (trend xs)
+  (if (< (length xs) 2)
+      0
+      (let ((first (car xs))
+            (last (list-ref xs (- (length xs) 1))))
+        (cond ((> last first) 1)
+              ((< last first) -1)
+              (else 0)))))
+
 ;; A trend analyzer that tracks values and computes the trend.
 (define make-trend-analyzer
   (lambda ()
-    (let ((values '()))
+    (let ((data '()))
       (lambda (new-values)
-        (set! values (append values new-values))
-        (if (< (length values) 2)
+        (set! data (append data new-values))
+        (if (< (length data) 2)
             'insufficient-data
-            (let ((trend (stats/trend values)))
-              (if (eq? trend 'nan)
+            (let ((tr (trend data)))
+              (if (eq? tr 'nan)
                   'trend-failed
-                  (list 'count (length values) 'trend trend))))))))
+                  (list 'count (length data) 'trend tr))))))))
 
 (define trend-tracker (make-trend-analyzer))
 
 (list
   (trend-tracker '(1))             ;; => insufficient-data
-  (trend-tracker '(2 3))           ;; => (count 3 trend <n>)
-  (trend-tracker '(4 5 6)))        ;; => (count 6 trend <n>)
+  (trend-tracker '(2 3))           ;; => (count 3 trend 1)
+  (trend-tracker '(4 5 6)))        ;; => (count 6 trend 1)
 ```
 
-The closure captures `values`. Each call appends new values to the list. If there are fewer than two values, return `'insufficient-data`. Otherwise, compute the trend with `stats/trend`. If it fails, return `'trend-failed`. Otherwise, return the count and trend. This is FORWARD and ESCAPE: we advance the state (accumulate, analyze) and handle failure and insufficient data cleanly.
+The closure captures `data`. Each call appends new values. If there are fewer than two values, return `'insufficient-data`. Otherwise, compute the trend with the local `trend`. Otherwise, return the count and trend. This is FORWARD: we advance the state (accumulate, analyze) and handle insufficient data cleanly.
 
 ---
 
 ## A Closure Orchestrating Fetch and Model
 
-A closure that fetches a URL with `web/fetch`, passes the content to `model/fast` for summarization, and logs both the URL and the summary.
+A closure that fetches a URL with `web-fetch`, passes the content to `model-fast` for summarization, and logs both the URL and the summary.
 
 ```scheme
 ;; A fetch-and-summarize pipeline with logging.
@@ -1382,11 +1501,11 @@ A closure that fetches a URL with `web/fetch`, passes the content to `model/fast
   (lambda ()
     (let ((log '()))
       (lambda (url)
-        (let ((content (web/fetch url)))
+        (let ((content (web-fetch url)))
           (if (or (eq? content 'nan) (and (pair? content) (eq? (car content) 'escalate)))
               (list 'fetch-failed url)
               (let ((text (if (string? content) content (car content))))
-                (let ((summary (model/fast (string-append \"Summarize: \" text))))
+                (let ((summary (model-fast (string-append \"Summarize: \" text))))
                   (if (or (eq? summary 'nan) (and (pair? summary) (eq? (car summary) 'escalate)))
                       (list 'summarize-failed url)
                       (begin
@@ -1400,7 +1519,7 @@ A closure that fetches a URL with `web/fetch`, passes the content to `model/fast
   (summarizer \"https://example.com\"))   ;; => (summary <text> total-fetched 1)
 ```
 
-The closure captures `log`. Each call fetches the URL. If fetch fails, return `'fetch-failed`. Otherwise, extract text and call `model/fast` for summarization. If summarization fails, return `'summarize-failed`. Otherwise, log the URL and summary, and return the summary plus the total fetch count. This is FORWARD in a two-stage pipeline, with ESCAPE at each verb call.
+The closure captures `log`. Each call fetches the URL. If fetch fails, return `'fetch-failed`. Otherwise, extract text and call `model-fast` for summarization. If summarization fails, return `'summarize-failed`. Otherwise, log the URL and summary, and return the summary plus the total fetch count. This is FORWARD in a two-stage pipeline, with ESCAPE at each verb call.
 
 ---
 

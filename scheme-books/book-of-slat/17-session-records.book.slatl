@@ -198,46 +198,68 @@ The session mailbox is a `.slatl` file, per chapter 13. Here's what a Canal Stre
 
 ## Reading the session back
 
-Auditing is a small function:
+Auditing is a small function. On disk the records are ordinary s-expressions, so once a stream is loaded into a list we filter it with plain list operations. Here we work over an in-memory list of records (`rec-head` reads the leading tag, `rec-key` reads a keyword field).
 
 ```scheme
-(define (session-audit path session-id)
-  (with-slat-stream path
-    (lambda (stream)
-      (filter
-        (lambda (record)
-          (case (car record)
-            ((session-begin session-end)
-               (equal? (slat-key record 'id) session-id))
-            ((session-action)
-               (equal? (slat-key record 'session) session-id))
-            (else #f)))
-        stream))))
+(define (rec-head record) (car record))
+(define (rec-key record key)
+  (let loop ((xs (cdr record)))
+    (cond ((null? xs) #f)
+          ((eq? (car xs) key) (cadr xs))
+          (else (loop (cddr xs))))))
 
-(display
-  (session-audit \"/var/lacuna/mailboxes/canal-street.slatl\"
-                 \"sess-2026-07-12-canal-upload-40\")) (newline)
+(define (session-audit stream session-id)
+  (filter
+    (lambda (record)
+      (case (rec-head record)
+        ((session-begin session-end)
+           (equal? (rec-key record :id) session-id))
+        ((session-action)
+           (equal? (rec-key record :session) session-id))
+        (else #f)))
+    stream))
+
+(define example-stream
+  (list '(session-begin :id \"sess-1\" :auto-approve #t)
+        '(session-action :session \"sess-1\" :seq 1 :outcome success)
+        '(session-end :id \"sess-1\" :outcome success)))
+
+(display (session-audit example-stream \"sess-1\")) (newline)
 ```
 
-Returns the full ordered trace of the session — begin, every action, end.
+Returns the full ordered trace of the session — begin, every action, end. In a real deployment a `with-slat-stream`-style reader would supply that list by streaming the mailbox file; the filtering logic is identical.
 
 ## Reading the grant back at decision time
 
 The runtime asks: is there a live grant for this session, and does this action fall inside it?
 
 ```scheme
-(define (has-live-grant? session-id classes)
-  (let ([begin-record (find-session-begin session-id)])
-    (and begin-record
-         (slat-key begin-record 'auto-approve)
-         (all-in?
-           classes
-           (slat-key begin-record 'approved-classes))
-         (not (session-ended? session-id)))))
+(define (find-session-begin stream session-id)
+  (let loop ((xs stream))
+    (cond ((null? xs) #f)
+          ((and (eq? (rec-head (car xs)) 'session-begin)
+                (equal? (rec-key (car xs) :id) session-id)) (car xs))
+          (else (loop (cdr xs))))))
+(define (all-in? xs ys)
+  (or (null? xs) (and (memq (car xs) ys) (all-in? (cdr xs) ys))))
+(define (session-ended? stream session-id)
+  (let loop ((xs stream))
+    (cond ((null? xs) #f)
+          ((and (eq? (rec-head (car xs)) 'session-end)
+                (equal? (rec-key (car xs) :id) session-id)) #t)
+          (else (loop (cdr xs))))))
 
-(display (has-live-grant?
-           \"sess-2026-07-12-canal-upload-40\"
-           '(listing-edit))) (newline)
+(define (has-live-grant? stream session-id classes)
+  (let ((begin-record (find-session-begin stream session-id)))
+    (and begin-record
+         (rec-key begin-record :auto-approve)
+         (all-in? classes (rec-key begin-record :approved-classes))
+         (not (session-ended? stream session-id)))))
+
+(define grant-stream
+  (list '(session-begin :id \"sess-1\" :auto-approve #t
+           :approved-classes (listing-edit category-assign))))
+(display (has-live-grant? grant-stream \"sess-1\" '(listing-edit))) (newline)
 ```
 
 Output:
@@ -265,38 +287,33 @@ Session records are ordinary slats. They inherit:
 
 ## Try this
 
-Write and read back a small session by hand.
+Build a small session by hand, then read it back. On disk a `slat-append`-style writer would push each record onto the mailbox file; here we build the same list of records in memory and audit it.
 
 ```scheme
-(define path \"/tmp/practice-session.slatl\")
+(define practice-session
+  (list
+    '(session-begin
+       :id \"sess-practice-1\"
+       :goal test-lane
+       :auto-approve #t
+       :approved-classes (edit)
+       :granted-verbatim \"go ahead\")
+    '(session-action
+       :session \"sess-practice-1\"
+       :seq 1
+       :action edit
+       :item \"thing-1\"
+       :class edit
+       :auto-approved #t
+       :outcome success)
+    '(session-end
+       :id \"sess-practice-1\"
+       :actions 1
+       :auto-approved 1
+       :outcome success
+       :ended-by natural-completion)))
 
-(slat-append path
-  '(session-begin
-     :id \"sess-practice-1\"
-     :goal test-lane
-     :auto-approve #t
-     :approved-classes (edit)
-     :granted-verbatim \"go ahead\"))
-
-(slat-append path
-  '(session-action
-     :session \"sess-practice-1\"
-     :seq 1
-     :action edit
-     :item \"thing-1\"
-     :class edit
-     :auto-approved #t
-     :outcome success))
-
-(slat-append path
-  '(session-end
-     :id \"sess-practice-1\"
-     :actions 1
-     :auto-approved 1
-     :outcome success
-     :ended-by natural-completion))
-
-(display (session-audit path \"sess-practice-1\")) (newline)
+(display (session-audit practice-session \"sess-practice-1\")) (newline)
 ```
 
 You should see the three records come back in order.

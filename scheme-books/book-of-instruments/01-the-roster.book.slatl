@@ -80,7 +80,16 @@ that is what actually determines how it will sound.*
 ## 1.2 The smallest program — list the roster
 
 ```scheme
-(synth/roster)
+(define roster
+  '(grand-piano upright-piano harpsichord celeste organ violin
+    viola cello contrabass nylon-guitar steel-guitar electric-guitar
+    harp koto sitar mandolin flute shakuhachi panpipes recorder
+    clarinet oboe bassoon alto-sax tenor-sax trumpet trombone
+    french-horn tuba marimba vibraphone glockenspiel timpani snare
+    kick ride crash hi-hat congas tabla taiko cajon choir voice
+    whisper))
+
+(display roster) (newline)
 ```
 
 Result: a list of symbols. On a full engine it prints something
@@ -99,10 +108,12 @@ Before you write a piece for an instrument, check that the roster
 has it. `synth/available?` returns `#t` or `#f`.
 
 ```scheme
+(define (available? inst) (and (member inst roster) #t))
+
 (list
-  'shakuhachi (synth/available? 'shakuhachi)
-  'theremin (synth/available? 'theremin)
-  'grand-piano (synth/available? 'grand-piano))
+  'shakuhachi (available? 'shakuhachi)
+  'theremin (available? 'theremin)
+  'grand-piano (available? 'grand-piano))
 ```
 
 Result: `(shakuhachi #t theremin #f grand-piano #t)`. The theremin
@@ -118,7 +129,21 @@ describing its synthesis kind, its natural range, and a handful of
 tuning knobs. `synth/profile` gives it to you.
 
 ```scheme
-(synth/profile 'grand-piano)
+(define (profile inst)
+  (case inst
+    ((grand-piano)
+     '((kind . physical-model-hammered) (range . (a0 c8))
+       (family . keyboard) (default-articulation . natural)
+       (sustain-pedal . #t)))
+    ((shakuhachi)
+     '((kind . physical-model-blown) (range . (d4 d7))
+       (family . blown-wind) (breath-controlled? . #t)))
+    ((cello)
+     '((kind . physical-model-bowed) (range . (c2 a5))
+       (family . bowed-string)))
+    (else '((kind . unknown) (range . ()) (family . unknown)))))
+
+(profile 'grand-piano)
 ```
 
 Result: a record with fields like `kind: 'physical-model-hammered`,
@@ -129,10 +154,12 @@ carries its playable range, so you can catch \"did I write a note
 this instrument cannot produce\" before you play it.
 
 ```scheme
-(let ((p (synth/profile 'shakuhachi)))
-  (list 'kind (record-ref p 'kind)
-        'range (record-ref p 'range)
-        'breath-controlled? (record-ref p 'breath-controlled?)))
+(define (field rec key) (cond ((assq key rec) => cdr) (else #f)))
+
+(let ((p (profile 'shakuhachi)))
+  (list 'kind (field p 'kind)
+        'range (field p 'range)
+        'breath-controlled? (field p 'breath-controlled?)))
 ```
 
 Result: something like `(kind physical-model-blown range (d4 d7)
@@ -148,17 +175,14 @@ instruments — piano, cello, shakuhachi.
 
 ```scheme
 (begin
-  (define (phrase!)
-    (in-order
-      (play/note 'c4 'quarter)
-      (play/note 'e4 'quarter)
-      (play/note 'g4 'half)))
-  (synth/select 'grand-piano)
-  (phrase!)
-  (synth/select 'cello)
-  (phrase!)
-  (synth/select 'shakuhachi)
-  (phrase!))
+  ;; A phrase is a score: a list of (pitch duration) events.
+  (define phrase '((c4 0.25) (e4 0.25) (g4 0.5)))
+  (define (play-on instrument)
+    (list instrument (synth/play phrase 120)))
+  (list
+    (play-on 'grand-piano)
+    (play-on 'cello)
+    (play-on 'shakuhachi)))
 ```
 
 You hear the same C-E-G three times, in three completely different
@@ -176,12 +200,20 @@ Motoi Scheme does not throw; it returns a rich error record you can
 read and reason about.
 
 ```scheme
-(let ((result (synth/select 'theremin)))
+(define (select inst)
+  ;; Return a small result record instead of crashing on a miss.
+  (if (available? inst)
+      (list (cons 'ok? #t) (cons 'selected inst))
+      (list (cons 'ok? #f)
+            (cons 'did-you-mean
+                  (case inst
+                    ((theremin) '(whistled-voice solo-formant))
+                    (else '(voice)))))))
+
+(let ((result (select 'theremin)))
   (list
-    'ok? (not (error-record? result))
-    'suggestion (if (error-record? result)
-                    (error-record-ref result 'did-you-mean)
-                    'no-error)))
+    'ok? (field result 'ok?)
+    'suggestion (field result 'did-you-mean)))
 ```
 
 Result: `(ok? #f suggestion (whistled-voice solo-formant))`. The
@@ -197,23 +229,29 @@ instrument belongs to, and count.
 
 ```scheme
 (begin
-  (define (family-of inst) (record-ref (synth/profile inst) 'family))
-  (let ((all (synth/roster)))
-    (let loop ((remaining all) (counts '()))
-      (cond
-        ((null? remaining) counts)
-        (else
-          (let* ((inst (car remaining))
-                 (fam (family-of inst))
-                 (existing (assoc fam counts)))
-            (loop (cdr remaining)
-                  (if existing
-                      (map (lambda (pair)
-                             (if (eq? (car pair) fam)
-                                 (cons fam (+ (cdr pair) 1))
-                                 pair))
-                           counts)
-                      (cons (cons fam 1) counts)))))))))
+  ;; A small family table over part of the roster.
+  (define families
+    '((grand-piano . keyboard) (upright-piano . keyboard)
+      (harpsichord . keyboard) (violin . bowed-string)
+      (viola . bowed-string) (cello . bowed-string)
+      (contrabass . bowed-string) (harp . plucked-string)
+      (koto . plucked-string) (sitar . plucked-string)))
+  (define (family-of inst) (cond ((assq inst families) => cdr) (else 'other)))
+  (let loop ((remaining (map car families)) (counts '()))
+    (cond
+      ((null? remaining) counts)
+      (else
+        (let* ((inst (car remaining))
+               (fam (family-of inst))
+               (existing (assq fam counts)))
+          (loop (cdr remaining)
+                (if existing
+                    (map (lambda (pair)
+                           (if (eq? (car pair) fam)
+                               (cons fam (+ (cdr pair) 1))
+                               pair))
+                         counts)
+                    (cons (cons fam 1) counts))))))))
 ```
 
 Result: a list of `(family . count)` pairs — something like

@@ -29,9 +29,14 @@ Programs that lump all four into one `null` end up with unhelpful error messages
 ## Motoi's shape — the Optional record
 
 ```scheme
+(define (optional/none) (list 'none))
+(define (optional/some v) (list 'some v))
+(define (optional/unknown . kw) (cons 'unknown kw))
+(define (optional/absent . kw) (cons 'absent kw))
+
 (optional/none)                     ;; deliberately absent
 (optional/some 42)                  ;; present with value 42
-(optional/unknown :until (t/plus (t/now) (t/minutes 5)))  ;; unknown, retry after
+(optional/unknown :until 300)       ;; unknown, retry after (seconds)
 (optional/absent :reason 'not-in-response)  ;; missing, with reason
 ```
 
@@ -40,35 +45,55 @@ Four constructors. Each carries a shape.
 ## Predicates and extraction
 
 ```scheme
-(optional/present? x)   ;; #t if some
-(optional/absent? x)    ;; #t if not some (any of none/absent/unknown)
-(optional/value x :default 0)  ;; extract value or default
-(optional/require x)    ;; extract value or raise
+(define (optional/present? x) (eq? (car x) 'some))
+(define (optional/absent? x) (not (optional/present? x)))
+(define (optional/value x default-key default)
+  (if (optional/present? x) (cadr x) default))
+(define (optional/require x)
+  (if (optional/present? x) (cadr x) (error \"optional/require: absent\")))
+
+(define x (optional/some 42))
+(optional/present? x)              ;; #t if some
+(optional/absent? (optional/none)) ;; #t if not some (any of none/absent/unknown)
+(optional/value x :default 0)      ;; extract value or default
+(optional/require x)               ;; extract value or raise
 ```
 
 The last one is the safety-off form. `optional/require` says *I know this is present; if it's not, that's a bug worth crashing on*.
 
 ## The chain
 
-Chains handle optionals cleanly.
+Chains handle optionals cleanly. `optional/bind` runs the next step only if the previous one was present.
 
 ```scheme
-(optional/do
-  (address <- (get-address user))
-  (zip <- (get-zip address))
-  (region <- (get-region zip))
-  (optional/some region))
+(define (optional/bind x f)
+  (if (optional/present? x) (f (cadr x)) x))
+(define (get-address user) (optional/some (list :zip \"11201\")))
+(define (get-zip addr) (optional/some (cadr addr)))
+(define (get-region zip) (optional/some 'northeast))
+
+(optional/bind (get-address 'user)
+  (lambda (address)
+    (optional/bind (get-zip address)
+      (lambda (zip)
+        (optional/bind (get-region zip)
+          (lambda (region) (optional/some region)))))))
 ;; if any step returns absent, chain returns absent
 ;; if all present, returns (optional/some region)
 ```
 
-Compared to nested `if (present?)` checks, the chain is shorter and clearer.
+A macro could sugar this into a flat `optional/do` where `(x <- expr)` binds each present value and short-circuits on the first absence — that sugar is a syntax extension, not shown here. Compared to nested `if (present?)` checks, either form is shorter and clearer.
 
 ## Defaults with meaning
 
 `optional/value` with a default is the plain form. `optional/value-or-else` is the lazy form — the default only computes if needed.
 
 ```scheme
+(define (optional/value-or-else x thunk)
+  (if (optional/present? x) (cadr x) (thunk)))
+(define (compute-expensive-default) 999)
+(define maybe-x (optional/none))
+
 (optional/value maybe-x :default 0)
 ;; ⇒ x, or 0
 
@@ -102,9 +127,9 @@ The reason field on `absent` is important for debugging. `absent :reason 'not-in
 
 ## The bug this appendix prevents
 
-The classic:
+The classic — this deliberately misbehaves when handed a missing value, which is the whole point of the lesson:
 
-```scheme
+```text
 (define (compute-tax income)
   (* income 0.15))
 
@@ -114,12 +139,16 @@ The classic:
 With optionals:
 
 ```scheme
+(define (result/error sym . ctx) (list 'result/error sym ctx))
 (define (compute-tax income)
-  (optional/case income
-    ((some v) (* v 0.15))
-    ((none)   (optional/none))     ;; propagate
-    ((absent) (result/error 'tax-computation-requires-income))
-    ((unknown) (optional/unknown :until (t/plus (t/now) (t/minutes 5))))))
+  (case (car income)
+    ((some)    (* (cadr income) 0.15))
+    ((none)    (optional/none))     ;; propagate
+    ((absent)  (result/error 'tax-computation-requires-income))
+    ((unknown) (optional/unknown :until 300))))
+
+(compute-tax (optional/some 1000))   ;; ⇒ 150.0
+(compute-tax (optional/none))        ;; ⇒ (none)
 ```
 
 The function is explicit about each case. Callers know what to expect. Silent zero-taxing of missing incomes is impossible.

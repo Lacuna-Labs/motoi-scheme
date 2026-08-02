@@ -126,32 +126,27 @@ collinear points, which usually gives better-looking motion.
 
 ## 6.4 Visualize the search
 
-Watching A* explore is one of the delightful things about it.
-`ai/path-debug` returns the search-order too, so you can paint each
-explored cell in fading color.
+Watching A* explore is one of the delightful things about it. We can
+paint the returned path onto the framebuffer, one bright pixel per cell
+(scaled up by the cell size), so the route pops out of the maze.
 
 ```scheme
-(let ((debug (ai/path-debug maze '(2 . 2) '(21 . 13))))
-  (let ((order (assoc 'explored debug))
-        (path  (assoc 'path     debug)))
-    (on-frame
-      (lambda (t)
-        ;; Paint each explored cell, colored by order.
-        (for-each
-          (lambda (cell-and-time)
-            (let ((c    (car  cell-and-time))
-                  (when (cadr cell-and-time)))
-              (paint-cell (car c) (cdr c) (color-fade when))))
-          (cdr order))
-        ;; Overlay the path in bright.
-        (for-each
-          (lambda (c) (paint-cell (car c) (cdr c) yellow))
-          (cdr path))))))
+;; Paint each path cell as a yellow pixel (cell size 8, colour index 10).
+(define (draw-path path cell-size)
+  (for-each
+    (lambda (c)
+      (fb/pixel (* (car c) cell-size) (* (cdr c) cell-size) 10))
+    path))
+
+(on-frame
+  (lambda (t)
+    (draw-path (ai/path maze '(2 . 2) '(21 . 13)) 8)))
 ```
 
-You see A* radiating out from the start, biased toward the goal (that
-is the heuristic doing its work), then a bright path drawn on top when
-it reaches. Kids love this. It demystifies AI.
+You see the path drawn cell by cell across the maze. Overlaying the
+cells A* examined (its frontier radiating out from the start, biased
+toward the goal by the heuristic) is the natural next step once the
+engine exposes the search order. Kids love this. It demystifies AI.
 
 ## 6.5 Dynamic maze — re-plan under change
 
@@ -159,11 +154,17 @@ Drop a wall in front of the agent mid-run. The agent has to notice
 and re-plan.
 
 ```scheme
+;; The agent's current grid cell: pixel position / cell size.
+(define (agent-cell a cell-size)
+  (let ((p (entity/pos a)))
+    (cons (quotient (car p) cell-size)
+          (quotient (cadr p) cell-size))))
+
 (define (drop-wall-and-replan)
   (ai/wall! maze 15 12)                 ;; block a cell on the path
-  (let* ((from (entity/cell runner))
+  (let* ((from (agent-cell runner 8))
          (new  (ai/path maze from '(21 . 13))))
-    (if new
+    (if (pair? new)
         (ai/follow-path runner (ai/waypoints new))
         (display \"stuck\"))))
 ```
@@ -181,39 +182,35 @@ puts them in a guard's sight for the next 30 frames?
 
 ```scheme
 (define guard-1 (spawn-agent 96 96))
-(define guard-1-path (ai/waypoints
-  (ai/path maze '(3 . 3) '(3 . 12))))
-(ai/follow-path-loop guard-1 guard-1-path)
+;; A guard's patrol loop, as an explicit list of (col . row) cells.
+(define guard-1-path '((3 . 3) (3 . 6) (3 . 9) (3 . 12)))
+(ai/follow-path guard-1 guard-1-path)
 
-;; Predict where each guard will be in the next 30 frames.
-(define (guard-forecast guard n)
-  (let loop ((i 0) (positions '()))
-    (if (>= i n)
-        (reverse positions)
-        (loop (+ i 1)
-              (cons (ai/predict-position guard i)
-                    positions)))))
+;; Predict where the guard will be over the next n waypoints: just read
+;; ahead along its planned path (a guard following a fixed patrol is
+;; predictable — that's what makes stealth solvable).
+(define (guard-forecast patrol n)
+  (let loop ((ps patrol) (i 0) (acc '()))
+    (if (or (null? ps) (>= i n))
+        (reverse acc)
+        (loop (cdr ps) (+ i 1) (cons (car ps) acc)))))
 
-;; A cell is 'unsafe' if any guard sees it within the next 30 frames.
-(define (unsafe? cell)
-  (let ((forecasts
-          (map (lambda (g) (guard-forecast g 30))
-               (world/find-all 'runner))))
-    (any (lambda (fs)
-           (any (lambda (p) (< (geom/distance cell p) 3)) fs))
-         forecasts)))
+;; Distance between two grid cells stored as (col . row) pairs.
+(define (cell-distance a b)
+  (math/hypot (- (car a) (car b)) (- (cdr a) (cdr b))))
 
-;; A pathfind that treats unsafe cells as walls.
-(define (safe-path from to)
-  (let ((snapshot (ai/grid-copy maze)))
-    (for-each
-      (lambda (cell) (ai/wall! snapshot (car cell) (cdr cell)))
-      (unsafe-cells snapshot 30))
-    (ai/path snapshot from to)))
+;; A cell is 'unsafe' if the guard's forecast passes within 3 cells of it.
+(define (unsafe? cell patrol n)
+  (any (lambda (p) (< (cell-distance cell p) 3))
+       (guard-forecast patrol n)))
+
+(unsafe? '(3 . 5) guard-1-path 30)
 ```
 
 This is game design as pathfinding-plus-prediction. Each guard's
 future path is a spacetime tube; the player's plan avoids the tubes.
+To route around danger, mark the forecast cells as walls on a fresh
+maze and re-run `ai/path` — the returned route dodges the guards.
 
 ---
 

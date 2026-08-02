@@ -125,14 +125,88 @@ We compute the mean first, then map over the list to get squared differences, su
 
 ## Percentiles and Boundary Detection
 
-`stats/percentile` takes a list and a percentile (0-100) and returns the value at that boundary. This is essential for understanding distributions: p50 is the median, p95 tells you the high-water mark for most of your data, p99 catches the outliers.
+`percentile` takes a list and a percentile (0-100) and returns the value at that boundary. This is essential for understanding distributions: p50 is the median, p95 tells you the high-water mark for most of your data, p99 catches the outliers. We define it as a local helper using the nearest-rank method: sort ascending, compute the index, return that element.
+
+```scheme
+;; Local helpers used throughout this chapter.
+
+;; percentile: nearest-rank method — sort ascending, index by (round (* p/100 * (n-1))).
+(define (percentile xs p)
+  (let* ((sorted (sort xs <))
+         (n (length sorted))
+         (idx (inexact->exact (round (* (/ p 100) (- n 1))))))
+    (list-ref sorted idx)))
+
+;; pearson-correlation: Pearson r for two equal-length lists.
+(define (pearson-correlation xs ys)
+  (let* ((n (length xs))
+         (mx (/ (apply + xs) n))
+         (my (/ (apply + ys) n))
+         (num (apply + (map (lambda (x y) (* (- x mx) (- y my))) xs ys)))
+         (dx  (sqrt (apply + (map (lambda (x) (expt (- x mx) 2)) xs))))
+         (dy  (sqrt (apply + (map (lambda (y) (expt (- y my) 2)) ys)))))
+    (if (or (= dx 0) (= dy 0))
+        'nan
+        (/ num (* dx dy)))))
+
+;; haversine: great-circle distance in km between two lat/lng points.
+(define (haversine lat1 lng1 lat2 lng2)
+  (let* ((r 6371)
+         (to-rad (lambda (d) (* d (/ (* 4 (atan 1)) 180))))
+         (dlat (to-rad (- lat2 lat1)))
+         (dlng (to-rad (- lng2 lng1)))
+         (a (+ (expt (sin (/ dlat 2)) 2)
+               (* (cos (to-rad lat1))
+                  (cos (to-rad lat2))
+                  (expt (sin (/ dlng 2)) 2))))
+         (c (* 2 (atan (sqrt a) (sqrt (- 1 a))))))
+    (* r c)))
+
+;; velocity: mean rate of change (mean of consecutive differences).
+(define (velocity series)
+  (if (< (length series) 2)
+      'nan
+      (let ((diffs (let loop ((rem (cdr series)) (prev (car series)) (acc '()))
+                     (if (null? rem)
+                         (reverse acc)
+                         (loop (cdr rem) (car rem) (cons (- (car rem) prev) acc))))))
+        (/ (apply + diffs) (length diffs)))))
+
+;; linear-trend: fit y = a + b*x by least squares, return (list slope intercept).
+(define (linear-trend series)
+  (let* ((n (length series))
+         (xs (iota n 0))
+         (mx (/ (apply + xs) n))
+         (my (/ (apply + series) n))
+         (num (apply + (map (lambda (x y) (* (- x mx) (- y my))) xs series)))
+         (den (apply + (map (lambda (x) (expt (- x mx) 2)) xs)))
+         (slope (if (= den 0) 0 (/ num den)))
+         (intercept (- my (* slope mx))))
+    (list slope intercept)))
+
+;; autocorr: autocorrelation of series at given lag.
+(define (autocorr series lag)
+  (let* ((n (length series))
+         (mean (/ (apply + series) n))
+         (centered (map (lambda (x) (- x mean)) series))
+         (variance (/ (apply + (map (lambda (x) (* x x)) centered)) n)))
+    (if (= variance 0)
+        'nan
+        (let* ((pairs-n (- n lag))
+               (num (/ (apply + (map (lambda (i)
+                                       (* (list-ref centered i)
+                                          (list-ref centered (+ i lag))))
+                                     (iota pairs-n 0)))
+                       pairs-n)))
+          (/ num variance)))))
+```
 
 ```scheme
 ;; Find the median (p50) of a list of response times.
 (define (median-response times)
   (if (null? times)
       'nan
-      (stats/percentile times 50)))
+      (percentile times 50)))
 
 (median-response '(12 15 18 22 29 35 47))
 ;; => 22
@@ -149,9 +223,9 @@ Guard, call, done. Now a program that computes *three* percentiles—p25, p50, p
 (define (quartiles values)
   (if (null? values)
       (list 'nan 'nan 'nan)
-      (list (stats/percentile values 25)
-            (stats/percentile values 50)
-            (stats/percentile values 75))))
+      (list (percentile values 25)
+            (percentile values 50)
+            (percentile values 75))))
 
 (quartiles '(5 7 9 11 13 15 17 19 21))
 ;; => (9 13 17)
@@ -225,7 +299,7 @@ Two accumulators now: `sum` and `count`. At each step, increment both, compute t
 
 ## Honest Correlation: Two Lists, One Coefficient
 
-`math/correlation` takes two equal-length lists and returns their Pearson correlation coefficient. The honest failure modes: lists of different lengths, lists too short (need at least 2 points), or lists with zero variance (correlation is undefined).
+Our `pearson-correlation` helper computes the Pearson r coefficient for two equal-length lists. The honest failure modes: lists of different lengths, lists too short (need at least 2 points), or lists with zero variance (correlation is undefined).
 
 Here's a program that wraps the verb with full guards:
 
@@ -239,7 +313,7 @@ Here's a program that wraps the verb with full guards:
    ((< (length xs) 2)
     'nan)  ;; need at least 2 points
    (else
-    (math/correlation xs ys))))
+    (pearson-correlation xs ys))))
 
 (safe-correlation '(1 2 3 4 5) '(2 4 6 8 10))
 ;; => 1.0
@@ -275,7 +349,7 @@ We map `safe-correlation` over the list of y-lists. Each result is independent. 
 
 ## Multi-Pass Stats: Velocity, Trend, and Z-Score
 
-Now we orchestrate several `stats/` verbs into a single route. `stats/velocity` computes rate of change over a time series. `stats/trend` fits a linear trend. `stats/zscore` computes how many standard deviations a value is from the mean.
+Now we orchestrate several helper functions into a single route. Our `velocity` helper computes mean rate of change over a time series. Our `linear-trend` helper fits a linear trend. Z-score we compute inline from mean and stddev.
 
 Here's a program that takes a time series, computes velocity and trend, and returns both:
 
@@ -285,8 +359,8 @@ Here's a program that takes a time series, computes velocity and trend, and retu
 (define (velocity-and-trend series)
   (if (< (length series) 2)
       (list 'nan 'nan)
-      (let ((vel (stats/velocity series))
-            (trend-data (stats/trend series)))
+      (let ((vel (velocity series))
+            (trend-data (linear-trend series)))
         (list vel trend-data))))
 
 (velocity-and-trend '(10 12 15 19 24))
@@ -296,7 +370,7 @@ Here's a program that takes a time series, computes velocity and trend, and retu
 ;; => (nan nan)
 ```
 
-`stats/velocity` returns a numeric rate. `stats/trend` returns structured data (likely a list or object with slope/intercept). We guard for minimum length and return both. This is FORWARD: the output of one stage doesn't feed the next, but both are computed from the same input and returned together.
+Our `velocity` helper returns the mean rate of change as a number. Our `linear-trend` helper returns `(list slope intercept)`. We guard for minimum length and return both. This is FORWARD: the output of one stage doesn't feed the next, but both are computed from the same input and returned together.
 
 Now a program that computes the z-score of the *last* element in a series (how unusual is the most recent value?):
 
@@ -341,8 +415,8 @@ Here's a program that computes p5 and p95 for a baseline series, then checks if 
 (define (outlier-check baseline value)
   (if (< (length baseline) 10)
       'insufficient-data
-      (let ((p5 (stats/percentile baseline 5))
-            (p95 (stats/percentile baseline 95)))
+      (let ((p5 (percentile baseline 5))
+            (p95 (percentile baseline 95)))
         (cond
          ((> value p95) 'high)
          ((< value p5) 'low)
@@ -367,8 +441,8 @@ Now a program that processes a *stream* of new values and classifies each one:
 (define (classify-stream baseline stream)
   (if (< (length baseline) 10)
       (map (lambda (x) 'insufficient-data) stream)
-      (let ((p5 (stats/percentile baseline 5))
-            (p95 (stats/percentile baseline 95)))
+      (let ((p5 (percentile baseline 5))
+            (p95 (percentile baseline 95)))
         (map (lambda (value)
                (cond
                 ((> value p95) 'high)
@@ -542,9 +616,9 @@ Now we compose several verbs into a single route that takes a list of numbers an
     (let* ((count (length series))
            (total (apply + series))
            (mean (/ total count))
-           (p50 (stats/percentile series 50))
-           (p95 (stats/percentile series 95))
-           (vel (stats/velocity series)))
+           (p50 (percentile series 50))
+           (p95 (percentile series 95))
+           (vel (velocity series)))
       (list (cons 'count count)
             (cons 'mean mean)
             (cons 'p50 p50)
@@ -718,7 +792,7 @@ Three accumulators: `up`, `down`, `flat`. Each delta increments one of them. The
 
 ## Haversine Distance and Geo Math
 
-`math/haversine` computes the great-circle distance between two lat/lng points (in kilometers). This is essential for geo-based analytics—how far apart are two locations?
+Our `haversine` helper computes the great-circle distance between two lat/lng points (in kilometers). This is essential for geo-based analytics—how far apart are two locations?
 
 ```scheme
 ;; Compute distance between two locations (lat/lng pairs).
@@ -727,7 +801,7 @@ Three accumulators: `up`, `down`, `flat`. Each delta increments one of them. The
         (lng1 (cadr loc1))
         (lat2 (car loc2))
         (lng2 (cadr loc2)))
-    (math/haversine lat1 lng1 lat2 lng2)))
+    (haversine lat1 lng1 lat2 lng2)))
 
 (distance '(40.7128 -74.0060) '(34.0522 -118.2437))
 ;; => ~3936 km (New York to Los Angeles)
@@ -834,14 +908,14 @@ The accumulator is a pair `(min . max)`. Each element updates both. This is effi
 
 ## Autocorrelation and Lag Analysis
 
-`stats/autocorr` computes the autocorrelation of a series at a given lag—how correlated is the series with a shifted version of itself. This is useful for detecting periodicity or memory in time series.
+Our `autocorr` helper computes the autocorrelation of a series at a given lag—how correlated is the series with a shifted version of itself. This is useful for detecting periodicity or memory in time series.
 
 ```scheme
 ;; Compute autocorrelation at lag 1 (is each value correlated with the previous one?).
 (define (autocorr-lag1 series)
   (if (< (length series) 3)
       'nan
-      (stats/autocorr series 1)))
+      (autocorr series 1)))
 
 (autocorr-lag1 '(10 12 14 16 18 20))
 ;; => ~1.0 (strong positive autocorr—values increase steadily)
@@ -860,7 +934,7 @@ Guard for minimum length (autocorr needs at least lag+2 points). Now a program t
 (define (autocorr-lags series max-lag)
   (if (< (length series) (+ max-lag 2))
       (map (lambda (lag) 'nan) (iota max-lag 1))
-      (map (lambda (lag) (stats/autocorr series lag))
+      (map (lambda (lag) (autocorr series lag))
            (iota max-lag 1))))
 
 (autocorr-lags '(10 12 14 16 18 20 22 24) 3)
@@ -1021,11 +1095,11 @@ A common request: \"Show me the 25th, 50th, 75th, 90th, and 95th percentiles.\" 
 (define (distribution-summary series)
   (if (< (length series) 5)
       (list 'escalate \"insufficient-data\" \"need at least 5 points\")
-      (list (cons 'p25 (stats/percentile series 25))
-            (cons 'p50 (stats/percentile series 50))
-            (cons 'p75 (stats/percentile series 75))
-            (cons 'p90 (stats/percentile series 90))
-            (cons 'p95 (stats/percentile series 95)))))
+      (list (cons 'p25 (percentile series 25))
+            (cons 'p50 (percentile series 50))
+            (cons 'p75 (percentile series 75))
+            (cons 'p90 (percentile series 90))
+            (cons 'p95 (percentile series 95)))))
 
 (distribution-summary '(5 7 9 12 15 18 22 28 35 50))
 ;; => ((p25 . 9) (p50 . 16.5) (p75 . 28) (p90 . 42.5) (p95 . 47.5))
@@ -1034,7 +1108,7 @@ A common request: \"Show me the 25th, 50th, 75th, 90th, and 95th percentiles.\" 
 ;; => (escalate \"insufficient-data\" \"need at least 5 points\")
 ```
 
-Five calls to `stats/percentile`, returned as an alist. The guard ensures minimum data. This is a *multi-call route*—same verb, different arguments, assembled into a structure.
+Five calls to `percentile`, returned as an alist. The guard ensures minimum data. This is a *multi-call route*—same verb, different arguments, assembled into a structure.
 
 ---
 
@@ -1155,7 +1229,7 @@ Now a program that computes the 90th percentile of values *above* a threshold:
   (let ((above (filter (lambda (x) (> x threshold)) lst)))
     (if (< (length above) 3)
         'nan
-        (stats/percentile above 90))))
+        (percentile above 90))))
 
 (p90-above '(5 10 15 20 25 30 35 40 45 50) 20)
 ;; => ~47.5  (p90 of 25,30,35,40,45,50)
@@ -1177,9 +1251,9 @@ MAD is a robust measure of variability: compute the median, then compute the med
 (define (mad series)
   (if (< (length series) 2)
       'nan
-      (let* ((median (stats/percentile series 50))
+      (let* ((median (percentile series 50))
              (deviations (map (lambda (x) (abs (- x median))) series))
-             (mad-value (stats/percentile deviations 50)))
+             (mad-value (percentile deviations 50)))
         mad-value)))
 
 (mad '(1 2 3 4 5 100))
@@ -1246,8 +1320,8 @@ Bring it all together: a program that takes a series and returns a \"dashboard\"
            (sorted (sort series <))
            (min-val (car sorted))
            (max-val (car (reverse sorted)))
-           (p50 (stats/percentile series 50))
-           (p95 (stats/percentile series 95))
+           (p50 (percentile series 50))
+           (p95 (percentile series 95))
            (zscores (if (= stddev 0)
                         (map (lambda (x) 0.0) series)
                         (map (lambda (x) (/ (- x mean) stddev)) series)))

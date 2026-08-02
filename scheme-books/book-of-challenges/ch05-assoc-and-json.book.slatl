@@ -19,7 +19,68 @@ Data rarely arrives naked. It comes in bundles—labeled, nested, shaped. An ass
 
 The satisfaction here is *precision*. You're not guessing at an index or hoping a field exists—you're naming what you want, checking what you got, and routing around absence with grace. Mastery means you can take a ragged pile of records, filter by one field, reshape by another, and surface exactly the slice that matters, all in one pass, all without a single假设.
 
-We'll start with the basics—reading a single field from an association list—then climb to multi-stage reshaping: filtering a list of records, transforming each survivor, and aggregating the result. By the end, you'll orchestrate `json/get`, `json/set`, `json/delete`, and `map`/`filter`/`fold` into pipelines that feel like one thought, even when they're ten verbs deep.
+We'll start with the basics—reading a single field from an association list—then climb to multi-stage reshaping: filtering a list of records, transforming each survivor, and aggregating the result. By the end, you'll orchestrate `obj-get`, `obj-set`, `obj-delete`, and `map`/`filter`/`fold` into pipelines that feel like one thought, even when they're ten helpers deep.
+
+---
+
+## A Small JSON-Object Toolbox
+
+Base Motoi doesn't ship a JSON object type—but an association list *is* a JSON object, and everything we need is a few lines of real Scheme over `assoc`. We'll build the toolbox once and use it for the rest of the chapter. Records are written as alists of `(key . value)` pairs; our helpers read the value out of a pair whether it's written in dotted form or as a plain two-element list.
+
+```scheme
+;; obj-value: pull the value out of an alist entry, dotted or plain.
+(define (obj-value entry)
+  (cond ((not (pair? entry)) 'nan)
+        ((= (length entry) 3) (caddr entry))   ; (key . value)
+        ((= (length entry) 2) (cadr entry))    ; (key value)
+        (else 'nan)))
+
+;; obj-get1: read one key (symbol or string) from an alist; 'nan if absent.
+(define (obj-get1 obj key)
+  (let ((k (if (string? key) (string->symbol key) key)))
+    (if (and (list? obj) (assq k obj))
+        (obj-value (assq k obj))
+        'nan)))
+
+;; obj-get: read a dotted path like \"billing.city\" through nested objects.
+(define (obj-get obj path)
+  (let loop ((cur obj)
+             (segs (if (string? path)
+                       (map string->symbol (string-split path \".\"))
+                       (list path))))
+    (cond ((eq? cur 'nan) 'nan)
+          ((null? segs) cur)
+          (else (loop (obj-get1 cur (car segs)) (cdr segs))))))
+
+;; obj-set: return a NEW alist with key set to value (plain 2-element entry).
+(define (obj-set obj key value)
+  (let ((k (if (string? key) (string->symbol key) key)))
+    (if (assq k obj)
+        (map (lambda (e) (if (eq? (car e) k) (list k value) e)) obj)
+        (append obj (list (list k value))))))
+
+;; obj-delete: return a NEW alist without key.
+(define (obj-delete obj key)
+  (let ((k (if (string? key) (string->symbol key) key)))
+    (filter (lambda (e) (not (eq? (car e) k))) obj)))
+
+;; obj-encode: render an alist to a compact JSON-ish string.
+(define (obj-encode obj)
+  (string-append
+   \"{\"
+   (string-join
+    (map (lambda (e)
+           (string-append \"\\\"\" (symbol->string (car e)) \"\\\": \"
+                          (let ((v (obj-value e)))
+                            (cond ((string? v) (string-append \"\\\"\" v \"\\\"\"))
+                                  ((number? v) (number->string v))
+                                  (else \"null\")))))
+         obj)
+    \", \")
+   \"}\"))
+```
+
+Five little helpers, all real Scheme. `obj-get` reads (with dot-paths), `obj-set` and `obj-delete` return fresh alists, `obj-encode` serializes. Now let's use them.
 
 ---
 
@@ -36,7 +97,7 @@ Here's the skeleton—find a value, or admit you didn't:
 (define name-pair (assoc 'name person))
 
 (if name-pair
-    (cdr name-pair)
+    (obj-value name-pair)
     'nan)
 ;; => \"Keiko\"
 ```
@@ -56,10 +117,10 @@ Now let's pull a nested field. JSON objects nest; so do association lists. We di
 (define address-pair (assoc 'address profile))
 
 (if address-pair
-    (let ((address (cdr address-pair)))
+    (let ((address (obj-value address-pair)))
       (let ((street-pair (assoc 'street address)))
         (if street-pair
-            (cdr street-pair)
+            (obj-value street-pair)
             'nan)))
     'nan)
 ;; => \"the runtime-dori 5-12\"
@@ -69,29 +130,29 @@ Two `assoc` calls, two checks. If either layer is missing, we bail cleanly. That
 
 ---
 
-## Using json/get for Safe Field Access
+## Using obj-get for Safe Field Access
 
-The wired surface gives us `json/get`, which reads a path through a nested structure and returns `'nan` if any segment is missing. It's `assoc` with a map—cleaner, and it handles lists-of-maps too.
+Our toolbox gives us `obj-get`, which reads a path through a nested structure and returns `'nan` if any segment is missing. It's `assoc` with a map—cleaner, and it handles nested objects too.
 
 Let's query a product record:
 
 ```scheme
-;; Use json/get to read a product's price, or return 'nan if absent.
+;; Use obj-get to read a product's price, or return 'nan if absent.
 (define product
   '((title . \"Ceramic teapot\")
     (price . 3200)
     (stock . 5)))
 
-(json/get product \"price\")
+(obj-get product \"price\")
 ;; => 3200
 ```
 
-No ceremony—just ask. If `price` weren't there, `json/get` would hand back `'nan`, and we'd route accordingly.
+No ceremony—just ask. If `price` weren't there, `obj-get` would hand back `'nan`, and we'd route accordingly.
 
 Now a nested read—grab the city from a customer's billing address:
 
 ```scheme
-;; Read customer -> billing -> city using json/get.
+;; Read customer -> billing -> city using obj-get.
 (define customer
   '((name . \"Yuki\")
     (email . \"yuki@example.jp\")
@@ -99,7 +160,7 @@ Now a nested read—grab the city from a customer's billing address:
                 (city . \"Sapporo\")
                 (postal . \"060-0003\")))))
 
-(json/get customer \"billing.city\")
+(obj-get customer \"billing.city\")
 ;; => \"Sapporo\"
 ```
 
@@ -109,7 +170,7 @@ One call, dot-path notation. If `billing` or `city` were absent, `'nan`. That's 
 
 ## Filtering a List of Records by a Field
 
-Real data comes in bunches. You have a list of orders, and you want only the ones marked \"shipped\". `filter` + `json/get` is the move—test each record, keep the ones that pass.
+Real data comes in bunches. You have a list of orders, and you want only the ones marked \"shipped\". `filter` + `obj-get` is the move—test each record, keep the ones that pass.
 
 Here's a list of three orders; we'll keep the shipped ones:
 
@@ -122,7 +183,7 @@ Here's a list of three orders; we'll keep the shipped ones:
    '((id . 103) (status . \"shipped\") (total . 8700))))
 
 (define (is-shipped? order)
-  (let ((status (json/get order \"status\")))
+  (let ((status (obj-get order \"status\")))
     (and (not (equal? status 'nan))
          (equal? status \"shipped\"))))
 
@@ -145,7 +206,7 @@ Now let's filter by a numeric threshold—keep orders over 5000:
    '((id . 204) (customer . \"Hana\") (total . 900))))
 
 (define (high-value? order)
-  (let ((total (json/get order \"total\")))
+  (let ((total (obj-get order \"total\")))
     (and (not (equal? total 'nan))
          (number? total)
          (> total 5000))))
@@ -161,7 +222,7 @@ Two checks: field is present, field is a number. Then the comparison. That's hon
 
 ## Transforming a List of Records with map
 
-Filtering keeps records whole; transformation reshapes them. `map` + `json/get` + `json/set` lets you pull one field, compute a new value, and return a fresh structure.
+Filtering keeps records whole; transformation reshapes them. `map` + `obj-get` + `obj-set` lets you pull one field, compute a new value, and return a fresh structure.
 
 Let's take a list of products and compute a discounted price:
 
@@ -174,10 +235,10 @@ Let's take a list of products and compute a discounted price:
    '((name . \"Bowl\") (price . 950))))
 
 (define (apply-discount product)
-  (let ((price (json/get product \"price\")))
+  (let ((price (obj-get product \"price\")))
     (if (and (not (equal? price 'nan)) (number? price))
         (let ((discounted (* price 0.9)))
-          (json/set product \"price\" discounted))
+          (obj-set product \"price\" discounted))
         product)))
 
 (map apply-discount products)
@@ -186,7 +247,7 @@ Let's take a list of products and compute a discounted price:
 ;;     ((name . \"Bowl\") (price . 855.0)))
 ```
 
-`json/set` returns a *new* alist with the updated field; the original is untouched. That's functional purity—no mutation, just transformation.
+`obj-set` returns a *new* alist with the updated field; the original is untouched. That's functional purity—no mutation, just transformation.
 
 Now let's add a computed field—`tax`, derived from `price`:
 
@@ -199,9 +260,9 @@ Now let's add a computed field—`tax`, derived from `price`:
    '((item . \"Notebook\") (price . 600))))
 
 (define (add-tax item)
-  (let ((price (json/get item \"price\")))
+  (let ((price (obj-get item \"price\")))
     (if (and (not (equal? price 'nan)) (number? price))
-        (json/set item \"tax\" (* price 0.1))
+        (obj-set item \"tax\" (* price 0.1))
         item)))
 
 (map add-tax items)
@@ -210,7 +271,7 @@ Now let's add a computed field—`tax`, derived from `price`:
 ;;     ((item . \"Notebook\") (price . 600) (tax . 60.0)))
 ```
 
-Each record grows a new field. `json/set` does the work; `map` does it for all.
+Each record grows a new field. `obj-set` does the work; `map` does it for all.
 
 ---
 
@@ -230,13 +291,13 @@ Let's keep high-value orders and add a `priority` flag:
    '((id . 304) (total . 400))))
 
 (define (high-value? order)
-  (let ((total (json/get order \"total\")))
+  (let ((total (obj-get order \"total\")))
     (and (not (equal? total 'nan))
          (number? total)
          (> total 3000))))
 
 (define (mark-priority order)
-  (json/set order \"priority\" \"high\"))
+  (obj-set order \"priority\" \"high\"))
 
 (map mark-priority (filter high-value? orders))
 ;; => (((id . 302) (total . 5500) (priority . \"high\"))
@@ -249,7 +310,7 @@ Filter first, transform second. Two survivors, both marked. One pass, one though
 
 ## Aggregating with fold
 
-Sometimes you don't want a list back—you want one number, one summary, one answer. `fold` (also called `reduce`) walks a list, accumulating a result. Pair it with `json/get` to sum a field, count matches, or build a report.
+Sometimes you don't want a list back—you want one number, one summary, one answer. `fold` (also called `reduce`) walks a list, accumulating a result. Pair it with `obj-get` to sum a field, count matches, or build a report.
 
 Let's sum the `total` field across all orders:
 
@@ -261,8 +322,8 @@ Let's sum the `total` field across all orders:
    '((id . 402) (total . 2300))
    '((id . 403) (total . 4700))))
 
-(define (add-total acc order)
-  (let ((total (json/get order \"total\")))
+(define (add-total order acc)
+  (let ((total (obj-get order \"total\")))
     (if (and (not (equal? total 'nan)) (number? total))
         (+ acc total)
         acc)))
@@ -284,8 +345,8 @@ Now let's count how many orders have `status` = `\"completed\"`:
    '((id . 503) (status . \"completed\"))
    '((id . 504) (status . \"cancelled\"))))
 
-(define (count-completed acc order)
-  (let ((status (json/get order \"status\")))
+(define (count-completed order acc)
+  (let ((status (obj-get order \"status\")))
     (if (equal? status \"completed\")
         (+ acc 1)
         acc)))
@@ -300,7 +361,7 @@ Two matches. `fold` is FORWARD in its purest form—carry state forward, one ste
 
 ## Building a New Association List from Scratch
 
-Sometimes you need to *construct* an alist, not just read one. Use `cons` to pair a key and value, `list` to bundle them. This is how you prep data for `json/set` or hand-craft a response.
+Sometimes you need to *construct* an alist, not just read one. Use `cons` to pair a key and value, `list` to bundle them. This is how you prep data for `obj-set` or hand-craft a response.
 
 Let's build a simple profile:
 
@@ -320,7 +381,7 @@ profile
 ;; => ((name . \"Sora\") (age . 34) (city . \"Fukuoka\"))
 ```
 
-Three pairs, one list. You can `json/get` from it now, or pass it to a wired verb that expects a map.
+Three pairs, one list. You can `obj-get` from it now, or pass it to a wired verb that expects a map.
 
 Now let's build a nested structure—an order with a `customer` sub-map:
 
@@ -352,9 +413,9 @@ Two layers, built by hand. This is BACK—no magic, just pairs and lists.
 
 ---
 
-## Reshaping a Record with json/set
+## Reshaping a Record with obj-set
 
-`json/set` returns a *new* alist with one field updated. Chain several `json/set` calls to reshape a record in multiple ways. Each call takes the result of the prior; that's FORWARD at the micro level.
+`obj-set` returns a *new* alist with one field updated. Chain several `obj-set` calls to reshape a record in multiple ways. Each call takes the result of the prior; that's FORWARD at the micro level.
 
 Let's update two fields in a product:
 
@@ -363,15 +424,15 @@ Let's update two fields in a product:
 (define product '((name . \"Vase\") (price . 2500) (stock . 3)))
 
 (define updated
-  (json/set
-   (json/set product \"price\" 2200)
+  (obj-set
+   (obj-set product \"price\" 2200)
    \"stock\" 7))
 
 updated
 ;; => ((name . \"Vase\") (price . 2200) (stock . 7))
 ```
 
-Two sets, one product. Each `json/set` returns a fresh alist; no mutation.
+Two sets, one product. Each `obj-set` returns a fresh alist; no mutation.
 
 Now let's add a computed field—`in-stock?` based on `stock`:
 
@@ -379,11 +440,11 @@ Now let's add a computed field—`in-stock?` based on `stock`:
 ;; Add a boolean 'in-stock? field derived from the 'stock count.
 (define product '((name . \"Lamp\") (price . 5500) (stock . 0)))
 
-(define stock (json/get product \"stock\"))
+(define stock (obj-get product \"stock\"))
 
 (define enriched
   (if (and (not (equal? stock 'nan)) (number? stock))
-      (json/set product \"in-stock?\" (> stock 0))
+      (obj-set product \"in-stock?\" (> stock 0))
       product))
 
 enriched
@@ -394,9 +455,9 @@ Read, check, compute, set. One pass, one new field.
 
 ---
 
-## Removing a Field with json/delete
+## Removing a Field with obj-delete
 
-Sometimes you want to drop a field—scrub sensitive data, slim a record for output. `json/delete` returns a new alist minus the named key.
+Sometimes you want to drop a field—scrub sensitive data, slim a record for output. `obj-delete` returns a new alist minus the named key.
 
 ```scheme
 ;; Remove the 'email field from a customer record.
@@ -405,7 +466,7 @@ Sometimes you want to drop a field—scrub sensitive data, slim a record for out
     (email . \"nao@example.jp\")
     (phone . \"+81-90-1234-5678\")))
 
-(json/delete customer \"email\")
+(obj-delete customer \"email\")
 ;; => ((name . \"Nao\") (phone . \"+81-90-1234-5678\"))
 ```
 
@@ -422,8 +483,8 @@ Now let's strip multiple fields—remove `email` and `phone`, keep only `name`:
     (city . \"Tokyo\")))
 
 (define scrubbed
-  (json/delete
-   (json/delete contact \"email\")
+  (obj-delete
+   (obj-delete contact \"email\")
    \"phone\"))
 
 scrubbed
@@ -448,16 +509,16 @@ Now we orchestrate. Take a list of sales records, filter by region, add a comput
    '((id . 804) (region . \"north\") (amount . 3200))))
 
 (define (is-west? sale)
-  (equal? (json/get sale \"region\") \"west\"))
+  (equal? (obj-get sale \"region\") \"west\"))
 
 (define (add-commission sale)
-  (let ((amount (json/get sale \"amount\")))
+  (let ((amount (obj-get sale \"amount\")))
     (if (and (not (equal? amount 'nan)) (number? amount))
-        (json/set sale \"commission\" (* amount 0.05))
+        (obj-set sale \"commission\" (* amount 0.05))
         sale)))
 
-(define (sum-commission acc sale)
-  (let ((commission (json/get sale \"commission\")))
+(define (sum-commission sale acc)
+  (let ((commission (obj-get sale \"commission\")))
     (if (and (not (equal? commission 'nan)) (number? commission))
         (+ acc commission)
         acc)))
@@ -487,8 +548,8 @@ Let's sum `price` from a list of items, some of which lack that field:
    '((name . \"Spoon\") (price . 200))
    '((name . \"Fork\"))))  ;; no price
 
-(define (safe-sum-price acc item)
-  (let ((price (json/get item \"price\")))
+(define (safe-sum-price item acc)
+  (let ((price (obj-get item \"price\")))
     (if (and (not (equal? price 'nan)) (number? price))
         (+ acc price)
         acc)))
@@ -511,7 +572,7 @@ Now let's build a list of emails from contacts, skipping those without an `email
    '((name . \"Aoi\"))))  ;; no email
 
 (define (extract-email contact)
-  (json/get contact \"email\"))
+  (obj-get contact \"email\"))
 
 (define emails-raw (map extract-email contacts))
 
@@ -527,7 +588,7 @@ emails
 
 ## Nested Reads and Writes
 
-Real structures nest. A customer has an address; an address has a city. You read through layers, write through layers. `json/get` and `json/set` both support dot-path notation for nested access.
+Real structures nest. A customer has an address; an address has a city. You read through layers, write through layers. `obj-get` and `obj-set` both support dot-path notation for nested access.
 
 Let's read a deeply nested field—`customer.address.postal`:
 
@@ -540,7 +601,7 @@ Let's read a deeply nested field—`customer.address.postal`:
                              (city . \"Sendai\")
                              (postal . \"980-0021\")))))))
 
-(json/get order \"customer.address.postal\")
+(obj-get order \"customer.address.postal\")
 ;; => \"980-0021\"
 ```
 
@@ -557,7 +618,7 @@ Now let's write a nested field—update the city inside the address:
                              (city . \"Nagoya\")
                              (postal . \"460-0008\")))))))
 
-(json/set order \"customer.address.city\" \"Osaka\")
+(obj-set order \"customer.address.city\" \"Osaka\")
 ;; => ((id . 902)
 ;;     (customer . ((name . \"Emi\")
 ;;                  (address . ((street . \"Chuo 1-8\")
@@ -565,13 +626,13 @@ Now let's write a nested field—update the city inside the address:
 ;;                              (postal . \"460-0008\"))))))
 ```
 
-The city changed; everything else stayed. `json/set` rebuilt the path, preserving structure.
+The city changed; everything else stayed. `obj-set` rebuilt the path, preserving structure.
 
 ---
 
 ## Merging Two Association Lists
 
-Sometimes you have two records and want one—merge a default config with user overrides, or combine two partial profiles. Walk one list, copy its pairs into the other using `json/set`, and you get a union.
+Sometimes you have two records and want one—merge a default config with user overrides, or combine two partial profiles. Walk one list, copy its pairs into the other using `obj-set`, and you get a union.
 
 ```scheme
 ;; Merge a user profile over a default profile.
@@ -584,8 +645,8 @@ Sometimes you have two records and want one—merge a default config with user o
   '((theme . \"dark\")
     (notifications . #f)))
 
-(define (merge-one acc pair)
-  (json/set acc (symbol->string (car pair)) (cdr pair)))
+(define (merge-one pair acc)
+  (obj-set acc (symbol->string (car pair)) (cdr pair)))
 
 (fold merge-one defaults user-prefs)
 ;; => ((theme . \"dark\")
@@ -613,8 +674,8 @@ This is a harder pattern—nested structure, conditional accumulation. Walk it c
    '((id . 1004) (status . \"cancelled\"))
    '((id . 1005) (status . \"pending\"))))
 
-(define (group-by-status acc order)
-  (let ((status (json/get order \"status\")))
+(define (group-by-status order acc)
+  (let ((status (obj-get order \"status\")))
     (if (equal? status 'nan)
         acc
         (let ((group-pair (assoc status acc)))
@@ -634,7 +695,7 @@ This is a harder pattern—nested structure, conditional accumulation. Walk it c
 ;;                   ((id . 1003) (status . \"shipped\")))))
 ```
 
-Three groups, built by folding. Each status appears once as a key; its value is a list of orders. This is harder—nested structure, conditional branching, list surgery—but it's all core Scheme + json/get. No magic.
+Three groups, built by folding. Each status appears once as a key; its value is a list of orders. This is harder—nested structure, conditional branching, list surgery—but it's all core Scheme + obj-get. No magic.
 
 ---
 
@@ -655,7 +716,7 @@ Sometimes data comes nested—a list of customers, each with a list of orders. Y
      (orders . ()))))
 
 (define (extract-orders customer)
-  (let ((orders (json/get customer \"orders\")))
+  (let ((orders (obj-get customer \"orders\")))
     (if (equal? orders 'nan)
         '()
         orders)))
@@ -682,8 +743,8 @@ You have a list of products, each with an `id`. You want a lookup table—an ali
    '((id . \"B2\") (name . \"Pants\") (price . 4200))
    '((id . \"C3\") (name . \"Hat\") (price . 1500))))
 
-(define (index-by-id acc product)
-  (let ((id (json/get product \"id\")))
+(define (index-by-id product acc)
+  (let ((id (obj-get product \"id\")))
     (if (equal? id 'nan)
         acc
         (cons (cons id product) acc))))
@@ -694,7 +755,7 @@ You have a list of products, each with an `id`. You want a lookup table—an ali
 ;;     (\"A1\" . ((id . \"A1\") (name . \"Shirt\") (price . 2500))))
 ```
 
-Now you can `assoc` by `id` and get the product in O(n) time. If you need it in code, `json/get` works too—treat the table as an alist.
+Now you can `assoc` by `id` and get the product in O(n) time. If you need it in code, `obj-get` works too—treat the table as an alist.
 
 ---
 
@@ -707,7 +768,7 @@ You have a record; you want to check that certain fields are present and of the 
 (define product '((name . \"Kettle\") (price . 3200) (stock . 8)))
 
 (define (validate-field record field-name predicate)
-  (let ((value (json/get record field-name)))
+  (let ((value (obj-get record field-name)))
     (and (not (equal? value 'nan))
          (predicate value))))
 
@@ -802,12 +863,12 @@ Actually, `filter-map` isn't in the core, so we'll compose our own: map, then fi
    '((name . \"Dave\") (dept . \"marketing\") (salary . 55000))))
 
 (define (process-employee emp)
-  (let ((dept (json/get emp \"dept\"))
-        (salary (json/get emp \"salary\")))
+  (let ((dept (obj-get emp \"dept\"))
+        (salary (obj-get emp \"salary\")))
     (if (and (equal? dept \"engineering\")
              (not (equal? salary 'nan))
              (number? salary))
-        (json/set emp \"bonus\" (* salary 0.1))
+        (obj-set emp \"bonus\" (* salary 0.1))
         #f)))
 
 (filter (lambda (x) (not (equal? x #f)))
@@ -836,8 +897,8 @@ We'll reuse the grouping pattern from earlier, then map over the groups:
    '((region . \"south\") (amount . 2200))
    '((region . \"north\") (amount . 900))))
 
-(define (group-by-region acc sale)
-  (let ((region (json/get sale \"region\")))
+(define (group-by-region sale acc)
+  (let ((region (obj-get sale \"region\")))
     (if (equal? region 'nan)
         acc
         (let ((group-pair (assoc region acc)))
@@ -852,7 +913,7 @@ We'll reuse the grouping pattern from earlier, then map over the groups:
 (define (summarize-group group-pair)
   (let* ((region (car group-pair))
          (sales (cdr group-pair))
-         (amounts (map (lambda (s) (json/get s \"amount\")) sales))
+         (amounts (map (lambda (s) (obj-get s \"amount\")) sales))
          (total (fold + 0 amounts))
          (count (length sales))
          (average (if (> count 0) (/ total count) 0)))
@@ -887,8 +948,8 @@ We'll simplify: group by user, then for each user, list actions:
    '((user . \"Alice\") (action . \"login\") (date . \"2025-01-16\"))
    '((user . \"Bob\") (action . \"logout\") (date . \"2025-01-16\"))))
 
-(define (group-by-user acc event)
-  (let ((user (json/get event \"user\")))
+(define (group-by-user event acc)
+  (let ((user (obj-get event \"user\")))
     (if (equal? user 'nan)
         acc
         (let ((group-pair (assoc user acc)))
@@ -924,7 +985,7 @@ You want to read a field three layers deep, but any layer might be missing. Rath
       record
       (let ((field (car path))
             (rest (cdr path)))
-        (let ((value (json/get record field)))
+        (let ((value (obj-get record field)))
           (if (equal? value 'nan)
               default
               (safe-get-nested value rest default))))))
@@ -961,11 +1022,11 @@ Real programs sometimes need to call a wired verb during a transformation—fetc
     (else 'nan)))
 
 (define (enrich-product product)
-  (let* ((id (json/get product \"id\"))
+  (let* ((id (obj-get product \"id\"))
          (price (if (equal? id 'nan) 'nan (mock-price-lookup id))))
     (if (equal? price 'nan)
         product
-        (json/set product \"price\" price))))
+        (obj-set product \"price\" price))))
 
 (map enrich-product products)
 ;; => (((id . \"P1\") (name . \"Widget\") (price . 1200))
@@ -1005,28 +1066,28 @@ Scenario: You have a list of orders. For each order, you want to:
 
 ;; Stage 1: filter
 (define (is-completed? order)
-  (equal? (json/get order \"status\") \"completed\"))
+  (equal? (obj-get order \"status\") \"completed\"))
 
 (define completed-orders (filter is-completed? orders))
 
 ;; Stage 2: enrich
 (define (enrich-order order)
-  (let* ((customer-id (json/get order \"customer-id\"))
+  (let* ((customer-id (obj-get order \"customer-id\"))
          (customer (if (equal? customer-id 'nan)
                        'nan
                        (mock-customer-fetch customer-id))))
     (if (equal? customer 'nan)
         order
-        (let ((name (json/get customer \"name\")))
+        (let ((name (obj-get customer \"name\")))
           (if (equal? name 'nan)
               order
-              (json/set order \"customer-name\" name))))))
+              (obj-set order \"customer-name\" name))))))
 
 (define enriched-orders (map enrich-order completed-orders))
 
 ;; Stage 3: aggregate
-(define (sum-total acc order)
-  (let ((total (json/get order \"total\")))
+(define (sum-total order acc)
+  (let ((total (obj-get order \"total\")))
     (if (and (not (equal? total 'nan)) (number? total))
         (+ acc total)
         acc)))
@@ -1060,11 +1121,11 @@ Sometimes a record contains nested lists of records—a tree. You want to transf
                  ((name . \"child2\"))))))
 
 (define (add-level node level)
-  (let ((node-with-level (json/set node \"level\" level))
-        (children (json/get node \"children\")))
+  (let ((node-with-level (obj-set node \"level\" level))
+        (children (obj-get node \"children\")))
     (if (equal? children 'nan)
         node-with-level
-        (json/set node-with-level \"children\"
+        (obj-set node-with-level \"children\"
                   (map (lambda (child) (add-level child (+ level 1)))
                        children)))))
 
@@ -1108,13 +1169,13 @@ response
 ;;              ((id . \"X2\") (name . \"Gloves\") (price . 1200)))))
 ```
 
-Three fields, one alist. You could serialize this with `json/encode` (if it existed) or pass it to a wired verb that expects a map. The shape is what matters—metadata + payload.
+Three fields, one alist. You could serialize this with `obj-encode` (if it existed) or pass it to a wired verb that expects a map. The shape is what matters—metadata + payload.
 
 ---
 
 ## Challenges
 
-You've seen filtering, transforming, aggregating, grouping, nesting, recursion, and orchestration—all with alists and json/* verbs. Now stretch:
+You've seen filtering, transforming, aggregating, grouping, nesting, recursion, and orchestration—all with alists and the `obj-*` helpers. Now stretch:
 
 1. **Recursive Validation**: Write a function that validates a nested alist against a schema (itself an alist of field -> predicate pairs). If a field's value is itself an alist, recurse. Return `#t` if the whole structure is valid, `#f` otherwise.
 

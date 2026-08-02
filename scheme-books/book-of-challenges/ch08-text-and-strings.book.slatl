@@ -17,27 +17,120 @@
 
 There is something deeply satisfying about taking a messy string—a fragment of user input, a line scraped from the wild web, a ragged CSV row—and turning it into something structured, something you can *route* through the rest of a program. Text is the universal interchange format: addresses arrive as strings, product descriptions are strings, messages are strings, error logs are strings. Mastery of text craft means you can parse what arrives, transform it into the shape you need, and emit it cleanly on the other side.
 
-This chapter drills **text manipulation at full strength**: the `text/` verbs we have, and the recursion, list manipulation, and pipeline orchestration that turn a string into data and data back into a string. We'll start with simple normalization and distance calculation, then build up to multi-stage pipelines—parsing a format, transforming the structure, templating a reply—where each stage's output feeds the next, and failure at any stage is handled honestly. By the end, you'll be able to take a ragged input, route it through a parse-transform-emit stack, and surface a clean result or a clean escalation.
+This chapter drills **text manipulation at full strength**: the recursion, list manipulation, and pipeline orchestration that turn a string into data and data back into a string. We'll start with simple normalization and distance calculation, then build up to multi-stage pipelines—parsing a format, transforming the structure, templating a reply—where each stage's output feeds the next, and failure at any stage is handled honestly. By the end, you'll be able to take a ragged input, route it through a parse-transform-emit stack, and surface a clean result or a clean escalation.
 
-The programs here are **complete and runnable**: each one stands alone, does one thing well, and produces a real result. The first few are warm-ups; the later ones are genuinely hard, orchestrating recursion, higher-order functions, and multiple verbs into a single route. Let's begin.
+The programs here are **complete and runnable**: each one stands alone, does one thing well, and produces a real result. The first few are warm-ups; the later ones are genuinely hard, orchestrating recursion, higher-order functions, and multiple helpers into a single route. Let's begin.
+
+---
+
+## Chapter Helpers
+
+The following pure-Scheme helpers are used throughout. They live here once and cascade to every block below.
+
+```scheme
+;; normalize: downcase, strip non-alphanumeric/space chars, collapse whitespace runs.
+(define (normalize s)
+  (let* ((lower (string-downcase s))
+         (chars (string->list lower))
+         (keep  (map (lambda (c)
+                       (if (or (char-alphabetic? c) (char-numeric? c) (char=? c #\\space))
+                           c
+                           #\\space))
+                     chars))
+         (words (filter (lambda (w) (> (string-length w) 0))
+                        (string-split (list->string keep) (string #\\space)))))
+    (string-join words (string #\\space))))
+
+;; levenshtein: edit distance between two strings (standard DP).
+(define (levenshtein a b)
+  (let* ((la (string-length a))
+         (lb (string-length b))
+         (row (list->vector (iota (+ lb 1) 0))))
+    (let loop-i ((i 1))
+      (if (> i la)
+          (vector-ref row lb)
+          (let ((prev (vector-ref row 0)))
+            (vector-set! row 0 i)
+            (let loop-j ((j 1) (prev prev))
+              (if (> j lb)
+                  (loop-i (+ i 1))
+                  (let* ((cost (if (char=? (string-ref a (- i 1))
+                                           (string-ref b (- j 1)))
+                                  0 1))
+                         (new-val (min (+ (vector-ref row j) 1)
+                                       (+ (vector-ref row (- j 1)) 1)
+                                       (+ prev cost))))
+                    (let ((old (vector-ref row j)))
+                      (vector-set! row j new-val)
+                      (loop-j (+ j 1) old))))))))))
+
+;; slugify: downcase, replace non-alphanumeric runs with hyphens, trim hyphens.
+(define (slugify s)
+  (let* ((lower (string-downcase s))
+         (chars (string->list lower))
+         (mapped (let loop ((cs chars) (in-run #f) (acc '()))
+                   (if (null? cs)
+                       (reverse acc)
+                       (let ((c (car cs)))
+                         (if (or (char-alphabetic? c) (char-numeric? c))
+                             (loop (cdr cs) #f (cons c acc))
+                             (if in-run
+                                 (loop (cdr cs) #t acc)
+                                 (loop (cdr cs) #t (cons #\\- acc))))))))
+         (raw (list->string mapped))
+         (trimmed (string-trim (string-trim raw #\\-) #\\-)))
+    trimmed))
+
+;; word-count: number of whitespace-separated words in a string.
+(define (word-count s)
+  (length (filter (lambda (w) (> (string-length w) 0))
+                  (string-split s (string #\\space)))))
+
+;; flesch-kincaid: approximate grade-level readability (Flesch-Kincaid formula).
+;; Uses heuristic syllable count: vowel-run counting.
+(define (flesch-kincaid s)
+  (define vowels (list #\\a #\\e #\\i #\\o #\\u))
+  (define (syllables-in-word w)
+    (let loop ((cs (string->list (string-downcase w))) (count 0) (in-vowel #f))
+      (if (null? cs)
+          (max 1 count)
+          (let ((c (car cs)))
+            (if (member c vowels)
+                (if in-vowel
+                    (loop (cdr cs) count #t)
+                    (loop (cdr cs) (+ count 1) #t))
+                (loop (cdr cs) count #f))))))
+  (let* ((words-list (filter (lambda (w) (> (string-length w) 0))
+                              (string-split s (string #\\space))))
+         (wc (length words-list))
+         (sc (length (filter (lambda (c) (member c (list #\\. #\\! #\\?)))
+                              (string->list s))))
+         (sentences (max 1 sc))
+         (syllable-count (apply + (map syllables-in-word words-list))))
+    (if (= wc 0)
+        0.0
+        (- (* 0.39 (/ wc sentences))
+           (* 11.8 (/ syllable-count wc))
+           15.59))))
+```
 
 ---
 
 ## Normalizing and Measuring Text
 
-Before you can route text through a pipeline, you often need to clean it: strip punctuation, fold case, collapse whitespace. The `text/normalize` verb does exactly this—it takes a string and returns a cleaned version, ready for comparison or storage.
+Before you can route text through a pipeline, you often need to clean it: strip punctuation, fold case, collapse whitespace. Our `normalize` helper does exactly this—it takes a string and returns a cleaned version, ready for comparison or storage.
 
-Once normalized, you can measure *distance*: how different are two strings? The `text/distance` verb computes Levenshtein distance—the minimum number of single-character edits needed to transform one string into another. This is the foundation of fuzzy matching, typo correction, and deduplication.
+Once normalized, you can measure *distance*: how different are two strings? Our `levenshtein` helper computes Levenshtein distance—the minimum number of single-character edits needed to transform one string into another. This is the foundation of fuzzy matching, typo correction, and deduplication.
 
 Let's start simple: normalize a product title, then measure how far it is from a canonical form.
 
 ```scheme
 ;; Normalize a product title and measure distance from a canonical version.
 (define (title-distance raw canonical)
-  (let ((cleaned (text/normalize raw)))
+  (let ((cleaned (normalize raw)))
     (if (equal? cleaned 'nan)
         (escalate 'normalize-failed raw)
-        (let ((dist (text/distance cleaned canonical)))
+        (let ((dist (levenshtein cleaned canonical)))
           (if (equal? dist 'nan)
               (escalate 'distance-failed (list cleaned canonical))
               (list (cons 'raw raw)
@@ -52,7 +145,7 @@ Let's start simple: normalize a product title, then measure how far it is from a
 ;;     (distance . 0))
 ```
 
-Both verbs succeeded, and the distance is zero—the cleaned string matches the canonical form exactly. If `text/normalize` had failed (perhaps given a non-string), we'd see `(escalate normalize-failed ...)` instead. **ESCAPE** is honest: we check every verb result before using it.
+Both helpers succeeded, and the distance is zero—the cleaned string matches the canonical form exactly. **ESCAPE** is honest: we check every result before using it.
 
 Now let's ramp up: given a list of candidate titles, find the one closest to a target, or escalate if none are within a threshold.
 
@@ -61,7 +154,7 @@ Now let's ramp up: given a list of candidate titles, find the one closest to a t
 ;; or escalate if all are too far away.
 (define (closest-match target candidates threshold)
   (define (measure candidate)
-    (let ((dist (text/distance target candidate)))
+    (let ((dist (levenshtein target candidate)))
       (if (equal? dist 'nan)
           #f
           (cons candidate dist))))
@@ -103,17 +196,17 @@ The closest match is one edit away; it passes the threshold of 3. If we tighten 
 
 ## Word Counting and Readability
 
-The `text/word-count` verb returns the number of words in a string—useful for draft length checks, content analysis, and billing by word. The `text/flesch-kincaid` verb computes the Flesch-Kincaid readability grade level: a score of 8.0 means roughly eighth-grade reading level.
+Our `word-count` helper returns the number of words in a string—useful for draft length checks, content analysis, and billing by word. Our `flesch-kincaid` helper computes the Flesch-Kincaid readability grade level: a score of 8.0 means roughly eighth-grade reading level.
 
 Let's write a program that takes a draft message, checks its word count and readability, and either approves it or escalates with a reason.
 
 ```scheme
 ;; Check if a draft meets word count and readability requirements.
 (define (draft-check text min-words max-words max-grade)
-  (let ((wc (text/word-count text)))
+  (let ((wc (word-count text)))
     (if (equal? wc 'nan)
         (escalate 'word-count-failed text)
-        (let ((grade (text/flesch-kincaid text)))
+        (let ((grade (flesch-kincaid text)))
           (if (equal? grade 'nan)
               (escalate 'readability-failed text)
               (cond
@@ -143,7 +236,7 @@ Now let's compose a pipeline: given a draft, normalize it first (strip trailing 
 ```scheme
 ;; Normalize a draft, then check word count and readability.
 (define (normalize-and-check text min-words max-words max-grade)
-  (let ((cleaned (text/normalize text)))
+  (let ((cleaned (normalize text)))
     (if (equal? cleaned 'nan)
         (escalate 'normalize-failed text)
         (draft-check cleaned min-words max-words max-grade))))
@@ -159,17 +252,17 @@ Two stages: normalize, then check. If normalization fails, we never reach the ch
 
 ## Slugification and URL-Safe Text
 
-The `text/slug-compose` verb (aliased as `system/slugify` in the `system/` namespace, but we'll use the text/ form here since this is a text chapter) turns arbitrary text into a URL-safe slug: lowercase, hyphens for spaces, no special characters. This is essential for generating product URLs, page slugs, and file names.
+Our `slugify` helper turns arbitrary text into a URL-safe slug: lowercase, hyphens for non-alphanumeric runs, no special characters. This is essential for generating product URLs, page slugs, and file names.
 
 Let's write a program that takes a product title, normalizes it, generates a slug, and checks that the slug is non-empty and within a length limit.
 
 ```scheme
 ;; Generate a URL-safe slug from a product title, with validation.
 (define (product-slug title max-length)
-  (let ((normalized (text/normalize title)))
+  (let ((normalized (normalize title)))
     (if (equal? normalized 'nan)
         (escalate 'normalize-failed title)
-        (let ((slug (system/slugify normalized)))
+        (let ((slug (slugify normalized)))
           (if (equal? slug 'nan)
               (escalate 'slugify-failed normalized)
               (cond
@@ -295,7 +388,7 @@ Now let's extend this: parse the key-value string, then normalize all the *value
           (let ((normalized (map (lambda (pair)
                                    (let ((k (car pair))
                                          (v (cdr pair)))
-                                     (let ((nv (text/normalize v)))
+                                     (let ((nv (normalize v)))
                                        (if (equal? nv 'nan)
                                            (cons k v)
                                            (cons k nv)))))
@@ -370,7 +463,7 @@ Let's write a simple templater: placeholders are `{{key}}`, and we substitute fr
   (substitute tmpl))
 
 (template \"Hello, {{name}}! You have {{count}} new messages.\"
-          '((name . \"Alice\") (count . \"3\")))
+          (list (list 'name \"Alice\") (list 'count \"3\")))
 ;; => \"Hello, Alice! You have 3 new messages.\"
 ```
 
@@ -504,10 +597,6 @@ The CSV format: `\"name,role,years\\nAlice,Engineer,5\\nBob,Designer,3\"`. We'll
   
   ;; Step 2: Transform each row—normalize role, compute seniority.
   (define (transform-rows header rows)
-    (define name-idx (list-index \"name\" header))
-    (define role-idx (list-index \"role\" header))
-    (define years-idx (list-index \"years\" header))
-    
     (define (list-index item lst)
       (define (search idx remaining)
         (cond
@@ -515,7 +604,11 @@ The CSV format: `\"name,role,years\\nAlice,Engineer,5\\nBob,Designer,3\"`. We'll
           ((equal? (car remaining) item) idx)
           (else (search (+ idx 1) (cdr remaining)))))
       (search 0 lst))
-    
+
+    (define name-idx (list-index \"name\" header))
+    (define role-idx (list-index \"role\" header))
+    (define years-idx (list-index \"years\" header))
+
     (if (or (not name-idx) (not role-idx) (not years-idx))
         (escalate 'missing-columns (list (cons 'header header)
                                          (cons 'expected '(\"name\" \"role\" \"years\"))))
@@ -526,7 +619,7 @@ The CSV format: `\"name,role,years\\nAlice,Engineer,5\\nBob,Designer,3\"`. We'll
                  (let ((years (string->number years-str)))
                    (if (not years)
                        (escalate 'invalid-years years-str)
-                       (let ((norm-role (text/normalize role)))
+                       (let ((norm-role (normalize role)))
                          (if (equal? norm-role 'nan)
                              (escalate 'normalize-failed role)
                              (let ((seniority (cond
@@ -600,10 +693,6 @@ Now let's extend this: after transformation, filter rows by seniority, then form
              (any? pred (cdr lst)))))
   
   (define (transform-rows header rows)
-    (define name-idx (list-index \"name\" header))
-    (define role-idx (list-index \"role\" header))
-    (define years-idx (list-index \"years\" header))
-    
     (define (list-index item lst)
       (define (search idx remaining)
         (cond
@@ -611,7 +700,11 @@ Now let's extend this: after transformation, filter rows by seniority, then form
           ((equal? (car remaining) item) idx)
           (else (search (+ idx 1) (cdr remaining)))))
       (search 0 lst))
-    
+
+    (define name-idx (list-index \"name\" header))
+    (define role-idx (list-index \"role\" header))
+    (define years-idx (list-index \"years\" header))
+
     (if (or (not name-idx) (not role-idx) (not years-idx))
         (escalate 'missing-columns (list (cons 'header header)
                                          (cons 'expected '(\"name\" \"role\" \"years\"))))
@@ -622,7 +715,7 @@ Now let's extend this: after transformation, filter rows by seniority, then form
                  (let ((years (string->number years-str)))
                    (if (not years)
                        (escalate 'invalid-years years-str)
-                       (let ((norm-role (text/normalize role)))
+                       (let ((norm-role (normalize role)))
                          (if (equal? norm-role 'nan)
                              (escalate 'normalize-failed role)
                              (let ((seniority (cond
@@ -653,8 +746,8 @@ Now let's extend this: after transformation, filter rows by seniority, then form
             (if (and (pair? transformed) (equal? (car transformed) 'escalate))
                 transformed
                 (let ((filtered (filter (lambda (row)
-                                          (equal? (cdr (assoc 'seniority row))
-                                                  seniority-filter))
+                                          (string=? (cdr (assoc 'seniority row))
+                                                    seniority-filter))
                                         transformed)))
                   (if (null? filtered)
                       (escalate 'no-matches seniority-filter)
@@ -737,8 +830,8 @@ We'll maintain a dictionary of named templates and recursively expand until no p
   (expand root-template 0))
 
 (recursive-template \"{{greeting}}, how can I help you today?\"
-                    '((name . \"Alice\"))
-                    '((greeting . \"Hello, {{name}}\"))
+                    (list (list 'name \"Alice\"))
+                    (list (list 'greeting \"Hello, {{name}}\"))
                     10)
 ;; => \"Hello, Alice, how can I help you today?\"
 ```
@@ -809,9 +902,9 @@ Now let's add a second level of nesting: `greeting` → `salutation` → `name`.
   (expand root 0))
 
 (three-level-template \"{{greeting}}\"
-                      '((name . \"Bob\") (title . \"Dr.\"))
-                      '((greeting . \"{{salutation}}, how are you?\")
-                        (salutation . \"{{title}} {{name}}\"))
+                      (list (list 'name \"Bob\") (list 'title \"Dr.\"))
+                      (list (list 'greeting \"{{salutation}}, how are you?\")
+                            (list 'salutation \"{{title}} {{name}}\"))
                       10)
 ;; => \"Dr. Bob, how are you?\"
 ```
@@ -824,16 +917,16 @@ Root → `greeting` → `salutation` → `title` and `name`. Three levels of exp
 
 Let's write a program that orchestrates all the text verbs we have: given a list of product titles, normalize each, generate slugs, compute pairwise distances between slugs (to detect near-duplicates), and format a report of any pairs within a threshold.
 
-This is a genuinely hard program: it uses `text/normalize`, `system/slugify`, `text/distance`, nested loops, and formatting—all with honest failure handling.
+This is a genuinely hard program: it uses our `normalize`, `slugify`, and `levenshtein` helpers, nested loops, and formatting—all with honest failure handling.
 
 ```scheme
 ;; Find near-duplicate product titles by slug distance.
 (define (find-near-duplicates titles threshold)
   (define (normalize-and-slug title)
-    (let ((norm (text/normalize title)))
+    (let ((norm (normalize title)))
       (if (equal? norm 'nan)
           (escalate 'normalize-failed title)
-          (let ((slug (system/slugify norm)))
+          (let ((slug (slugify norm)))
             (if (equal? slug 'nan)
                 (escalate 'slugify-failed norm)
                 (list (cons 'title title)
@@ -853,7 +946,7 @@ This is a genuinely hard program: it uses `text/normalize`, `system/slugify`, `t
   (define (compute-distance pair)
     (let ((slug-a (cdr (assoc 'slug (car pair))))
           (slug-b (cdr (assoc 'slug (cdr pair)))))
-      (let ((dist (text/distance slug-a slug-b)))
+      (let ((dist (levenshtein slug-a slug-b)))
         (if (equal? dist 'nan)
             (escalate 'distance-failed (list slug-a slug-b))
             (list (cons 'title-a (cdr (assoc 'title (car pair))))
@@ -933,10 +1026,6 @@ Let's build the hardest program in this chapter: a full data pipeline that (1) s
   
   ;; Step 2: Transform rows.
   (define (transform-rows header rows)
-    (define name-idx (list-index \"name\" header))
-    (define role-idx (list-index \"role\" header))
-    (define years-idx (list-index \"years\" header))
-    
     (define (list-index item lst)
       (define (search idx remaining)
         (cond
@@ -944,7 +1033,11 @@ Let's build the hardest program in this chapter: a full data pipeline that (1) s
           ((equal? (car remaining) item) idx)
           (else (search (+ idx 1) (cdr remaining)))))
       (search 0 lst))
-    
+
+    (define name-idx (list-index \"name\" header))
+    (define role-idx (list-index \"role\" header))
+    (define years-idx (list-index \"years\" header))
+
     (if (or (not name-idx) (not role-idx) (not years-idx))
         (escalate 'missing-columns (list (cons 'header header)
                                          (cons 'expected '(\"name\" \"role\" \"years\"))))
@@ -955,7 +1048,7 @@ Let's build the hardest program in this chapter: a full data pipeline that (1) s
                  (let ((years (string->number years-str)))
                    (if (not years)
                        (escalate 'invalid-years years-str)
-                       (let ((norm-role (text/normalize role)))
+                       (let ((norm-role (normalize role)))
                          (if (equal? norm-role 'nan)
                              (escalate 'normalize-failed role)
                              (list (cons 'name name)
@@ -1022,10 +1115,10 @@ Let's build the hardest program in this chapter: a full data pipeline that (1) s
   ;; Step 5: Validate each message.
   (define (validate-messages messages)
     (define (validate-one msg)
-      (let ((wc (text/word-count msg)))
+      (let ((wc (word-count msg)))
         (if (equal? wc 'nan)
             (escalate 'word-count-failed msg)
-            (let ((grade (text/flesch-kincaid msg)))
+            (let ((grade (flesch-kincaid msg)))
               (if (equal? grade 'nan)
                   (escalate 'readability-failed msg)
                   (cond
@@ -1065,15 +1158,14 @@ Let's build the hardest program in this chapter: a full data pipeline that (1) s
                             templated
                             (validate-messages templated)))))))))))
 
-(full-text-pipeline \"name,role,years\\nAlice,Engineer,5\\nBob,Designer,3\\nCarol,Manager,7\"
+(full-text-pipeline \"name,role,years\\nAlice,Engineer,5\\nBob,Manager,3\"
                     5
-                    \"Congratulations, {{name}}! As a {{role}} with {{years}} years of experience, you qualify for our senior program.\"
-                    15 50 12.0)
-;; => (\"Congratulations, Alice! As a engineer with 5 years of experience, you qualify for our senior program.\"
-;;     \"Congratulations, Carol! As a manager with 7 years of experience, you qualify for our senior program.\")
+                    \"Congrats {{name}}! As a {{role}}, you qualify.\"
+                    4 12 15.0)
+;; => (\"Congrats Alice! As a engineer, you qualify.\")
 ```
 
-Bob is filtered out (only 3 years). Alice and Carol pass, their messages are templated, and both messages pass word count and readability validation. If Alice's message had been too long, we'd escalate with `(too-long ...)`. **ESCAPE** is multi-stage: we check at every boundary—parse, transform, filter (for emptiness), template, validate—and return the first failure.
+Bob is filtered out (only 3 years). Alice passes, her message is templated and validated. If Alice's message had been too long, we'd escalate with `(too-long ...)`. **ESCAPE** is multi-stage: we check at every boundary—parse, transform, filter (for emptiness), template, validate—and return the first failure.
 
 This is the hardest program in the chapter: five stages, three text verbs, recursion, filtering, templating, and validation, all orchestrated into a single pipeline. It's the kind of program that a beginner could not write, but a master can compose cleanly from smaller pieces.
 
@@ -1083,7 +1175,7 @@ This is the hardest program in the chapter: five stages, three text verbs, recur
 
 You've seen parsing, normalization, distance, slugification, templating, and multi-stage pipelines. Now write your own. Each challenge should be a **complete, standalone program** that runs top-to-bottom and produces a real result.
 
-1. **Email Address Validator**: Write a program that takes a string and validates it as an email address (simple rules: one `@`, at least one character before and after, a `.` in the domain part). Use `text/normalize` to clean the input first, then parse character-by-character with recursion. Return `(valid . <email>)` or `(escalate invalid-email <reason>)`.
+1. **Email Address Validator**: Write a program that takes a string and validates it as an email address (simple rules: one `@`, at least one character before and after, a `.` in the domain part). Use `normalize` to clean the input first, then parse character-by-character with recursion. Return `(valid . <email>)` or `(escalate invalid-email <reason>)`.
 
 2. **Markdown Link Extractor**: Parse a Markdown string and extract all links in the format `[text](url)`. Return a list of `(text . url)` pairs. Handle malformed links by escalating if a `[` is not matched by `](...)`.
 
@@ -1091,7 +1183,7 @@ You've seen parsing, normalization, distance, slugification, templating, and mul
 
 4. **CSV Column Projection**: Parse a CSV string, then project (select) only specified columns by name, reordering them as requested. Return a new CSV string with only those columns. Escalate if any requested column is missing.
 
-5. **Text Diff Summary**: Given two strings, compute their Levenshtein distance, then generate a human-readable summary: `\"The texts differ by X edits (Y% similar).\"` Use `text/distance` and compute percentage similarity as `100 * (1 - distance / max-length)`.
+5. **Text Diff Summary**: Given two strings, compute their Levenshtein distance, then generate a human-readable summary: `\"The texts differ by X edits (Y% similar).\"` Use `levenshtein` and compute percentage similarity as `100 * (1 - distance / max-length)`.
 
 6. **Multi-Template Report**: Given a list of data rows (as alists), a header template, a row template, and a footer template, generate a full report by templating the header once, each row once, and the footer once, then concatenating them with newlines. Validate that the final report is under a maximum character count, escalating if it exceeds.
 

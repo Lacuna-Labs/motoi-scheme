@@ -38,23 +38,46 @@ A type is either a base type (`int`, `bool`), a type variable (`(var 'a)`), or a
 
 Walk the expression. Give each subexpression a fresh type variable. Emit equations that say 'these two types must be the same.'
 
+First the supporting pieces — a fresh-variable source and a tiny type environment:
+
+```scheme
+(define counter 0)
+(define (fresh-var)
+  (set! counter (+ counter 1))
+  (type-var (string->symbol
+             (string-append \"t\" (number->string counter)))))
+
+(define (env-lookup sym env)
+  (let ((p (assoc sym env)))
+    (if p (cadr p) (error 'unbound-type-var sym))))
+(define (env-extend sym t env)
+  (cons (list sym t) env))
+```
+
+Then the walk itself:
+
 ```scheme
 (define (infer expr env)
   (cond ((number? expr) (values (type-int) '()))
         ((symbol? expr) (values (env-lookup expr env) '()))
         ((and (pair? expr) (eq? (car expr) 'lambda))
-         (let* ((param (cadr (cadr expr)))
+         (let* ((param (car (cadr expr)))
                 (body  (caddr expr))
                 (a     (fresh-var))
                 (env2  (env-extend param a env)))
            (let-values (((body-t constraints) (infer body env2)))
              (values (type-fun a body-t) constraints))))
-        ((pair? expr)  ;; application
-         (let-values (((fun-t fc) (infer (car expr) env))
-                      ((arg-t ac) (infer (cadr expr) env)))
-           (let ((r (fresh-var)))
-             (values r (cons (list fun-t (type-fun arg-t r))
-                             (append fc ac))))))))
+        ((pair? expr)  ;; application (folded over each argument)
+         (let-values (((fun-t fc) (infer (car expr) env)))
+           (let loop ((f-t fun-t) (cs fc) (args (cdr expr)))
+             (if (null? args)
+                 (values f-t cs)
+                 (let-values (((arg-t ac) (infer (car args) env)))
+                   (let ((r (fresh-var)))
+                     (loop r
+                           (cons (list f-t (type-fun arg-t r))
+                                 (append cs ac))
+                           (cdr args))))))))))
 ```
 
 That's the whole shape. Numbers have type `int`, no constraints. Symbols look up their type. A lambda introduces a fresh variable for its parameter and infers the body's type; the whole lambda's type is `param-type -> body-type`. An application says 'the operator's type must be (arg-type -> result-type), so emit that equation and return a fresh result variable.'
@@ -63,18 +86,35 @@ That's the whole shape. Numbers have type `int`, no constraints. Symbols look up
 
 The engine that solves the equations. Given `A = (Int -> B)` and `A = (C -> Int)`, unification returns `A = (Int -> Int), B = Int, C = Int`.
 
+A substitution is a list of `(var type)` entries. `extend-subst` records a
+binding; `walk` follows a chain of variable bindings to the type they resolve to:
+
+```scheme
+(define (extend-subst v t subst) (cons (list v t) subst))
+
+(define (walk t subst)
+  (if (and (pair? t) (eq? (car t) 'var))
+      (let ((p (assoc (cadr t) subst)))
+        (if p (walk (cadr p) subst) t))
+      t))
+```
+
+Then unification proper — it walks each side first, so already-solved
+variables resolve before we compare:
+
 ```scheme
 (define (unify a b subst)
-  (cond ((equal? a b) subst)
-        ((and (pair? a) (eq? (car a) 'var))
-         (extend-subst (cadr a) b subst))
-        ((and (pair? b) (eq? (car b) 'var))
-         (extend-subst (cadr b) a subst))
-        ((and (pair? a) (pair? b)
-              (eq? (car a) 'fun) (eq? (car b) 'fun))
-         (unify (caddr a) (caddr b)
-                (unify (cadr a) (cadr b) subst)))
-        (else (error 'type-mismatch a b))))
+  (let ((a (walk a subst)) (b (walk b subst)))
+    (cond ((equal? a b) subst)
+          ((and (pair? a) (eq? (car a) 'var))
+           (extend-subst (cadr a) b subst))
+          ((and (pair? b) (eq? (car b) 'var))
+           (extend-subst (cadr b) a subst))
+          ((and (pair? a) (pair? b)
+                (eq? (car a) 'fun) (eq? (car b) 'fun))
+           (unify (caddr a) (caddr b)
+                  (unify (cadr a) (cadr b) subst)))
+          (else (error 'type-mismatch a b)))))
 ```
 
 Read that top to bottom. If the two types are already equal, done. If one is a variable, bind it. If both are function types, unify their input types and their output types. Otherwise, mismatch.
@@ -83,13 +123,33 @@ The `occurs check` — verifying that we don't bind `A` to something containing 
 
 ## Try it
 
+Two more pieces tie it together: `solve-all` unifies every generated
+constraint into one substitution, and `apply-subst` reads a type back out
+through that substitution:
+
+```scheme
+(define (solve-all constraints subst)
+  (if (null? constraints)
+      subst
+      (let ((c (car constraints)))
+        (solve-all (cdr constraints)
+                   (unify (car c) (cadr c) subst)))))
+
+(define (apply-subst t subst)
+  (let ((t (walk t subst)))
+    (if (and (pair? t) (eq? (car t) 'fun))
+        (type-fun (apply-subst (cadr t) subst)
+                  (apply-subst (caddr t) subst))
+        t)))
+```
+
 Set up an initial environment:
 
 ```scheme
 (define initial-env
-  (list (cons '+   (type-fun (type-int)
+  (list (list '+   (type-fun (type-int)
                              (type-fun (type-int) (type-int))))
-        (cons 'not (type-fun (type-bool) (type-bool)))))
+        (list 'not (type-fun (type-bool) (type-bool)))))
 ```
 
 Then run:

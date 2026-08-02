@@ -41,11 +41,14 @@ confetti.
 ## 9.1 One spark
 
 ```scheme
+;; Colours are palette indices; 9 = orange in the default palette.
+(define orange 9)
+
 (define (spawn-spark x y)
   (let ((p (world/spawn 'spark x y))
         (angle (* 2 3.14159 (random))))
     (entity/mass!          p 0.1)
-    (entity/set-vel!       p (* 3 (cos angle)) (* 3 (sin angle)))
+    (entity/set-vel!       p (* 3 (geom/cos angle)) (* 3 (geom/sin angle)))
     (entity/gravity-scale! p 0.5)     ;; gravity affects sparks less
     (entity/drag!          p 0.03)    ;; air slows them
     (ai/bb-set!            p 'life 60);; 60-frame lifetime
@@ -58,6 +61,11 @@ lifetime and color. Each frame we decrement 'life; when it hits zero
 we despawn.
 
 ```scheme
+;; Paint a particle as one pixel at its position.
+(define (paint-dot p color)
+  (let ((pos (entity/pos p)))
+    (fb/pixel (car pos) (cadr pos) color)))
+
 (on-frame
   (lambda (t)
     (world/step)
@@ -65,16 +73,19 @@ we despawn.
       (lambda (p)
         (let ((life (ai/bb-get p 'life)))
           (ai/bb-set! p 'life (- life 1))
-          (when (<= (- life 1) 0)
-            (entity/despawn! p))
-          (let ((pos (entity/pos p)))
-            (paint-circle (car pos) (cdr pos) 1
-              (ai/bb-get p 'color-hot))))))))
+          (if (<= (- life 1) 0)
+              (entity/despawn! p)
+              (paint-dot p (ai/bb-get p 'color-hot))))))))
 ```
 
+`repeat` isn't a standard verb, so we write the burst loop ourselves.
 Every 30 frames or so, spawn a spark burst:
 
 ```scheme
+;; Call thunk n times.
+(define (repeat n thunk)
+  (when (> n 0) (thunk) (repeat (- n 1) thunk)))
+
 (on-frame
   (lambda (t)
     (when (= 0 (modulo t 30))
@@ -104,6 +115,9 @@ continuously from a source.
     (ai/bb-set!            p 'life-max 40)
     p))
 
+;; Palette indices for the fire ramp.
+(define yellow 10) (define red 8) (define black 0)
+
 ;; Age-dependent color: hot at start, cool at end.
 (define (flame-color life-frac)
   (cond ((> life-frac 0.7) yellow)
@@ -120,10 +134,9 @@ continuously from a source.
         (let ((life (ai/bb-get p 'life))
               (life-max (ai/bb-get p 'life-max)))
           (ai/bb-set! p 'life (- life 1))
-          (when (<= (- life 1) 0) (entity/despawn! p))
-          (let ((pos (entity/pos p)))
-            (paint-circle (car pos) (cdr pos) 3
-              (flame-color (/ life life-max)))))))))
+          (if (<= (- life 1) 0)
+              (entity/despawn! p)
+              (paint-dot p (flame-color (/ life life-max)))))))))
 ```
 
 Three new flames per frame at (240, 240). They rise, drift, cool,
@@ -168,6 +181,7 @@ chapter; this is the fake-fluid particle version.
     (ai/bb-set!      p 'life 200)
     p))
 
+(define blue 12)
 (world/gravity! 0 0.4)
 (world/floor!   380)                    ;; puddle at y=380
 
@@ -177,9 +191,7 @@ chapter; this is the fake-fluid particle version.
     (when (= 0 (modulo t 4))
       (spawn-drop 240 40))
     (world/each 'drop
-      (lambda (p)
-        (let ((pos (entity/pos p)))
-          (paint-circle (car pos) (cdr pos) 2 blue))))))
+      (lambda (p) (paint-dot p blue)))))
 ```
 
 Drops fall from a tap, splash on the puddle, spread out on the
@@ -193,27 +205,28 @@ Confetti is not spherical, so it rotates. Give each particle a
 random angular velocity.
 
 ```scheme
+;; A random palette index in 1..15 (0 is background).
+(define (random-color) (+ 1 (random-int 15)))
+
 (define (spawn-confetti x y)
   (let ((p (world/spawn 'confetti x y)))
     (entity/mass!          p 0.05)
     (entity/set-vel!       p (- (* 8 (random)) 4) (- (* 4 (random)) 2))
     (entity/gravity-scale! p 1.0)
     (entity/drag!          p 0.05)
-    (entity/angular-vel!   p (- (* 12 (random)) 6))
     (ai/bb-set!            p 'life 180)
     (ai/bb-set!            p 'color (random-color))
     p))
 ```
 
-Then paint each confetto as a rotated rectangle:
+Then paint each confetto as a small rectangle in its color:
 
 ```scheme
 (world/each 'confetti
   (lambda (p)
     (let ((pos (entity/pos p))
-          (a   (entity/angle p))
           (c   (ai/bb-get p 'color)))
-      (paint-rect-rotated (car pos) (cdr pos) 4 8 a c))))
+      (fb/rect (car pos) (cadr pos) 4 8 c))))
 ```
 
 Two hundred confetti drop from the top on a click. Watch them tumble.
@@ -245,15 +258,20 @@ You can capture the pattern in a record and re-use it.
     (paint . dot)
     (size . 3)))
 
-(particle-emitter spark-preset 240 180 :on 'click)
-(particle-emitter fire-preset  400 240 :on 'always)
+;; There's no built-in emitter verb, so we write one: read a preset's
+;; tag + spawn helper, and emit `count` particles at (x y).
+(define (emit preset spawn-fn x y count)
+  (repeat count (lambda () (spawn-fn x y))))
+
+;; A click burst of sparks, and a steady fire.
+(emit spark-preset spawn-spark 240 180 20)
+(on-frame (lambda (t) (emit fire-preset spawn-flame 400 240 3)))
 ```
 
-`particle-emitter` reads the preset and installs an emitter at the
-given position. All the boilerplate above (spawn, tune, life-count,
-color, paint) is expressed as data. Now you have a system that lets
-you build particle effects without writing new code — just tweak the
-preset.
+The preset reads the boilerplate above (spawn, tune, life-count,
+color, paint) as data, and `emit` drives the spawn helper from it. Now
+you have a system that lets you build particle effects by tweaking the
+preset and pairing it with a spawn function — no new per-effect loop.
 
 ---
 

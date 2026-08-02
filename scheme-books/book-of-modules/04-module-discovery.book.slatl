@@ -11,181 +11,77 @@
     (:authored-at "2026-07-17"
      :authored-by "book-completion-orchestrator")
   :prose
-"# Chapter 4 — Module discovery
+"# Chapter 4 — There is no discovery step
 
-When you write `(import manners)`, Motoi has to find `manners` before it can load anything. This chapter explains where it looks, in what order, and what happens when it does not find what you asked for.
+In a module-having Scheme, writing `(import manners)` kicks off *discovery*: the runtime hunts for `manners` across a cache, a search path, a registry, maybe the network — and only then loads it. This chapter is about discovery, and about why **Motoi has none of it.** Motoi's libraries are already in memory when the interpreter starts. There is nothing to find, so there is no finding.
 
-Discovery is one of the parts of a module system that seems boring until it does not work, at which point it becomes the only thing you care about. Learning it now saves you an afternoon later.
+That makes this a dialect-boundary chapter. I will describe what discovery does in the other dialect — so you recognize it when you meet it — and, in each section, name the Motoi truth: the verb is already loaded, call it.
 
-## 4.1 The four places
+## 4.1 The four places (in the other dialect)
 
-Motoi looks in four places, in this order:
+A discovery-based module system typically looks in four places, in order:
 
-1. **The local cache.** A per-machine cache of modules already loaded, downloaded, or built. Fastest.
-2. **The search path.** A list of directories on your machine that hold module source. Fast enough.
-3. **The registry.** A remote (or local network) service that holds published modules. Slower.
-4. **The hash resolver.** A last resort — if you imported by hash, and it wasn't in any of the above, Motoi asks the network if anyone has that hash. Slowest.
+1. A local **cache** of modules already loaded or downloaded.
+2. A **search path** of directories holding module source.
+3. A **registry** — a service that stores published modules.
+4. A **hash resolver** — a network last resort for content pinned by hash.
 
-The first place that has a match wins. Discovery stops there. This means the search order matters: if you have a local copy of `manners` in your search path and a different copy in the registry, the local copy wins. Motoi does not silently prefer newer versions from the registry over what is right in front of it.
-
-## 4.2 The local cache
-
-Every module Motoi has ever loaded gets cached under `~/.motoi/cache/`. The cache is content-addressed — the file name is the module's hash — so no two versions collide.
-
-You do not usually need to think about the cache. It is populated automatically. When you import a module, Motoi checks the cache first; if the hash is there, it uses it. The cache is what makes repeated program runs fast: the first run pays for loading; every subsequent run just reads from the cache.
-
-If you ever suspect the cache is corrupted, delete a specific entry or the whole cache:
+The first place with a match wins. This is real machinery in Schemes and package managers that have it. **Motoi has zero of these**, because it never goes looking for a library — the standard library is loaded at boot and lives in one process. To prove there is nothing to discover, just call across three libraries with no setup:
 
 ```scheme
-(cache/purge 'manners)     ;; remove one module
-(cache/purge-all)          ;; nuclear option
+(list (string-upcase \"hi\")          ; SRFI-13, already loaded
+      (delete-duplicates '(1 1 2))   ; SRFI-1, already loaded
+      (integer? (random-integer 4))) ; SRFI-27, already loaded
+;; ⇒ (\"HI\" (1 2) #t)
 ```
 
-Motoi will re-fetch what it needs on the next run. This is safe; the cache is a performance artifact, not a source of truth.
+No cache was consulted, no path walked, no registry queried. The verbs were in memory the instant Motoi started.
 
-## 4.3 The search path
+## 4.2 The cache — and `cache/purge`
 
-The search path is an ordered list of directories. Each directory is checked in order until a module with the right name is found.
+The other dialect caches downloaded modules and gives you a verb to clear a corrupt entry — something like `(cache/purge 'manners)`. Motoi has no module cache to purge; typing `(cache/purge 'manners)` yields `error: unbound symbol: cache/purge`. There is nothing to purge because nothing was downloaded — the library is compiled into the runtime. When you edit your own source and re-run, Motoi simply reads your file fresh; there is no stale module artifact between you and your code.
 
-You can inspect the current search path:
+## 4.3 The search path — there isn't one
 
-```scheme
-(module-path)
-;; ⇒ (\"~/.motoi/modules/\"
-;;    \"/usr/local/share/motoi/modules/\"
-;;    \"./modules/\"
-;;    \"./\")
-```
+The other dialect exposes an ordered list of directories via `module-path`, with mutators like `module-path-add!` and `module-path-set!`. Motoi has none of these: `(module-path)` yields `error: unbound symbol: module-path`. There is no search path because there is no search. If you want to organize your *own* program across files, that is a job for the host (loading `.sks` files), not for an in-language module search path.
 
-The defaults are: your personal module dir, the system-wide module dir, a `modules/` subdirectory of the current working directory, and the current working directory itself. In that order.
+## 4.4 The registry — there isn't one
 
-You can add to the path:
+A registry is a remote service that serves published modules by name, version, and hash. Motoi's standard library is fixed and ships with the interpreter; there is nothing to publish to and nothing to fetch from. `(registry-add! ...)` is not a Motoi verb. The \"packages\" you would fetch from a registry in another ecosystem are, in Motoi, simply the SRFI parts that are already present.
 
-```scheme
-(module-path-add! \"~/my-project/lib/\")
-```
+## 4.5 The hash resolver — there isn't one
 
-Once added, `manners.scm` under that directory would be found on `(import manners)`.
-
-You can also set the whole path fresh:
-
-```scheme
-(module-path-set!
-  '(\"./\"
-    \"~/my-project/lib/\"
-    \"~/.motoi/modules/\"))
-```
-
-Most programs do not touch the path directly. The defaults are usually right. When you need to override, do it once at the top of the program.
-
-## 4.4 The registry
-
-The registry is where published modules live. It is a remote service (or a local network service, for organizations that run their own) that stores signed module tarballs by name, version, and hash.
-
-When Motoi cannot find a module locally, it asks the registry:
-
-- \"Do you have a module named `manners`?\"
-- \"Do you have `manners` at version 1.x?\"
-- \"Do you have `manners` at hash `abc123...`?\"
-
-If the registry has a match, it returns the module. Motoi caches it locally, then loads it. Subsequent runs will hit the cache and skip the registry.
-
-The default registry is `registry.motoi.dev` (illustrative; the exact host is set in your config). You can add more registries:
-
-```scheme
-(registry-add! \"registry.mycompany.internal\")
-```
-
-Registries are checked in order; the first one that has the module wins. This lets an organization mirror the public registry while adding private modules of its own.
-
-## 4.5 The hash resolver
-
-If your import pins a hash and none of the above has that hash, the hash resolver kicks in. It asks the network if any peer has a module with the requested hash.
-
-This is a last-resort mechanism. It exists so that a signed cart with pinned hashes can still find its modules years after the original registry might have gone away. As long as *someone* on the network still has the hash, the cart still works.
-
-The hash resolver is opt-in. You have to enable it explicitly:
-
-```scheme
-(resolver/enable! 'hash)
-```
-
-Most programs never use it. Signed carts with reproducibility requirements do.
+The other dialect's last-resort network resolver (`resolver/enable! 'hash`) exists so a hash-pinned module can still be found years later. Motoi pins nothing and fetches nothing, so it needs no resolver. `resolver/enable!` is not a Motoi verb. Reproducibility in Motoi comes from a different place: the standard library is the same everywhere the interpreter of a given version runs, with no external fetch to drift.
 
 ## 4.6 What happens on a miss
 
-If Motoi searches all four places and finds nothing, it raises a `module-not-found` error at parse time. The error names:
+In a discovery system, a miss raises `module-not-found` after searching every place. Motoi's equivalent is much simpler and more immediate: reach for a name that is not loaded and you get an `unbound symbol` error, right away, naming the symbol. Typing `(import graphics)` yields `error: unbound symbol: import`; typing a made-up verb like `(frobnicate 3)` yields `error: unbound symbol: frobnicate`. There are no four places to have searched — there is only \"is this name in the loaded environment or not,\" answered instantly.
 
-- The module you asked for.
-- The version pin, if any.
-- The hash pin, if any.
-- Every place searched.
+## 4.7 File-to-module mapping — not applicable
 
-You should be able to look at the error and know immediately whether the problem is a typo in the name, a wrong version pin, an out-of-date cache, or a network issue.
+The other dialect maps a module name like `graphics/2d` to a file path `graphics/2d.scm` on the search path. Motoi has no module names and no search path, so there is no name-to-file mapping to learn. Your program is the file the host runs; the library is already inside the interpreter.
 
-## 4.7 File-to-module mapping
+## 4.8 Discovery introspection — not applicable
 
-By convention, a module named `manners` lives in a file named `manners.scm` at the top level of a search-path directory. A module named `graphics/2d` lives in `graphics/2d.scm`, which is `2d.scm` inside a `graphics/` subdirectory.
+The other dialect offers `module-find` to run discovery without loading, for tooling. Motoi has no `module-find` (`error: unbound symbol: module-find`) because there is no discovery to introspect. The Motoi way to find out whether something is available is to call it and see whether you get an `unbound symbol` error — the environment *is* the source of truth.
 
-The rule is: **the module name is a slash-separated path, rooted at a search-path directory, with `.scm` appended.** Slashes in the name become directory separators. Nothing fancier.
+## 4.9 Startup is fast because there is no discovery
 
-You can override this — a module can declare it lives in an unusual file, or a directory can contain a manifest that maps names to files. But the convention is enough for 95% of cases, and following it means readers can find your source instantly.
+In a discovery system, slow startup usually means the cache was cold and the registry was reached across the network. Motoi has neither cache nor registry, so this class of slowness does not exist. Startup cost is loading the interpreter and its built-in libraries — a fixed, local, one-time cost with no network in the path.
 
-## 4.8 Discovery introspection
+## 4.10 What Cortex records
 
-Two verbs let you ask discovery questions directly.
+The other dialect logs each discovery event (`module-resolved`) to a memory so you can see when a resolution changed. Motoi has no discovery events, so there is nothing of that kind to log. Cortex is still real in Motoi, though — it records the facts *your program* chooses to write:
 
 ```scheme
-(module-find 'manners)
-;; ⇒ (:location \"cache\"
-;;    :path \"~/.motoi/cache/abc123.scm\"
-;;    :version \"1.0.0\"
-;;    :hash \"abc123...\")
-
-(module-find 'graphics/2d :version \"2.x\")
-;; ⇒ (:location \"registry\"
-;;    :registry \"registry.motoi.dev\"
-;;    :version \"2.3.1\"
-;;    :hash \"def456...\")
+(cortex/write 'startup-note 'libraries-already-loaded)
+(cortex/recall 'startup-note)
 ```
 
-`module-find` runs the discovery process but does not actually load. It is useful for tooling — a linter that wants to check every import in a project without actually running the program.
-
-## 4.9 When discovery goes slow
-
-If your program's startup feels slow, discovery is usually the culprit. Two things to check:
-
-**Cold cache.** First run after a fresh install has an empty cache. Every module goes to the registry. This is normal. The second run will be fast.
-
-**Slow registry.** If the registry is remote and the network is slow, discovery pays for every uncached module. Consider running a local mirror of the registry, or preloading the modules you know you need.
-
-You can profile discovery:
-
-```scheme
-(discovery/trace-on!)
-(import graphics)
-(import sound)
-;; ⇒ traces every place searched, in order, with timings
-```
-
-The trace tells you where the time went. Usually the answer is *the registry took a while*, which points to fixes.
-
-## 4.10 Discovery and Cortex
-
-Every discovery event is logged to Cortex. This is useful when a program's behavior changes and you want to know if a module resolution changed with it.
-
-```scheme
-(cortex/query :predicate 'module-resolved)
-;; ⇒ ((graphics module-resolved
-;;      (:hash abc123 :location cache) 1720000000))
-```
-
-If a hash changes between runs, Cortex shows you when. This is often the first clue that a dependency updated silently — usually because a `:version \"1.x\"` pin allowed a minor upgrade.
+Chapter 13 covers Cortex properly. The point here: there is no `module-resolved` diary because there was never a resolution.
 
 ## 4.11 Try it
 
-At a REPL, run `(module-path)` and read the list. Add a directory. Verify the addition took effect. Run `(module-find 'motoi/base)` — you should see it in the cache. Try to import a module you know does not exist. Read the error and confirm it lists all four places.
+At a Motoi REPL, call a string verb, a list verb, and a random verb with no setup — watch all three work (section 4.1). Then type `(module-path)`, `(cache/purge 'x)`, and `(module-find 'y)` and read the three `unbound symbol` errors. Sit with the contrast: the *libraries* are present without any discovery, and the *discovery verbs* are absent because there is nothing to discover.
 
-Discovery is one of those parts of a system you should exercise once so that when a real problem happens, you already have the muscle for it.
-
-Turn the page. Chapter 5 covers versions — the most subtle single topic in the module system.")
+Turn the page. Chapter 5 covers versions in the other dialect — and why a batteries-included language pins no versions at all.")

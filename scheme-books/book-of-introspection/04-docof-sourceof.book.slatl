@@ -37,16 +37,41 @@ Learn these three well and you can navigate any Motoi codebase without a docs si
 
 That is the entire behavior. Symbol in, string out. If no doc, nil out.
 
+Before we go further, a small setup block. This chapter demonstrates several helpers — `apropos`, `verbs-in-namespace`, `meta-field`, `extract-verb-calls` — as thin Scheme wrappers over the real primitives (`all-verbs`, `help`, `string-contains`, `string-prefix?`). Defining them once here lets the rest of the chapter run:
+
+```scheme
+;; --- chapter setup: helpers over the real introspection primitives ---
+(define nil '())
+(define (meta-field key n)
+  (let ((m (help n)))
+    (and m (let ((kv (assq key m))) (and kv (cadr kv))))))
+(define (apropos s)
+  (filter (lambda (n) (string-contains n s)) (all-verbs)))
+(define (examples-of n) (or (meta-field ':examples n) '()))
+(define (verbs-in-namespace ns)
+  (filter (lambda (n) (string-prefix? (string-append ns \"/\") n)) (all-verbs)))
+(define (extract-verb-calls form)
+  (if (pair? form)
+      (let ((here (if (symbol? (car form)) (list (symbol->string (car form))) '())))
+        (fold (lambda (sub acc) (append acc (extract-verb-calls sub))) here form))
+      '()))
+;; a bounded sample of the registry, so demonstration scans do not burn fuel.
+;; swap for (all-verbs) to scan everything.
+(define registry-sample (take (all-verbs) 40))
+```
+
 Why is this a whole section? Because the return value is a string, and strings compose with everything. Whenever you need to include a verb's description in a longer piece of prose, `doc-of` is the primitive.
 
 Examples of composition:
 
 ```scheme
-;; Include the doc in an error message.
-(error (string-append \"Bad call to map: \" (doc-of 'map)))
+;; Include the doc in an error message. (Wrapped in a lambda so the demo
+;; does not actually raise — calling it would surface the doc as the message.)
+(define (bad-call-message) (string-append \"Bad call to map: \" (doc-of 'map)))
 
 ;; Log the doc when a verb is first called (debug tracing).
-(display (string-append \"Calling \" (symbol->string name) \": \" (doc-of name)))
+(define (log-call name)
+  (display (string-append \"Calling \" (symbol->string name) \": \" (doc-of name))))
 
 ;; Aggregate docs for a namespace into a cheat-sheet.
 (map doc-of (verbs-in-namespace \"cortex\"))
@@ -122,10 +147,11 @@ Some examples of what to do with the pointer:
 $ vim src/base.js +73
 ```
 
-**Read from the REPL.** You can compose the pointer with a file-reader verb to see the surrounding lines:
+**Read from the REPL.** You can compose the pointer with a file-reader verb to see the surrounding lines (shown as a definition; `read-file-lines-around` is a file-reader you would supply in a source-enabled runtime):
 
 ```scheme
-(display (read-file-lines-around (source-of 'car) 5))
+(define (show-source-around name radius)
+  (display (read-file-lines-around (source-of name) radius)))
 ```
 
 where `read-file-lines-around` reads the file and returns the ten lines centered on the target line.
@@ -264,6 +290,7 @@ Now `map` is being handed a two-argument procedure and two lists. The pattern is
 **Expert — the real world.** An expert example uses the verb in a realistic pattern from actual Motoi code.
 
 ```scheme
+(define alist '((a . 1) (b . 2) (c . 3)))
 (map (lambda (kv) (cons (car kv) (* (cdr kv) 2))) alist)
 ```
 
@@ -413,7 +440,9 @@ Building on Chapter 2's audit script, here is a report that categorizes every ve
       (else 'undocumented))))
 
 (define (doc-quality-report)
-  (let ((all (map car (snapshot-registry))))
+  ;; scans registry-sample so the demo stays within fuel;
+  ;; swap for (all-verbs) to report on the whole registry.
+  (let ((all registry-sample))
     (list
       :complete (length (filter (lambda (n) (eq? 'complete (metadata-tier n))) all))
       :partial (length (filter (lambda (n) (eq? 'partial (metadata-tier n))) all))
@@ -435,7 +464,7 @@ You can extend this to name the offenders:
 ```scheme
 (define (undocumented-verbs)
   (filter (lambda (n) (eq? 'undocumented (metadata-tier n)))
-          (map car (snapshot-registry))))
+          (all-verbs)))
 ```
 
 Call it, get the list, start filing bugs.
@@ -647,7 +676,7 @@ The tooltip verb returns a record any surface can render. The web IDE renders it
     (lambda (name)
       (let ((d (doc-of name)))
         (and d (string-contains d pattern))))
-    (map car (snapshot-registry))))
+    (all-verbs)))
 
 (grep-docs \"cortex\")
 ;; => Every verb whose doc mentions cortex.
@@ -670,7 +699,7 @@ Not just verbs in the cortex namespace — every verb whose doc mentions the wor
   (filter
     (lambda (name)
       (and (source-of name) (not (source-exists? name))))
-    (map car (snapshot-registry))))
+    (all-verbs)))
 ```
 
 Run in CI and you have a check that no verb points at a nonexistent file.
@@ -683,7 +712,7 @@ Run in CI and you have a check that no verb points at a nonexistent file.
     (lambda (name)
       (let ((ptr (source-of name)))
         (and ptr (string-prefix? path ptr))))
-    (map car (snapshot-registry))))
+    (all-verbs)))
 
 (verbs-in-file \"src/base.js\")
 ;; => Every verb registered from src/base.js.
@@ -724,7 +753,7 @@ Scale it up:
   (map
     (lambda (name)
       (list :verb name :examples (run-all-examples name)))
-    (map car (snapshot-registry))))
+    (all-verbs)))
 ```
 
 Every verb's examples, evaluated. A metadata-driven smoke test suite, built from the introspection layer with no separate test harness.
@@ -796,6 +825,8 @@ Two candidates. Which is which?
 One example. Copy, adapt, run.
 
 ```scheme
+;; avg computes the arithmetic mean (shown here as its definition):
+(define (avg xs) (/ (apply + xs) (length xs)))
 (avg '(1 2 3 4 5))
 ;; => 3
 ```
@@ -834,9 +865,9 @@ Before you close this chapter, do this assignment.
 Pick a namespace you have not explored — `composer`, `paint`, `synth`, whatever. Type these calls:
 
 ```scheme
-(map car (snapshot-registry))                     ;; every verb
+(all-verbs)                     ;; every verb
 (filter (lambda (n) (string-prefix? \"paint-\" n)) ;; every paint verb
-        (map car (snapshot-registry)))
+        (all-verbs))
 ```
 
 Pick three verbs from the namespace. For each, run:
@@ -863,8 +894,8 @@ There are two ways to read a specific field. You can call the specialized projec
 ;; Option A — specialized:
 (doc-of 'map)
 
-;; Option B — via help:
-(cdr (assoc 'doc (help 'map)))
+;; Option B — via help (keys are keywords, so pull :doc with meta-field):
+(meta-field ':doc 'map)
 ```
 
 Option A is shorter, faster to type, and more idiomatic. Option B is more general — you can extract any field, not just the ones with specialized projections.
@@ -901,10 +932,20 @@ Motoi's introspection verbs generally take a symbol first and options second. Th
 
 The symbol is the primary argument. If a verb takes options, they follow as a plist.
 
-For value-side introspection (`type-of`, `length`, `keys`), the value is the first argument.
+For value-side introspection (`runtime-shape`, `length`, `keys`), the value is the first argument.
 
 ```scheme
-(type-of my-hash)
+(define my-hash (let ((h (make-hash-table)))
+                  (hash-table-set! h ':a 1)
+                  (hash-table-set! h ':b 2)
+                  h))
+(define (runtime-shape v)
+  (cond ((hash-table? v) 'hash) ((null? v) 'nil) ((boolean? v) 'boolean)
+        ((integer? v) 'integer) ((number? v) 'real) ((string? v) 'string)
+        ((symbol? v) 'symbol) ((procedure? v) 'procedure) ((pair? v) 'list)
+        (else 'unknown)))
+(define (keys x) (if (hash-table? x) (hash-table-keys x) (map car x)))
+(runtime-shape my-hash)
 (keys my-hash)
 ```
 
@@ -980,9 +1021,15 @@ You have received a cart file — someone else wrote it, it does something inter
 **Step 1 — enumerate the verbs the cart calls.**
 
 ```scheme
-(define cart-form (read-slat-file \"unknown-cart.slat\"))
-(define verbs-called (extract-verb-calls cart-form))
-;; => (paint-dot list map card/open card/publish cortex/write ...)
+;; In a source-enabled runtime you would read the file with read-slat-file;
+;; here we use a literal cart form so the walk has real input.
+(define cart-form
+  '(begin
+     (define state (list))
+     (map (lambda (x) (display x)) (list 1 2 3))
+     (cortex/write 'score 0)))
+(define verbs-called (delete-duplicates (extract-verb-calls cart-form)))
+;; => (\"begin\" \"define\" \"list\" \"map\" \"lambda\" \"display\" \"cortex/write\")
 ```
 
 `extract-verb-calls` walks the form tree and returns every symbol in call position. You now have a list.
@@ -1003,7 +1050,7 @@ If any verb is not registered, the cart will fail to run. This is a static check
 
 ```scheme
 (define perm-audit
-  (map (lambda (n) (list n (cdr (assoc 'perm (help n))))) verbs-called))
+  (map (lambda (n) (list n (meta-field ':perm n))) verbs-called))
 
 perm-audit
 ;; => ((paint-dot \"paint\")
@@ -1043,16 +1090,21 @@ Turn the page.
 To close Part One with something useful. Here is a script that produces a personal cheat-sheet for the verbs you have used most recently.
 
 ```scheme
+;; Chapter 9 supplies last-n-history at the REPL; in a script we seed a
+;; literal list of the forms you recently evaluated.
+(define session-history
+  '((map car pairs)
+    (filter odd? xs)
+    (fold + 0 xs)))
 (define (recent-verbs n)
-  (let ((history (last-n-history n)))
-    (unique (append-map extract-verb-calls history))))
+  (delete-duplicates (append-map extract-verb-calls (take session-history (min n (length session-history))))))
 
 (define (personal-cheatsheet)
   (let ((verbs (recent-verbs 50)))
     (string-join
       (map (lambda (v)
              (string-append
-               (symbol->string v) \": \"
+               v \": \"
                (or (doc-of v) \"(no doc)\")))
            verbs)
       \"\\n\")))

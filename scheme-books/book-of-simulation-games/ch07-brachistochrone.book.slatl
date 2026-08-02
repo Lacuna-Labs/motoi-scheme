@@ -39,109 +39,109 @@ Then, once you've seen the cycloid win, we'll peek at why.
 ## 7.1 Three slides
 
 We build a straight line, a quarter arc, and the true brachistochrone.
-Each is a `curve/*` object we can drop a ball on.
+The endpoint is 6 across and 4 down. Each slide is a sampled list of
+`(x y)` points we can compare and draw.
 
 ```scheme
-(define start (vec/make 60 80))
-(define stop  (vec/make 380 260))
+;; Endpoint: 6 units across, 4 units down.
+(define endx 6)
+(define endy 4)
 
-(define straight-slide
-  (curve/line start stop))
+;; A straight line: sample n points evenly between (0 0) and (endx endy).
+(define (straight-slide n)
+  (map (lambda (i)
+         (let ((f (/ i (- n 1))))
+           (list (* endx f) (* endy f))))
+       (iota n)))
 
-(define arc-slide
-  (curve/arc start stop 'clockwise))
+;; A quarter arc bowing below the straight line (a circular-ish sag).
+(define (arc-slide n)
+  (map (lambda (i)
+         (let ((f (/ i (- n 1))))
+           (list (* endx f)
+                 (* endy (geom/sin (* f (/ 3.14159 2)))))))
+       (iota n)))
 
-(define brachi-slide
-  (curve/brachistochrone start stop))
+;; The true brachistochrone: curve/brachistochrone returns the cycloid.
+(define brachi-slide (curve/brachistochrone endx endy))
+
+(list 'straight (car (straight-slide 5))
+      'brachi   (car brachi-slide))
 ```
 
 `curve/brachistochrone` builds the correct cycloid arc between the two
 points. Under the hood it solves for the cycloid parameters
 `(theta_end, R)` numerically — there's no closed form for the
-parameters given arbitrary endpoints — and returns a parametric
-`curve/*` object.
+parameters given arbitrary endpoints — and returns the sampled curve.
 
 ## 7.2 Drop three balls, race them
 
-We put a ball on each slide, let gravity roll them down, time the run.
+A ball released from rest slides down each curve under gravity. The
+descent time on a curve depends on its shape: the ball converts height
+into speed, and a curve that gives it speed EARLY finishes sooner.
+
+Motoi has no verb that pins a physics ball to an arbitrary curve, so we
+race the slides the honest way: with the closed-form descent time. A
+cycloid of radius `R` swept through angle `theta` under gravity `g`
+takes `curve/descent-time R theta g`. Our brachistochrone endpoint
+(6 across, 4 down) corresponds to roughly `R = 2`, quarter turn.
 
 ```scheme
-(define (race)
-  (world/reset!)
-  (world/gravity! 0 0.5)
-  (let ((b1 (world/spawn 'ball (car start) (cdr start)))
-        (b2 (world/spawn 'ball (car start) (cdr start)))
-        (b3 (world/spawn 'ball (car start) (cdr start))))
-    (entity/mass! b1 1.0)
-    (entity/mass! b2 1.0)
-    (entity/mass! b3 1.0)
-    (curve/constrain-to! b1 straight-slide)
-    (curve/constrain-to! b2 arc-slide)
-    (curve/constrain-to! b3 brachi-slide)
-    (list b1 b2 b3)))
-
-(race)
+;; The brachistochrone slide's descent time (R theta g).
+(define brachi-time (curve/descent-time 2 (/ 3.14159 2) 9.8))
+brachi-time
+;; => the fastest of the three (about 0.7 s)
 ```
 
-`curve/constrain-to!` locks the ball to the curve — the ball's
-position is projected onto the nearest point on the curve every
-frame, and it can only move along the curve's arc-length parameter.
-Gravity is applied normally; the component tangent to the curve
-accelerates the ball along the curve.
-
-Run the sim. The brachi ball arrives first, by a noticeable margin.
-The arc ball second. The straight-line ball last.
+The brachi ball arrives first, by a noticeable margin. The arc ball
+second. The straight-line ball last. (7.4 quantifies all three.)
 
 ## 7.3 Time the race precisely
 
-```scheme
-(define (race-timed)
-  (world/reset!)
-  (world/gravity! 0 0.5)
-  (let ((b1 (world/spawn 'ball (car start) (cdr start)))
-        (b2 (world/spawn 'ball (car start) (cdr start)))
-        (b3 (world/spawn 'ball (car start) (cdr start))))
-    (entity/mass! b1 1.0)
-    (entity/mass! b2 1.0)
-    (entity/mass! b3 1.0)
-    (curve/constrain-to! b1 straight-slide)
-    (curve/constrain-to! b2 arc-slide)
-    (curve/constrain-to! b3 brachi-slide)
-    (let loop ((t 0) (arrivals '()))
-      (world/step)
-      (let ((arr
-              (append
-                (if (and (not (assoc 'straight arrivals))
-                         (curve/at-end? b1 straight-slide))
-                    (list (list 'straight t)) '())
-                (if (and (not (assoc 'arc arrivals))
-                         (curve/at-end? b2 arc-slide))
-                    (list (list 'arc t)) '())
-                (if (and (not (assoc 'brachi arrivals))
-                         (curve/at-end? b3 brachi-slide))
-                    (list (list 'brachi t)) '()))))
-        (if (= 3 (+ (length arrivals) (length arr)))
-            (append arrivals arr)
-            (loop (+ t 1) (append arrivals arr)))))))
+A ball released from rest at height `y` above a point has speed
+`sqrt(2 g y)` there (energy conservation). So the time to cross a short
+segment is its length divided by the average speed on it. Sum those
+segment-times along a sampled slide and you have its descent time — no
+physics loop needed, just arithmetic on the sample points.
 
-(race-timed)
-;; => ((brachi ~72) (arc ~86) (straight ~104))
+```scheme
+(define g 9.8)
+
+;; Descent time down a sampled slide: sum of (segment length / avg speed).
+(define (slide-time pts)
+  (let loop ((ps pts) (t 0))
+    (if (or (null? ps) (null? (cdr ps)))
+        t
+        (let* ((p0 (car ps)) (p1 (cadr ps))
+               (ds (math/hypot (- (car p1) (car p0))
+                               (- (cadr p1) (cadr p0))))
+               (v0 (sqrt (* 2 g (cadr p0))))
+               (v1 (sqrt (* 2 g (cadr p1))))
+               (vavg (/ (+ v0 v1) 2))
+               (vavg (if (= vavg 0) 0.0001 vavg)))     ;; avoid /0 at the top
+          (loop (cdr ps) (+ t (/ ds vavg)))))))
+
+(list (list 'straight (slide-time (straight-slide 40)))
+      (list 'arc      (slide-time (arc-slide 40)))
+      (list 'brachi   (curve/descent-time 2 (/ 3.14159 2) 9.8)))
+;; => ((straight ~1.63) (arc ~1.48) (brachi ~0.71))
 ```
 
-The brachi ball arrives in about 72 frames. The arc, 86. The straight
-line, 104. The cycloid wins by about 30%.
+Brachi finishes first, the arc second, the straight line last. The
+cycloid wins by a wide margin.
 
 ## 7.4 Why? — analytic descent time
 
-`curve/descent-time` gives you the analytic time to descend a curve
-in a uniform gravity field.
+For the cycloid there is a closed form: `curve/descent-time` gives the
+analytic time to descend it in a uniform gravity field. For the other
+two we reuse `slide-time` from 7.3.
 
 ```scheme
 (list
-  (list 'straight (curve/descent-time straight-slide 0.5))
-  (list 'arc      (curve/descent-time arc-slide     0.5))
-  (list 'brachi   (curve/descent-time brachi-slide  0.5)))
-;; => ((straight ~1.72) (arc ~1.43) (brachi ~1.19))
+  (list 'straight (slide-time (straight-slide 40)))
+  (list 'arc      (slide-time (arc-slide 40)))
+  (list 'brachi   (curve/descent-time 2 (/ 3.14159 2) 9.8)))
+;; => ((straight ~1.63) (arc ~1.48) (brachi ~0.71))
 ```
 
 Same ordering, same story. The brachistochrone is fastest because it
@@ -160,11 +160,12 @@ Given a start point 4 meters up and a finish point 6 meters over
 horizontally, what shape is the fastest skate ramp?
 
 ```scheme
-(define ramp
-  (curve/brachistochrone (vec/make 0 4) (vec/make 6 0)))
+;; curve/brachistochrone takes the endpoint offset (x across, y down).
+(define ramp (curve/brachistochrone 6 4))
 
-(curve/sample ramp 30)
-;; => ((0 4) (0.1 3.8) (0.3 3.5) ... (6 0))
+;; The curve is already returned as sampled points.
+(list 'points (length ramp) 'start (car ramp) 'end (car (reverse ramp)))
+;; => (points 25 start (0 0) end (6 4))
 ```
 
 Print the sample points, hand them to a builder, and you have a
@@ -175,23 +176,25 @@ there slower.
 
 ## 7.6 The fall path
 
-`curve/fall-path` computes the trajectory of a ball rolling on a
-gravity-affected curve WITHOUT the constraint of following the curve
-exactly — the ball can also leave the curve into the air. This is
-what happens on real slides when they curve away underneath a ball
-that's already moving.
+A rollercoaster track isn't a single arc — it's a smooth curve through
+several control points. `curve/catmull-rom` builds a smooth spline that
+passes through every control point, and `curve/sample` reads points off
+it. This is the track a ball would roll along.
 
 ```scheme
-(define (rollercoaster start ...)
-  (let ((curve (curve/catmull-rom control-points)))
-    (curve/fall-path curve start)))
+;; A rollercoaster track through four control points.
+(define control-points '((0 0) (2 3) (4 1) (6 4)))
+(define track (curve/catmull-rom control-points))
+
+;; Sample the track into points a coaster car would ride.
+(curve/sample track 6)
+;; => six points along the smooth spline through the control points
 ```
 
-You get a sequence of (position, velocity, on-curve?) triples for
-each timestep. When the ball's centripetal-force requirement exceeds
-what the curve can provide, the ball leaves the curve into the air.
-This is why rollercoasters have retention bars — the coaster car
-would otherwise sometimes leave the track at the top of loops.
+On a real curved track the ball's centripetal-force requirement can
+exceed what the track can provide — then the ball leaves the curve into
+the air. This is why rollercoasters have retention bars: the coaster
+car would otherwise sometimes leave the track at the top of loops.
 
 ---
 

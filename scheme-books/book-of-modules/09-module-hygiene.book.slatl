@@ -11,110 +11,98 @@
     (:authored-at "2026-07-17"
      :authored-by "book-completion-orchestrator")
   :prose
-"# Chapter 9 — Module hygiene
+"# Chapter 9 — Hygiene, the Motoi way: lexical scope
 
-Hygiene, in the module-system sense, means: **modules do not read each other's private state**. Every module has walls, and the walls hold.
-
-This chapter covers why hygiene matters, how Motoi enforces it, and the small handful of cases where hygiene is deliberately relaxed.
+Hygiene, in the module sense, means one thing: **code does not read another piece of code's private state**. Every private thing has walls, and the walls hold. The other dialect enforces this at the boundary of `module`/`export`. Motoi enforces the very same property with something more fundamental and airtight: **lexical scope**. This chapter teaches hygiene in Motoi's own terms, and marks the other dialect's introspection verbs (which Motoi lacks) as a boundary.
 
 ## 9.1 What hygiene protects
 
-The point of a module is that its internals are its business. When you refactor a module — rename a helper, restructure a table, add caching — no other module should notice, as long as the exports still behave the same.
+The point of a private helper is that it is *your* business. When you refactor — rename a helper, restructure a table, add caching — no other code should notice, as long as the public surface still behaves the same.
 
-Hygiene is what makes this possible. If any module could reach into any other module and grab a private variable, the internals would not be private in any meaningful sense. Refactoring would break other people. Modules would become tightly coupled by accident.
+Hygiene is what makes this possible. If any code could reach into any other code and grab a private variable, \"private\" would mean nothing. Refactoring would break people at a distance. Everything would become coupled by accident.
 
-## 9.2 The hygiene rules
+## 9.2 The hygiene rules, in Motoi
 
-Motoi enforces three rules.
+Motoi gives you these guarantees through scope:
 
-**Rule 1: A module cannot see another module's unexported names.** If `manners` defines a helper `heads-or-tails` and does not export it, no `import manners` form can bring `heads-or-tails` into scope. It is invisible from outside.
+**Rule 1: You cannot see a name that lives in another closure's private interior.** If `flip-run` hides a helper `heads-or-tails` inside itself, nothing outside can name `heads-or-tails`. It is invisible.
 
-**Rule 2: A module cannot mutate another module's variables directly.** Even for exported names, if a module exposes a variable as `read-only`, importers can read but not write. Mutation is the exception, not the rule.
+**Rule 2: You cannot mutate a variable you have no reference to.** A variable sealed in a closure (section 3.7's counter) can only be touched through the verbs the closure hands out. There is no back door.
 
-**Rule 3: A module cannot redefine another module's verbs.** If you import `greet` from `manners`, you cannot redefine `greet` locally to change what `manners` does. Your local `greet` shadows the import in your program; it does not modify the source.
+**Rule 3: Redefining a name locally does not change the original.** If you `(define greet ...)` your own `greet`, you shadow the name in your scope; you do not alter anyone else's definition.
 
-These three rules together create the hygiene property. Each module is a black box to every other module.
+Together these make each closure a black box to every other. Here is Rule 1, proven:
+
+```scheme
+(define (flip-run count)
+  (define (heads-or-tails n) (if (< n 0.5) 'heads 'tails))  ; PRIVATE
+  (heads-or-tails (/ count 100.0)))
+
+(list (flip-run 20)                            ; public verb works
+      (guard (e (#t 'cannot-reach))            ; private helper is invisible
+        (heads-or-tails 0.1)))
+;; ⇒ (heads cannot-reach)
+```
+
+`flip-run` works; reaching for its private `heads-or-tails` from outside errors, and we catch that error to prove it is genuinely unreachable.
 
 ## 9.3 How Motoi enforces hygiene
 
-At parse time, when Motoi sees an import form, it checks the requested names against the module's export list. Names not in the export list produce a parse error before any code runs.
-
-At runtime, the module's private variables live in a lexical scope that has no name in the outside world. Even if you knew the name of a private variable, you would have no reference to reach it. There is no `get-private-var` verb; there is no way to escape the scope.
-
-The one exception — introspection — is covered in section 9.6.
+At runtime, a private variable lives in a lexical scope that has no name in the outside world. Even if you knew the name, you would have no reference to reach it. There is no `get-private-var` verb; there is no way to escape the scope. This is stronger than an honor-system export list — it is a property of how the interpreter looks names up.
 
 ## 9.4 Why hygiene matters more than it looks like it should
 
-If you have never worked in a language without hygiene, you might not appreciate what it buys you. A short list:
+If you have never worked in a language without hygiene, you might not appreciate what it buys:
 
-- **Refactoring is safe.** You can restructure internals freely, confident that no other module has grown a dependency on them.
-- **Understanding is local.** To understand what a module does, you read its exports and its body. You do not have to grep the whole codebase for who else might be manipulating its internals.
-- **Debugging is bounded.** When something goes wrong inside `manners`, the fault has to be inside `manners` or in how someone called an exported verb. It cannot be some other module poking at `manners`' private state.
-- **Testing is meaningful.** You test the exported surface; you know that is the entire contract. There is no hidden back door to test.
+- **Refactoring is safe.** Restructure a closure's interior freely; nothing outside grew a dependency on it.
+- **Understanding is local.** To understand a verb, read it and its helpers. You do not grep the whole codebase for who else touches its internals.
+- **Debugging is bounded.** When something goes wrong inside a verb, the fault is inside that verb or in how a caller used its public surface. No distant code was poking its private state.
+- **Testing is meaningful.** You test the public surface, knowing that is the entire contract. There is no hidden back door.
 
-All four of these break down without hygiene. Programs get harder to change, harder to understand, harder to debug, harder to test.
+All four break down without hygiene.
 
 ## 9.5 Exceptions and escapes
 
-Hygiene is strong, but Motoi is not a prison. There are two deliberate ways to reach into a module.
+Motoi is not a prison, but its escapes are narrow. There is no routine way to read a closure's private state from outside — that is the whole point. In a REPL you debug by editing your own code and re-running, not by reaching past scope. There is no in-language \"peek at private state\" back door in normal execution.
 
-**Introspection verbs.** `module-verbs`, `module-hash`, `module-source` — these read metadata *about* a module without actually breaking hygiene. They tell you the shape, not the state.
+## 9.6 There is no module-introspection surface
 
-**Debug mode.** In a debug session, you can peek at any module's private state. This is for humans debugging humans. Debug mode is off in production; a running program cannot access private state.
+The other dialect offers verbs that read metadata *about* a module — `module-verbs`, `module-hash`, `module-version`, `module-source`, `module-imports`, `module-signature`. **Motoi has none of these**; each yields `error: unbound symbol: ...`. There are no module objects to introspect. The Motoi way to know what a piece of code offers is to read its source and its documentation, and to call its verbs — an `unbound symbol` error tells you when a name is not there.
 
-Neither of these is a routine escape. Both are marked as extraordinary. If you find yourself using them in normal code, you have probably reached for the wrong tool.
-
-## 9.6 The introspection surface
-
-```scheme
-(module-verbs 'manners)            ;; list of exported names
-(module-hash 'manners)             ;; content hash
-(module-version 'manners)          ;; declared version
-(module-source 'manners)           ;; source text (for debugging)
-(module-imports 'manners)          ;; what manners itself imports
-(module-signature 'manners)        ;; author info
-```
-
-None of these violate hygiene. They tell you *about* a module. They do not let you *modify* it.
-
-Tools built on these verbs — dependency analyzers, doc generators, security auditors — are the good use case. A tool that reads `module-imports` for every module in a repo can produce a full dependency graph, which is useful in its own right.
+That is a genuine trade: the other dialect's tooling (dependency analyzers, doc generators built on `module-imports`) has no in-language basis in Motoi, because Motoi has no module graph to analyze. Its dependency story is simpler: everything depends on the one standard library, which is always present.
 
 ## 9.7 Hygiene and macros
 
-Macro hygiene is a related but distinct topic. When a module exports a macro, and the macro references names, hygiene guarantees the names are looked up in the *macro's* scope, not the caller's.
+There is a second, related meaning of \"hygiene\": *macro* hygiene. When a macro references a name, hygienic macro expansion looks that name up in the *macro's* scope, not the caller's. So a macro that expands to use `if` gets the real `if`, even if the caller rebound `if` locally. Motoi's macros are hygienic in this sense. The details fill their own chapter elsewhere; here the point is that hygiene covers the whole compilation environment, not just variables.
 
-This means a macro like `(when cond body)` can safely expand to `(if cond body (void))` without worrying that the caller has defined `if` to mean something else. The `if` in the expansion is the `if` from the macro's environment.
+## 9.8 Scoped mutation — a real Motoi pattern
 
-Motoi's macro hygiene is R6RS-flavored. The details fill their own chapter of another book; here the point is only that hygiene extends beyond just variable bindings — it covers the whole compilation environment.
-
-## 9.8 When hygiene bites
-
-There is one situation where hygiene feels like it is fighting you: dynamic parameters.
-
-If module A defines a dynamic parameter — say, `(define current-color (make-parameter 'red))` — and module B wants to override it temporarily, module B has to call *A*'s `parameterize` verb, not its own. This is right, but it can be surprising.
-
-The pattern:
+Say you have a dynamic value — a current color — and you want to override it just for the duration of some work, then restore it. You seal the value in a closure and hand out a *scoped-override verb* that saves, sets, runs, and restores — so callers borrow the override for a scope instead of seizing the variable:
 
 ```scheme
-;; module A
-(module colors
-  (export current-color with-color)
-  (define current-color (make-parameter 'red))
-  (define-syntax with-color
-    (syntax-rules ()
-      ((_ c body ...)
-       (parameterize ((current-color c)) body ...)))))
+(define with-color #f)
+(define get-color #f)
 
-;; module B
-(import colors :as c)
-(c/with-color 'blue
-  (do-something-with-color))
+(let ((color 'red))
+  (set! get-color (lambda () color))
+  (set! with-color
+    (lambda (c thunk)
+      (let ((saved color))          ; save
+        (set! color c)              ; set for the scope
+        (let ((result (thunk)))
+          (set! color saved)        ; restore
+          result)))))
+
+(list (get-color)                                 ; default
+      (with-color 'blue (lambda () (get-color)))  ; overridden inside
+      (get-color))                                ; restored after
+;; ⇒ (red blue red)
 ```
 
-The `with-color` helper is exported so callers do not have to reach into `colors` to parameterize. This is a general pattern: if a module has dynamic state, it should offer a *scoped-mutation verb* that hides the machinery.
+`with-color` hides the save/set/restore machinery behind one clean verb, and `color` itself is sealed in the `let` — no caller can reach it directly. That is the pattern: if you have dynamic state, hand out a scoped-mutation verb rather than exposing the variable. Hygiene stays intact — the override lasts exactly one scope, then the original value returns.
 
 ## 9.9 Try it
 
-Write a module with one exported verb and one private helper. Try to import and use the private helper from another program. Verify Motoi refuses. Add the helper to the export list. Verify it now works. Remove it again. Notice how the parse error tells you exactly which name is not exported.
+Write a public verb with a private helper nested inside it. Confirm the public verb works and that naming the helper from outside errors (wrap the outside call in `guard` as in section 9.2 to prove it). Then build `with-color` from section 9.8 and confirm the override is visible only inside the scope. That is hygiene in Motoi: enforced by lexical scope, no `module`/`export` required.
 
-Chapter 10 covers lazy vs eager loading — when the module actually gets its body run. Turn the page.")
+Chapter 10 covers lazy vs eager loading in the other dialect — and why, in a batteries-included language, everything is simply already loaded. Turn the page.")

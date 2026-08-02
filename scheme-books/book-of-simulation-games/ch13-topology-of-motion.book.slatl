@@ -47,6 +47,12 @@ Every N frames, sample the agent's position. Connect consecutive
 samples. Now you have a graph.
 
 ```scheme
+;; A moving agent whose trail we will sample.
+(world/reset!)
+(world/gravity! 0 0.2)
+(define runner (world/spawn 'runner 240 40))
+(entity/set-vel! runner 2 0)
+
 (define (agent-graph agent T sample-every)
   (let loop ((n 0) (prev #f) (edges '()))
     (if (>= n T)
@@ -59,8 +65,8 @@ samples. Now you have a graph.
                       (if prev (cons (list prev now) edges) edges)))
               (loop (+ n 1) prev edges))))))
 
-(define g (agent-graph runner 600 5))
-(topo/components g)
+(define g (agent-graph runner 200 5))
+(length (topo/components g))    ;; connected-component count
 ;; => 1     (one connected component — the trail is a single thread)
 (topo/connected? g)
 ;; => #t
@@ -75,9 +81,15 @@ split into sub-flocks).
 ## 13.2 Flock topology over time
 
 ```scheme
+;; Collect all entities of a tag into a list (no world/find-all verb).
+(define (all-of tag)
+  (let ((acc '()))
+    (world/each tag (lambda (e) (set! acc (cons e acc))))
+    acc))
+
 ;; Every frame, build the graph of 'boids within distance 40 of each other'
 (define (flock-topology-frame)
-  (let ((boids (world/find-all 'boid))
+  (let ((boids (all-of 'boid))
         (edges '()))
     (for-each
       (lambda (b1)
@@ -90,14 +102,15 @@ split into sub-flocks).
       boids)
     (topo/graph edges)))
 
-;; Track components over time
+;; Track component counts over time
 (define comp-history '())
 (on-frame
   (lambda (t)
     (world/step)
     (when (= 0 (modulo t 10))
       (let ((g (flock-topology-frame)))
-        (set! comp-history (cons (topo/components g) comp-history))))))
+        (set! comp-history
+          (cons (length (topo/components g)) comp-history))))))
 ```
 
 Watch `comp-history`. The number of connected components fluctuates:
@@ -115,11 +128,12 @@ grows, points connect, then form triangles, then fill in. Track when
 each topological feature is born and when it dies.
 
 ```scheme
+;; topo/rips-filtration takes (points max-scale) positionally.
 (define (persistence-of-trajectory agent T)
   (let ((points '()))
     (let loop ((n 0))
       (if (>= n T)
-          (let ((complex (topo/rips-filtration points :max-scale 100)))
+          (let ((complex (topo/rips-filtration points 100)))
             (topo/persistence complex))
           (begin
             (world/step)
@@ -127,7 +141,13 @@ each topological feature is born and when it dies.
               (set! points (cons (entity/pos agent) points)))
             (loop (+ n 1)))))))
 
-(persistence-of-trajectory pendulum-bob 900)
+;; A bob swinging on a pinned link traces a looping arc.
+(let ((pivot (world/spawn 'pivot 240 40))
+      (bob   (world/spawn 'pendulum-bob 340 40)))
+  (entity/pin! pivot)
+  (entity/mass! bob 1.0)
+  (world/link! pivot bob 100 0.9)
+  (persistence-of-trajectory bob 200))
 ;; => ((:dim 0 :birth 0 :death 10)  <- points merged early
 ;;     (:dim 1 :birth 12 :death 60) <- a loop that persisted
 ;;     (:dim 1 :birth 8  :death 15) <- a short-lived loop (noise)
@@ -145,7 +165,9 @@ scale: `b_0` = number of connected components, `b_1` = number of
 independent loops, `b_2` = number of enclosed 3D voids.
 
 ```scheme
-(define complex (topo/rips-filtration my-points :max-scale 30))
+;; Some sampled points forming a rough loop.
+(define my-points '((0 0) (2 0) (3 2) (2 3) (0 3) (-1 2) (0 0)))
+(define complex (topo/rips-filtration my-points 30))
 (topo/betti complex 30)
 ;; => (b_0 . 1) (b_1 . 3) (b_2 . 0)
 ```
@@ -159,10 +181,14 @@ continuous deformation, but knot type IS invariant under
 homeomorphism of the ambient space.
 
 ```scheme
-;; Sample a 2D trajectory. Compute writhe.
-(define trace (world/tape-positions 'moon 2000))
+;; Sample a 2D trajectory (here, a hand-built closed loop). Compute writhe.
+(define trace
+  (map (lambda (i)
+         (let ((a (* 2 3.14159 (/ i 20))))
+           (list (geom/cos a) (geom/sin a))))
+       (iota 21)))
 (topo/writhe trace)
-;; => 4     (average of signed crossings per pass)
+;; => a small signed crossing count
 
 (topo/knot trace)
 ;; => 'unknot   (in 2D this is either unknot or something requiring 3D)
@@ -180,12 +206,13 @@ two points is not a straight line — it's a geodesic. `curve/geodesic-
 distance` computes it.
 
 ```scheme
-;; A torus surface: parameterized by (u, v) in [0, 2*pi) x [0, 2*pi)
-(define torus-metric
-  (lambda (u v) ...))
+;; A surface given as a height function (u v) -> z. A rippled torus-like
+;; surface makes geodesics longer than the flat straight-line distance.
+(define torus-surface
+  (lambda (u v) (* 0.5 (geom/sin u) (geom/cos v))))
 
-(curve/geodesic-distance torus-metric (0 0) (3.14 3.14))
-;; => 4.442     (the geodesic wraps around both directions)
+(curve/geodesic-distance torus-surface '(0 0) '(3.14 3.14))
+;; => longer than the flat distance, since the path climbs the ripples
 ```
 
 If we simulate a particle moving under 'gravity' on the torus (a
@@ -200,19 +227,29 @@ but different initial phase-space positions. One is a bound orbit;
 one escapes.
 
 ```scheme
-(define (compare-orbits)
+;; Spawn three mutually-attracting bodies; v scales the initial speeds.
+(define (three-body-init v)
   (world/reset!)
+  (let ((b1 (world/spawn 'body-1 200 240))
+        (b2 (world/spawn 'body-2 280 240))
+        (b3 (world/spawn 'body-3 240 300)))
+    (entity/mass! b1 1.0) (entity/mass! b2 1.0) (entity/mass! b3 1.0)
+    (entity/set-vel! b1 0 (* v 1.5))
+    (entity/set-vel! b2 0 (* v -1.5))
+    (entity/set-vel! b3 (* v 2.0) 0)
+    (world/attract! b1 b2 50) (world/attract! b2 b3 50) (world/attract! b1 b3 50)))
+
+(define (compare-orbits)
   ;; Configuration A: bound
-  (three-body-init 1.0 2.0 :velocities '(1.5 1.5 2.0))
-  (let loop ((n 2000) (pts-A '()))
+  (three-body-init 1.0)
+  (let loop ((n 200) (pts-A '()))
     (if (<= n 0)
-        (let ((topo-A (topo/rips-filtration pts-A :max-scale 200)))
-          ;; Configuration B: unbound, same energy
-          (world/reset!)
-          (three-body-init 1.0 2.0 :velocities '(1.55 1.45 2.15))
-          (let loop-b ((m 2000) (pts-B '()))
+        (let ((topo-A (topo/rips-filtration pts-A 200)))
+          ;; Configuration B: same setup, slightly faster
+          (three-body-init 1.05)
+          (let loop-b ((m 200) (pts-B '()))
             (if (<= m 0)
-                (let ((topo-B (topo/rips-filtration pts-B :max-scale 200)))
+                (let ((topo-B (topo/rips-filtration pts-B 200)))
                   (list (list 'A (topo/betti topo-A 50))
                         (list 'B (topo/betti topo-B 50))))
                 (begin (world/step)
