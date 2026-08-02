@@ -600,7 +600,36 @@ export function makeBaseEnv(fuel) {
   def('string-eq?', (a, b) => String(a) === String(b))
   def('string=?', (a, b) => String(a) === String(b))
   def('vector-ref', (v, i) => (isVec(v) ? v.items[i] : Array.isArray(v) ? v[i] : null))
-  def('substring', (s, a, b = undefined) => String(s).substring(a, b))
+  // (substring s start [end]) — R7RS §6.7, which requires
+  // 0 <= start <= end <= (string-length s). This used to be raw JS
+  // String.prototype.substring, which instead clamped past the end, clamped
+  // negatives to 0, and SWAPPED the arguments when start > end — so a
+  // reversed-index bug returned a plausible string and never announced
+  // itself. Each error names the real length and the conforming spelling,
+  // because a caller who hits it is usually reaching for one of two other
+  // things: a prefix TEST (string-prefix?), or a TRUNCATION, which is
+  // (substring s 0 (min n (string-length s))).
+  def('substring', (s, a, b = undefined) => {
+    const str = String(s)
+    const len = str.length
+    const start = (a === undefined) ? 0 : a
+    const end = (b === undefined) ? len : b
+    if (!_isNum(start) || !_isNum(end)) {
+      throw new Error(`substring: expected a number index, got ${_describe(_isNum(start) ? end : start)}`)
+    }
+    if (start < 0) {
+      throw new Error(`substring: start ${start} is negative; R7RS §6.7 requires 0 <= start <= end <= ${len}`)
+    }
+    if (end > len) {
+      throw new Error(`substring: end ${end} is past the end of a string of length ${len}. ` +
+        `To TEST a prefix use (string-prefix? "..." s); to TRUNCATE use (substring s ${start} (min ${end} (string-length s))).`)
+    }
+    if (start > end) {
+      throw new Error(`substring: start ${start} is greater than end ${end} — the indices are reversed. ` +
+        `R7RS §6.7 requires 0 <= start <= end <= ${len}.`)
+    }
+    return str.slice(start, end)
+  })
   def('number->string', (n, radix) => {
     // Standard Scheme: (number->string n [radix]). Default radix 10.
     // Radix 16 emits lowercase hex (matches the `"#rrggbb"` convention).
@@ -1036,7 +1065,7 @@ function registerBaseMetadata() {
     ['string-ref',     2,             '(string-ref s i) — the i-th character.',              '(string-ref "abc" 1) => "b"',           'string'],
     ['string=?',       2,             'String equality.',                                    '(string=? "a" "a") => #t',              'string'],
     ['string-eq?',     2,             'String equality — same as string=?.',                 '(string-eq? "a" "a") => #t',            'string'],
-    ['substring',     [2, 3],         '(substring s a [b]) — a substring of s. DIVERGES from R7RS §6.7, which requires 0 <= a <= b <= (string-length s): indices past the end CLAMP instead of raising, so (substring "ab" 0 3) is "ab"; negative indices clamp to 0; and a > b SWAPS the two, so (substring "hello" 4 1) is "ell". All three are silent. Portable code must not rely on them, and a reversed-index bug will not announce itself.', '(substring "hello" 1 4) => "ell"',      'string'],
+    ['substring',     [2, 3],         '(substring s a [b]) — the part of s from index a up to (not including) b, or to the end if b is omitted. Conforms to R7RS §6.7: requires 0 <= a <= b <= (string-length s) and RAISES otherwise. It does not clamp. To TEST a prefix reach for string-prefix?, which cannot go out of range; to TRUNCATE to at most n characters write (substring s 0 (min n (string-length s))).', '(substring "hello" 1 4) => "ell"',      'string'],
     ['number->string',[1, 2],         '(number->string n [radix]) — number to string.',      '(number->string 255 16) => "ff"',       'string'],
     ['string->number',[1, 2],         '(string->number s [radix]) — parse a number.',        '(string->number "42") => 42',           'string'],
 

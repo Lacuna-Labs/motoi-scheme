@@ -56,8 +56,23 @@ def get_str_at(rec, key):
     return p.group(1) if p else None
 
 def unescape(s):
+    # Single pass. Sequential .replace() calls corrupt a literal backslash-n:
+    # r'\\n' would turn into a real newline on the first replace, and the
+    # later '\\\\' -> '\\' pass could no longer put it back. Every escape has
+    # to be consumed exactly once, left to right.
     if s is None: return None
-    return s.replace(r'\n', '\n').replace(r'\"', '"').replace('\\\\', '\\')
+    out = []
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if c == '\\' and i + 1 < n:
+            nxt = s[i + 1]
+            out.append({'n': '\n', 't': '\t', 'r': '\r', '"': '"', '\\': '\\'}.get(nxt, '\\' + nxt))
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return ''.join(out)
 
 def run_snippet(code, timeout=8):
     """Run a Scheme snippet via ./bin/motoi run. Return (ok, output_or_err)."""

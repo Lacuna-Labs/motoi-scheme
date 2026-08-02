@@ -240,3 +240,39 @@ test('the empty list is eq? to itself across constructions', () => {
   assert.equal(run("(equal? '() '())"), true)
   assert.equal(run("(null? '())"), true)
 })
+
+// ── substring conforms to R7RS §6.7 (2026-08-02) ──────────────────────────
+//
+// This was raw JS String.prototype.substring, which clamped past the end,
+// clamped negatives, and SWAPPED reversed indices. The swap is the reason
+// this matters: a reversed-index bug returned a plausible string and never
+// announced itself, which is the failure a learner cannot debug.
+test('substring returns the right slice when in range', () => {
+  assert.equal(run('(substring "hello" 1 4)'), 'ell')
+  assert.equal(run('(substring "hello" 0 5)'), 'hello')
+  assert.equal(run('(substring "hello" 2)'), 'llo')
+  assert.equal(run('(substring "hello" 3 3)'), '')
+})
+
+test('substring RAISES past the end instead of clamping', () => {
+  assert.throws(() => run('(substring "ab" 0 3)'), /past the end .*length 2/)
+  // and the message points at the two things the caller actually wanted
+  assert.throws(() => run('(substring "ab" 0 3)'), /string-prefix\?/)
+  assert.throws(() => run('(substring "ab" 0 3)'), /min 3 \(string-length s\)/)
+})
+
+test('substring RAISES on a negative index instead of clamping to 0', () => {
+  assert.throws(() => run('(substring "hello" -3 2)'), /-3 is negative/)
+})
+
+test('substring RAISES on reversed indices instead of swapping them', () => {
+  // Used to answer "ell" — a plausible string for a genuine bug.
+  assert.throws(() => run('(substring "hello" 4 1)'), /greater than end/)
+})
+
+test('the conforming spellings of what callers actually meant both work', () => {
+  assert.equal(run('(string-prefix? "au" "audio/x")'), true)
+  assert.equal(run('(string-prefix? "au" "a")'), false)   // short input: #f, not an error
+  assert.equal(run('(substring "hi" 0 (min 5 (string-length "hi")))'), 'hi')
+  assert.equal(run('(substring "hello world" 0 (min 5 (string-length "hello world")))'), 'hello')
+})

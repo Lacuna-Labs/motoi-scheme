@@ -385,3 +385,40 @@ test('all five standard parts still pass the 5-point gate', async () => {
     assert.deepEqual(failed, [], `${report.name} failed: ${failed.join(' | ')}`)
   }
 })
+
+// ── Two SRFI-1 conformance bugs found by the reference-authoring pass ──────
+//
+// Both were silent-wrong: the verb answered something plausible instead of
+// raising, which is the failure class a learner cannot debug.
+
+test('cons* mints a real improper pair for a non-list tail', () => {
+  // SRFI-1 defines (cons* a b c) as (cons a (cons b c)), so a non-list tail
+  // ends the chain as a dotted pair. This used to flatten to (1 2 3), which
+  // silently turned a pair into a list and disagreed with `xcons` and
+  // `append-reverse` in the very same part.
+  shows('(cons* 1 2 3)', '(1 2 . 3)')
+  shows('(cons* 1 2 (list 3 4))', '(1 2 3 4)')
+  shows('(cons* 5)', '5')
+  shows('(pair? (cons* 1 2 3))', '#t')
+  shows('(list? (cons* 1 2 3))', '#f')
+  // (cons* a b) must agree with (cons a b) exactly.
+  shows('(equal? (cons* 1 2) (cons 1 2))', '#t')
+})
+
+test('delete-duplicates honours its optional equality argument', () => {
+  // The comparator used to be ignored outright — the verb always keyed on a
+  // structural hash, so a caller passing `=` got the DEFAULT answer back and
+  // nothing said the argument had been dropped.
+  shows('(delete-duplicates (list 1 2 1 3 2))', '(1 2 3)')
+  shows(
+    '(delete-duplicates (list 1 2 3 4 5 6) (lambda (a b) (= (modulo a 3) (modulo b 3))))',
+    '(1 2 3)'
+  )
+  shows(
+    '(delete-duplicates (list "a" "A" "b") (lambda (a b) (string=? (string-downcase a) (string-downcase b))))',
+    '("a" "b")'
+  )
+  // Comparator is applied (kept, candidate) — kept element FIRST. An
+  // asymmetric predicate is the only way to observe the order.
+  shows('(delete-duplicates (list 1 5 2) (lambda (kept cand) (< kept cand)))', '(1)')
+})
