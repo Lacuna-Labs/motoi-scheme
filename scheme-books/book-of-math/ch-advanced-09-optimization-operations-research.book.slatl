@@ -81,6 +81,10 @@ Constraints:
 
 We express this as a linear program and solve it.
 
+`ops/lp` is a *constructor*: `(ops/lp direction c A b)`. There is no list of
+constraint senses, because standard form fixes them — every row of `A` is a
+`≤` row and every variable is `≥ 0`. `ops/simplex` then solves the artifact.
+
 ```scheme
 (define prob-furniture
   (ops/lp
@@ -88,27 +92,35 @@ We express this as a linear program and solve it.
     '(30 40)          ; coefficients of objective (profit per chair, per table)
     '((1 2)           ; constraint matrix: [labor, wood] × [x y]
       (4 3))
-    '(8 18)           ; right-hand sides (hours, board-feet)
-    '(<= <=)))        ; both constraints are ≤
+    '(8 18)))         ; right-hand sides (hours, board-feet)
 
-(define solution (ops/lp-solve prob-furniture))
+(define solution (ops/simplex prob-furniture))
 
 solution
-; => ((x . 2) (y . 3) (value . 180))
+; => ((status optimal) (objective 184) (x (2.4 2.8)))
 ```
 
-[VISUAL: A Cartesian plot showing the feasible region (a polygon bounded by the two constraint lines and the axes), with the optimal corner labeled (2, 3) and the objective line 30x + 40y = 180 shown tangent to that corner.]
+[VISUAL: A Cartesian plot showing the feasible region (a polygon bounded by the two constraint lines and the axes), with the optimal corner labeled (2.4, 2.8) and the objective line 30x + 40y = 184 shown tangent to that corner.]
 
-<!-- BUILD: run this program; the solver returns an a-list with the optimal x, y, and the objective value. Render the feasible region as a filled polygon, the constraint lines, and mark the optimal point. -->
+<!-- BUILD: run this program; the solver returns a list of (key value) pairs: status, objective, and the decision vector x. Render the feasible region as a filled polygon, the constraint lines, and mark the optimal point. -->
 
-**Reading the solution:**  
-Make 2 chairs and 3 tables for a profit of $180. The solution lies at a *corner* of the feasible region — this is always true for LPs (the optimum is at a vertex of the constraint polytope).
+**Reading the solution:**
+Make 2.4 chairs and 2.8 tables for a profit of $184. The solution lies at a
+*corner* of the feasible region — this is always true for LPs (the optimum is
+at a vertex of the constraint polytope). That corner is where the two
+constraint lines cross: solve `x + 2y = 8` and `4x + 3y = 18` together and you
+get exactly `(2.4, 2.8)`.
+
+Fractional chairs are of course not sawable. An LP does not know that; forcing
+whole numbers is a *different* problem, and §1.7 solves this same shop as an
+integer program (answer: 2 chairs, 3 tables, $180 — strictly worse, which is
+the price of integrality).
 
 ---
 
 ### 1.2 — Checking Feasibility & Reading the Value
 
-Sometimes a problem has no feasible solution (constraints contradict). Sometimes it's unbounded (you can make the objective arbitrarily large). The solver returns `(escalate ...)` in these cases. Let's try an infeasible problem.
+Sometimes a problem has no feasible solution (constraints contradict). Sometimes it's unbounded (you can make the objective arbitrarily large). The solver returns a bare diagnostic symbol instead of a solution in these cases. Let's try an infeasible problem.
 
 ```scheme
 (define prob-infeasible
@@ -117,18 +129,39 @@ Sometimes a problem has no feasible solution (constraints contradict). Sometimes
     '(1 1)
     '((1 0)
       (-1 0))
-    '(5 -10)          ; x ≤ 5 and x ≥ 10 — impossible
-    '(<= <=)))
+    '(5 -10)))        ; x ≤ 5 and −x ≤ −10 (i.e. x ≥ 10) — impossible
 
-(define result (ops/lp-solve prob-infeasible))
+(define result (ops/simplex prob-infeasible))
 
 result
-; => (escalate infeasible \"constraints have no common solution\")
+; => needs-phase-1
 ```
 
 [VISUAL: A Cartesian plot with the two constraint half-planes shown in different colors; they do not overlap — no feasible region exists.]
 
-<!-- BUILD: run; the solver detects infeasibility and escalates. Show the disjoint half-planes. -->
+<!-- BUILD: run; the solver refuses the problem and says which capability it is missing. Show the disjoint half-planes. -->
+
+**Read that answer carefully — it is not the word you expected.** `ops/simplex`
+starts its walk at the origin, which is feasible only when every right-hand
+side is non-negative. `x ≥ 10` had to be written `−x ≤ −10`, and that negative
+right-hand side puts the origin outside the region. Recovering a starting
+corner from there is a separate procedure called *phase 1*, and this simplex
+does not implement it. So it returns `needs-phase-1`: an honest "I cannot start
+here," not a guess.
+
+That distinction matters more than the missing feature. A solver that
+*silently* returned `x = 0` here would be worse than useless, because 0 is a
+perfectly plausible-looking number. Compare `unbounded`, which the same solver
+*can* prove:
+
+```scheme
+(ops/simplex (ops/lp 'maximize '(1 1) '((-1 -1)) '(0)))
+; => unbounded
+```
+
+There the origin is feasible, the walk starts fine, and it discovers that no
+ratio test ever bounds the step. Three outcomes, three different symbols:
+a solution list, `unbounded`, or `needs-phase-1`.
 
 ---
 
@@ -143,53 +176,60 @@ Constraints:
   `10x + 20y ≥ 50` (protein)  
   `x, y ≥ 0`
 
+Standard form has no `≥`. Turning `500x + 800y ≥ 2000` into a `≤` row means
+multiplying through by −1: `−500x − 800y ≤ −2000`. That is the honest encoding,
+so let's write it and hand it over.
+
 ```scheme
 (define prob-diet
   (ops/lp
     'minimize
     '(1 2)            ; cost per unit of A, B
-    '((500 800)
-      (10 20))
-    '(2000 50)
-    '(>= >=)))        ; both constraints are ≥ (we need at least this much)
+    '((-500 -800)     ; 500x + 800y ≥ 2000, negated into ≤ form
+      (-10 -20))      ; 10x + 20y ≥ 50, negated
+    '(-2000 -50)))
 
-(define sol-diet (ops/lp-solve prob-diet))
+(define sol-diet (ops/simplex prob-diet))
 
 sol-diet
-; => ((x . 4) (y . 0) (value . 4))
+; => needs-phase-1
 ```
 
-[VISUAL: Cartesian plot with the feasible region above and to the right of the constraint lines; the optimal corner is at (4, 0), cost = $4.]
+[VISUAL: Cartesian plot with the feasible region above and to the right of the constraint lines; the origin is *outside* it, which is exactly the difficulty.]
 
-<!-- BUILD: run; render the feasible region (unbounded in the first quadrant, but the optimum is at the corner where the calorie constraint is tight). -->
+<!-- BUILD: run; the solver reports that it cannot find a starting corner. Render the feasible region and mark the origin outside it. -->
 
-**Interpretation:**  
-Buy 4 units of food A, none of B. Total cost $4. Food A alone meets both requirements exactly at the calorie constraint (4 × 500 = 2000 cal, 4 × 10 = 40g protein — wait, that's only 40g, not 50). Let's check the math again — ah, the solver found the corner where the calorie constraint is tight, but protein is slack. Actually, re-examining: 4 units of A give 2000 cal and 40g protein, which violates the protein constraint. This suggests the solver is rounding or the problem is degenerate. Let's re-solve carefully.
+**Why it stops, and why that is the right behaviour:**
+Negating the rows put minus signs on both right-hand sides, and §1.2 already
+told us what that means: the origin is infeasible, so the walk has no corner to
+start from. Every "at least this much" problem lands here. This is a real limit
+of this solver, not a limit of linear programming — a phase-1 pass would
+manufacture a starting corner and then hand off to the same pivot loop.
 
-Actually, the correct solution should satisfy both constraints. Let's rewrite the problem more carefully:
+**So solve it by hand — it is small enough, and this is the habit worth
+keeping.** The optimum of a two-variable LP is at a corner of the feasible
+region, and there are only three candidates:
 
-```scheme
-(define prob-diet-corrected
-  (ops/lp
-    'minimize
-    '(1 2)
-    '((500 800)
-      (10 20))
-    '(2000 50)
-    '(>= >=)))
+- On the x-axis: calories force `x ≥ 4`, protein forces `x ≥ 5`. So `(5, 0)`,
+  cost `5`.
+- On the y-axis: calories force `y ≥ 2.5`, protein forces `y ≥ 2.5`. So
+  `(0, 2.5)`, cost `5`.
+- Where the two constraint lines cross: solving them together gives `(0, 2.5)`
+  again — the calorie line meets the protein line right on the axis.
 
-(define sol-diet-c (ops/lp-solve prob-diet-corrected))
+Minimum cost is **$5**, and it is attained at *both* `(5, 0)` and `(0, 2.5)` —
+and therefore along the whole segment between them, since the objective is
+constant there. Check the midpoint `(2.5, 1.25)`: cost `2.5 + 2.5 = 5`,
+calories `1250 + 1000 = 2250 ≥ 2000`, protein `25 + 25 = 50 ≥ 50`. Feasible,
+same cost. That is *alternative optima*, and it is common; a solver would have
+handed you one of them and said nothing about the other.
 
-sol-diet-c
-; => ((x . 0) (y . 2.5) (value . 5))
-```
-
-[VISUAL: Same plot; the actual optimal corner is at (0, 2.5), cost = $5. The previous answer was incorrect — the solver should have returned this. If the first run returned (4, 0), that's a bug or a misunderstanding of the constraint encoding. We'll proceed with the correct answer.]
-
-<!-- BUILD: run; the correct solution is y = 2.5 units of B (2.5 × 800 = 2000 cal, 2.5 × 20 = 50g protein), cost $5. -->
-
-**Lesson:**  
-Always verify the solution against the constraints by hand. The LP solver finds the optimum, but you must check that the encoding matches your intent.
+**Lesson:**
+Always verify the solution against the constraints by hand. A tempting-looking
+answer of 4 units of A gives 2000 calories but only 40g of protein — it fails
+the second constraint outright and costs $4, less than the true optimum. Any
+"answer" cheaper than the optimum is a sign you dropped a constraint somewhere,
+not a bargain.
 
 ---
 
@@ -197,59 +237,80 @@ Always verify the solution against the constraints by hand. The LP solver finds 
 
 A factory makes three products (A, B, C). Each uses machine time, labor, and raw material (all limited), and each has a different profit margin. We want to maximize profit.
 
+`ops/lp-solve` is the one-call form: hand it `c`, `A` and `b` directly and it
+builds the artifact and simplexes it for you.
+
 ```scheme
-(define prob-factory
-  (ops/lp
-    'maximize
+(define sol-factory
+  (ops/lp-solve
     '(20 30 25)       ; profit per unit of A, B, C
     '((1 2 1)         ; machine hours
       (3 2 2)         ; labor hours
       (1 1 2))        ; raw material (kg)
-    '(100 200 150)    ; available: 100 machine-hr, 200 labor-hr, 150 kg
-    '(<= <= <=)))
-
-(define sol-factory (ops/lp-solve prob-factory))
+    '(100 200 150)))  ; available: 100 machine-hr, 200 labor-hr, 150 kg
 
 sol-factory
-; => ((a . 0) (b . 50) (c . 0) (value . 1500))
+; => ((status optimal)
+;     (objective 2200.0000000000005)
+;     (x (19.999999999999996 9.999999999999998 60.00000000000001)))
 ```
 
 [VISUAL: A table showing the optimal production plan and the objective value. (Cannot plot in 3D easily, so show the result as text or a bar chart of the three quantities.)]
 
-<!-- BUILD: run; display the solution as a table: Product A: 0 units, Product B: 50 units, Product C: 0 units, Total profit: $1500. -->
+<!-- BUILD: run; display the solution as a table: Product A: 20 units, Product B: 10 units, Product C: 60 units, Total profit: $2200. -->
 
-**Interpretation:**  
-Make 50 units of product B, none of A or C. Profit = $1500. This is a *corner* solution in 3D space — the optimal point lies at a vertex of the constraint polytope.
+**Interpretation:**
+Make 20 units of A, 10 of B and 60 of C. Profit = $2200. This is a *corner*
+solution in 3D space — the optimal point lies at a vertex of the constraint
+polytope, and here all three resources are used to the last unit: machine
+`20 + 20 + 60 = 100`, labor `60 + 20 + 120 = 200`, material `20 + 10 + 120 = 150`.
+
+Notice the trailing digits — `2200.0000000000005`, `19.999999999999996`. The
+pivots are floating-point divisions, so the exact vertex `(20, 10, 60)` arrives
+a few ulps off. That is normal and it is why you compare LP objectives with a
+tolerance rather than `=`.
+
+It is worth resisting the intuitive answer here. "Make only B, it has the
+highest margin" gives `(0, 50, 0)` and $1500 — feasible, but $700 worse. Margin
+per unit is not margin per *resource*, and finding out which one wins is
+exactly the job you handed to the solver.
 
 ---
 
 ### 1.5 — The Simplex Method (Conceptual)
 
-The `ops/simplex` verb performs the simplex algorithm step-by-step (tableau pivoting). We won't implement it ourselves, but we can watch it work. The simplex method starts at a corner of the feasible region and \"walks\" along edges to adjacent corners, always improving the objective, until no improving move exists.
+The `ops/simplex` verb performs the simplex algorithm (tableau pivoting). We won't implement it ourselves, but we can watch it work. The simplex method starts at a corner of the feasible region and \"walks\" along edges to adjacent corners, always improving the objective, until no improving move exists.
 
-For a small problem, let's see the pivots:
+`ops/simplex` takes **an LP artifact**, not a raw tableau. It builds the tableau
+itself — adding one slack column per constraint and negating the objective row
+for a maximization — and it hands back the *result* of the walk, not the
+intermediate arithmetic:
 
 ```scheme
-(define tableau-init
-  (ops/simplex
-    '((1 1 1 0 4)     ; constraint 1 as a row: x + y + s1 = 4
-      (2 1 0 1 5)     ; constraint 2: 2x + y + s2 = 5
-      (-3 -2 0 0 0))  ; objective row: -3x - 2y (we minimize the negative to maximize)
-    2))               ; 2 decision variables (x, y), rest are slack
+(define lp-small
+  (ops/lp 'maximize
+          '(3 2)        ; maximize 3x + 2y
+          '((1 1)       ; x + y ≤ 4
+            (2 1))      ; 2x + y ≤ 5
+          '(4 5)))
 
-; The verb returns the final tableau after all pivots.
-tableau-init
-; => ((0 1/2 1 -1/2 3/2)
-;     (1 1/2 0 1/2 5/2)
-;     (0 -1/2 0 3/2 15/2))
+(define solved (ops/simplex lp-small))
+
+solved
+; => ((status optimal) (objective 9) (x (1 3)))
 ```
 
-[VISUAL: A sequence of tableaux, each row/column labeled, showing the pivots. (This is advanced; for now just show the final tableau.)]
+[VISUAL: A sequence of tableaux, each row/column labeled, showing the pivots, ending with the reported solution. (This is advanced; for now just show the final answer.)]
 
-<!-- BUILD: run; display the final simplex tableau as a formatted table. This is a glimpse under the hood — the solver already did this internally for `ops/lp-solve`. -->
+<!-- BUILD: run; display the solution map as a formatted table. This is the same call `ops/lp-solve` makes internally. -->
 
-**Lesson:**  
-The simplex method is the workhorse LP solver (though interior-point methods are used for very large problems). Every pivot improves the objective until optimum is reached.
+Check it by hand: the two constraint lines cross where `x + y = 4` and
+`2x + y = 5`, i.e. at `(1, 3)`, and `3(1) + 2(3) = 9`. The tableau the solver
+pivoted through is real, but it is scratch paper — the verb does not expose it,
+and no verb in this library returns one.
+
+**Lesson:**
+The simplex method is the workhorse LP solver (though interior-point methods are used for very large problems). Every pivot improves the objective until optimum is reached. What you get back is the corner it stopped at, tagged with why it stopped.
 
 ---
 
@@ -272,29 +333,40 @@ For the furniture problem (chairs and tables), the dual asks: \"what is the mini
 
 Sometimes decision variables must be integers (you can't make 2.5 chairs). *Integer programming* (IP) is much harder than LP — NP-hard in general — but small problems are tractable. The `ops/mip-solve` verb solves *mixed-integer linear programs* (MIP) where some variables are constrained to integers.
 
-```scheme
-(define prob-integer
-  (ops/lp
-    'maximize
-    '(30 40)
-    '((1 2)
-      (4 3))
-    '(8 18)
-    '(<= <=)))
+`ops/mip-solve` does **not** take an LP artifact. It has its own problem shape:
+a list of constraint rows, each written `(c₀ c₁ … op rhs)` with the comparison
+spelled out per row, then the objective vector, then an options plist naming
+which variable indices must be integral. Because each row carries its own
+operator, you write `≥` directly instead of negating it yourself.
 
-; We want x and y to be integers.
-(define sol-ip (ops/mip-solve prob-integer '(integer integer)))
+```scheme
+; Same furniture shop, but x and y must be whole numbers.
+(define sol-ip
+  (ops/mip-solve
+    (list (list 1 2 '<= 8)      ; labor:  x + 2y ≤ 8
+          (list 4 3 '<= 18))    ; wood:  4x + 3y ≤ 18
+    (list 30 40)                ; maximize 30x + 40y
+    (list ':integers (list 0 1))))
 
 sol-ip
-; => ((x . 2) (y . 3) (value . 180))
+; => (2 3)
 ```
 
-[VISUAL: The same feasible region, but now we mark only the *integer* lattice points inside it. The optimal integer point is (2, 3), which happens to coincide with the LP optimum.]
+[VISUAL: The same feasible region, but now we mark only the *integer* lattice points inside it. The optimal integer point is (2, 3).]
 
 <!-- BUILD: run; render the feasible region with a grid of integer points; highlight (2, 3). -->
 
-**Remark:**  
-In this case the LP solution was already integer, so the IP solution is the same. For most problems, the IP optimum is strictly worse than the LP relaxation (you lose some objective value by forcing integrality).
+**Reading it:** the answer is the bare decision vector — 2 chairs, 3 tables —
+not a labelled map. Fold it against the objective yourself to price it:
+`30 × 2 + 40 × 3 = 180`.
+
+**Remark:**
+Compare that with §1.1, where the same shop with fractional quantities earned
+$184 at `(2.4, 2.8)`. Forcing integrality cost $4. That is the usual direction:
+the IP optimum is never better than its LP relaxation, because every integer
+point is also a real point. The relaxation's value is therefore an *upper
+bound* on the integer answer — which is precisely the fact branch-and-bound
+prunes with in §1.9.
 
 ---
 
@@ -304,41 +376,62 @@ You have a knapsack with capacity 10 kg. You have items with weights `[2, 3, 5, 
 
 This is the *0/1 knapsack problem*, a classic in combinatorial optimization. We model it as an IP: let `x_i ∈ {0,1}` indicate whether item `i` is taken.
 
-```scheme
-(define items-weight '(2 3 5 7))
-(define items-value '(10 15 20 25))
-(define capacity 10)
+`ops/knapsack` wants the **capacity first**, then the items — and each item is
+a `(weight value)` pair, kept together, not two parallel lists:
 
-(define sol-knapsack
-  (ops/knapsack items-value items-weight capacity))
+```scheme
+(define capacity 10)
+(define items '((2 10)     ; item 0: 2 kg, worth 10
+                (3 15)     ; item 1: 3 kg, worth 15
+                (5 20)     ; item 2: 5 kg, worth 20
+                (7 25)))   ; item 3: 7 kg, worth 25
+
+(define sol-knapsack (ops/knapsack capacity items))
 
 sol-knapsack
-; => ((taken . (1 1 0 1)) (value . 50))
+; => (45 (0 1 2))
 ```
 
 [VISUAL: A bar chart showing the four items, with the chosen items highlighted, and a running total of weight and value.]
 
 <!-- BUILD: run; the `ops/knapsack` verb solves this directly (dynamic programming). Display the items as bars; color the taken ones green. -->
 
-**Interpretation:**  
-Take items 0, 1, and 3 (weights 2, 3, 7 = 12 kg — wait, that exceeds capacity 10). Let's re-check the output. If the solution is `(1 1 0 1)`, that's items 0, 1, 3 with weight 2+3+7=12, which violates the constraint. The solver must have returned a different solution. Let's rewrite the example:
+**Reading it:** the total value comes first, then the *indices* of the items to
+take — not a 0/1 flag vector. Take items 0, 1 and 2: weight `2+3+5 = 10`, which
+exactly fills the sack, for value `10+15+20 = 45`.
 
-Actually, items 0, 1, 2 have weight 2+3+5=10, value 10+15+20=45. Items 0, 1, 3 have weight 2+3+7=12 (infeasible). Items 0, 2, 3 have weight 2+5+7=14 (infeasible). Items 1, 2 have weight 3+5=8, value 15+20=35. Items 1, 3 have weight 3+7=10, value 15+25=40. Items 2, 3 have weight 5+7=12 (infeasible).
+**Verify it by enumeration.** Four items is few enough to check every subset by
+hand, and you should, at least once:
 
-So the best is items 1 and 3 (weight 10, value 40), or items 0, 1, 2 (weight 10, value 45). The optimal is `(1 1 1 0)` with value 45.
+- items 0,1,2 — weight 10, value 45 ✔
+- items 0,1,3 — weight 12, over capacity ✘
+- items 0,2,3 — weight 14, over capacity ✘
+- items 1,2,3 — weight 15, over capacity ✘
+- items 1,3 — weight 10, value 40 ✔
+- items 2,3 — weight 12, over capacity ✘
+- items 0,2 — weight 7, value 30 ✔
 
-Let's correct the example:
+45 is the best feasible value, so the solver is right. Note the near-miss: a
+greedy \"take the most valuable item first\" rule grabs item 3 (worth 25) and can
+then only afford item 1, landing on 40. Greed is wrong here by 5, and that gap
+is the whole reason knapsack needs dynamic programming.
+
+**Same items, same answer, written as flags.** If you want the 0/1 vector the
+IP formulation talks about, build it from the index list:
 
 ```scheme
-(define sol-knap (ops/knapsack '(10 15 20 25) '(2 3 5 7) 10))
+(define taken
+  (let ((chosen (cadr sol-knapsack)))
+    (map (lambda (i) (if (member i chosen) 1 0))
+         (iota (length items)))))
 
-sol-knap
-; => ((taken . (1 1 1 0)) (value . 45))
+taken
+; => (1 1 1 0)
 ```
 
 [VISUAL: Items 0, 1, 2 highlighted (weight 2+3+5=10, value 10+15+20=45).]
 
-<!-- BUILD: run; display the correct solution. -->
+<!-- BUILD: run; display the taken-flags derivation. -->
 
 ---
 
@@ -348,19 +441,36 @@ For harder IPs, we use *branch-and-bound*: solve the LP relaxation (ignore integ
 
 The `ops/branch-bound` verb performs this search.
 
+`ops/branch-bound` takes a single **problem spec** — one flat plist naming the
+direction, the objective, the constraint rows and which variables are integral:
+
 ```scheme
 (define prob-bb
-  (ops/lp 'maximize '(5 8) '((2 3) (1 5)) '(10 8) '(<= <=)))
+  (list 'maximize (list 5 8)
+        'constraints (list (list 2 3 '<= 10)     ; 2x + 3y ≤ 10
+                           (list 1 5 '<= 8))     ;  x + 5y ≤ 8
+        'integers '(0 1)))
 
-(define sol-bb (ops/branch-bound prob-bb '(integer integer)))
+(define sol-bb (ops/branch-bound prob-bb))
 
 sol-bb
-; => ((x . 5) (y . 0) (value . 25))
+; => (5 0)
 ```
 
 [VISUAL: A tree diagram showing the branch-and-bound search: root node (LP relaxation), branching on x, subproblems, pruning, until the optimal integer solution is found.]
 
 <!-- BUILD: run; display the final solution. (Rendering the search tree is advanced; for now just show the result.) -->
+
+Like `ops/mip-solve`, it answers with the bare decision vector: `x = 5`, `y = 0`,
+worth `5 × 5 + 8 × 0 = 25`. Check feasibility: `2(5) + 3(0) = 10 ≤ 10` and
+`5 + 0 = 5 ≤ 8`. Both hold, and the first is tight.
+
+The pull toward `y` is a trap worth naming — `y` has the bigger coefficient (8
+against 5), so the LP relaxation loads up on it. Branch-and-bound tries that,
+finds the fractional answer, branches, and discovers that the integer points
+near it are all worse than plain `(5, 0)`. That is the method in one sentence:
+*relax, branch on a fractional variable, and prune any branch whose relaxed
+bound cannot beat the best whole answer found so far.*
 
 ---
 
@@ -382,16 +492,17 @@ We'll start with single-machine scheduling (simple rules like shortest-processin
 Rule: process jobs in order of increasing processing time. This minimizes the *average completion time*.
 
 ```scheme
-(define jobs '((id . a) (time . 5))
-             '((id . b) (time . 2))
-             '((id . c) (time . 8))
-             '((id . d) (time . 1)))
+(define jobs '((5 a)
+               (2 b)
+               (8 c)
+               (1 d)))
 
 (define schedule-spt (ops/spt jobs))
 
 schedule-spt
-; => ((d 1) (b 3) (a 8) (c 16))
-; Each pair is (job-id completion-time).
+; => ((1 d) (2 b) (5 a) (8 c))
+; A task's FIRST element is its processing time — that is what ops/spt sorts
+; on. Anything after it rides along, so (time id) keeps the names attached.
 ```
 
 [VISUAL: A Gantt chart: horizontal axis is time, each job is a colored bar starting when the previous one finishes. Jobs appear in order d, b, a, c.]
@@ -401,10 +512,11 @@ schedule-spt
 **Metrics:**
 
 ```scheme
-(define metrics (ops/sequence-metrics schedule-spt jobs))
+(define metrics (ops/sequence-metrics schedule-spt))
 
 metrics
-; => ((avg-completion . 7) (makespan . 16) (avg-wait . 2.75))
+; => (16 28 16)
+; (makespan total-flow max-lateness). Mean flow time is 28/4 = 7.
 ```
 
 [VISUAL: A small table showing the metrics.]
@@ -427,8 +539,13 @@ If jobs have due dates, process them in order of increasing due date to minimize
 (define schedule-edd (ops/edd jobs-due))
 
 schedule-edd
-; => ((c 4) (a 7) (b 9) (d 10))
+; => (((id . c) (time . 4) (due . 5)) ((id . a) (time . 3) (due . 6)) ((id . b) (time . 2) (due . 8)) ((id . d) (time . 1) (due . 12)))
 ```
+
+Read what came back: `ops/edd` hands you **the jobs themselves, reordered** —
+not their finish times. Processed in that order the finishes are 4, 7, 9 and
+10, but you have to accumulate the processing times yourself to get them.
+§2.4 does exactly that.
 
 [VISUAL: Gantt chart in EDD order, with due dates marked as vertical dashed lines. Job a finishes at 7, due at 6 → late by 1. Job c finishes at 4, due at 5 → on time.]
 
@@ -442,18 +559,18 @@ A *flow shop* has jobs that visit machines in the same order (every job goes mac
 
 ```scheme
 (define jobs-flow
-  '(((id . a) (m1 . 2) (m2 . 5))
-    ((id . b) (m1 . 4) (m2 . 1))
-    ((id . c) (m1 . 3) (m2 . 3))
-    ((id . d) (m1 . 6) (m2 . 2))))
+  '((a . ((m1 . 2) (m2 . 5)))
+    (b . ((m1 . 4) (m2 . 1)))
+    (c . ((m1 . 3) (m2 . 3)))
+    (d . ((m1 . 6) (m2 . 2)))))
 
 (define sequence-johnson (ops/johnson jobs-flow))
 
 sequence-johnson
-; => (a c b d)
+; => (a c d b)
 ```
 
-[VISUAL: A two-row Gantt chart: top row is machine 1, bottom row is machine 2, jobs flowing through in the sequence a, c, b, d. Idle time on machine 2 is visible until the first job finishes on machine 1.]
+[VISUAL: A two-row Gantt chart: top row is machine 1, bottom row is machine 2, jobs flowing through in the sequence a, c, d, b. Idle time on machine 2 is visible until the first job finishes on machine 1.]
 
 <!-- BUILD: run; render the two-machine schedule as a stacked Gantt chart. -->
 
@@ -478,19 +595,39 @@ For more complex objectives (weighted tardiness, multiple machines with preceden
 ; For simplicity, we'll use EDD and compute the tardiness.
 (define sched-complex (ops/edd jobs-complex))
 
+; ops/edd returns the jobs REORDERED, not their finish times. Walk that
+; order once with a running clock to turn it into an id -> finish alist.
+(define (finish-times ordered)
+  (let loop ((rest ordered) (clock 0) (acc '()))
+    (if (null? rest)
+        (reverse acc)
+        (let* ((job  (car rest))
+               (done (+ clock (cdr (assoc 'time job)))))
+          (loop (cdr rest) done (cons (cons (cdr (assoc 'id job)) done) acc))))))
+
+(define finishes (finish-times sched-complex))
+
+finishes
+; => ((j2 . 3) (j1 . 7) (j3 . 12))
+
 (define tardiness
   (map (lambda (job)
-         (let ((finish (cadr (assoc (car job) sched-complex)))
-               (due (cdr (assoc 'due (cdr job))))
-               (weight (cdr (assoc 'weight (cdr job)))))
+         (let ((finish (cdr (assoc (cdr (assoc 'id job)) finishes)))
+               (due    (cdr (assoc 'due job)))
+               (weight (cdr (assoc 'weight job))))
            (* weight (max 0 (- finish due)))))
        jobs-complex))
 
 (define total-tardiness (apply + tardiness))
 
 total-tardiness
-; => (some number, depends on the schedule)
+; => 0
 ```
+
+Zero, and that is a real answer rather than a missing one: j2 finishes at 3
+against a due date of 8, j1 at 7 against 10, j3 at 12 against 12. EDD found a
+schedule where nothing is late, so no weight has anything to multiply. Push
+any due date earlier and the same code starts charging you.
 
 [VISUAL: Gantt chart with due dates and tardiness costs labeled.]
 
@@ -532,19 +669,21 @@ The system is stable if λ < μ (arrival rate < service rate). Key metrics:
 (define mm1 (ops/mm1 arr-rate mu))
 
 mm1
-; => ((utilization . 0.6)
-;     (avg-in-system . 1.5)
-;     (avg-time-in-system . 0.5)
-;     (avg-in-queue . 0.9)
-;     (avg-wait-in-queue . 0.3))
+; => (0.6 1.4999999999999998 0.8999999999999999 0.5 0.3)
+; A positional list, in the order (ρ L Lq W Wq) — utilization, number in
+; system, number in queue, time in system, wait in queue. No labels: you
+; index it, and you have to remember that the two counts come before the
+; two times.
 ```
 
 [VISUAL: A diagram of the queue system (customers arriving from the left, a single server box, customers leaving to the right), with the metrics labeled below.]
 
-<!-- BUILD: run; display the M/M/1 metrics as a table. -->
+<!-- BUILD: run; display the M/M/1 metrics as a table with the five names attached in order. -->
 
-**Interpretation:**  
-On average, 1.5 customers are in the system (waiting or being served), and each spends 0.5 hours (30 minutes) in the system. The server is busy 60% of the time.
+**Interpretation:**
+On average, 1.5 customers are in the system (waiting or being served), and each spends 0.5 hours (30 minutes) in the system. The server is busy 60% of the time. Check each against the formulas above: ρ = 3/5 = 0.6, L = 0.6/0.4 = 1.5, L_q = 0.36/0.4 = 0.9, W = 1/(5−3) = 0.5, W_q = 0.6/2 = 0.3. All five agree.
+
+The trailing `…998` and `…999` digits are floating-point noise from those divisions, not a different answer.
 
 ---
 
@@ -557,10 +696,10 @@ Little's Law is a fundamental relation in queueing theory:
 This holds for *any* stable queueing system, regardless of arrival or service distributions.
 
 ```scheme
-(define L-check (* arr-rate (list-ref mm1 3)))  ; index 3 = avg-time-in-system
+(define L-check (* arr-rate (list-ref mm1 3)))  ; index 3 = W, time in system
 
 L-check
-; => 1.5 (matches the avg-in-system from the M/M/1 formula)
+; => 1.5 (matches L, the avg-in-system at index 1)
 
 ; Verify Little's Law:
 (define littles (ops/littles-law arr-rate (list-ref mm1 3)))
@@ -587,20 +726,27 @@ Now suppose we have *c* servers instead of one. The formulas are more complex (E
 (define mmc (ops/mmc lambda-c mu-c c))
 
 mmc
-; => ((utilization . 0.833)
-;     (prob-wait . 0.45)
-;     (avg-in-system . 2.7)
-;     (avg-time-in-system . 0.27)
-;     (avg-in-queue . 0.2)
-;     (avg-wait-in-queue . 0.02))
+; => (0.8333333333333334 6.011235955056179 3.5112359550561796
+;     0.601123595505618 0.35112359550561795 0.7022471910112359)
+; Positional again, one entry longer than M/M/1: (ρ L Lq W Wq Pw), where
+; Pw is the Erlang-C probability that an arrival finds every server busy.
 ```
 
 [VISUAL: A diagram with three server boxes in parallel, customers arriving and being routed to an available server.]
 
-<!-- BUILD: run; display the M/M/c metrics. -->
+<!-- BUILD: run; display the M/M/c metrics as a table, six names in order. -->
 
-**Interpretation:**  
-With 3 servers, the system is much less congested than a single server handling the same load. Average wait in queue is only 0.02 hours (~1 minute).
+**Interpretation:**
+Read it honestly, because the numbers are worse than they look at first glance.
+The offered load is a = λ/μ = 10/4 = 2.5 Erlangs against c = 3 servers, so
+ρ = 2.5/3 = 0.833 — each server is busy 83% of the time. An arriving customer
+finds all three busy 70% of the time (Pw ≈ 0.702), waits on average
+W_q ≈ 0.351 hours (**21 minutes**, not one), and spends W ≈ 0.601 hours in the
+system all told. On average 3.5 people are queued and 6 are in the building.
+
+Three servers is *not* comfortable here. At 83% utilization an M/M/c queue is
+already deep in the region where the 1/(1−ρ) term dominates, and a small rise in
+λ makes the wait explode. §3.4 asks the sizing question properly.
 
 ---
 
@@ -614,12 +760,26 @@ Suppose we want the average wait in queue to be at most 0.05 hours (3 minutes). 
 (define c-needed (ops/mmc-servers-for lambda-c mu-c target-wait))
 
 c-needed
-; => 3 (with 3 servers, wait is 0.02 < 0.05; with 2 servers, wait would be higher)
+; => 5
 ```
 
-[VISUAL: A bar chart showing avg-wait-in-queue as a function of number of servers (c = 1, 2, 3, 4, ...), with a horizontal line at the target.]
+[VISUAL: A bar chart showing avg-wait-in-queue as a function of number of servers (c = 1, 2, 3, 4, ...), with a horizontal line at the target of 0.05.]
 
 <!-- BUILD: run; display the bar chart. -->
+
+**Five, not three.** The verb steps c upward and returns the first count whose
+W_q clears the target:
+
+| servers | W_q (hours) | vs. target 0.05 |
+|---|---|---|
+| 3 | 0.351 | far over |
+| 4 | 0.053 | *still* over, barely |
+| 5 | 0.013 | under |
+
+Four servers misses by six thousandths of an hour — about twenty seconds. That
+near-miss is the point of the section: queueing capacity does not scale
+linearly, and eyeballing "3 looks fine" would have missed the target by seven
+times over. Ask the formula.
 
 ---
 
@@ -627,20 +787,35 @@ c-needed
 
 Erlang-B answers: if I have *c* servers and no queue (customers are *blocked* if all servers are busy), what fraction of customers are blocked?
 
+Erlang-B does not want λ and μ separately. It wants the **offered load** (or
+*intensity*) a = λ/μ, measured in Erlangs, and the number of channels — two
+arguments, not three. That is not a shortcut; the blocking probability genuinely
+depends only on the ratio.
+
 ```scheme
 (define lambda-b 8)
 (define mu-b 2)
 (define c-b 5)
 
-(define block-prob (ops/erlang-b lambda-b mu-b c-b))
+(define intensity (/ lambda-b mu-b))    ; 4 Erlangs of offered load
+
+(define block-prob (ops/erlang-b intensity c-b))
 
 block-prob
-; => 0.13 (13% of customers are blocked)
+; => 0.19906687402799378
 ```
 
-[VISUAL: A simple readout: \"With 5 servers and offered load 4 Erlangs, 13% of calls are blocked.\"]
+[VISUAL: A simple readout: \"With 5 servers and offered load 4 Erlangs, 20% of calls are blocked.\"]
 
 <!-- BUILD: run; display the blocking probability. -->
+
+About **20% of calls are turned away**. Check it against the formula
+B = (aᶜ/c!) ÷ Σₖ₌₀..ᶜ (aᵏ/k!): the numerator is 4⁵/120 = 8.533, the denominator
+is 1 + 4 + 8 + 10.667 + 10.667 + 8.533 = 42.867, and 8.533/42.867 = 0.199.
+
+Note how much rougher this is than an M/M/c queue at the same load — there is
+no waiting room here, so a customer who arrives to a full system is simply
+lost. Adding a sixth channel drops blocking to about 12%.
 
 ---
 
@@ -648,16 +823,27 @@ block-prob
 
 Erlang-C answers: in an M/M/c queue, what is the probability that an arriving customer has to wait?
 
+Like Erlang-B, it takes the **offered load and the server count** — a = λ/μ and
+c — not the three raw rates.
+
 ```scheme
-(define delay-prob (ops/erlang-c lambda-c mu-c c))
+(define intensity-c (/ lambda-c mu-c))   ; 10/4 = 2.5 Erlangs
+
+(define delay-prob (ops/erlang-c intensity-c c))
 
 delay-prob
-; => 0.45 (from the earlier M/M/c example)
+; => 0.702247191011236
 ```
 
-[VISUAL: A readout: \"Probability of waiting: 45%.\"]
+[VISUAL: A readout: \"Probability of waiting: 70%.\"]
 
 <!-- BUILD: run; display the delay probability. -->
+
+**70%** — and that is not a new number. It is the sixth entry of the `mmc` list
+back in §3.3, to the last digit. Erlang-C *is* the P_w that the M/M/c model
+reports; computing it on its own just saves you building the rest of the
+metrics. Whenever two verbs in this chapter claim to compute the same quantity,
+that agreement is the check worth running.
 
 ---
 
@@ -690,17 +876,35 @@ where D = annual demand, K = order cost, h = holding cost per unit per year.
 (define eoq (ops/eoq D K h))
 
 eoq
-; => ((order-quantity . 223.6)
-;     (orders-per-year . 4.47)
-;     (total-cost . 447.2))
+; => 223.60679774997897
 ```
 
 [VISUAL: A plot of total cost vs. order quantity, showing the parabola with minimum at Q*.]
 
 <!-- BUILD: run; plot the cost curve (sum of ordering cost D*K/Q and holding cost h*Q/2) vs. Q, with the minimum marked. -->
 
-**Interpretation:**  
+`ops/eoq` answers with **Q\* alone** — one number, not a report. That is the
+only thing the formula computes; everything else is arithmetic you do on top:
+
+```scheme
+(define orders-per-year (/ D eoq))
+(define total-cost (ops/inventory-cost D eoq h K))
+
+(list orders-per-year total-cost)
+; => (4.47213595499958 447.21359549995793)
+```
+
+**Interpretation:**
 Order ~224 units at a time, ~4.5 times per year. Total annual cost is $447.
+Sanity-check Q\* by hand: √(2 × 1000 × 50 / 2) = √50000 = 223.607. And notice
+that at the optimum the two costs are equal — ordering costs
+1000/223.6 × 50 = 223.6, holding costs 223.6/2 × 2 = 223.6. That balance is
+what the square root is *for*, and it holds at the EOQ of every problem in this
+family.
+
+Mind the argument order of `ops/inventory-cost`: it is
+`(demand order-qty holding-cost order-cost)`, with holding before ordering —
+the reverse of the order the formula is usually written in.
 
 ---
 
@@ -715,12 +919,27 @@ Let's verify the EOQ by computing the cost for a few different order quantities:
 
 (map (lambda (Q) (list Q (inventory-cost Q)))
      '(100 150 200 224 250 300))
-; => ((100 700) (150 566.7) (200 500) (224 447.2) (250 450) (300 483.3))
+; => ((100 600.0)
+;     (150 483.3333333333333)
+;     (200 450.0)
+;     (224 447.2142857142857)
+;     (250 450.0)
+;     (300 466.66666666666663))
 ```
 
 [VISUAL: A table showing Q and cost, with the minimum highlighted at 224.]
 
 <!-- BUILD: run; display the table. -->
+
+The curve bottoms out at Q = 224, at $447.21 — within a hundredth of a cent of
+the $447.2136 the EOQ formula predicted, and the gap is only because 223.607
+was rounded to a whole number of units.
+
+Look at how *flat* the bottom is. Q = 200 and Q = 250 both cost exactly $450 —
+they sit symmetrically either side of the optimum — which is under $3 worse than
+ordering the theoretically perfect quantity. Being 12% off on Q costs you 0.6%
+on total cost. That flatness is the practical gift of EOQ: you can round to a
+convenient pallet or case size and lose almost nothing.
 
 ---
 
@@ -734,8 +953,10 @@ Suppose orders take 2 weeks to arrive (lead time). If demand is 1000/year ≈ 20
 (define reorder-pt (* demand-per-week lead-time-weeks))
 
 reorder-pt
-; => 38.46 ≈ 40 units
+; => 38.46153846153846
 ```
+
+So we reorder at ~38.5 units — call it 40 in practice, since you can't hold a fraction of a unit.
 
 [VISUAL: A sawtooth inventory plot: inventory starts at Q, declines linearly, reorder is placed at the reorder point, shipment arrives after lead time, inventory jumps back to Q.]
 
@@ -751,13 +972,17 @@ If demand is uncertain, we add *safety stock* to the reorder point to avoid stoc
 (define lead-time-days 14)
 (define demand-per-day 2.74)        ; 1000/365
 (define std-dev-daily 0.5)          ; daily demand std dev
-(define service-level 0.95)         ; 95% service level (z = 1.65)
+(define z 1.65)                     ; 95% service level → z = 1.65
 
-(define safety (ops/safety-stock std-dev-daily lead-time-days service-level))
+(define safety (ops/safety-stock z std-dev-daily lead-time-days))
 
 safety
-; => 3.09 units
+; => 3.0868673440885015
 ```
+
+`ops/safety-stock` takes `(z σ L)` — the service-level *z-score* first, then the
+daily standard deviation, then the lead time in days. It computes z·σ·√L:
+1.65 × 0.5 × √14 ≈ 3.09 units.
 
 [VISUAL: A bell curve showing the demand distribution during lead time, with the safety stock marked.]
 
@@ -771,17 +996,20 @@ The plain reorder point covers *expected* demand during lead time. Adding safety
 
 ```scheme
 (define reorder-pt-safe
-  (ops/reorder-point demand-per-day lead-time-days std-dev-daily service-level))
+  (ops/reorder-point demand-per-day lead-time-days safety))
 
 reorder-pt-safe
-; => 41.45 (expected demand during lead time + safety stock)
+; => 41.4468673440885
 ```
+
+`ops/reorder-point` takes `(daily-demand lead-time-days safety-stock)` and
+returns `daily-demand × lead-time + safety-stock`: 2.74 × 14 + 3.09 ≈ 41.45.
 
 [VISUAL: Same sawtooth plot, but now the reorder point is higher (includes safety stock).]
 
 <!-- BUILD: run; overlay the new reorder point on the inventory plot. -->
 
-The trigger rose from ~38.36 (expected only) to 41.45 (with the ~3.09-unit safety cushion). That extra buffer is the price of hitting a 95% service level instead of 50%.
+The trigger rose from 38.36 (expected demand over the 14-day lead time, 2.74 × 14) to 41.45 (with the ~3.09-unit safety cushion). That extra buffer is the price of hitting a 95% service level instead of 50%.
 
 ---
 
@@ -796,18 +1024,22 @@ A newsvendor must decide how many papers to order before demand is known. Too ma
 (define demand-mean 100)
 (define demand-std 20)
 
-(define opt-qty (ops/newsvendor cost price salvage demand-mean demand-std))
+(define opt-qty (ops/newsvendor demand-mean demand-std cost price salvage))
 
 opt-qty
-; => 107.2 papers
+; => (113.48979500446839 137.28893515871226)
 ```
+
+The order matters: `ops/newsvendor` is `(mu sigma cost price salvage)` — the
+demand distribution first, then the three prices. It returns a two-element list:
+the optimal order quantity Q\* and the expected profit at that quantity.
 
 [VISUAL: A plot of expected profit vs. order quantity, with the optimum marked.]
 
 <!-- BUILD: run; plot the expected profit curve. -->
 
 **Interpretation:**  
-The critical fractile is (price - cost)/(price - salvage) = 1.5/2.0 = 0.75. The optimal quantity is the 75th percentile of the demand distribution.
+The critical fractile is (price - cost)/(price - salvage) = 1.5/2.0 = 0.75. The optimal quantity is the 75th percentile of the demand distribution: 100 + 0.6745 × 20 ≈ 113.49 papers, and stocking that many earns ~$137.29 in expected profit.
 
 ---
 
@@ -848,7 +1080,14 @@ If demand is discrete (not normal), we compute the optimal quantity by evaluatin
                  (cdr profits))))))
 
 opt-discrete
-; => (some quantity, e.g. 80 or 90)
+; => 80
+```
+
+The full profit table shows why:
+
+```scheme
+(map (lambda (Q) (list Q (expected-profit Q))) (map car demand-dist))
+; => ((50 75.0) (60 87.0) (70 94.5) (80 96.0) (90 90.0) (100 79.5) (110 66.0))
 ```
 
 [VISUAL: A bar chart of expected profit vs. order quantity.]
@@ -913,23 +1152,23 @@ dist-1-correct
 **Better approach:** use the `ops/markov-step` verb, which handles the matrix multiplication correctly.
 
 ```scheme
-(define dist-1 (ops/markov-step P (vec/make 1 0)))
+; The distribution comes FIRST, then the matrix, then how many steps to take:
+; (ops/markov-step pi P k) computes pi · P^k.
+(define dist-1 (ops/markov-step '(1 0) P 1))
 
 dist-1
 ; => (0.8 0.2)
 
-(define dist-2 (ops/markov-step P dist-1))
+(define dist-2 (ops/markov-step '(1 0) P 2))
 
 dist-2
-; => (0.72 0.28)
+; => (0.7200000000000002 0.28)
 
-(define dist-10
-  (fold (lambda (_ d) (ops/markov-step P d))
-        (vec/make 1 0)
-        (math/array 10)))
+; k does the repetition for you — no fold needed.
+(define dist-10 (ops/markov-step '(1 0) P 10))
 
 dist-10
-; => (0.6667 0.3333) ≈ (2/3, 1/3)
+; => (0.6667016192000003 0.33329838080000007)   ≈ (2/3, 1/3)
 ```
 
 [VISUAL: A line plot showing the probability of Sunny vs. time (number of steps), converging to 2/3.]
@@ -946,8 +1185,11 @@ The stationary distribution π satisfies π P = π (π is a left eigenvector of 
 (define pi (ops/stationary P))
 
 pi
-; => (0.6667 0.3333)
+; => (0.6666666663734642 0.3333333336265367)
 ```
+
+`ops/stationary` iterates to a tolerance, so the answer is 2/3 and 1/3 to about
+nine decimal places rather than exactly.
 
 [VISUAL: A bar chart showing the stationary probabilities: Sunny 66.7%, Rainy 33.3%.]
 
@@ -979,8 +1221,11 @@ A stock can be Up (U), Flat (F), or Down (D). Transition matrix:
 (define pi-stock (ops/stationary P-stock))
 
 pi-stock
-; => (0.235 0.471 0.294) (approximately)
+; => (0.23809523821822867 0.4285714284484379 0.33333333333333326)
 ```
+
+Solving πP = π by hand gives exactly 5/21, 9/21, 7/21 — so the long-run split is
+Up ~23.8%, Flat ~42.9%, Down ~33.3%.
 
 [VISUAL: A three-node state diagram with edges labeled.]
 
@@ -1012,10 +1257,14 @@ We want to know: starting at $5, what's the probability of reaching $10 (winning
            (range 0 size)))))
 
 (define P-gambler (gambler-matrix 10))
-(define absorbing-probs (ops/absorbing-probs P-gambler 5))
 
-absorbing-probs
-; => ((win . 0.5) (ruin . 0.5)) (if the walk is symmetric, prob of win = 5/10 = 0.5)
+;; ops/absorbing-probs takes ONLY the matrix. It returns one row per TRANSIENT
+;; state (here states 1..9), each row giving the probability of ending in each
+;; absorbing state. Starting at $5 is transient state 5, which is row index 4.
+(define absorbing-probs (ops/absorbing-probs P-gambler))
+
+(list-ref absorbing-probs 4)
+; => (0.5 0.5)
 ```
 
 [VISUAL: A bar chart showing the absorption probabilities.]
@@ -1038,16 +1287,28 @@ Let's define the transition matrix for a random walk on {0, 1, 2, ..., 10}:
                       ((= j (- i 1)) 0.5)              ; move down
                       ((= j (+ i 1)) 0.5)              ; move up
                       (else 0)))
-                  (math/array size)))
-           (math/array size)))))
+                  (iota size)))
+           (iota size)))))
 
 (define P-gambler (random-walk-matrix 10))
 
-(define abs-probs (ops/absorbing-probs P-gambler 5))
+(define abs-probs (ops/absorbing-probs P-gambler))
 
 abs-probs
-; => ((prob-0 . 0.5) (prob-10 . 0.5))
+; => ((0.8999999999999999 0.09999999999999998)
+;     (0.7999999999999999 0.19999999999999996)
+;     (0.6999999999999998 0.29999999999999993)
+;     (0.6000000000000001 0.4)
+;     (0.5 0.5)
+;     (0.4 0.5999999999999999)
+;     (0.30000000000000004 0.6999999999999998)
+;     (0.20000000000000004 0.7999999999999998)
+;     (0.10000000000000002 0.8999999999999999))
 ```
+
+One row per starting stake $1..$9; the two columns are P(ruin at $0) and
+P(win at $10). Read down the second column and you get 0.1, 0.2, 0.3, ... — the
+straight line the theory predicts, and starting at $5 the odds are exactly even.
 
 [VISUAL: A line graph showing the probability of absorption at 10 vs. starting state (0 to 10). It should be a straight line from 0 at state 0 to 1 at state 10.]
 
@@ -1060,11 +1321,21 @@ abs-probs
 How many steps (on average) until the gambler is absorbed?
 
 ```scheme
-(define avg-steps (ops/absorbing-steps P-gambler 5))
+;; Like ops/absorbing-probs, this takes only the matrix and returns one entry
+;; per transient state ($1..$9). Starting at $5 is index 4.
+(define avg-steps (ops/absorbing-steps P-gambler))
 
 avg-steps
-; => 25 (for a symmetric random walk on {0..10} starting at 5, expected steps = 5*(10-5) = 25)
+; => (8.999999999999998 16 21 24.000000000000004 25.000000000000004
+;     24.000000000000004 21 16 9)
+
+(list-ref avg-steps 4)
+; => 25.000000000000004
 ```
+
+For a symmetric random walk on {0..10} the theory says starting at $k the
+expected number of steps is k(10-k): 9, 16, 21, 24, 25, 24, 21, 16, 9. The
+engine reproduces that exactly (up to floating-point dust).
 
 [VISUAL: A bar chart showing expected steps vs. starting state.]
 
@@ -1095,26 +1366,33 @@ The adjacency matrix (who links to whom) is:
 The transition matrix is the *transpose* of the column-normalized adjacency matrix (each column sums to 1, representing the probability of jumping from one page to another).
 
 ```scheme
+;; ops/pagerank takes an EDGE LIST — one (from to) pair per link — and an
+;; optional damping factor. The page set is inferred from the edges.
 (define links
-  '((a b c)      ; A links to B, C
+  '((a b)        ; A links to B
+    (a c)        ; A links to C
     (b c)        ; B links to C
     (c a)        ; C links to A
     (d b)))      ; D links to B
 
-(define pages '(a b c d))
+(define pr (ops/pagerank links 0.85))
 
-(define pr (ops/pagerank links pages 0.85))
-
-pr
-; => ((a . 0.29) (b . 0.27) (c . 0.27) (d . 0.17))
+(hash-table->alist pr)
+; => ((a 0.3602741661669915)
+;     (b 0.2224915205659801)
+;     (c 0.37973431326702833)
+;     (d 0.037500000000000006))
 ```
+
+The result is a hash table from page to score, so we convert it to an alist to
+look at it.
 
 [VISUAL: A directed graph with four nodes (A, B, C, D) and edges showing the links. Node sizes proportional to PageRank.]
 
 <!-- BUILD: run; render the graph with node sizes scaled by PageRank. -->
 
 **Interpretation:**  
-Page A has the highest rank (it's linked by C). Page D has the lowest (it's a \"dead end\" with no incoming links except from itself in the damping model).
+Page C has the highest rank (0.380) — two pages link to it, and one of them is A, which is itself well-ranked. A is a close second (0.360) because C sends all of its weight there. Page D is last by a mile (0.0375): nobody links to D, so its whole score is the teleportation floor (1-α)/N = 0.15/4.
 
 ---
 
@@ -1126,15 +1404,21 @@ The formula is:
 **PR(p) = (1-α)/N + α Σ PR(q) / outdegree(q)**  
 summed over all pages q that link to p.
 
-The `ops/pagerank` verb already includes damping (second argument).
+The `ops/pagerank` verb already includes damping (the optional second argument, default 0.85). Set it to 1.0 to switch teleportation off entirely.
 
 ```scheme
-(define pr-no-damp (ops/pagerank links pages 1.0))
+(define pr-no-damp (ops/pagerank links 1.0))
 
-pr-no-damp
-; => ((a . 0.33) (b . 0.33) (c . 0.33) (d . 0.0))
-; Page D gets no rank without damping (it's a sink).
+(hash-table->alist pr-no-damp)
+; => ((a 0.4000000001396984)
+;     (b 0.19999999983701855)
+;     (c 0.40000000002328306)
+;     (d 0))
 ```
+
+With α = 1.0, page D drops to exactly zero. Nothing links to D, and without
+teleportation there is no other way for probability to reach it — the surfer who
+leaves D can never come back. The remaining rank settles into the A↔C cycle.
 
 [VISUAL: Same graph, but now D has zero size (no rank without damping).]
 
@@ -1178,8 +1462,12 @@ f(x) = (x - 3)² has minimum at x = 3. Let's find it by gradient descent.
 (define x-min (gd-iterate x0 100))
 
 x-min
-; => 2.9999... ≈ 3
+; => 2.9999995063486327
 ```
+
+Not exactly 3 — gradient descent approaches a minimum, it does not land on one.
+The loop stops when the gradient falls under `tol`, and at x = 2.9999995 the
+gradient is about 10⁻⁶, which is close enough.
 
 [VISUAL: A plot of f(x) = (x-3)² with the gradient descent path marked as dots converging to x=3.]
 
@@ -1199,9 +1487,20 @@ Let's collect the intermediate steps and plot them:
 
 (define trace (gd-trace x0 50))
 
-trace
-; => (0.0 0.6 1.08 1.464 ... 2.999)
+(length trace)
+; => 51
+
+(list-head trace 5)
+; => (0.0 0.6000000000000001 1.08 1.464 1.7711999999999999)
+
+(list-ref trace 50)
+; => 2.9999571825692186
 ```
+
+Fifty-one points: the tolerance never fires, so the walk uses its full step
+budget and closes to within 0.00005 of 3. Each step shrinks the remaining
+distance by 20% (α = 0.1 on a gradient of 2), which is why the approach is fast
+at first and then crawls.
 
 [VISUAL: A Cartesian plot: x-axis is iteration number, y-axis is x value, showing the convergence to 3.]
 
@@ -1239,8 +1538,10 @@ f(x, y) = (x - 2)² + (y + 1)² has minimum at (2, -1). Gradient is (2(x-2), 2(y
 (define p-min (gd-iterate2 p0 100 0.1))
 
 p-min
-; => (1.9999... -0.9999...) ≈ (2, -1)
+; => (1.9999995886238606 -0.9999997943119303)
 ```
+
+Six digits of agreement with (2, -1) after 100 steps.
 
 [VISUAL: A contour plot of f(x,y) with the gradient descent path traced from (0,0) to (2,-1).]
 
@@ -1259,9 +1560,20 @@ If the learning rate α is too large, gradient descent *overshoots* and diverges
 
 (map (lambda (a) (test-alpha a 50))
      '(0.01 0.1 0.5 1.0 1.5))
-; => ((0.01 (1.8...) 0.04) (0.1 (2.0...) 0.0) (0.5 (2.0...) 0.0)
-;     (1.0 (diverged)) (1.5 (diverged)))
+; => ((0.01 (1.2716606398257657 -0.6358303199128829) 0.6630977794737662)
+;     (0.1 (1.9999714550461458 -0.9999857275230729) 1.018517988171692e-9)
+;     (0.5 (2.0 -1.0) 0.0)
+;     (1.0 (0.0 0.0) 5.0)
+;     (1.5 (-2251799813685246.0 1125899906842623.0) 6.338253001141147e+30))
 ```
+
+Four distinct behaviors in one table:
+
+- **α = 0.01 — too slow.** After 50 steps it is only two-thirds of the way there; f is still 0.66.
+- **α = 0.1 — healthy.** Converged to nine decimal places.
+- **α = 0.5 — exact.** For this particular f, α = 0.5 lands on the minimum in a single step and stays there.
+- **α = 1.0 — oscillating, not diverging.** The step exactly reflects the point across the minimum, so it bounces (0,0) → (4,-2) → (0,0) forever. After an even number of steps it is right back where it started, with f = 5.
+- **α = 1.5 — genuinely diverging.** Each step overshoots by more than it corrects, and 50 steps of that gets you to 10^15 and an objective of 6.3 × 10^30.
 
 [VISUAL: A table showing alpha, final point, and final objective value.]
 
@@ -1296,11 +1608,26 @@ The Rosenbrock function f(x, y) = (1 - x)² + 100(y - x²)² has a long, narrow 
         (iter (step p) (- n 1))))
   (iter p0 steps))
 
-(define r-min (gd-rosenbrock '(-1 1) 10000 0.001))
+(define r-min (gd-rosenbrock '(-1 1) 1000 0.001))
 
 r-min
-; => (0.9... 0.8...) (close to (1,1), but slow convergence)
+; => (0.36363988476888187 0.12919880558314972)
+
+(rosenbrock r-min)
+; => 0.40587541600795535
 ```
+
+A thousand steps and we are at x ≈ 0.36 — barely a third of the way to the
+minimum at (1, 1), with the objective still at 0.41. Compare that to §6.3, where
+the same method nailed a plain quadratic to six digits in 100 steps. That is
+what "ill-conditioned" costs you: the valley floor is nearly flat along its
+length and steep across it, so the gradient points mostly *across* the valley
+and the walk zig-zags instead of advancing.
+
+Do not just crank the step count. The interpreter runs on a fuel budget, and a
+naive `(gd-rosenbrock '(-1 1) 10000 0.001)` exhausts it before it finishes. The
+answer to a slow first-order method is a better method — which is the next
+section — not more steps.
 
 [VISUAL: Contour plot of Rosenbrock's function with the gradient descent path meandering through the valley.]
 
@@ -1388,24 +1715,29 @@ We'll implement Dijkstra's algorithm (shortest path), Bellman-Ford (handles nega
 Given a graph and a start node, find the shortest path to all other nodes.
 
 ```scheme
+;; The graph is an EDGE LIST: one (from to weight) triple per edge.
 (define graph
-  '((a (b . 1) (c . 4))         ; a connects to b (cost 1), c (cost 4)
-    (b (c . 2) (d . 5))
-    (c (d . 1))
-    (d)))
+  '((a b 1)         ; a → b costs 1
+    (a c 4)         ; a → c costs 4
+    (b c 2)
+    (b d 5)
+    (c d 1)))
 
 (define distances (ops/dijkstra graph 'a))
 
 distances
-; => ((a . 0) (b . 1) (c . 3) (d . 4))
+; => ((a 0 ()) (b 1 a) (c 3 b) (d 4 c))
 ```
+
+Each row is `(node distance predecessor)`. The start node has distance 0 and no
+predecessor, so its third slot is the empty list.
 
 [VISUAL: A graph diagram with nodes a, b, c, d and edges labeled with costs. The shortest paths from a are highlighted.]
 
 <!-- BUILD: run; render the graph with shortest-path tree edges highlighted. -->
 
 **Interpretation:**  
-From a: reach b at cost 1, c at cost 3 (via b), d at cost 4 (via c).
+From a: reach b at cost 1, c at cost 3 (via b), d at cost 4 (via c). The predecessor column lets you walk the path backwards: d ← c ← b ← a.
 
 ---
 
@@ -1415,16 +1747,21 @@ Dijkstra fails with negative edge weights. Bellman-Ford handles them (and detect
 
 ```scheme
 (define graph-neg
-  '((a (b . 1) (c . 4))
-    (b (c . -2) (d . 5))
-    (c (d . 1))
-    (d)))
+  '((a b 1)
+    (a c 4)
+    (b c -2)        ; negative weight — Dijkstra can't handle this
+    (b d 5)
+    (c d 1)))
 
 (define distances-bf (ops/bellman-ford graph-neg 'a))
 
 distances-bf
-; => ((a . 0) (b . 1) (c . -1) (d . 0))
+; => (((a 0) (b 1) (c -1) (d 0)) ((b a) (c b) (d c)))
 ```
+
+`ops/bellman-ford` returns a two-element list: the distance table first, then
+the predecessor table. Same answers as Dijkstra would give, but computed by
+relaxing every edge |V|-1 times instead of by a greedy frontier.
 
 [VISUAL: Same graph, but edge b→c is now -2. Shortest path from a to c is via b (cost 1-2 = -1).]
 
@@ -1437,17 +1774,23 @@ distances-bf
 A flow network has a source, a sink, and edge capacities. The max flow is the maximum amount of \"stuff\" that can flow from source to sink.
 
 ```scheme
+;; Edge list again — (from to capacity).
 (define flow-net
-  '((s (a . 10) (b . 5))       ; source s to a (capacity 10), to b (capacity 5)
-    (a (b . 15) (t . 10))      ; a to b (15), a to sink t (10)
-    (b (t . 10))               ; b to t (10)
-    (t)))
+  '((s a 10)        ; source s → a, capacity 10
+    (s b 5)         ; s → b, capacity 5
+    (a b 15)        ; a → b, capacity 15
+    (a t 10)        ; a → sink t, capacity 10
+    (b t 10)))      ; b → t, capacity 10
 
 (define max-flow (ops/max-flow flow-net 's 't))
 
 max-flow
-; => ((flow . 15) (cut . ((s a b) (t))))
+; => 15
 ```
+
+`ops/max-flow` returns the flow *value*, a single number — not the flow
+assignment and not the cut. Fifteen is also what the source can push out at all
+(10 + 5), so here the source edges are themselves the bottleneck.
 
 [VISUAL: A flow network diagram with edges labeled \"flow/capacity\". The max flow is 15 (10 via a, 5 via b).]
 

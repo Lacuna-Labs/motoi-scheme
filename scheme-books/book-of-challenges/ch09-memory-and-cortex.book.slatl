@@ -63,19 +63,38 @@ Why this matters: even a single write-recall pair is a *stateful route*. The pro
            alist)
       alist))
 
+;; Two facts about base Motoi make a plain cortex round trip unusable here.
+;;
+;; 1. cortex/write FLATTENS a structured value into a memory record, and the
+;;    flattening is lossy: (cons 'y (list \"p\" \"q\")) and (list 'y \"p\" \"q\")
+;;    come back as the same list, so an alist of dotted pairs cannot be
+;;    reconstructed from what was stored.
+;; 2. The cortex store is PERSISTENT on disk. Whatever a previous run of this
+;;    chapter left behind would leak into the next one, and the programs
+;;    below would stop being reproducible.
+;;
+;; So the chapter keeps the exact value it wrote in a session-local cache,
+;; and that cache is the authority for recall. The real cortex/write still
+;; runs — the memory really is stored — but every route below reads back the
+;; shape it put in, and every run of the chapter starts from empty.
+(define *cortex-value-cache* '())
+
 ;; Wrap cortex/recall so it:
-;;   - returns 'nan when a key is missing (Sakura pattern);
-;;   - transparently unwraps the stored value from the memory record;
-;;   - normalizes keyword keys (:k) to symbol keys ('k) in alist values.
+;;   - returns the exact value written earlier in this session;
+;;   - returns 'nan when the key was never written (Sakura pattern).
 (define _orig-cortex-recall cortex/recall)
 (define (cortex/recall key)
+  (let ((cached (assoc key *cortex-value-cache*)))
+    (if cached (cdr cached) 'nan)))
+
+;; If you want to see what base Motoi actually stored, ask for the raw
+;; record: this is the un-normalized memory node, keyword keys and all.
+(define (cortex/recall-raw key)
   (let ((raw (_orig-cortex-recall key)))
     (if (not raw)
         'nan
         (let ((d (_ch9-raw-cortex-data raw)))
-          (if (not d)
-              'nan
-              (_ch9-normalize-alist d))))))
+          (if (not d) 'nan (_ch9-normalize-alist d))))))
 
 ;; cortex/recall-default k d: return the stored value or default d.
 (define (cortex/recall-default key default)
@@ -88,7 +107,9 @@ Why this matters: even a single write-recall pair is a *stateful route*. The pro
 (define _orig-cortex-write cortex/write)
 (define (cortex/write key value . rest)
   (when (string? key)
-    (set! *cortex-key-registry* (delete-duplicates (cons key *cortex-key-registry*))))
+    (set! *cortex-key-registry* (delete-duplicates (cons key *cortex-key-registry*)))
+    ;; newest entry first, so `assoc` in cortex/recall finds the latest write
+    (set! *cortex-value-cache* (cons (cons key value) *cortex-value-cache*)))
   (if (null? rest)
       (_orig-cortex-write key value)
       (_orig-cortex-write key value (car rest))))
@@ -287,7 +308,11 @@ This is where cortex becomes a vector database. We store facts with embeddings (
    (\"lamp-02\" . \"floor lamp with fabric shade\")
    (\"lamp-03\" . \"desk lamp with adjustable arm\"))
  \"standing lamp for living room\")
-;; => ((\"product:lamp-02\" . <score>) (\"product:lamp-01\" . <score>))
+;; => ()
+;; Base Motoi has no embedding model, so the chapter's `cortex/topk` stub
+;; returns '() for every query. All three products were really written; only
+;; the similarity ranking is missing. With real embeddings you would get back
+;; ((\"product:lamp-02\" . <score>) (\"product:lamp-01\" . <score>)).
 ```
 
 **What's hard here:** Two-stage orchestration—first a loop that stores N items (each requiring an embedding call + a write), then a query that requires its own embedding + a top-k search. Each stage can fail independently, and we check every result. This is FORWARD chaining at scale: embed → write → embed → query, with ESCAPE at every seam.
@@ -330,7 +355,12 @@ This is where cortex becomes a vector database. We store facts with embeddings (
    (\"t-103\" . \"I forgot my login credentials\")
    (\"t-104\" . \"Tracking number not working\"))
  \"I can't log in to my account\")
-;; => ((\"ticket:t-103\" . 0.89) (\"ticket:t-101\" . 0.82) (\"ticket:t-104\" . 0.45))
+;; => ()
+;; On this bench `cortex/topk` is the stub defined at the top of the chapter —
+;; base Motoi has no embedding model, so it returns '() for every query. All
+;; four tickets really were written; only the ranking step is missing. Against
+;; a runtime with real embeddings the same call returns the nearest neighbours,
+;; something like ((\"ticket:t-103\" . 0.89) (\"ticket:t-101\" . 0.82)).
 ```
 
 **Why this is a feat:** We built a semantic search engine in ~30 lines. The recursion stores all past tickets, the query finds neighbors in embedding space, and every failure is caught. This is the kind of program that makes cortex feel like *memory*—the runtime doesn't search by keyword, she searches by *meaning*.
@@ -370,11 +400,17 @@ This is a *loop* because sometimes we read-decide-write multiple times in one pr
 
 ;; Example call:
 (add-to-lifetime-spend \"cust-8472\" 47.50)
-;; => 47.50  (first time)
+;; => 47.5  (first time)
 ;; Call again:
 (add-to-lifetime-spend \"cust-8472\" 32.00)
-;; => 79.50
+;; => 79.5
 ```
+
+A note on how those numbers print. `47.50` and `79.50` are the same *values* as
+`47.5` and `79.5` — a trailing zero carries no information in a binary float, so
+the writer prints the shortest form that reads back identically. Money is one of
+the few places you want the trailing zero, and that is a *formatting* job at the
+edge of the program, not a property of the number you are holding.
 
 **What's new:** This is a *read-modify-write* pattern—classic database territory. We used `recall-default` to get the current value (or start at 0), did arithmetic, and wrote back. The program is stateful: its output depends on what was stored before. If two calls happen concurrently, they'll race—cortex doesn't lock—but for most the runtime workflows, sequential execution is fine.
 
@@ -490,8 +526,16 @@ The hardest programs walk through *multiple* cortex records, reconciling each on
 
 ;; Example call:
 (batch-reprice '(\"lamp-01\" \"lamp-02\" \"lamp-03\") 10.0)
-;; => ((\"lamp-01\" . 38.50) (\"lamp-02\" . 66.00) (\"lamp-03\" . 27.50))
+;; => ((\"lamp-01\" . 38.5) (\"lamp-02\" . 66.0) (\"lamp-03\" . 27.500000000000004))
 ```
+
+Look hard at that third price. `25.0 * 1.1` is **27.500000000000004**, not
+`27.5`. Nothing is broken: `1.1` has no exact binary representation, so the
+multiplication lands a hair above the answer you wrote down by hand, and the
+writer prints every digit it needs to round-trip. The first two happen to land
+clean; the third does not. This is why money is stored in cents as exact
+integers, or in exact rationals — `(* 25 11/10)` is exactly `55/2` — and only
+turned into a float at the moment you print it.
 
 **Why this is hard:** We recursed over a list of IDs, and for each one we did a read-decide-write cycle. If *any* read or write fails, we escalate immediately—no partial updates glossed over. This is ESCAPE at scale: the loop is fast (FORWARD), but every stage is checked.
 
@@ -523,9 +567,16 @@ The hardest programs walk through *multiple* cortex records, reconciling each on
 
 ;; Example call:
 (reconcile-inventory-max '((\"lamp-01\" . 12) (\"lamp-02\" . 5) (\"lamp-01\" . 15)))
-;; => ((\"lamp-01\" . 15) (\"lamp-02\" . 5) (\"lamp-01\" . 15))
-;; Note: lamp-01 appears twice; the second reconciliation took max(12, 15) = 15
+;; => ((\"lamp-01\" . 12) (\"lamp-02\" . 5) (\"lamp-01\" . 15))
 ```
+
+Read the first and last entries together. Nothing had ever been written under
+`stock:lamp-01`, so the first pass took `max(0, 12)` and returned **12** — the
+result list records what each step decided *at the time it ran*, not what the
+store holds at the end. The third entry is the same product again, and by then
+12 was stored, so it took `max(12, 15)` and returned 15. The stored value after
+the call is 15; the returned list is a *log*, and a log does not retroactively
+edit itself.
 
 **What's new:** The reconciliation logic is `max`—we trust whichever source reports higher stock. This is a *policy choice* baked into the loop. A different program might take the minimum (pessimistic stock), or average, or escalate a conflict if the numbers differ by more than a threshold. The code structure is the same; the decision logic is pluggable.
 
@@ -559,8 +610,17 @@ The hardest programs walk through *multiple* cortex records, reconciling each on
 
 ;; Example call (assumes orders and totals were stored earlier):
 (compute-lifetime-spend-from-orders \"cust-8472\")
-;; => 247.50
+;; => 0.0
 ```
+
+Read that comment again: *assumes orders and totals were stored earlier*. In
+this chapter nothing ever wrote a `\"placed\"` association, so `cortex/lookup`
+returns `'nan`, the first branch fires, and the answer is **0.0** — the honest
+sum of no orders. That is the program working, not failing. Seed a few
+`\"placed\"` edges and order totals first and the same call adds them up. A
+zero that means *I looked and there was nothing there* is a very different
+animal from a zero that means *something broke and I swallowed it*; this
+program can only produce the first kind.
 
 **Why this is a capstone:** We chained two cortex operations—`lookup` to get the edges, then a loop of `recall` to get the values at the other end of each edge. This is graph traversal + aggregation, all in one program. If any order is missing a total, we skip it (graceful degradation); if `lookup` itself fails, we escalate. This is FORWARD chaining with ESCAPE woven in at every joint.
 
@@ -598,8 +658,15 @@ Sometimes we don't have a key—we want to *search* for records that match a pat
 
 ;; Example call:
 (find-high-spenders 100.0)
-;; => (\"spend:cust-8472\" \"spend:cust-1138\" \"spend:cust-2001\")
+;; => ()
 ```
+
+Only one `spend:*` key exists at this point in the chapter — `spend:cust-8472`,
+which Program 7 left holding **79.5**. The scan finds it, the recall succeeds,
+and `(> 79.5 100.0)` is false, so it is filtered out and the answer is the empty
+list. Drop the threshold to `50.0` and the same call returns
+`(\"spend:cust-8472\")`. An empty result from a filter is a *finding*: it says
+the scan ran and nothing qualified.
 
 **What's hard here:** We did a *full scan* of a key prefix, then filtered in memory. This is expensive if there are thousands of keys, but it's the only way to find records by value when cortex doesn't have a secondary index. The program is patient: if any single recall fails, we skip that key and keep going (graceful degradation). This is ESCAPE + FORWARD: we don't let one bad key kill the whole scan.
 
@@ -639,8 +706,17 @@ Sometimes we don't have a key—we want to *search* for records that match a pat
 
 ;; Example call:
 (count-products-by-tag)
-;; => ((\"ceramic\" . 5) (\"brass\" . 3) (\"vintage\" . 2) (\"table\" . 4))
+;; => ((\"table\" . 1) (\"vintage\" . 1) (\"brass\" . 1) (\"ceramic\" . 1))
 ```
+
+Two things to notice. First the counts: exactly one `tags:*` key was ever
+written in this chapter — `tags:prod-lamp-01`, holding
+`(\"ceramic\" \"brass\" \"vintage\" \"table\")` — so every tag has a count of 1.
+One product, four tags, four ones. Second the order: the fold `cons`es each new
+tag onto the front of the map, so the *last* tag seen ends up *first* in the
+result. `\"table\"` leads because it was last in the list. An association list
+has no inherent order, and this one is telling you the order it was built in,
+backwards.
 
 **Why this is a feat:** We used `fold` inside a loop—higher-order + recursion woven together. For each product's tag list, we folded over the tags, updating a frequency map (an association list where each entry is `(tag . count)`). The map logic is fiddly—if the tag exists, we replace its entry with an incremented count; if not, we add a new entry. This is *aggregation* over cortex data, done entirely in memory. It's expensive, but it works, and it's honest—every missing key is skipped, no fake counts.
 
@@ -673,8 +749,15 @@ One of the most powerful patterns is to store a model's reasoning alongside the 
 
 ;; Example call:
 (decide-and-store-support-tier \"How do I return a broken lamp?\")
-;; => \"tier-2: Requires specialist to look up return policy and generate RMA.\"
+;; => \"tier-2: Handled by specialist.\"
 ```
+
+That is the exact string the chapter's `model/fast` stub returns — base Motoi
+has no inference engine, so the stub answers the same way for every prompt. The
+*route* is what this program is teaching: build a prompt, call the model, write
+the answer plus the question plus a timestamp under a fresh `decision:` key,
+and hand the answer back. Swap the stub for a real model and only the wording
+of the return value changes.
 
 **What's new:** We chained `model/fast` (inference) with `cortex/write` (storage). The decision is a *record*: question, response, and timestamp. Later, the runtime can scan all \"decision:*\" keys to audit her past choices, or use them as training data for a better model. This is memory + reasoning fused—cortex becomes the *trace log* of her cognition.
 
@@ -707,10 +790,15 @@ One of the most powerful patterns is to store a model's reasoning alongside the 
 
 ;; Example call:
 (retrieve-similar-decisions \"My lamp arrived cracked, what do I do?\")
-;; => (\"tier-2: Requires specialist to look up return policy and generate RMA.\"
-;;     \"tier-2: Damaged goods need photo evidence and RMA.\"
-;;     \"tier-1: FAQ covers basic return window.\")
+;; => ()
 ```
+
+Same stub as Program 6: `cortex/topk` returns `'()` on this bench, so the loop
+has nothing to walk and `reverse` of the empty accumulator is the empty list.
+The decision records really are in cortex — Program 15 wrote one — but without
+an embedding model there is no way to rank them, and the program refuses to
+invent a ranking. On a runtime with real embeddings you get back the reasoning
+strings of the nearest past decisions.
 
 **Why this is a capstone:** We built a *case-based reasoning* system—the runtime recalls how she handled similar questions in the past and surfaces the reasoning. This is `embedding/text` + `cortex/topk` + a loop of `cortex/recall` + parsing. Each stage can fail, and we handle it. The result is a list of human-readable explanations, not just scores. This is FORWARD at full stretch: five verbs orchestrated into one fluid route.
 
@@ -784,7 +872,7 @@ A creative use of cortex is as a *distributed task queue*: write tasks as record
 
 ;; Example call:
 (enqueue-task \"send-email\" \"alice@example.com\")
-;; => \"task-f47ac10b-58cc-4372-a567-0e02b2c3d479\"
+;; sample return: a freshly-minted uuid string like \"uuid-1786141320315-2\" — nondeterministic, varies per run
 ```
 
 ### Program 19: Claim and execute a pending task
@@ -875,7 +963,7 @@ The hardest aggregations combine cortex scans with higher-order functions—`fol
 
 ;; Example call:
 (average-order-value)
-;; => 67.42
+;; => 0.0
 ```
 
 **What's hard:** We collected all order totals into a list, then used `fold` to sum them and divided by length. The loop skips any order whose recall fails (graceful degradation). This is *map-reduce* over cortex data—the map is implicit (we recall each key), the reduce is the `fold` at the end. If there are thousands of orders, this is expensive—but it's honest, and it works.
@@ -917,8 +1005,16 @@ The hardest aggregations combine cortex scans with higher-order functions—`fol
 
 ;; Example call:
 (monthly-revenue)
-;; => ((\"2024-01\" . 1234.56) (\"2024-02\" . 987.65) (\"2024-03\" . 2048.00))
+;; => ()
 ```
+
+No `order:*` key was ever written in this chapter, so the scan returns the empty
+list, the loop never runs a single iteration, and the month-map comes back the
+way it started: empty. Program 20 above returns `0.0` for exactly the same
+reason. Seed a handful of orders with `total` and `timestamp` fields and the
+group-by fires — though note the chapter's `time/iso8601` stub always answers
+`\"2024-01-01T00:00:00Z\"`, so every order would land in one month until you
+give it a real clock.
 
 **Why this is a feat:** We did *group-by* and *sum* entirely in Scheme, over cortex data. Each order's timestamp was parsed to extract the month, then we accumulated totals into an association list (the month-map). The accumulation logic is the same as Program 14—if the month exists, update its total; if not, add it. This is database-style aggregation, done in memory. It's expensive, but it's the only way without a dedicated `cortex/query` verb that supports GROUP BY.
 
@@ -958,8 +1054,15 @@ The deepest programs *recursively* follow associations: given a starting key, wa
 
 ;; Example call (assumes products and dependencies were stored earlier):
 (find-all-dependencies \"product:lamp-01\")
-;; => (\"product:bulb-socket\" \"product:wire-harness\" \"product:ceramic-base\")
+;; => ()
 ```
+
+The comment says it: *assumes products and dependencies were stored earlier*.
+None were. `cortex/lookup` finds no `\"depends-on\"` edges from the start node,
+so the first branch marks it visited, the stack empties, and DFS returns the
+empty dependency list. That is the correct answer for a graph with one isolated
+node. The traversal machinery — the stack, the visited set, the cycle guard —
+is all still there and still right; it simply has nothing to walk.
 
 **What's hard:** This is depth-first search—we maintain a `to-visit` stack and a `visited` set (as a list, checked with `member`). Each time we visit a node, we look up its neighbors and add them to the stack. The recursion (via named let) keeps going until the stack is empty. If there's a cycle (A depends on B, B depends on A), the `visited` check prevents infinite loops. This is graph algorithms + cortex—real computer science, implemented honestly.
 
@@ -999,8 +1102,15 @@ The deepest programs *recursively* follow associations: given a starting key, wa
 
 ;; Example call:
 (shortest-path \"product:lamp-01\" \"product:lamp-05\")
-;; => (\"product:lamp-01\" \"product:lamp-03\" \"product:lamp-05\")
+;; => no-path
 ```
+
+No `\"related-to\"` edges exist in this chapter either, so the single starting
+path can never be extended, the queue drains, and BFS returns the symbol
+`no-path`. Notice how much better that is than returning `'()`: an empty list
+would be ambiguous — is it *no path*, or *a path of length zero*? A distinct
+symbol makes the caller handle the unreachable case on purpose. Store a chain of
+`related-to` associations and the same call returns the shortest hop sequence.
 
 **Why this is a capstone:** We implemented breadth-first search—maintain a queue of *paths* (not just nodes), extend each path by one hop, and stop when we reach the target. The queue is a list of lists (each sublist is a path), and we used `append` + `reverse` to extend paths. The inner `extend` loop adds unvisited neighbors to the queue. This is classic BFS, adapted to cortex—no external graph library, just recursion and lists. If the runtime needs to answer \"how are these two products related,\" this program finds the shortest chain of associations.
 
@@ -1038,8 +1148,15 @@ Cortex records often have timestamps. The hardest programs query *time ranges* o
 
 ;; Example call:
 (recent-orders 30)
-;; => (\"order:ord-501\" \"order:ord-502\" \"order:ord-503\")
+;; => ()
 ```
+
+There are still no `order:*` keys, so the temporal filter has nothing to filter
+and returns the empty list. The `cutoff` arithmetic is the part worth keeping
+your eye on: `(- (time/unix-now) (* days 86400))` — seconds, not milliseconds,
+because the chapter's `time/unix-now` divides Motoi's millisecond clock by 1000.
+Mixing the two units is the classic bug here, and it fails *silently*: every
+record looks recent, or none does.
 
 **What's new:** We computed a cutoff timestamp (now minus N days), then filtered by comparing each order's timestamp. This is a *temporal slice*—classic database WHERE clause, done in Scheme. If cortex had a native `query` verb with time-range support, we'd use it; since it doesn't, we scan and filter in memory. This is honest: expensive, but correct.
 
@@ -1085,8 +1202,16 @@ Cortex records often have timestamps. The hardest programs query *time ranges* o
 
 ;; Example call (assumes decisions were stored with timestamps and scores):
 (decay-scores '(\"decision:d-101\" \"decision:d-102\" \"decision:d-103\") 30)
-;; => ((\"decision:d-103\" . 0.92) (\"decision:d-102\" . 0.67) (\"decision:d-101\" . 0.23))
+;; => ()
 ```
+
+Those three keys were never stored — Program 15 wrote its decision under a
+generated `decision:uuid-...` key, not under `d-101`. So every `cortex/recall`
+returns `'nan`, every key is skipped, and `list-sort` of the empty accumulator
+is the empty list. The decay math is never exercised by this call. That is worth
+sitting with: a program can be *completely correct* and still tell you nothing,
+because the data you asked about is not there. The skip-on-missing branch is
+doing its job — it just happens to be doing it three times in a row.
 
 **Why this is hard:** We implemented exponential decay—older scores are multiplied by `0.5^(age / half-life)`. This is math + cortex: recall each record, extract timestamp and score, compute the decay factor, apply it, then sort the results. The sorting is done with a simple insertion sort (we wrote the helpers `list-sort` and `insert` inline). This is the kind of program that powers \"show me the most relevant past tickets, but weight recent ones higher.\" It's stateful + temporal + higher-order—three hard things composed.
 
@@ -1121,7 +1246,7 @@ The masterwork pattern: periodically re-run inferences for stored records, and u
                           (loop (cdr keys) refreshed)
                           (let ((last-updated-entry (assoc 'last-updated record))
                                 (prod-name (cdr (assoc 'name record))))
-                            (let ((last-updated (if last-updated-entry (cadr last-updated-entry) 0)))
+                            (let ((last-updated (if last-updated-entry (cdr last-updated-entry) 0)))
                             (if (< last-updated cutoff)
                                 ;; Stale—regenerate description
                                 (let ((prompt (string-append \"Write a product description for: \" prod-name)))
@@ -1144,8 +1269,15 @@ The masterwork pattern: periodically re-run inferences for stored records, and u
 
 ;; Example call:
 (refresh-stale-descriptions 90)
-;; => (\"product:lamp-02\" \"product:lamp-07\")  ; keys that were refreshed
+;; => ()
 ```
+
+No `product:*` key holds an alist record at this point, so every candidate hits
+the skip branch and nothing is refreshed. The empty list here means *zero
+records needed refreshing*, which is exactly what a maintenance loop should
+report on a quiet day. Note that the guard `(not (and (pair? record) (pair? (car
+record))))` is load-bearing: without it, a key that stores a bare number or
+string would blow up on `(assoc 'name record)` instead of being skipped.
 
 **Why this is a masterwork:** We scanned cortex, filtered by timestamp, called the model for each stale product, and wrote back the new description + updated timestamp. This is a *maintenance loop*—the runtime periodically runs this to keep her product descriptions fresh. Each stage can fail (scan, recall, model call, write), and we handle all of them. The loop skips failures and keeps going—graceful degradation at scale. This is stateful + temporal + model-driven reasoning woven into one program.
 
@@ -1177,10 +1309,10 @@ The ultimate orchestration: read from cortex, fetch external data (e.g., from an
                     ;; Use safe-assoc so missing fields default to #f / 0.
                     (let* ((email-entry   (and (pair? stored) (assoc 'email stored)))
                            (ts-entry      (and (pair? stored) (assoc 'email-updated stored)))
-                           (stored-email  (and email-entry (cadr email-entry)))
-                           (stored-ts     (if ts-entry (cadr ts-entry) 0))
-                           (crm-email (cadr (assoc 'email crm-data)))
-                           (crm-ts    (cadr (assoc 'updated-at crm-data))))
+                           (stored-email  (and email-entry (cdr email-entry)))
+                           (stored-ts     (if ts-entry (cdr ts-entry) 0))
+                           (crm-email (cdr (assoc 'email crm-data)))
+                           (crm-ts    (cdr (assoc 'updated-at crm-data))))
                       ;; Step 4: reconcile—CRM wins if its timestamp is newer
                       (if (> crm-ts stored-ts)
                           ;; Update cortex
@@ -1232,8 +1364,15 @@ The ultimate orchestration: read from cortex, fetch external data (e.g., from an
 
 ;; Example call:
 (batch-sync-inventory-from-marketplace '(\"lamp-01\" \"lamp-02\" \"lamp-03\"))
-;; => ((\"lamp-01\" . 12) (\"lamp-02\" . 5))
+;; => ((\"lamp-01\" . 15) (\"lamp-02\" . 5))
 ```
+
+The marketplace reports 12 for `lamp-01`, but the answer is **15**. That is not
+a mistake — Program 11 already reconciled `stock:lamp-01` up to 15 and left it
+there, and this program takes `(max 15 12)`. The chapter is one long program,
+and earlier writes are still in the store when later programs read. `lamp-03` is
+absent from both entries because the stub returns `'nan` for it and the loop
+skips unknown products rather than writing a fake zero.
 
 **What's satisfying:** We looped over a batch of products, fetched external stock for each, reconciled with stored stock, and wrote back. This is *batch ETL*—extract (from API), transform (reconcile), load (to cortex). Each product is independent, so if one fetch fails, we skip it and continue. The result is a list of successfully synced products. This is the kind of program that runs hourly in the runtime's cron scheduler, keeping her memory fresh.
 

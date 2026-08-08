@@ -28,6 +28,7 @@ import { makeCoreEnv } from '../core/index.js'
 import { evaluate } from '../src/interp.js'
 import { parse } from '../src/reader.js'
 
+import { plain } from './_cells.mjs'
 function run(src) {
   const fuel = { n: 1_000_000 }
   const env = makeCoreEnv({ fuel })
@@ -58,7 +59,7 @@ function raises(src, verb) {
 test('apply prepends its leading arguments to the final list', () => {
   assert.equal(run('(apply + 1 2 (list 3 4))'), 10)
   assert.equal(run('(apply + 1 (list 2))'), 3)
-  assert.deepEqual(run('(apply list 1 2 (list 3 4))'), [1, 2, 3, 4])
+  assert.deepEqual(plain(run('(apply list 1 2 (list 3 4))')), [1, 2, 3, 4])
 })
 
 test('apply still accepts the plain two-argument form', () => {
@@ -155,7 +156,7 @@ test('length rejects anything that is not a proper list', () => {
 
 test('the accessors still work on the shapes they should', () => {
   assert.equal(run('(car (list 1 2))'), 1)
-  assert.deepEqual(run('(cdr (list 1 2))'), [2])
+  assert.deepEqual(plain(run('(cdr (list 1 2))')), [2])
   assert.equal(run('(car (cons 1 2))'), 1)
   assert.equal(run('(cdr (cons 1 2))'), 2)
   assert.equal(run('(cadr (list 1 2 3))'), 2)

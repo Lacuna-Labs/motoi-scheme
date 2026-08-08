@@ -16,6 +16,7 @@ import { makeBaseEnv } from '../src/base.js'
 import { parse } from '../src/reader.js'
 import { evaluate } from '../src/interp.js'
 
+import { plain } from './_cells.mjs'
 function run(src) {
   const env = makeBaseEnv(1_000_000)
   const forms = parse(src)
@@ -28,34 +29,34 @@ function run(src) {
 // ── SRFI-1 list library ──────────────────────────────────────────────
 
 test('iota — SRFI-1 numeric range with start + step', () => {
-  assert.deepEqual(run('(iota 5)'), [0, 1, 2, 3, 4])
-  assert.deepEqual(run('(iota 5 10)'), [10, 11, 12, 13, 14])
-  assert.deepEqual(run('(iota 5 0 2)'), [0, 2, 4, 6, 8])
-  assert.deepEqual(run('(iota 0)'), [])
+  assert.deepEqual(plain(run('(iota 5)')), [0, 1, 2, 3, 4])
+  assert.deepEqual(plain(run('(iota 5 10)')), [10, 11, 12, 13, 14])
+  assert.deepEqual(plain(run('(iota 5 0 2)')), [0, 2, 4, 6, 8])
+  assert.deepEqual(plain(run('(iota 0)')), [])
 })
 
 test('fold — SRFI-1 left fold', () => {
   assert.equal(run('(fold + 0 (list 1 2 3 4))'), 10)
-  assert.deepEqual(run('(fold cons (list) (list 1 2 3))'), [3, 2, 1])
+  assert.deepEqual(plain(run('(fold cons (list) (list 1 2 3))')), [3, 2, 1])
   assert.equal(run('(fold + 0 (list))'), 0)
 })
 
 test('fold-right — SRFI-1 right fold', () => {
-  assert.deepEqual(run('(fold-right cons (list) (list 1 2 3))'), [1, 2, 3])
+  assert.deepEqual(plain(run('(fold-right cons (list) (list 1 2 3))')), [1, 2, 3])
   assert.equal(run('(fold-right + 0 (list 1 2 3 4))'), 10)
 })
 
 test('concatenate — SRFI-1 flatten one level', () => {
-  assert.deepEqual(run('(concatenate (list (list 1 2) (list 3 4)))'), [1, 2, 3, 4])
-  assert.deepEqual(run('(concatenate (list))'), [])
+  assert.deepEqual(plain(run('(concatenate (list (list 1 2) (list 3 4)))')), [1, 2, 3, 4])
+  assert.deepEqual(plain(run('(concatenate (list))')), [])
 })
 
 test('append-map — SRFI-1', () => {
-  assert.deepEqual(run('(append-map (lambda (x) (list x x)) (list 1 2 3))'), [1, 1, 2, 2, 3, 3])
+  assert.deepEqual(plain(run('(append-map (lambda (x) (list x x)) (list 1 2 3))')), [1, 1, 2, 2, 3, 3])
 })
 
 test('filter-map — SRFI-1 map then drop #f', () => {
-  assert.deepEqual(run('(filter-map (lambda (x) (if (odd? x) (* x x) #f)) (list 1 2 3 4 5))'), [1, 9, 25])
+  assert.deepEqual(plain(run('(filter-map (lambda (x) (if (odd? x) (* x x) #f)) (list 1 2 3 4 5))')), [1, 9, 25])
 })
 
 test('partition — SRFI-1 split by predicate (returns TWO values)', () => {
@@ -63,7 +64,7 @@ test('partition — SRFI-1 split by predicate (returns TWO values)', () => {
   // (values/call-with-values live in the core env; let-values is a base
   // special form, so the base-env harness consumes the values that way.)
   const r = run('(let-values (((yes no) (partition odd? (list 1 2 3 4 5)))) (list yes no))')
-  assert.deepEqual(r, [[1, 3, 5], [2, 4]])
+  assert.deepEqual(plain(r), [[1, 3, 5], [2, 4]])
 })
 
 test('find — SRFI-1 first match or #f', () => {
@@ -72,11 +73,11 @@ test('find — SRFI-1 first match or #f', () => {
 })
 
 test('delete-duplicates — SRFI-1', () => {
-  assert.deepEqual(run('(delete-duplicates (list 1 2 1 3 2 4))'), [1, 2, 3, 4])
+  assert.deepEqual(plain(run('(delete-duplicates (list 1 2 1 3 2 4))')), [1, 2, 3, 4])
 })
 
 test('unzip — SRFI-1 inverse of zip', () => {
-  assert.deepEqual(run('(unzip (list (list 1 3) (list 2 4)))'), [[1, 2], [3, 4]])
+  assert.deepEqual(plain(run('(unzip (list (list 1 3) (list 2 4)))')), [[1, 2], [3, 4]])
 })
 
 test('second through tenth — SRFI-1 positional accessors', () => {
@@ -88,8 +89,8 @@ test('second through tenth — SRFI-1 positional accessors', () => {
 test('list? / list-tail / list-copy — R7RS §6.4', () => {
   assert.equal(run('(list? (list 1 2 3))'), true)
   assert.equal(run('(list? 5)'), false)
-  assert.deepEqual(run('(list-tail (list 1 2 3 4 5) 2)'), [3, 4, 5])
-  assert.deepEqual(run('(list-copy (list 1 2 3))'), [1, 2, 3])
+  assert.deepEqual(plain(run('(list-tail (list 1 2 3 4 5) 2)')), [3, 4, 5])
+  assert.deepEqual(plain(run('(list-copy (list 1 2 3))')), [1, 2, 3])
 })
 
 // ── SRFI-13 string library ──────────────────────────────────────────
@@ -101,9 +102,9 @@ test('string-contains / string-index — SRFI-13', () => {
 })
 
 test('string-split / string-join — round-trip', () => {
-  assert.deepEqual(run('(string-split "a,b,c" ",")'), ['a', 'b', 'c'])
+  assert.deepEqual(plain(run('(string-split "a,b,c" ",")')), ['a', 'b', 'c'])
   assert.equal(run('(string-join (list "a" "b" "c") "-")'), 'a-b-c')
-  assert.deepEqual(run('(string-split "hello world foo")'), ['hello', 'world', 'foo'])
+  assert.deepEqual(plain(run('(string-split "hello world foo")')), ['hello', 'world', 'foo'])
 })
 
 test('string-upcase / string-downcase / string-titlecase', () => {
@@ -148,15 +149,17 @@ test('string-replace / string-reverse / string-count', () => {
 // so they passed strings where characters belong. Switched to `#\x` literals —
 // this STRENGTHENS the assertion (it now proves the character type exists).
 test('string->list / list->string / string constructor', () => {
-  const chars = run('(string->list "abc")')
+  const chars = plain(run('(string->list "abc")'))
   assert.deepEqual(chars.map((c) => c.value), ['a', 'b', 'c'])
-  assert.equal(run('(list->string (list #\\a #\\b #\\c))'), 'abc')
-  assert.equal(run('(string #\\a #\\b #\\c)'), 'abc')
+  // R7RS §6.7 calls these results "newly allocated" — they come back as the
+  // MUTABLE carrier (lib/base/mutable-string.js), so compare the TEXT.
+  assert.equal(String(run('(list->string (list #\\a #\\b #\\c))')), 'abc')
+  assert.equal(String(run('(string #\\a #\\b #\\c)')), 'abc')
 })
 
 test('make-string / string-copy', () => {
-  assert.equal(run('(make-string 3 "-")'), '---')
-  assert.equal(run('(string-copy "hello" 1 4)'), 'ell')
+  assert.equal(String(run('(make-string 3 "-")')), '---')
+  assert.equal(String(run('(string-copy "hello" 1 4)')), 'ell')
 })
 
 test('string<? / string>? / string-ci=?', () => {
@@ -219,7 +222,10 @@ test('exact / inexact / integer? / rational? / real?', () => {
   assert.equal(run('(denominator (exact 1.5))'), 2)
   // An integral float still yields a plain exact integer.
   assert.equal(run('(exact 3.0)'), 3)
-  assert.equal(run('(inexact 3)'), 3)
+  // REBASELINED 2026-08-03: (inexact 3) is 3.0, an INEXACT integer — the whole
+  // point of `inexact`. It used to hand back the same exact 3 it was given.
+  assert.equal(Number(run('(inexact 3)')), 3)
+  assert.equal(run('(exact? (inexact 3))'), false)
   assert.equal(run('(integer? 3)'), true)
   assert.equal(run('(integer? 3.5)'), false)
   assert.equal(run('(rational? 3.5)'), true)
@@ -238,7 +244,10 @@ test('gcd / lcm / numerator / denominator / truncate / square', () => {
   assert.equal(run('(lcm 4 6)'), 12)
   assert.equal(run('(numerator 3)'), 3)
   assert.equal(run('(denominator 3)'), 1)
-  assert.equal(run('(truncate 3.7)'), 3)
+  // REBASELINED 2026-08-03: §6.2.6 preserves exactness, so (truncate 3.7) is
+  // the inexact 3.0 — chibi-scheme answers the same.
+  assert.equal(Number(run('(truncate 3.7)')), 3)
+  assert.equal(run('(exact? (truncate 3.7))'), false)
   assert.equal(run('(square 5)'), 25)
   assert.equal(run('(gcd)'), 0)
   assert.equal(run('(lcm)'), 1)
@@ -246,7 +255,7 @@ test('gcd / lcm / numerator / denominator / truncate / square', () => {
 
 test('atan — 1-arg + 2-arg', () => {
   assert.equal(Math.round(run('(atan 1 1)') * 1000) / 1000, 0.785)
-  assert.equal(run('(atan 0)'), 0)
+  assert.equal(Number(run('(atan 0)')), 0)  // 0.0 — §6.2.6 inexact, as in chibi
 })
 
 // ── I/O — R7RS §6.10 ────────────────────────────────────────────────
@@ -312,7 +321,7 @@ test('make-hash-table / set! / ref / contains?', () => {
     (hash-table-set! h "k" 42)
     (list (hash-table-ref h "k") (hash-table-contains? h "k") (hash-table-contains? h "missing"))
   `
-  assert.deepEqual(run(src), [42, true, false])
+  assert.deepEqual(plain(run(src)), [42, true, false])
 })
 
 test('hash-table-ref/default value on miss; hash-table-ref failure thunk', () => {
@@ -333,7 +342,7 @@ test('hash-table-delete! / hash-table-size / hash-table-clear!', () => {
     (hash-table-clear! h)
     (list pre post (hash-table-size h))
   `
-  assert.deepEqual(run(src), [2, 1, 0])
+  assert.deepEqual(plain(run(src)), [2, 1, 0])
 })
 
 test('hash-table-keys / values / ->alist / alist->', () => {
@@ -343,7 +352,7 @@ test('hash-table-keys / values / ->alist / alist->', () => {
     (hash-table-set! h "b" 2)
     (list (length (hash-table-keys h)) (length (hash-table-values h)))
   `
-  assert.deepEqual(run(src), [2, 2])
+  assert.deepEqual(plain(run(src)), [2, 2])
 })
 
 test('hash-table-update! — apply updater', () => {
@@ -371,21 +380,21 @@ test('hash-table-fold — left fold over entries', () => {
 
 test('vector / make-vector / vector? / vector-length', () => {
   // R7RS §6.8: vectors are a DISTINCT type (SchemeVector), never a list.
-  assert.deepEqual(run('(vector 1 2 3)').items, [1, 2, 3])
-  assert.deepEqual(run('(make-vector 3 0)').items, [0, 0, 0])
+  assert.deepEqual(plain(run('(vector 1 2 3)').items), [1, 2, 3])
+  assert.deepEqual(plain(run('(make-vector 3 0)').items), [0, 0, 0])
   assert.equal(run('(vector? (vector 1 2))'), true)
   assert.equal(run('(vector? (list 1 2))'), false)   // disjoint from lists
   assert.equal(run('(vector-length (vector 1 2 3))'), 3)
 })
 
 test('vector-map / vector-for-each / vector-fill!', () => {
-  assert.deepEqual(run('(vector-map square (vector 1 2 3))').items, [1, 4, 9])
+  assert.deepEqual(plain(run('(vector-map square (vector 1 2 3))').items), [1, 4, 9])
   const src = `
     (define v (vector 1 2 3))
     (vector-fill! v 0)
     v
   `
-  assert.deepEqual(run(src).items, [0, 0, 0])
+  assert.deepEqual(plain(run(src).items), [0, 0, 0])
 })
 
 // ── Exceptions — R7RS §6.11 ─────────────────────────────────────────
@@ -415,7 +424,7 @@ test('error-object-message / error-object-irritants', () => {
     (guard (err ((error-object? err) (list (error-object-message err) (error-object-irritants err))))
       (error "boom" 1 2))
   `
-  const [msg, irritants] = run(src)
+  const [msg, irritants] = plain(run(src))
   assert.equal(msg, 'boom')
   assert.deepEqual(irritants, [1, 2])
 })
@@ -427,7 +436,7 @@ test('raise — throws value (caught via guard)', () => {
     (guard (err ((error-object? err) (error-object-irritants err)))
       (raise "boom"))
   `
-  assert.deepEqual(run(src), ['boom'])
+  assert.deepEqual(plain(run(src)), ['boom'])
 })
 
 // ── Records — R7RS §5.5 ─────────────────────────────────────────────
@@ -442,7 +451,7 @@ test('define-record-type — full lifecycle', () => {
     (define p (make-point 3 4))
     (list (point? p) (point-x p) (point-y p) (begin (set-point-x! p 99) (point-x p)))
   `
-  assert.deepEqual(run(src), [true, 3, 4, 99])
+  assert.deepEqual(plain(run(src)), [true, 3, 4, 99])
 })
 
 test('define-record-type — predicate distinguishes types', () => {
@@ -451,7 +460,7 @@ test('define-record-type — predicate distinguishes types', () => {
     (define-record-type bar (make-bar y) bar? (y bar-y))
     (list (foo? (make-foo 1)) (foo? (make-bar 1)) (bar? (make-bar 1)))
   `
-  assert.deepEqual(run(src), [true, false, true])
+  assert.deepEqual(plain(run(src)), [true, false, true])
 })
 
 // ── do — R7RS §4.2.4 ────────────────────────────────────────────────

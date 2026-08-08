@@ -17,6 +17,7 @@ import { existsSync, unlinkSync, readFileSync } from 'node:fs'
 import { makeCoreEnv } from '../core/index.js'
 import { evaluate } from '../src/interp.js'
 import { parse, Sym } from '../src/reader.js'
+import { plain } from './_cells.mjs'
 import {
   READING_STATE_PATH,
   emptyState,
@@ -35,8 +36,9 @@ function evalSrc(src, envOpt) {
 }
 
 function alistGet(alist, key) {
-  if (!Array.isArray(alist)) return undefined
-  for (const pair of alist) {
+  const rows = plain(alist)
+  if (!Array.isArray(rows)) return undefined
+  for (const pair of rows) {
     if (Array.isArray(pair) && pair.length === 2 && pair[0] instanceof Sym) {
       if (pair[0].name === key) return pair[1]
     }
@@ -79,7 +81,7 @@ test('serialize + parse — state round-trips', () => {
   assert.equal(back.chapters['code:12'].book, 'code')
   assert.equal(back.chapters['code:12'].notes, 'my thoughts on the fetch loop')
   assert.equal(back.chapters['code:12'].codeBlockRuns['1'], 3)
-  assert.deepEqual(Object.keys(back.chapters['code:12'].sections).sort(),
+  assert.deepEqual(plain(Object.keys(back.chapters['code:12'].sections).sort()),
     ['fetch-decode', 'intro'])
   assert.equal(back.bookmarks['attention'].context, 'ml/12')
   assert.equal(back.highlights[0].text, '(vec/dot ws xs)')
@@ -98,7 +100,7 @@ test('motoi/mark-read! — records a chapter visit; reading-state returns it', (
   assert.equal(alistGet(out, ':book'), 'code')
   assert.equal(alistGet(out, ':chapter'), 6)
   assert.equal(alistGet(out, ':section-count'), 1)
-  assert.deepEqual(alistGet(out, ':sections'), ['intro'])
+  assert.deepEqual(plain(alistGet(out, ':sections')), ['intro'])
 })
 
 test('motoi/mark-read! — multiple sections accumulate', () => {
@@ -144,7 +146,7 @@ test('motoi/bookmark! + motoi/bookmarks — round-trip', () => {
   const env = makeCoreEnv({ fuel: { n: 500000 } })
   evalSrc('(motoi/bookmark! (quote attention-lemma) "ml/12")', env)
   evalSrc('(motoi/bookmark! (quote backprop) "ml/9")', env)
-  const { out } = evalSrc('(motoi/bookmarks)', env)
+  const out = plain(evalSrc('(motoi/bookmarks)', env).out)
   assert.equal(out.length, 2)
   const names = out.map((row) => alistGet(row, ':name')).sort()
   assert.deepEqual(names, ['attention-lemma', 'backprop'])
@@ -154,9 +156,9 @@ test('motoi/bookmark-delete! — removes a bookmark', () => {
   cleanSharedAndFile()
   const env = makeCoreEnv({ fuel: { n: 500000 } })
   evalSrc('(motoi/bookmark! (quote temp) "test")', env)
-  const before = evalSrc('(motoi/bookmarks)', env).out.length
+  const before = plain(evalSrc('(motoi/bookmarks)', env).out).length
   evalSrc('(motoi/bookmark-delete! (quote temp))', env)
-  const after = evalSrc('(motoi/bookmarks)', env).out.length
+  const after = plain(evalSrc('(motoi/bookmarks)', env).out).length
   assert.equal(before, 1)
   assert.equal(after, 0)
 })
@@ -168,7 +170,7 @@ test('motoi/highlight! + motoi/highlights — track selections', () => {
   const env = makeCoreEnv({ fuel: { n: 500000 } })
   evalSrc('(motoi/highlight! "(vec/dot ws xs)" "buffer 1")', env)
   evalSrc('(motoi/highlight! "(matrix/mult A B)" "buffer 1")', env)
-  const { out } = evalSrc('(motoi/highlights 10)', env)
+  const out = plain(evalSrc('(motoi/highlights 10)', env).out)
   assert.equal(out.length, 2)
   // Most-recent-first
   assert.equal(alistGet(out[0], ':text'), '(matrix/mult A B)')
@@ -185,7 +187,7 @@ test('motoi/log-exchange! + motoi/session-log — round-trip', () => {
   cleanSharedAndFile()
   evalSrc('(motoi/log-exchange! (quote in) "(+ 1 2)")', env)
   evalSrc('(motoi/log-exchange! (quote out) "3")', env)
-  const { out } = evalSrc('(motoi/session-log 10)', env)
+  const out = plain(evalSrc('(motoi/session-log 10)', env).out)
   assert.equal(out.length, 2)
   assert.equal(alistGet(out[0], ':text'), '(+ 1 2)')
   assert.equal((alistGet(out[0], ':kind') || {}).name, 'in')
@@ -215,8 +217,8 @@ test('motoi/reading-state/reset! — empties the state', () => {
   evalSrc('(motoi/bookmark! (quote x) "y")', env)
   evalSrc('(motoi/reading-state/reset!)', env)
   const { out } = evalSrc('(motoi/reading-state)', env)
-  assert.deepEqual(alistGet(out, ':chapters'), [])
-  assert.deepEqual(alistGet(out, ':bookmarks'), [])
+  assert.deepEqual(plain(alistGet(out, ':chapters')), [])
+  assert.deepEqual(plain(alistGet(out, ':bookmarks')), [])
   cleanSharedAndFile()
 })
 

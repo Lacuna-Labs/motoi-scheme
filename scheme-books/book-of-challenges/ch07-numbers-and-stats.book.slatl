@@ -41,7 +41,7 @@ Here's a program that computes a conversion rate from two counts, cleanly:
       (math/pct converted total)))
 
 (conversion-rate 42 200)
-;; => 21.0
+;; => 21
 ```
 
 The `if` is the guard. If total is zero or negative, we return 'nan immediately—no call to `math/pct`, no invention of a fake result. This is ESCAPE: when the input makes the question meaningless, we say so.
@@ -61,13 +61,13 @@ Now a program that computes *two* rates and returns them as a list, with either 
     (list ctr cvr)))
 
 (campaign-rates 1000 50 5)
-;; => (5.0 10.0)
+;; => (5 10)
 
 (campaign-rates 0 0 0)
 ;; => (nan nan)
 
 (campaign-rates 1000 0 0)
-;; => (0.0 nan)
+;; => (0 nan)
 ```
 
 Each rate guards its own denominator. The program returns both, and the caller sees the honest shape of the data. No pretending that 0/0 is 0; no crash.
@@ -113,7 +113,7 @@ Now a program that computes *both* mean and standard deviation (population versi
         (list mean stddev))))
 
 (mean-and-stddev '(2 4 4 4 5 5 7 9))
-;; => (5.0 2.0)
+;; => (5 2)
 
 (mean-and-stddev '())
 ;; => (nan nan)
@@ -125,17 +125,28 @@ We compute the mean first, then map over the list to get squared differences, su
 
 ## Percentiles and Boundary Detection
 
-`percentile` takes a list and a percentile (0-100) and returns the value at that boundary. This is essential for understanding distributions: p50 is the median, p95 tells you the high-water mark for most of your data, p99 catches the outliers. We define it as a local helper using the nearest-rank method: sort ascending, compute the index, return that element.
+`percentile` takes a list and a percentile (0-100) and returns the value at that boundary. This is essential for understanding distributions: p50 is the median, p95 tells you the high-water mark for most of your data, p99 catches the outliers. We define it as a local helper using linear interpolation between the two closest ranks: sort ascending, compute the fractional position `p/100 * (n-1)`, and blend the two neighbouring values. That is the method that makes p50 come out as the true median—for an even-length list it averages the two middle values instead of arbitrarily picking one.
 
 ```scheme
 ;; Local helpers used throughout this chapter.
 
-;; percentile: nearest-rank method — sort ascending, index by (round (* p/100 * (n-1))).
+;; percentile: linear interpolation between closest ranks (the R-7 method, what
+;; most spreadsheets and stats packages mean by \"percentile\"). Sort ascending,
+;; land at position p/100 * (n-1), and interpolate between the two neighbours.
+;; This is what makes p50 the true median of an even-length list — a rounded
+;; index would pick one of the two middle values instead of averaging them.
+;; The rank arithmetic is kept in whole numbers until the last divide, so
+;; p90 of a ten-point series comes back 36.5 and not 36.49999999999999.
 (define (percentile xs p)
   (let* ((sorted (sort xs <))
          (n (length sorted))
-         (idx (inexact->exact (round (* (/ p 100) (- n 1))))))
-    (list-ref sorted idx)))
+         (num (* p (- n 1)))
+         (lo (inexact->exact (floor (/ num 100))))
+         (rem (- num (* lo 100))))
+    (if (or (= rem 0) (>= (+ lo 1) n))
+        (list-ref sorted lo)
+        (+ (list-ref sorted lo)
+           (/ (* rem (- (list-ref sorted (+ lo 1)) (list-ref sorted lo))) 100)))))
 
 ;; pearson-correlation: Pearson r for two equal-length lists.
 (define (pearson-correlation xs ys)
@@ -143,11 +154,14 @@ We compute the mean first, then map over the list to get squared differences, su
          (mx (/ (apply + xs) n))
          (my (/ (apply + ys) n))
          (num (apply + (map (lambda (x y) (* (- x mx) (- y my))) xs ys)))
-         (dx  (sqrt (apply + (map (lambda (x) (expt (- x mx) 2)) xs))))
-         (dy  (sqrt (apply + (map (lambda (y) (expt (- y my) 2)) ys)))))
-    (if (or (= dx 0) (= dy 0))
+         (sxx (apply + (map (lambda (x) (expt (- x mx) 2)) xs)))
+         (syy (apply + (map (lambda (y) (expt (- y my) 2)) ys))))
+    ;; One sqrt of the product, not a product of two sqrts: multiplying two
+    ;; rounded roots loses a bit, and a perfect correlation comes back as
+    ;; 0.9999999999999998 instead of 1.
+    (if (or (= sxx 0) (= syy 0))
         'nan
-        (/ num (* dx dy)))))
+        (/ num (sqrt (* sxx syy))))))
 
 ;; haversine: great-circle distance in km between two lat/lng points.
 (define (haversine lat1 lng1 lat2 lng2)
@@ -316,7 +330,7 @@ Here's a program that wraps the verb with full guards:
     (pearson-correlation xs ys))))
 
 (safe-correlation '(1 2 3 4 5) '(2 4 6 8 10))
-;; => 1.0
+;; => 1
 
 (safe-correlation '(1 2 3) '(5 5 5))
 ;; => nan  ;; zero variance in ys
@@ -340,7 +354,7 @@ Now a program that computes correlation between a list of x values and *multiple
  '((2 4 6 8 10)
    (5 4 3 2 1)
    (3 3 3 3 3)))
-;; => (1.0 -1.0 nan)
+;; => (1 -1 nan)
 ```
 
 We map `safe-correlation` over the list of y-lists. Each result is independent. The third y-list has zero variance, so its correlation is 'nan. The program returns the honest shape of the results.
@@ -364,7 +378,11 @@ Here's a program that takes a time series, computes velocity and trend, and retu
         (list vel trend-data))))
 
 (velocity-and-trend '(10 12 15 19 24))
-;; => (14.0 <trend-data>)
+;; => (7/2 (7/2 9))
+;;    velocity 3.5 is the MEAN step (diffs are 2 3 4 5, so 14/4), not the total
+;;    rise of 14. The trend is (slope intercept) = (3.5 9); slope matching
+;;    velocity exactly is a property of evenly spaced x values, not a coincidence
+;;    worth relying on in general.
 
 (velocity-and-trend '(5))
 ;; => (nan nan)
@@ -390,7 +408,7 @@ Now a program that computes the z-score of the *last* element in a series (how u
             (/ (- last-val mean) stddev)))))
 
 (last-zscore '(10 12 14 16 30))
-;; => ~2.0  (last value is ~2 stddevs above mean)
+;; => 1.918731003142541  (mean 82/5 = 16.4, stddev 7.088, so 30 sits ~1.9 stddevs high)
 
 (last-zscore '(5 5 5 5 5))
 ;; => nan  ;; zero variance
@@ -425,14 +443,21 @@ Here's a program that computes p5 and p95 for a baseline series, then checks if 
 (outlier-check '(10 12 14 15 16 18 20 22 24 26 28 30) 35)
 ;; => high
 
-(outlier-check '(10 12 14 15 16 18 20 22 24 26 28 30) 11)
+(outlier-check '(10 12 14 15 16 18 20 22 24 26 28 30) 20)
 ;; => normal
+
+(outlier-check '(10 12 14 15 16 18 20 22 24 26 28 30) 11)
+;; => low  ;; surprising? the band is narrower than the data — see below
 
 (outlier-check '(10 12 14) 50)
 ;; => insufficient-data
 ```
 
 We require at least 10 baseline points (a heuristic—p5 and p95 are meaningless with tiny samples). Compute the band, classify the new value. This is a *decision route*: data in, symbol out.
+
+The third call is the one to sit with. The baseline runs from 10 to 30, and 11 is comfortably inside that range—yet it classifies as `low`. The reason is that p5 and p95 are *not* the minimum and maximum. For these twelve points the band is `[11.1, 28.9]`, computed by interpolating between the first two and the last two values. So 11 falls below the band and 29 would fall above it, even though both are values you could plausibly have drawn from the baseline itself.
+
+That is not a bug; it is what a 5%–95% band means. With only twelve points, 5% of the data is 0.6 of a point, so the band has to cut somewhere inside the gap between the two lowest observations. The practical lesson: a p5/p95 band on a small baseline is *tight*, and it will flag values that a human eyeballing the range would call ordinary. If you want a band that only fires on genuine excursions, either collect more baseline or widen the percentiles.
 
 Now a program that processes a *stream* of new values and classifies each one:
 
@@ -450,10 +475,10 @@ Now a program that processes a *stream* of new values and classifies each one:
                 (else 'normal)))
              stream))))
 
-(classify-stream 
+(classify-stream
  '(10 12 14 15 16 18 20 22 24 26 28 30)
- '(35 11 29 8 50))
-;; => (high normal normal low high)
+ '(35 11 20 29 8 50))
+;; => (high low normal high low high)  ;; band is [11.1, 28.9]
 ```
 
 We compute the percentile band once, then map the classification over the stream. Each element is independent. The program is efficient (one computation of the band) and clear.
@@ -482,7 +507,12 @@ An exponential moving average (EMA) is a running aggregate where each new value 
                     (cons new-ema result)))))))
 
 (ema '(10 12 15 14 16 20 18) 0.3)
-;; => (10 10.6 11.62 12.134 13.2938 15.40566 16.184062)
+;; => (10 10.6 11.919999999999998 12.543999999999997 13.580799999999996
+;;     15.506559999999997 16.254591999999995)
+;;    On paper these are 10, 10.6, 11.92, 12.544, 13.5808, 15.50656, 16.254592.
+;;    The trailing digits are real: 0.3 and 0.7 are not exactly representable in
+;;    binary, and an EMA feeds each result back into the next step, so the tiny
+;;    representation error compounds. Never compare two of these with `=`.
 ```
 
 The first element initializes the EMA. Each subsequent element updates it: `new_ema = α * x + (1 - α) * old_ema`. We cons each new EMA onto the result and recur. The final reverse restores order.
@@ -517,11 +547,14 @@ Now a program that computes *both* a simple moving average (window of 3) and an 
     (list sma-series ema-series)))
 
 (sma-and-ema '(10 12 15 14 16 20 18 22))
-;; => ((12.333... 13.666... 15.0 16.666... 18.0 20.0)
-;;     (10 10.6 11.62 12.134 13.2938 15.40566 16.184062 18.3288...))
+;; => ((37/3 41/3 15 50/3 18 20)
+;;     (10 10.6 11.919999999999998 12.543999999999997 13.580799999999996
+;;      15.506559999999997 16.254591999999995 17.978214399999995))
 ```
 
 Two independent computations, both recursive, returned as a pair. The SMA slides a window; the EMA blends. The program is longer but not more complex—each part is a clear named-let.
+
+Look at the two series side by side and you can read the arithmetic off them. The SMA divides whole numbers by 3, and every input here is an integer, so the results stay *exact*: 37/3 is the average of 10, 12 and 15, and it is written as a ratio because that is the answer—no rounding has happened yet. The EMA multiplies by 0.3 and 0.7, which are inexact the moment they appear, so that whole series is inexact and carries the usual floating-point tail (11.919999999999998 is 0.3 × 15 + 0.7 × 10.6). Same program, two number types, because the operations differ.
 
 ---
 
@@ -547,10 +580,10 @@ Two independent computations, both recursive, returned as a pair. The SMA slides
           (/ dot (* mag1 mag2)))))))
 
 (cosine-sim '(1 0 0) '(1 0 0))
-;; => 1.0
+;; => 1
 
 (cosine-sim '(1 0 0) '(0 1 0))
-;; => 0.0
+;; => 0
 
 (cosine-sim '(1 2 3) '(4 5 6))
 ;; => 0.974...
@@ -586,7 +619,7 @@ Now a program that finds the *most similar* vector from a list, given a query ve
               '((1 0 0)
                 (0 1 0)
                 (0.9 0.1 0)))
-;; => (0 . 1.0)
+;; => (0 . 1)
 
 (most-similar '(1 2 3)
               '((0 0 0)
@@ -627,10 +660,10 @@ Now we compose several verbs into a single route that takes a list of numbers an
 
 (stats-summary '(10 12 15 18 22 28 35 42 50))
 ;; => ((count . 9)
-;;     (mean . 25.777...)
+;;     (mean . 232/9)
 ;;     (p50 . 22)
-;;     (p95 . 50)
-;;     (velocity . 5.0))
+;;     (p95 . 234/5)
+;;     (velocity . 5))
 
 (stats-summary '(10 12))
 ;; => (escalate \"insufficient-data\" \"need at least 5 points for summary\")
@@ -640,6 +673,8 @@ Now we compose several verbs into a single route that takes a list of numbers an
 ```
 
 This is a *route*: data flows through a series of verbs, and the result is a structured summary. The guards at the top are ESCAPE—if the input can't support the computation, we escalate immediately with a reason. The body is FORWARD—each stage computes a piece of the answer, and we assemble them into an alist.
+
+Read the numbers carefully. The nine inputs are all integers, and `/` on integers gives an exact ratio, so the mean comes back as `232/9`—which is 25.777..., written without losing anything. The same is true of `234/5` for p95, which is 46.8: the interpolated percentile lands four fifths of the way between 42 and 50. If you want the decimal, ask for it: `(exact->inexact 232/9)` is `25.77777777777778`. The summary keeps the exact answer so *you* decide when to round.
 
 Now a program that computes summaries for *multiple* series and returns a list of summaries:
 
@@ -653,12 +688,14 @@ Now a program that computes summaries for *multiple* series and returns a list o
  '((10 12 15 18 22 28 35 42 50)
    (5 5 5 5 5)
    (100 110 105 115 120 125 130)))
-;; => (((count . 9) (mean . 25.777...) ...)
-;;     ((count . 5) (mean . 5) ...)
-;;     ((count . 7) (mean . 115) ...))
+;; => (((count . 9) (mean . 232/9) (p50 . 22) (p95 . 234/5) (velocity . 5))
+;;     ((count . 5) (mean . 5) (p50 . 5) (p95 . 5) (velocity . 0))
+;;     ((count . 7) (mean . 115) (p50 . 115) (p95 . 257/2) (velocity . 5)))
 ```
 
 We map the route over a list of series. Each series gets its own summary. If any series is too short, its result will be an escalate form. The caller sees the honest shape of the results.
+
+Notice that the middle series—five identical 5s—has a mean of exactly `5`, not `5.0`, and a velocity of `0`. Nothing moved, so nothing needed a decimal. The first and third series have exact ratios (`232/9`, `234/5`, `257/2`) wherever the division did not come out whole. Exactness is not a special case here; it is just what the arithmetic gives back when you never ask for a float.
 
 ---
 
@@ -675,10 +712,10 @@ We map the route over a list of series. Each series gets its own summary. If any
 ;; => 42.7
 
 (clamp-percent -5)
-;; => 0.0
+;; => 0
 
 (clamp-percent 105)
-;; => 100.0
+;; => 100
 ```
 
 Two verbs, chained. The output of `math/clamp` feeds into `math/round`. This is the simplest form of FORWARD composition.
@@ -699,20 +736,25 @@ Now a program that computes a margin percentage, clamps it to 0-100, and classif
                      (else 'high))))
         (list 'margin rounded 'classification class))))
 
+(margin-status 80 100)
+;; => (margin 20 classification medium)
+
 (margin-status 70 100)
-;; => (margin 30.0 classification medium)
+;; => (margin 30 classification high)  ;; exactly 30 is NOT medium — see below
 
 (margin-status 10 100)
-;; => (margin 90.0 classification high)
+;; => (margin 90 classification high)
 
 (margin-status 100 50)
-;; => (margin 0.0 classification low)  ;; negative margin clamped to 0
+;; => (margin 0 classification low)  ;; negative margin clamped to 0
 
 (margin-status 50 0)
 ;; => (margin nan classification invalid)
 ```
 
 Three verbs, one decision ladder, result as an alist. The guard at the top prevents division by zero. The clamp ensures the margin stays in 0-100 even if cost exceeds revenue. The classification is a simple threshold check.
+
+Read that second call carefully, because it is the kind of thing that costs you an afternoon. A margin of exactly 30 comes back `high`, not `medium`. The ladder tests `(< rounded 30)`, so the bands it actually carves out are `[0, 10)` low, `[10, 30)` medium, `[30, 100]` high—half-open, each band excluding its upper edge. That is the conventional reading of a `cond` chain built from `<`, and it is self-consistent, but it means every boundary value falls into the band *above* the one you might have said out loud. If you want 30 to read as medium, you have to write `(<= rounded 30)` and say so. Pick a convention, write it in the comment, and test the boundary itself—never just the middle of each band.
 
 ---
 
@@ -754,7 +796,7 @@ Now a program that computes deltas, then computes the mean delta (average rate o
           (/ total count)))))
 
 (mean-delta '(10 12 15 14 16 20))
-;; => 2.0
+;; => 2
 
 (mean-delta '(5))
 ;; => nan
@@ -783,7 +825,9 @@ Now a more complex program: compute deltas, classify each delta as 'up, 'down, o
                  (else (loop (cdr remaining) up down (+ flat 1))))))))))
 
 (delta-tally '(10 12 15 14 16 20 20 18))
-;; => ((up . 3) (down . 2) (flat . 1))
+;; => ((up . 4) (down . 2) (flat . 1))
+;;    deltas are (2 3 -1 2 4 0 -2); eight values give seven deltas,
+;;    and the tally must add up to seven — a good self-check.
 ```
 
 Three accumulators: `up`, `down`, `flat`. Each delta increments one of them. The result is a tally. This is a *classification + fold* pattern—very common in real stats work.
@@ -804,7 +848,7 @@ Our `haversine` helper computes the great-circle distance between two lat/lng po
     (haversine lat1 lng1 lat2 lng2)))
 
 (distance '(40.7128 -74.0060) '(34.0522 -118.2437))
-;; => ~3936 km (New York to Los Angeles)
+;; => 3935.746254609722  (~3936 km, New York to Los Angeles)
 ```
 
 Unpack the pairs, call the verb. Now a program that computes the *total* distance along a route (list of waypoints):
@@ -829,7 +873,7 @@ Unpack the pairs, call the verb. Now a program that computes the *total* distanc
    (41.8781 -87.6298)   ; Chicago
    (34.0522 -118.2437)  ; Los Angeles
    ))
-;; => ~5600 km
+;; => 3948.26278092154  (km: 1144.29 New York->Chicago + 2803.97 Chicago->Los Angeles)
 ```
 
 Named-let recursion, accumulator for total distance. Each segment is computed with `distance`, added to the total, and we move to the next pair. The pattern is identical to `running-sum`, but the operation is haversine instead of addition.
@@ -918,16 +962,20 @@ Our `autocorr` helper computes the autocorrelation of a series at a given lag—
       (autocorr series 1)))
 
 (autocorr-lag1 '(10 12 14 16 18 20))
-;; => ~1.0 (strong positive autocorr—values increase steadily)
+;; => 3/5  (that is 0.6 — positive, but nowhere near 1)
 
 (autocorr-lag1 '(10 5 10 5 10 5))
-;; => ~-1.0 (strong negative autocorr—oscillates)
+;; => -1  (perfect period-2 oscillation)
 
 (autocorr-lag1 '(10 10))
 ;; => nan
 ```
 
-Guard for minimum length (autocorr needs at least lag+2 points). Now a program that computes autocorrelation at *multiple* lags and returns a list:
+Guard for minimum length (autocorr needs at least lag+2 points).
+
+That first result deserves a second look, because the intuition most people bring to it is wrong. A steady climb `10 12 14 16 18 20` *looks* like the most correlated series imaginable, so you expect lag-1 autocorrelation near 1. You get 0.6. Autocorrelation does not measure \"is this series smooth\"—it measures how well each value predicts the one `lag` steps later *once the mean is subtracted*. Subtracting the mean turns the ramp into `-5 -3 -1 1 3 5`, which changes sign in the middle, and the pairs that straddle that sign change contribute negative terms. Only a series that repeats itself with period `lag` scores near ±1, which is exactly what the oscillating series does: subtract its mean and every value is `+2.5` or `-2.5`, so every lag-1 pair contributes the same negative product and the result is exactly -1. A trend is not a cycle. Autocorrelation is a cycle detector.
+
+Now a program that computes autocorrelation at *multiple* lags and returns a list:
 
 ```scheme
 ;; Compute autocorrelation at lags 1 through max-lag.
@@ -938,11 +986,14 @@ Guard for minimum length (autocorr needs at least lag+2 points). Now a program t
            (iota max-lag 1))))
 
 (autocorr-lags '(10 12 14 16 18 20 22 24) 3)
-;; => (~1.0 ~1.0 ~1.0)  ;; strong autocorr at all lags (linear trend)
+;; => (5/7 23/63 -1/21)
+;;    a linear trend DECAYS as the lag grows, and is near zero by lag 3
 
 (autocorr-lags '(10 5 10 5 10 5 10 5) 2)
-;; => (~-1.0 ~1.0)  ;; oscillates with period 2
+;; => (-1 1)  ;; oscillates with period 2: -1 at odd lags, +1 at even lags
 ```
+
+The contrast between those two lines is the whole lesson. The oscillating series is genuinely periodic, so it pins to exactly -1 and +1 and stays there. The ramp starts moderately positive and falls off a cliff—by lag 3 it is essentially zero. If you scan an autocorrelation profile looking for a repeating pattern, a decaying profile like the first one is telling you there isn't one; it's telling you there's a *trend*, which is `linear-trend`'s job, not `autocorr`'s.
 
 `iota` generates `(1 2 3 ... max-lag)`. We map `autocorr` over those lags. If the series is too short, we return a list of 'nan. (Note: `iota` is a common Scheme helper; if not available in Motoi Scheme, replace with a manual list or named-let.)
 
@@ -1006,7 +1057,7 @@ Sometimes you want to compute a stat (like z-score), then apply a math operation
 ;; => (-1.46 -0.88 -0.29 0.29 0.88 1.46)
 
 (normalized-zscores '(5 5 5 5 5))
-;; => (0.0 0.0 0.0 0.0 0.0)  ;; zero stddev -> all z=0
+;; => (0.0 0.0 0.0 0.0 0.0)  ;; zero stddev -> all z=0, written 0.0 because the branch returns 0.0
 
 (normalized-zscores '(10))
 ;; => (nan)
@@ -1043,9 +1094,9 @@ Given a list of series, compute the correlation between every pair. This is a cl
  '((1 2 3 4 5)
    (2 4 6 8 10)
    (5 4 3 2 1)))
-;; => (((0 . 1) . 1.0)
-;;     ((0 . 2) . -1.0)
-;;     ((1 . 2) . -1.0))
+;; => (((0 . 1) . 1)
+;;     ((0 . 2) . -1)
+;;     ((1 . 2) . -1))
 ```
 
 Nested loops: outer over each series `i`, inner over each series `j > i`. For each pair, compute correlation and cons onto results. The result is a list of `((i . j) . correlation)` pairs. This is *exhaustive pairwise orchestration*—a common pattern in multi-variate stats.
@@ -1073,7 +1124,7 @@ A weighted mean multiplies each value by a weight, sums those products, then div
           (/ weighted-sum weight-total))))))
 
 (weighted-mean '(10 20 30) '(1 2 3))
-;; => 23.333...  ;; (10*1 + 20*2 + 30*3) / (1+2+3) = 140/6
+;; => 70/3  ;; (10*1 + 20*2 + 30*3) / (1+2+3) = 140/6, reduced to 70/3 = 23.333...
 
 (weighted-mean '(5 10) '(0 0))
 ;; => nan  ;; zero total weight
@@ -1102,7 +1153,7 @@ A common request: \"Show me the 25th, 50th, 75th, 90th, and 95th percentiles.\" 
             (cons 'p95 (percentile series 95)))))
 
 (distribution-summary '(5 7 9 12 15 18 22 28 35 50))
-;; => ((p25 . 9) (p50 . 16.5) (p75 . 28) (p90 . 42.5) (p95 . 47.5))
+;; => ((p25 . 39/4) (p50 . 33/2) (p75 . 53/2) (p90 . 73/2) (p95 . 173/4))
 
 (distribution-summary '(10 20))
 ;; => (escalate \"insufficient-data\" \"need at least 5 points\")
@@ -1166,7 +1217,7 @@ A rolling (or moving) aggregate computes a stat over a sliding window. Here's a 
                     (cons mean result)))))))
 
 (rolling-mean-3 '(10 12 14 16 18 20 22))
-;; => (12.0 14.0 16.0 18.0 20.0)
+;; => (12 14 16 18 20)
 ```
 
 Named-let recursion. At each position, extract the next three elements, compute their mean, cons onto result. The output is shorter than the input by window-1.
@@ -1213,7 +1264,7 @@ Sometimes you want to compute a stat only over elements that meet a condition—
           (/ total count)))))
 
 (mean-positive '(5 -3 8 -2 10 -1 6))
-;; => 7.25
+;; => 29/4
 
 (mean-positive '(-5 -10 -3))
 ;; => nan
@@ -1232,7 +1283,7 @@ Now a program that computes the 90th percentile of values *above* a threshold:
         (percentile above 90))))
 
 (p90-above '(5 10 15 20 25 30 35 40 45 50) 20)
-;; => ~47.5  (p90 of 25,30,35,40,45,50)
+;; => 95/2  (p90 of 25,30,35,40,45,50 — that is 47.5)
 
 (p90-above '(5 10 15) 20)
 ;; => nan  ;; no values above threshold
@@ -1257,7 +1308,8 @@ MAD is a robust measure of variability: compute the median, then compute the med
         mad-value)))
 
 (mad '(1 2 3 4 5 100))
-;; => 1.5  ;; median is 3.5, deviations are [2.5 1.5 0.5 0.5 1.5 96.5], median of those is 1.5
+;; => 3/2  ;; median is 7/2 (3.5), deviations are (5/2 3/2 1/2 1/2 3/2 193/2),
+;;            and the median of those is 3/2, which is 1.5
 ```
 
 Compute median, map to get absolute deviations, compute median of those. This is a *two-stage stat*—output of stage one feeds stage two. MAD is robust to outliers (note the 100 in the list—it doesn't skew the result much).
@@ -1279,22 +1331,27 @@ Combine z-score with a threshold to produce a binary anomaly flag or a severity 
              (variance (apply / (list (apply + sq-diffs) (length series))))
              (stddev (sqrt variance)))
         (if (= stddev 0)
-            (map (lambda (x) (list x 0.0 #f)) series)
+            (map (lambda (x) (list x 0 #f)) series)
             (map (lambda (x)
+                   ;; Flag on the FULL-PRECISION z, report a rounded one. A value
+                   ;; sitting a hair either side of 2 must not have its verdict
+                   ;; decided by the display rounding.
                    (let ((z (/ (- x mean) stddev)))
-                     (list x z (> (abs z) 2))))
+                     (list x (math/round z 2) (> (abs z) 2))))
                  series)))))
 
 (flag-anomalies '(10 12 14 16 18 50))
-;; => ((10 -1.26 #f)
-;;     (12 -0.91 #f)
-;;     (14 -0.56 #f)
-;;     (16 -0.21 #f)
-;;     (18 0.14 #f)
-;;     (50 2.8 #t))
+;; => ((10 -0.73 #f)
+;;     (12 -0.59 #f)
+;;     (14 -0.44 #f)
+;;     (16 -0.29 #f)
+;;     (18 -0.15 #f)
+;;     (50 2.2 #t))
 ```
 
 Compute mean and stddev once, map the z-score and flag computation. The flag is a boolean: `#t` if |z| > 2. This is a *classification map*—turn numeric data into labeled data.
+
+Notice that *every* ordinary value here has a negative z-score, including the ones above the middle of the list. That is the outlier's doing: 50 drags the mean up to 20, which is higher than five of the six values, so five of the six sit below it. A single extreme point moves the very yardstick you are measuring against. This is the standard objection to z-scores for outlier detection, and it is why the median-based MAD above is the more robust tool when you expect contamination.
 
 ---
 
@@ -1337,12 +1394,12 @@ Bring it all together: a program that takes a series and returns a \"dashboard\"
 
 (stats-dashboard '(10 12 14 16 18 20 50))
 ;; => ((count . 7)
-;;     (mean . 20.0)
-;;     (stddev . 13.4...)
+;;     (mean . 20)
+;;     (stddev . 12.649110640673518)
 ;;     (min . 10)
 ;;     (max . 50)
 ;;     (p50 . 16)
-;;     (p95 . 50)
+;;     (p95 . 41)
 ;;     (anomalies . 1))
 
 (stats-dashboard '())

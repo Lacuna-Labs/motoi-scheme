@@ -54,8 +54,9 @@
 //    into their Scheme code.
 
 import { Sym, sym } from './reader.js'
-import { slatLoads, slatDumps, SlatValue } from '../bindings/js/slat.js'
+import { slatLoads, slatLoadsAll, slatDumps, SlatValue } from '../bindings/js/slat.js'
 
+import { NIL, Pair, arrayToList, isList, isListish, isNull, isPair, listLength, listToArray, pairToString, seqVerb, toJS, toScheme } from '../lib/base/list.js'
 // ─────────────────────────────────────────────────────────────────────────
 // Vote-1 wrapper — local copy of the wrapStructured pattern, tightened.
 //
@@ -73,15 +74,21 @@ import { slatLoads, slatDumps, SlatValue } from '../bindings/js/slat.js'
 // name for the structured-shape branch to fire. That eliminates false
 // positives for the data-carrying case.
 // ─────────────────────────────────────────────────────────────────────────
+// A verb bound under two names was only reachable through the structured
+// shape under ONE of them, so a host that spelled the alias handed the whole
+// [slat-read "..."] list to the body as its argument. Aliases are listed
+// only for READERS, whose argument is a string: there is no legitimate
+// Sym-headed sole argument for them, so widening the match cannot swallow
+// data. Writers keep the single-name rule, because (slat-dumps '(slat-write
+// x)) is a real value someone might want written.
 function wrapStructured(fn, verbName) {
+  const names = new Set(isList(verbName) ? verbName : [verbName])
   return function wrapped(...args) {
     if (
-      verbName
-      && args.length === 1
-      && Array.isArray(args[0])
-      && args[0].length > 0
+      args.length === 1
+      && isPair(args[0])
       && args[0][0] instanceof Sym
-      && args[0][0].name === verbName
+      && names.has(args[0][0].name)
     ) {
       // Structured shape — [Sym('verb-name'), positional..., :kw, val, ...]
       const list = args[0]
@@ -128,6 +135,10 @@ function fromSlatValues(v) {
     // is not defined in the minimum-viable set.
     return v
   }
+  // Cells before the plain-object walk: a chain answers `isList`, has no
+  // `.map`, and would be walked as a `{car, cdr}` OBJECT — which is how
+  // `slat-dump` started emitting `[object Object]`.
+  if (v instanceof Pair || v === NIL) return arrayToList(listToArray(v).map(fromSlatValues))
   if (Array.isArray(v)) return v.map(fromSlatValues)
   if (v && typeof v === 'object') {
     // Plain object — walk keys, preserve _form / _positional shape.
@@ -150,6 +161,8 @@ function fromSlatValues(v) {
  *   plain object with _form          → object walked, keys preserved
  *   everything else                  → unchanged
  */
+const _RATIONAL_TAG = Symbol.for('motoi:rational')
+
 function toSlatValues(v) {
   if (v instanceof Sym) {
     if (v.name.startsWith(':')) {
@@ -158,6 +171,14 @@ function toSlatValues(v) {
     return new SlatValue('symbol', v.name)
   }
   if (v instanceof SlatValue) return v   // already in slat shape
+  // An exact rational fell through to the plain-object walk, so it dumped as
+  // its internal {n, d} bigint fields and died with "cannot emit bigint" —
+  // while the READER has always accepted 1/3. Slat already has a rational
+  // token; the bridge simply never reached for it.
+  if (v && typeof v === 'object' && v[_RATIONAL_TAG] === true) {
+    return new SlatValue('rational', v.d === 1n ? String(v.n) : `${v.n}/${v.d}`)
+  }
+  if (v instanceof Pair || v === NIL) return listToArray(v).map(toSlatValues)
   if (Array.isArray(v)) return v.map(toSlatValues)
   if (v && typeof v === 'object') {
     const out = {}
@@ -213,7 +234,7 @@ export const slatLoadsVerb = wrapStructured(function slatLoadsVerbBody(text) {
     const raw = slatLoads(text)
     return fromSlatValues(raw)
   }, 'slat/parse-error')
-}, 'slat-loads')
+}, ['slat-loads', 'slat-read'])
 
 /**
  * (slat-load text) → list-of-values
@@ -232,11 +253,11 @@ export const slatLoadVerb = wrapStructured(function slatLoadVerbBody(text) {
   const out = []
   for (const line of lines) {
     try {
-      const raw = slatLoads(line)
-      // Multi-line inside a single line shouldn't happen post-filter,
-      // but slatLoads may still yield an array if the line was empty
-      // after trimming — normalize.
-      out.push(fromSlatValues(raw))
+      // One entry per FORM, not per line. slatLoads collapses a
+      // one-element result, so a line carrying `(a 1) (b 2)` would arrive
+      // as a single two-element array and be pushed as one value — the
+      // two forms silently fused into one.
+      for (const form of slatLoadsAll(line)) out.push(fromSlatValues(form))
     } catch (err) {
       out.push({
         _form: '_bad-line',
@@ -247,6 +268,35 @@ export const slatLoadVerb = wrapStructured(function slatLoadVerbBody(text) {
   }
   return out
 }, 'slat-load')
+
+/**
+ * stripDocComments(text) — split a document into comment-free lines.
+ *
+ * Cutting each line at its first `;` is blind to string literals, so a
+ * legal document holding (note :text "a;b") lost its closing quote and
+ * came back as `unterminated string` — a parse failure with no relation
+ * to anything the author wrote. The quote state is carried ACROSS lines
+ * because the joiner lets a string span them.
+ */
+function stripDocComments(text) {
+  const lines = []
+  let line = ''
+  let inString = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (c === '\n') { lines.push(line.trim()); line = ''; continue }
+    if (inString) {
+      line += c
+      if (c === '\\' && i + 1 < text.length) { line += text[i + 1]; i++ } else if (c === '"') inString = false
+      continue
+    }
+    if (c === '"') { inString = true; line += c; continue }
+    if (c === ';') { while (i < text.length && text[i] !== '\n') i++; i--; continue }
+    line += c
+  }
+  lines.push(line.trim())
+  return lines
+}
 
 /**
  * (slat-load-doc text) → value
@@ -269,27 +319,22 @@ export const slatLoadDocVerb = wrapStructured(function slatLoadDocVerbBody(text)
     }
     // Whole-document framing permits newlines inside a form; the
     // current binding doesn't, so we squash intra-form whitespace to a
-    // single space. Comments (`; ...`) are stripped line-by-line.
-    const stripped = text
-      .split('\n')
-      .map((l) => {
-        const semi = l.indexOf(';')
-        return (semi >= 0 ? l.slice(0, semi) : l).trim()
-      })
+    // single space. Comments (`; ...`) are stripped as we go.
+    const stripped = stripDocComments(text)
       .filter((l) => l)
       .join(' ')
-    const raw = slatLoads(stripped)
-    // slatLoads returns an array if multiple top-level forms are present;
-    // a whole-document parse expects zero or one top-level form (§5.1).
-    if (Array.isArray(raw) && raw.length > 1
-        && !(raw.length && typeof raw[0] === 'object' && raw[0]._form)) {
-      // Ambiguous: got multiple forms. Per §5.1, whole-doc expects one.
-      // Return the array wrapped as an error for the caller to inspect.
+    // Count top-level forms from slatLoadsAll, never from slatLoads' value.
+    // slatLoads collapses a one-element result, so the old count could not
+    // tell one list datum from N forms and got BOTH cases wrong: it rejected
+    // the single form `(1 2 3)` as "3 forms", and it accepted the genuine two
+    // forms `(a 1) (b 2)` in silence because their heads were symbols.
+    const forms = slatLoadsAll(stripped)
+    if (forms.length > 1) {
       return slatError('slat/multi-form',
         'slat-load-doc: whole-document mode expects zero or one top-level form; got '
-        + raw.length)
+        + forms.length)
     }
-    return fromSlatValues(raw)
+    return fromSlatValues(forms.length === 1 ? forms[0] : forms)
   }, 'slat/parse-error')
 }, 'slat-load-doc')
 
@@ -316,10 +361,10 @@ export const slatDumpsVerb = wrapStructured(function slatDumpsVerbBody(value) {
  */
 export const slatDumpVerb = wrapStructured(function slatDumpVerbBody(values) {
   return tryOr(() => {
-    if (!Array.isArray(values)) {
+    if (!isList(values)) {
       return slatError('slat/bad-arg', 'slat-dump: expected a list of values')
     }
-    const lines = values.map((v) => slatDumps(toSlatValues(v)))
+    const lines = toJS(values).map((v) => slatDumps(toSlatValues(v)))
     return lines.join('\n') + '\n'
   }, 'slat/emit-error')
 }, 'slat-dump')
@@ -365,7 +410,7 @@ export const slatWriteVerb = slatDumpsVerb
  * record isn't a slat-record shape. Never throws.
  */
 export const slatKeyVerb = wrapStructured(function slatKeyVerbBody(record, key) {
-  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+  if (!record || typeof record !== 'object' || isList(record)) {
     return slatError('slat/bad-arg', 'slat-key: expected a slat-record')
   }
   let name

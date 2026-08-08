@@ -15,6 +15,8 @@
 //   SRFI-13  (string library)            — lazy, pulled in explicitly
 //   SRFI-125 (intermediate hash tables)  — lazy, pulled in explicitly
 //   SRFI-27  (sources of random bits)    — lazy, pulled in explicitly
+//   SRFI-48  (intermediate format strings) — lazy, pulled in explicitly
+//   SRFI-133 (vector library)            — lazy, pulled in explicitly
 //
 // Each entry pairs a part module's exported contract (STD, SPEC, LAZY,
 // VERBS, install*) into one record. The register/install tooling
@@ -32,6 +34,8 @@ import * as srfi1 from '../lib/std/srfi-1.js'
 import * as srfi13 from '../lib/std/srfi-13.js'
 import * as srfi125 from '../lib/std/srfi-125.js'
 import * as srfi27 from '../lib/std/srfi-27.js'
+import * as srfi48 from '../lib/std/srfi-48.js'
+import * as srfi133 from '../lib/std/srfi-133.js'
 
 // Repo root — parts-registry.js lives in core/, so up one level.
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -57,6 +61,8 @@ export const STD_PARTS = [
   partFrom(srfi13, srfi13.installSRFI13),
   partFrom(srfi125, srfi125.installSRFI125),
   partFrom(srfi27, srfi27.installSRFI27),
+  partFrom(srfi48, srfi48.installSRFI48),
+  partFrom(srfi133, srfi133.installSRFI133),
 ]
 
 // The default bundle — the "expected superset" every program can assume.

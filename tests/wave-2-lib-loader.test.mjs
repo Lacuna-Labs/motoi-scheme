@@ -62,8 +62,12 @@ test('lib-loader — makeExtendedBaseEnv returns env with __libSummary', () => {
   // "no module failed to load" test is what guards load integrity, and it is
   // green (failed.length === 0). A drop here with 0 failed means installers
   // were removed on purpose; a drop here WITH failures means something broke.
-  assert.equal(env.__libSummary.modules.length, 79,
-    '79 installer runs: 76 CORE + 3 MODULE (juggle, eng, ops), 0 failed — live registry count as of 2026-08-01, post the 2026-07-25 rip')
+  //
+  // 2026-08-04: 79 -> 80. One installer added on purpose, core/base/alist
+  // (assoc-ref), for the eBay/Etsy cart lane. A RISE with 0 failed is an
+  // addition; the tripwire reading above is otherwise unchanged.
+  assert.equal(env.__libSummary.modules.length, 80,
+    '80 installer runs: 77 CORE + 3 MODULE (juggle, eng, ops), 0 failed — live registry count as of 2026-08-04')
 })
 
 test('lib-loader — no module failed to load', () => {

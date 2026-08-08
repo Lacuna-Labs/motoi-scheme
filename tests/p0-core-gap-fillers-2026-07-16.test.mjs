@@ -28,6 +28,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { plain } from './_cells.mjs'
 // ISOLATION fix (2026-08-01): the cortex is a PERSISTENT user-global store at
 // $MOTOI_HOME/copilot/cortex.slatl (src/paths.js). Without this, every run of
 // this file wrote its fixture keys (a, b, temp, planet, kx, ky, user/name)
@@ -55,7 +56,7 @@ function fresh() {
 // A string payload is stored as the record's searchable :text (that is what
 // RAG matches on); any other value rides in the extensible :data slot.
 const recallData = (recall, key) => {
-  const rec = recall(key)
+  const rec = plain(recall(key))
   if (!Array.isArray(rec)) return rec
   const field = (name) => {
     const hit = rec.find((p) => Array.isArray(p) && p[0] instanceof Sym && p[0].name === name)
@@ -106,7 +107,7 @@ test('cortex/keys — returns list of remembered keys', () => {
   const remember = get(env, 'cortex/remember')
   remember(sym('kx'), 1)
   remember(sym('ky'), 2)
-  const ks = keys()
+  const ks = plain(keys())
   assert.ok(Array.isArray(ks))
   // Keys may come back as strings or Syms; normalize.
   const names = ks.map((k) => (k instanceof Sym ? k.name : String(k)))
@@ -130,7 +131,7 @@ test('cortex/forget — removes a stored key', () => {
   // 'temp' collides with the knowledge node "intuition/temp", so recall keeps
   // answering — with knowledge, not memory. The contract cortex/forget actually
   // makes is "the MEMORY record is gone", so that is what we assert.
-  const v = recall(sym('temp'))
+  const v = plain(recall(sym('temp')))
   const kind = Array.isArray(v)
     ? v.find((p) => Array.isArray(p) && p[0] instanceof Sym && p[0].name === ':kind')?.[1]
     : undefined
@@ -153,7 +154,7 @@ test('cortex/query — accepts a pattern and returns something iterable', () => 
   remember(sym('user/name'), 'alfa')
   const out = query(sym('user/name'))
   // Contract: returns list/array of matches (may be empty).
-  assert.ok(out === undefined || out === null || Array.isArray(out) || typeof out === 'object')
+  assert.ok(out === undefined || out === null || Array.isArray(plain(out)) || typeof out === 'object')
 })
 
 // ── entity/* ─────────────────────────────────────────────────────────
@@ -161,7 +162,7 @@ test('cortex/query — accepts a pattern and returns something iterable', () => 
 test('entity/all — empty at boot', () => {
   const env = fresh()
   const all = get(env, 'entity/all')
-  assert.deepEqual(all(), [])
+  assert.deepEqual(plain(all()), [])
 })
 
 test('entity/count — starts at 0', () => {
@@ -219,7 +220,7 @@ test('time/delta — returns a number for known unit', () => {
 test('time/every-ms — returns a clause form (no side effect)', () => {
   const env = fresh()
   const every = get(env, 'time/every-ms')
-  const clause = every(1000, () => 42)
+  const clause = plain(every(1000, () => 42))
   assert.ok(Array.isArray(clause))
   assert.ok(clause[0] instanceof Sym)
   assert.equal(clause[0].name, 'clause/every-ms')
@@ -228,35 +229,35 @@ test('time/every-ms — returns a clause form (no side effect)', () => {
 test('time/during — clause form', () => {
   const env = fresh()
   const during = get(env, 'time/during')
-  const c = during(() => true, () => 1)
+  const c = plain(during(() => true, () => 1))
   assert.ok(Array.isArray(c) && c[0] instanceof Sym && c[0].name === 'clause/during')
 })
 
 test('time/then — clause form', () => {
   const env = fresh()
   const then = get(env, 'time/then')
-  const c = then('a', 'b')
+  const c = plain(then('a', 'b'))
   assert.ok(Array.isArray(c) && c[0] instanceof Sym && c[0].name === 'clause/then')
 })
 
 test('time/until — clause form', () => {
   const env = fresh()
   const until = get(env, 'time/until')
-  const c = until(() => true, () => 1)
+  const c = plain(until(() => true, () => 1))
   assert.ok(Array.isArray(c) && c[0] instanceof Sym && c[0].name === 'clause/until')
 })
 
 test('time/when — clause form', () => {
   const env = fresh()
   const when = get(env, 'time/when')
-  const c = when(() => true, () => 1)
+  const c = plain(when(() => true, () => 1))
   assert.ok(Array.isArray(c) && c[0] instanceof Sym && c[0].name === 'clause/when')
 })
 
 test('time/across — author-blocked placeholder returns marker', () => {
   const env = fresh()
   const across = get(env, 'time/across')
-  const c = across()
+  const c = plain(across())
   // Contract per source: returns [Sym('author-blocked'), ...]. Whatever
   // shape lands, it must be array-like with a Sym head.
   assert.ok(Array.isArray(c))
@@ -313,7 +314,7 @@ test('font/mono, font/big, font/tiny — Sym constants', () => {
 
 test('input/buttons — returns the six standard button names', () => {
   const env = fresh()
-  const btns = get(env, 'input/buttons')()
+  const btns = plain(get(env, 'input/buttons')())
   assert.ok(Array.isArray(btns))
   const names = btns.map((b) => (b instanceof Sym ? b.name : String(b)))
   for (const n of ['up', 'down', 'left', 'right', 'a', 'b']) {
@@ -461,7 +462,7 @@ test('world/frame + world/state — readable with no game set up (no throw)', ()
   // The singleton world always exists, so these answer at boot.
   assert.equal(typeof frame(), 'number')
   const s = state()
-  assert.ok(Array.isArray(s), 'world/state returns an alist')
+  assert.ok(Array.isArray(plain(s)), 'world/state returns an alist')
 })
 
 test('world/running? + world/stop + world/start — loop lifecycle', () => {
@@ -498,7 +499,7 @@ test('big-bang — accepts an initial state + step fn without throwing', () => {
 test('system/health — returns an alist with expected keys', () => {
   const env = fresh()
   const health = get(env, 'system/health')
-  const h = health()
+  const h = plain(health())
   assert.ok(Array.isArray(h), 'health is an alist')
   const keys = h.map((pair) => (pair[0] instanceof Sym ? pair[0].name : String(pair[0])))
   for (const k of ['quarantined', 'fuel_exhausted', 'illusions']) {
@@ -509,7 +510,7 @@ test('system/health — returns an alist with expected keys', () => {
 test('system/registry — returns a domain summary alist', () => {
   const env = fresh()
   const reg = get(env, 'system/registry')
-  const r = reg(sym('verbs'))
+  const r = plain(reg(sym('verbs')))
   assert.ok(Array.isArray(r), 'registry returns an alist')
   const findKey = (k) => {
     for (const pair of r) {

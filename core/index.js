@@ -27,6 +27,7 @@
 //   filter by CORE_VERBS to answer "what does the model memorize?"
 
 import { makeBaseEnv } from '../src/base.js'
+import { noteLibsLoaded } from '../lib/system/require-verb.js'
 
 // base tier — pure Scheme modules
 import { installR7rsSmall } from '../lib/base/r7rs-small.js'
@@ -65,6 +66,7 @@ import { installVerbStats } from '../lib/system/verb-stats.js'
 // ── Wave 1-5 (2026-07-16 completion) ────────────────────────────────
 import { installConst } from '../lib/math/const.js'
 import { installMathBasic } from '../lib/math/basic.js'
+import { installAlist } from '../lib/base/alist.js'
 import { installMathPedagogy } from '../lib/math/pedagogy.js'
 import { installGeom } from '../lib/graphics/geom.js'
 import { installVec } from '../lib/graphics/vec.js'
@@ -383,6 +385,7 @@ export function installCore (env, opts = {}) {
   // ── Wave 1-5 CORE completion (2026-07-16) ─────────────────────────
   runInstaller('core/math/const',        () => installConst(env, fuel))
   runInstaller('core/math/basic',        () => installMathBasic(env, fuel))
+  runInstaller('core/base/alist',        () => installAlist(env, fuel))
   runInstaller('core/math/pedagogy',     () => installMathPedagogy(env, fuel))
   runInstaller('core/graphics/geom',     () => installGeom(env, fuel))
   runInstaller('core/graphics/vec',      () => installVec(env, fuel))
@@ -483,6 +486,13 @@ export function installCore (env, opts = {}) {
   const failed = modules.filter((m) => !m.ok)
   const coverage = coreCoverage(env)
 
+  // Only the installers that actually returned — runInstaller sets ok:false on
+  // a throw, so a part that failed halfway stays out of (loaded-libs) instead
+  // of being reported live on the manifest's say-so. The `core/` prefix is a
+  // loader-report label; strip it so the ledger is spelled the same way
+  // `require` and `available-libs` spell a part name.
+  noteLibsLoaded(modules.filter((m) => m.ok).map((m) => m.name.replace(/^core\//, '')))
+
   return { modules, total, failed, game, coverage }
 }
 
@@ -539,6 +549,7 @@ export function installCoreLazy (env, opts = {}) {
       _installedLazy.add(entry.name)
       try {
         entry.install(env, ctx)
+        noteLibsLoaded([entry.name])
       } catch (e) {
         console.warn(`[core/lazy] lazy install of ${entry.name} failed: ${e.message}`)
       }
@@ -559,6 +570,12 @@ export function installCoreLazy (env, opts = {}) {
       lazyRegistered.push(verbName)
     }
   }
+
+  // Tell (loaded-libs) what is actually live. eagerLoaded holds only the
+  // entries whose install() returned; a thrown installer is warned about
+  // above and stays out. Lazy entries report themselves when their thunk
+  // fires, which is the moment they become true.
+  noteLibsLoaded(eagerLoaded)
 
   return { eager: eagerLoaded, lazy: lazyRegistered, game }
 }

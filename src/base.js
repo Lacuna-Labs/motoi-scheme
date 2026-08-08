@@ -6,14 +6,27 @@
 // `apply`, so they share the same fuel budget — no way to escape the cap.
 
 import { Env, apply, Closure } from './interp.js'
-import { Sym, Pair } from './reader.js'
+import { Sym, Pair, complexFromString } from './reader.js'
+import { isCpx, cpxToString, makeComplex } from '../lib/math/complex.js'
 import { makeRational, isRational, liftRational } from '../lib/math/exact.js'
+import {
+  Flo, flo, isFlo, isNum, num, isExact, isInexact, isIntegerValued,
+  toExact, toInexact, anyInexact, withExactness, numEq, numCmp, numEqv,
+  numToString, asFraction, normExact, exactSqrt, exptNum, exactFromDecimal,
+} from '../lib/math/tower.js'
 import { SchemeVector, isVec, Ch } from '../lib/base/r7rs-types.js'
+// R7RS §6.7 mutable strings. `isStr` is the type test that replaces
+// `typeof x === 'string'` on any value that can reach a Scheme verb — a
+// mutable string is an OBJECT, so the primitive test says #f for one. `str`
+// reads the live text. See lib/base/mutable-string.js for the whole design.
+import { isStr, str as _str } from '../lib/base/mutable-string.js'
 import { registerVerbMeta } from './verbRegistry.js'
 import { seededRandom } from './rng.js'
+import { opaqueRepr } from './opaque-print.js'
 import { installSlatVerbs } from './slat-verbs.js'
 import { installR7RSCompletions } from './r7rs-completions.js'
 
+import { NIL, arrayToList, bumpListEpoch, isList, isListish, isNull, isPair, listLength, listToArray, pairToString, seqVerb, toJS, toScheme } from '../lib/base/list.js'
 // The bricklay cache was Curator-specific host state. Extracted engine
 // keeps the `bricklay-pack-native` primitive but drops the cache — the
 // primitive still returns correct results, it just re-packs every call.
@@ -37,7 +50,44 @@ export function makeBaseEnv(fuel) {
   // The third arg is now mandatory at the audit level (the warming
   // wrapper at interp.js logs a warn otherwise); the `def` helper
   // defaults the perm so we don't repeat it at every line.
-  const def = (n, f, perm = 'read', extra = {}) => e.define(n, f, { perm, ...extra })
+  // The verbs whose whole meaning IS the cons cell — identity, sharing,
+  // mutation, or the shape of an improper tail. They are installed raw and
+  // written against the cells; everything else in the base vocabulary takes a
+  // list as a SEQUENCE and is wrapped at the boundary (lib/base/list.js) so it
+  // keeps receiving a JavaScript array.
+  //
+  // Getting this set wrong is not silent: a verb that belongs here and is not
+  // listed loses interior identity, and `tests/pairs.test.mjs` says so.
+  const RAW = new Set([
+    'cons', 'car', 'cdr', 'set-car!', 'set-cdr!', 'pair?', 'null?', 'list?',
+    'length', 'append', 'list-tail', 'last-pair',
+    'apply', 'eq?', 'eqv?', 'equal?', 'display', 'write',
+    'write-shared', 'write-simple', 'newline', 'write-string',
+    // The search verbs answer a SUBLIST of their argument (R7RS §6.4), so they
+    // must see and return the caller's own cells.
+    'member', 'assoc',
+    // `drop` answers an INTERIOR CELL of its argument (SRFI-1), which is the
+    // whole reason the verb exists: `(eq? (cdddr x) (drop x 3))` is #t. The
+    // boundary wrapper handed it an array, `slice` copied, and the identity was
+    // gone — the old array spelling could not express this answer at all.
+    'drop',
+    // The shortest-stop family. These take SEVERAL lists and stop at the
+    // shortest (SRFI-1), which is precisely what makes a CIRCULAR argument
+    // legal — the other list runs out. The boundary wrapper converts every
+    // argument to an array first, and a circular list has no array spelling, so
+    // wrapped they could only ever refuse: `(map + '(3 1 4 1) (circular-list 1
+    // 0))` raised where the SRFI says it answers `(4 1 5 1)`.
+    'map', 'for-each', 'any', 'every', 'count', 'zip',
+    // `list` and `vector` take VALUES, not sequences. Wrapped, every argument
+    // was converted on the way in — so `(list x 'a)` where x is circular
+    // raised "circular list passed to a verb that expects a proper list" about
+    // a list that was perfectly proper. R7RS's own `equal?` examples build
+    // exactly that structure. Raw, they cons what they are handed and never
+    // look inside it.
+    'list', 'vector',
+  ])
+  const def = (n, f, perm = 'read', extra = {}) =>
+    e.define(n, RAW.has(n) || /^c[ad]{2,4}r$/.test(n) ? f : seqVerb(f), { perm, ...extra })
 
   // ── R7RS number tower (exact rationals) ───────────────────────────
   // Rationals are the {n,d} objects from lib/math/exact.js. The core
@@ -107,37 +157,38 @@ export function makeBaseEnv(fuel) {
     if (twice > r.d) return f + 1
     return (f % 2 === 0) ? f : f + 1
   }
-  // Integer square root by Newton's method on BigInt. Returns null for a
-  // negative input. Used only to decide whether an exact rational HAS an
-  // exact square root; when it does, R7RS §6.2.6 says the result should be
-  // exact, so `(sqrt 1/4)` is 1/2 and not 0.5.
-  const _bigISqrt = (v) => {
-    if (v < 0n) return null
-    if (v < 2n) return v
-    let x = v
-    let y = (x + 1n) / 2n
-    while (y < x) { x = y; y = (x + v / x) / 2n }
-    return x
-  }
-
   // The arithmetic verbs used to be the raw JS operators, so `(+ 1 "a")`
   // answered "1a" and `(* 2 'x)` answered NaN — JS coercion leaking through
   // the language. Wrong answers with no error are the failure a learner
   // cannot debug, because nothing tells them anything went wrong. Every
   // numeric verb now states what it got instead of a number.
-  const _isNum = (x) => typeof x === 'number' || isRational(x)
+  const _isNum = (x) => isNum(x)
+
+  // The EXACT half of the tower, computed as fractions over BigInt so nothing
+  // is lost on the way: `(* 1518500249 1518500249)` and `(expt 2 62)` used to
+  // round through a double, and `(/ 1 3)` used to answer 0.3333333333333333
+  // where R7RS requires the exact 1/3. Results come back in the smallest
+  // faithful carrier — a JS number when it fits, a bigint when it does not,
+  // a Rational when the denominator is not 1.
+  const _exactNorm = normExact
+  const _exactFold = (args, combine, unit) => {
+    let acc = unit
+    for (const x of args) acc = combine(acc, asFraction(x))
+    return _exactNorm(acc[0], acc[1])
+  }
   const _describe = (x) => {
     if (x === undefined || x === null) return 'nothing'
-    if (typeof x === 'string') return `the string ${JSON.stringify(x)}`
+    if (isStr(x)) return `the string ${JSON.stringify(_str(x))}`
     if (typeof x === 'boolean') return x ? '#t' : '#f'
-    if (Array.isArray(x)) return x.length === 0 ? 'the empty list' : 'a list'
+    if (isNull(x)) return 'the empty list'
+    if (isList(x)) return 'a list'
     if (x instanceof Sym) return `the symbol ${x.name}`
     // A character is its OWN type (R7RS §6.6), not a one-letter string —
     // naming it is what tells a caller of `(string=? (string-ref s 0) "a")`
     // that `char=?` is the verb they wanted.
     if (x instanceof Ch) return `the character #\\${x.value}`
     if (isVec(x)) return 'a vector'
-    if (x instanceof Pair) return 'a pair'
+    if (x instanceof Pair) return 'an improper list'
     if (typeof x === 'function' || x instanceof Closure) return 'a procedure'
     if (_isNum(x)) return `the number ${isRational(x) ? `${x.n}/${x.d}` : x}`
     return 'a value of another kind'
@@ -157,17 +208,95 @@ export function makeBaseEnv(fuel) {
     }
   }
 
-  def('+', (...a) => _hasRat(_ckNums('+', a)) ? _numFold(a, _ratAdd, (x, y) => x + y, _ZERO) : a.reduce((x, y) => x + y, 0))
-  def('-', (...a) => _hasRat(_ckNums('-', a)) ? _numFold(a, _ratSub, (x, y) => x - y, _ZERO) : (a.length === 1 ? -a[0] : a.reduce((x, y) => x - y)))
-  def('*', (...a) => _hasRat(_ckNums('*', a)) ? _numFold(a, _ratMul, (x, y) => x * y, _ONE) : a.reduce((x, y) => x * y, 1))
-  def('/', (...a) => {
+  // §6.2.2 exactness contagion: an operation with any inexact argument has an
+  // inexact result; an operation on exact arguments alone stays exact. Both
+  // halves are new — every one of these used to run through JS doubles, so
+  // `(+ 1 2.0)` answered an exact 3 and `(* 1518500249 1518500249)` answered a
+  // rounded one.
+  // The inexact sum folds from the FIRST argument, not from 0: `0 + -0.0` is
+  // +0.0, so seeding with zero destroyed the sign of `(+ -0.0 -0.0)`.
+  const _addR = (...a) => anyInexact(_ckNums('+', a))
+    ? flo(a.slice(1).reduce((x, y) => x + num(y), num(a[0])))
+    : _exactFold(a, ([an, ad], [bn, bd]) => [an * bd + bn * ad, ad * bd], [0n, 1n])
+  const _subR = (...a) => {
+    _ckNums('-', a)
+    if (a.length === 1) return anyInexact(a) ? flo(-num(a[0])) : _exactFold(a, ([an, ad], [bn, bd]) => [an * bd - bn * ad, ad * bd], [0n, 1n])
+    if (anyInexact(a)) return flo(a.slice(1).reduce((x, y) => x - num(y), num(a[0])))
+    return _exactFold(a.slice(1), ([an, ad], [bn, bd]) => [an * bd - bn * ad, ad * bd], asFraction(a[0]))
+  }
+  const _mulR = (...a) => anyInexact(_ckNums('*', a))
+    ? flo(a.reduce((x, y) => x * num(y), 1))
+    : _exactFold(a, ([an, ad], [bn, bd]) => [an * bn, ad * bd], [1n, 1n])
+  const _divR = (...a) => {
     _ckNums('/', a)
     _ckNonZero('/', a.length === 1 ? a : a.slice(1))
-    return _hasRat(a) ? _numFold(a, _ratDiv, (x, y) => x / y, _ONE) : (a.length === 1 ? 1 / a[0] : a.reduce((x, y) => x / y))
+    if (anyInexact(a)) {
+      return flo(a.length === 1 ? 1 / num(a[0]) : a.slice(1).reduce((x, y) => x / num(y), num(a[0])))
+    }
+    // Exact division is where the rationals come from: `(/ 1 3)` is 1/3, not a
+    // double that only looks like it.
+    const div = ([an, ad], [bn, bd]) => [an * bd, ad * bn]
+    if (a.length === 1) return _exactFold(a, div, [1n, 1n])
+    return _exactFold(a.slice(1), div, asFraction(a[0]))
+  }
+
+  // §6.2.1: the tower is CLOSED over the complex numbers, so the four
+  // operations have to accept one. Each is written in terms of the real fold
+  // just above rather than in doubles, which is what keeps exactness right for
+  // free — `(/ 1+2i 3+4i)` is `11/25+2/25i`, not a pair of rounded doubles.
+  // `makeComplex` collapses an exact zero imaginary part back to a real, so a
+  // complex operand that cancels leaves the answer on the real line.
+  const _re = (v) => (isCpx(v) ? v.re : v)
+  const _im = (v) => (isCpx(v) ? v.im : 0)
+  const _hasCpx = (a) => a.some(isCpx)
+  const _cAdd = (x, y) => makeComplex(_addR(_re(x), _re(y)), _addR(_im(x), _im(y)))
+  const _cSub = (x, y) => makeComplex(_subR(_re(x), _re(y)), _subR(_im(x), _im(y)))
+  const _cMul = (x, y) => {
+    const [a, b, c, d] = [_re(x), _im(x), _re(y), _im(y)]
+    return makeComplex(_subR(_mulR(a, c), _mulR(b, d)), _addR(_mulR(a, d), _mulR(b, c)))
+  }
+  // (a+bi)/(c+di) = ((ac+bd) + (bc-ad)i) / (c²+d²) — the conjugate trick, so
+  // the divisor is real and the exact fold above can do the work.
+  const _cDiv = (x, y) => {
+    const [a, b, c, d] = [_re(x), _im(x), _re(y), _im(y)]
+    const den = _addR(_mulR(c, c), _mulR(d, d))
+    if (num(den) === 0) throw new Error('/: division by zero')
+    return makeComplex(_divR(_addR(_mulR(a, c), _mulR(b, d)), den),
+      _divR(_subR(_mulR(b, c), _mulR(a, d)), den))
+  }
+  // A complex argument must be let past `_ckNums`, which only knows the reals.
+  const _ckNumsC = (op, a) => {
+    for (const x of a) {
+      if (!_isNum(x) && !isCpx(x)) throw new Error(`${op}: expected a number, got ${_describe(x)}`)
+    }
+    return a
+  }
+  def('+', (...a) => _hasCpx(a) ? _ckNumsC('+', a).reduce(_cAdd, 0) : _addR(...a))
+  def('-', (...a) => {
+    if (!_hasCpx(a)) return _subR(...a)
+    _ckNumsC('-', a)
+    if (a.length === 1) return _cSub(0, a[0])
+    return a.slice(1).reduce(_cSub, a[0])
   })
-  def('modulo', (x, y) => { _ckNums('modulo', [x, y]); _ckNonZero('modulo', [y]); return ((x % y) + y) % y })
-  def('quotient', (x, y) => { _ckNums('quotient', [x, y]); _ckNonZero('quotient', [y]); return Math.trunc(x / y) })   // integer division — standard Scheme
-  def('remainder', (x, y) => { _ckNums('remainder', [x, y]); _ckNonZero('remainder', [y]); return x - Math.trunc(x / y) * y })
+  def('*', (...a) => _hasCpx(a) ? _ckNumsC('*', a).reduce(_cMul, 1) : _mulR(...a))
+  def('/', (...a) => {
+    if (!_hasCpx(a)) return _divR(...a)
+    _ckNumsC('/', a)
+    if (a.length === 1) return _cDiv(1, a[0])
+    return a.slice(1).reduce(_cDiv, a[0])
+  })
+  // The integer-division family (§6.2.6). Each returns an integer, exact when
+  // both arguments are — `(modulo 7 3)` is 1, `(modulo 7.0 3)` is 1.0.
+  const _intDiv = (op, f) => (x, y) => {
+    _ckNums(op, [x, y]); _ckNonZero(op, [y])
+    return withExactness([x, y], f(num(x), num(y)))
+  }
+  // §6.2.6 defines modulo as the FLOOR remainder. The `((x % y) + y) % y`
+  // identity agrees on every value except the sign of a zero result, where it
+  // manufactures one: `(modulo -15.0 -3.0)` came out -0.0 instead of 0.0.
+  def('modulo', _intDiv('modulo', (x, y) => x - Math.floor(x / y) * y))
+  def('quotient', _intDiv('quotient', (x, y) => Math.trunc(x / y)))   // integer division — standard Scheme
+  def('remainder', _intDiv('remainder', (x, y) => x - Math.trunc(x / y) * y))
   // R7RS §6.2.6 spells these `(max x1 x2 …)` — at least one argument. Zero
   // arguments used to hand back JS's reduce identity, so `(max)` answered
   // -Infinity and `(min)` answered Infinity: a number where the learner asked
@@ -179,9 +308,18 @@ export function makeBaseEnv(fuel) {
     if (a.length === 0) throw new Error(`${op}: expected at least 1 argument, got none`)
     return a
   }
-  def('max', (...a) => Math.max(..._ckNums('max', _ckArity1('max', a)).map(_toFloat)))
-  def('min', (...a) => Math.min(..._ckNums('min', _ckArity1('min', a)).map(_toFloat)))
-  def('abs', (x) => isRational(x) ? (x.n < 0n ? makeRational(-x.n, x.d) : x) : Math.abs(x))
+  // §6.2.6 max/min return one of their ARGUMENTS, so the exact one is returned
+  // exact — unless some other argument was inexact, in which case contagion
+  // applies to the answer. Both used to collapse everything to a double.
+  const _pick = (op, a, keepLeft) => {
+    _ckNums(op, _ckArity1(op, a))
+    let best = a[0]
+    for (const x of a.slice(1)) if (keepLeft ? numCmp(x, best) > 0 : numCmp(x, best) < 0) best = x
+    return anyInexact(a) ? toInexact(best) : best
+  }
+  def('max', (...a) => _pick('max', a, true))
+  def('min', (...a) => _pick('min', a, false))
+  def('abs', (x) => isRational(x) ? (x.n < 0n ? makeRational(-x.n, x.d) : x) : withExactness([x], Math.abs(num(x))))
 
   // R7RS §6.2.6: `= < > <= >=` are N-ARY and hold when EVERY adjacent pair
   // holds — `(< 1 2 3)` is #t, `(< 1 3 2)` is #f, `(= 1 1 2)` is #f.
@@ -209,21 +347,40 @@ export function makeBaseEnv(fuel) {
   // `(= DIFFICULTY 'easy)` and so start raising — the carts are wrong, not
   // the engine; comparing a symbol with `=` is exactly the mistake this
   // check exists to catch, and `eq?` is the verb they wanted.
+  // R7RS §6.2.6 defines `=` on the whole numeric tower, complex included,
+  // while `<` `>` `<=` `>=` are real-only. `=` used to raise on a complex
+  // ("=: expected a number, got a value of another kind"), so the one verb
+  // the standard guarantees works on a complex number was the one that
+  // refused it. Ordering still refuses — there is no order on the plane.
+  const _CPX_REL = Symbol.for('motoi:complex')
+  const _isCpxRel = (v) => v != null && typeof v === 'object' && v[_CPX_REL] === true
+  // `Number(...)` on the real side too: an inexact real is a `Flo` heap
+  // object, and `===` against the double on the complex side said #f.
+  const _cpxRe = (v) => Number(_isCpxRel(v) ? v.re : _toFloat(v))
+  const _cpxIm = (v) => (_isCpxRel(v) ? Number(v.im) : 0)
   const _numRel = (rel, x, y) => {
-    if (isRational(x) || isRational(y)) {
-      const c = _numCmp(x, y)
-      return rel === '=' ? c === 0
-        : rel === '<' ? c < 0
-          : rel === '>' ? c > 0
-            : rel === '<=' ? c <= 0 : c >= 0
+    if (_isCpxRel(x) || _isCpxRel(y)) {
+      return _cpxRe(x) === _cpxRe(y) && _cpxIm(x) === _cpxIm(y)
     }
-    return rel === '=' ? x === y
-      : rel === '<' ? x < y
-        : rel === '>' ? x > y
-          : rel === '<=' ? x <= y : x >= y
+    // NaN is unordered, so every comparison against it is #f — including `=`.
+    // Routed through the tower so that two exact integers past 2^53 are
+    // compared as integers, not as the one double they both round to.
+    if (Number.isNaN(num(x)) || Number.isNaN(num(y))) return false
+    const c = numCmp(x, y)
+    return rel === '=' ? c === 0
+      : rel === '<' ? c < 0
+        : rel === '>' ? c > 0
+          : rel === '<=' ? c <= 0 : c >= 0
   }
   const _numChain = (op, rel) => (...a) => {
-    _ckNums(op, _ckArity1(op, a))
+    _ckArity1(op, a)
+    for (const x of a) {
+      if (_isCpxRel(x)) {
+        if (rel === '=') continue
+        throw new Error(`${op}: expected a real number, got a complex number`)
+      }
+      if (!_isNum(x)) throw new Error(`${op}: expected a number, got ${_describe(x)}`)
+    }
     for (let i = 0; i + 1 < a.length; i++) if (!_numRel(rel, a[i], a[i + 1])) return false
     return true
   }
@@ -245,18 +402,29 @@ export function makeBaseEnv(fuel) {
   // the whole reason the error exists.
   const _asPair = (op, a) => {
     if (a instanceof Pair) return a
-    if (Array.isArray(a) && a.length > 0) return a
-    throw new Error(`${op}: expected a pair or a non-empty list, got ${_describe(a)}`)
+    throw new Error(`${op}: expected a pair, got ${_describe(a)}`)
   }
-  const _car = (a, op = 'car') => { const p = _asPair(op, a); return p instanceof Pair ? p.car : p[0] }
-  const _cdr = (a, op = 'cdr') => { const p = _asPair(op, a); return p instanceof Pair ? p.cdr : p.slice(1) }
+  // `cdr` hands back the REST OF THE CHAIN, not a copy of it. That is the whole
+  // point of the cell change: `(eq? (cdr x) (cdr x))` is #t, a tail can be
+  // shared, and `set-car!` through one name is visible through the other.
+  const _car = (a, op = 'car') => _asPair(op, a).car
+  const _cdr = (a, op = 'cdr') => _asPair(op, a).cdr
+  // R7RS §6.4 asks list-ref and list-tail for k cdrs, not for a proper list, so
+  // `(list-tail '(a b c . d) 2)` is `(c . d)` and not an error.
+  const _walkCdrs = (op, a, k) => {
+    let t = a
+    for (let i = 0; i < k; i++) {
+      if (!(t instanceof Pair)) throw new Error(`${op}: index ${k} is past the end of the list`)
+      t = t.cdr
+    }
+    return t
+  }
 
-  def('list', (...a) => a)
-  // R7RS §6.4. Consing onto a list extends the list (array fast path, the
-  // shape every cart already relies on); consing onto a non-list mints a
-  // real improper Pair, so `(cons 'sku 42)` is `(sku . 42)` and not the
-  // two-element list it silently produced before 2026-08-01.
-  def('cons', (a, b) => (Array.isArray(b) ? [a, ...b] : new Pair(a, b)))
+  def('list', (...a) => arrayToList(a))
+  // R7RS §6.4. One cell, always — there is no case analysis left. `b` is the
+  // tail whatever it is, so `(cons 'sku 42)` is the improper `(sku . 42)` and
+  // `(cons 1 x)` shares x rather than copying it.
+  def('cons', (a, b) => new Pair(a, b))
   def('car', (a) => _car(a))
   def('cdr', (a) => _cdr(a))
   // Standard Scheme convenience accessors — second + third elements.
@@ -297,21 +465,21 @@ export function makeBaseEnv(fuel) {
       if (v === null || typeof v !== 'object') return false
       if (seen.has(v)) return false
       seen.add(v)
-      if (Array.isArray(v)) return v.some(walk)
       if (v instanceof Pair) return walk(v.car) || walk(v.cdr)
+      if (Array.isArray(v)) return v.some(walk)
       return false
     }
     return walk(start)
   }
   def('set-car!', (p, v) => {
     if (p instanceof Pair) { p.car = v; return undefined }
-    if (Array.isArray(p) && p.length > 0) { p[0] = v; return undefined }
+    if (isPair(p)) { p[0] = v; return undefined }
     throw new Error(`set-car!: expected a pair or a non-empty list, got ${_describe(p)}`)
   }, 'state-change')
   def('set-cdr!', (p, v) => {
     if (p instanceof Pair) { p.cdr = v; return undefined }
-    if (Array.isArray(p) && p.length > 0) {
-      if (!Array.isArray(v)) {
+    if (isPair(p)) {
+      if (!isList(v)) {
         throw new Error(`set-cdr!: cannot make ${_describe(v)} the tail of a list built by (list …). ` +
           'Motoi spells a proper list as a flat array, which has no cell to hold an improper tail. ' +
           'To get a dotted pair, build it with cons — (cons x y) with a non-list y is a real pair, ' +
@@ -330,68 +498,139 @@ export function makeBaseEnv(fuel) {
     throw new Error(`set-cdr!: expected a pair or a non-empty list, got ${_describe(p)}`)
   }, 'state-change')
 
-  def('null?', (a) => Array.isArray(a) && a.length === 0)
+  def('null?', (a) => isNull(a))
   // R7RS §6.4 / §6.3 / §6.5 — the load-bearing type predicates the spec
   // expects every Scheme to bind. `pair?` is true of a non-empty list
   // (Motoi represents proper lists as JS arrays) or an improper `Pair`.
   // `symbol?` is true on a `Sym` reader token. `procedure?` is true on
   // anything callable — JS functions (primitives) or `Closure` instances.
-  def('pair?', (a) => a instanceof Pair || (Array.isArray(a) && a.length > 0))
+  def('pair?', (a) => isPair(a))
   def('symbol?', (a) => a instanceof Sym)
   def('procedure?', (a) => typeof a === 'function' || a instanceof Closure)
   // R7RS §6.4: `length` is an error on an improper list. (`list?` already
   // lives in lib/std/r7rs-completions-core.js and is correct as written —
   // `Array.isArray` is false for a Pair.)
   def('length', (a) => {
-    if (a instanceof Pair) throw new Error('length: improper list')
     // `(length 5)` used to answer `undefined` — JS reads `.length` off
     // anything, and a number simply has none.
-    if (!Array.isArray(a)) throw new Error(`length: expected a proper list, got ${_describe(a)}`)
-    return a.length
+    if (!isListish(a)) throw new Error(`length: expected a proper list, got ${_describe(a)}`)
+    // Walks the chain, and raises rather than hanging on a circular list —
+    // which is a shape the language can express now.
+    return listLength(a)
   })
-  def('range', (a, b) => { const r = []; for (let i = a; i < b; i++) r.push(i); return r })
+  // (range a b [step]) — the half-open span [a, b).
+  //
+  // The third argument was ACCEPTED AND IGNORED until 2026-08-02, so
+  // `(range 0 5 2)` answered `(0 1 2 3 4)` — the learner's step vanished
+  // and nothing said so. It is now honoured, and a negative step counts
+  // down (the direction the bound comparison has to flip for).
+  //
+  // A step of 0 RAISES. It cannot reach `b`, so the honest alternatives
+  // are an error or an infinite loop that hangs the interpreter; the
+  // error is the one that tells you what you did.
+  def('range', (a, b, step) => {
+    // Non-numeric bounds used to reach the loop, where `i += 1` on a symbol
+    // builds a growing string that never compares past `b` — (range 'a 'b)
+    // HUNG the interpreter with no output and no way out but an interrupt.
+    if (!_isNum(a)) throw new Error(`range: expected a number start, got ${_describe(a)}`)
+    if (b !== undefined && !_isNum(b)) {
+      throw new Error(`range: expected a number end, got ${_describe(b)}`)
+    }
+    if (step !== undefined && !_isNum(step)) {
+      throw new Error(`range: expected a number step, got ${_describe(step)}`)
+    }
+    const s = step === undefined ? 1 : _toFloat(step)
+    if (s === 0) throw new Error('range: the step must not be 0 — a zero step never reaches the end')
+    const r = []
+    if (s > 0) { for (let i = a; i < b; i += s) r.push(i) }
+    else { for (let i = a; i > b; i += s) r.push(i) }
+    return r
+  })
 
-  // (for-each fn xs [ys …]) — R7RS §6.10. Multi-list form iterates
-  // pairwise; the callback receives one arg from each list per step.
-  // Length is the shortest list; no error on ragged inputs (matches
-  // R7RS behaviour that "the shortest list determines the length").
   // Improper lists reach these as a Pair; without this guard the learner
   // sees a JS message like "lists[0].map is not a function".
   const _needList = (name, v) => {
-    if (!Array.isArray(v)) throw new Error(`${name}: expected a proper list`)
+    if (!isList(v)) throw new Error(`${name}: expected a proper list`)
     return v
   }
+
+  // ── the shortest-stop family ────────────────────────────────────────
+  //
+  // `map`, `for-each`, `any`, `every`, `count` and `zip` all take one or more
+  // lists and walk them in step, stopping at the SHORTEST (SRFI-1; R7RS §6.10
+  // leaves the ragged case unspecified, and the SRFI reading is a superset of
+  // it — see CLAUDE.md on binding the superset).
+  //
+  // Stopping at the shortest is exactly what makes a CIRCULAR argument legal:
+  // `(map + '(3 1 4 1) (circular-list 1 0))` is `(4 1 5 1)` because the FIRST
+  // list runs out. These verbs read their arguments through a cursor rather
+  // than an index for that reason — an index needs a length, and a circular
+  // list does not have one.
+  //
+  // A cursor also removes the older hazard in this family, which is the one
+  // this codebase keeps re-finding: `isList(l)` answers #t for a cell chain as
+  // well as an array, and a chain has no `.length`. `Math.min(...)` over
+  // `undefined` is `NaN`, `i < NaN` is false, and the loop simply never ran —
+  // `map` handed back an empty list and said nothing.
+  const _cursor = (op, l) => {
+    // The array spelling, from the far side of the sequence boundary. It
+    // cannot hold a cycle, so it needs no cycle test.
+    if (Array.isArray(l)) {
+      let i = 0
+      return { circular: false, more: () => i < l.length, next: () => toScheme(l[i++]) }
+    }
+    if (l === NIL) return { circular: false, more: () => false, next: () => undefined }
+    if (!(l instanceof Pair)) {
+      throw new Error(`${op}: expected a proper list, got ${_describe(l)}`)
+    }
+    // `isList` folds "circular" and "improper" together into one #f, and here
+    // they could not be further apart: circular is legal, improper is an error.
+    const circular = isCircularList(l)
+    if (!circular && !isList(l)) {
+      throw new Error(`${op}: expected a proper list, got ${_describe(l)}`)
+    }
+    let p = l
+    return {
+      circular,
+      more: () => p instanceof Pair,
+      next: () => { const v = p.car; p = p.cdr; return v },
+    }
+  }
+  // Build one cursor per list and refuse the one case that cannot terminate:
+  // EVERY argument circular means there is no shortest list to stop at, so the
+  // walk would run until the fuel ran out with nothing to show for it. SRFI-1
+  // calls that an error; saying so is better than hanging.
+  const _cursors = (op, lists) => {
+    const cs = lists.map((l) => _cursor(op, l))
+    if (cs.length > 0 && cs.every((c) => c.circular)) {
+      throw new Error(`${op}: every list is circular, so there is no shortest one to stop at — ` +
+        'at least one argument must be a finite list')
+    }
+    return cs
+  }
+  // True while every cursor still has an element; the shortest one ends it.
+  const _allMore = (cs) => { for (const c of cs) if (!c.more()) return false; return true }
+  const _step = (cs) => cs.map((c) => c.next())
+
+  // (for-each fn xs [ys …]) — R7RS §6.10. Multi-list form iterates
+  // pairwise; the callback receives one arg from each list per step.
   def('for-each', (fn, ...lists) => {
-    lists.forEach((l) => _needList('for-each', l))
     if (lists.length === 0) return undefined
-    if (lists.length === 1) {
-      for (const x of lists[0]) apply(fn, [x], fuelBox)
-      return undefined
-    }
-    const n = lists.reduce((m, l) => Math.min(m, l.length), Infinity)
-    for (let i = 0; i < n; i++) {
-      const args = lists.map((l) => l[i])
-      apply(fn, args, fuelBox)
-    }
+    const cs = _cursors('for-each', lists)
+    while (_allMore(cs)) apply(fn, _step(cs), fuelBox)
     return undefined
   })
   // (map fn xs [ys …]) — R7RS §6.10, "Patch 2" (2026-07-19). Prior form
   // was single-list only; the multi-list form evaluates the callback
   // once per index with one arg from each list. `(map + xs ys)` sums two
-  // lists pairwise. Backwards-compatible: single-list callers work
-  // unchanged. If the fn has a fixed lower arity the runtime error
+  // lists pairwise. If the fn has a fixed lower arity the runtime error
   // surfaces from apply, not from map.
   def('map', (fn, ...lists) => {
-    lists.forEach((l) => _needList('map', l))
-    if (lists.length === 0) return []
-    if (lists.length === 1) return lists[0].map((x) => apply(fn, [x], fuelBox))
-    const n = lists.reduce((m, l) => Math.min(m, l.length), Infinity)
-    const out = new Array(n)
-    for (let i = 0; i < n; i++) {
-      const args = lists.map((l) => l[i])
-      out[i] = apply(fn, args, fuelBox)
-    }
-    return out
+    if (lists.length === 0) return NIL
+    const cs = _cursors('map', lists)
+    const out = []
+    while (_allMore(cs)) out.push(apply(fn, _step(cs), fuelBox))
+    return arrayToList(out)
   })
   def('filter', (fn, lst) => _needList('filter', lst).filter((x) => apply(fn, [x], fuelBox) !== false))
   // SRFI-1 `reduce`: (reduce f ridentity list). For a NON-empty list the
@@ -414,10 +653,15 @@ export function makeBaseEnv(fuel) {
   def('apply', (fn, ...rest) => {
     if (rest.length === 0) throw new Error('apply: expected a procedure and an argument list')
     const tail = rest[rest.length - 1]
-    if (!Array.isArray(tail)) {
+    if (!isList(tail)) {
       throw new Error('apply: the last argument must be a list of arguments')
     }
-    return apply(fn, [...rest.slice(0, -1), ...tail], fuelBox)
+    // `isList` passes BOTH spellings, and `listToArray` only knows cells — an
+    // array-spelled list (one that came out of a vector, say) satisfied the
+    // guard on the line above and was then rejected two characters later by
+    // `listToArray` with a message about a proper list, which it plainly was.
+    // Normalize first, so one guard decides.
+    return apply(fn, [...rest.slice(0, -1), ...listToArray(toScheme(tail))], fuelBox)
   })
 
   // (=? a b) — smart equality. The PICO-8-style "do what I mean" verb:
@@ -431,9 +675,23 @@ export function makeBaseEnv(fuel) {
   // beginners cite this as the #1 surprise). Use `=?` everywhere and
   // it just works; the verbose forms stay for the few cases that need
   // them.
-  function _eqQ(a, b) {
-    if (a === b) return true
+  //
+  // The recursion — the walk over pairs and vectors, and the stop that keeps
+  // it from running forever on a circular one — lives in the module-level
+  // `deepEqual` at the foot of this file, which `r7rs-small.js` shares. Only
+  // the LEAF comparison is spelled here, because only the leaves differ
+  // between the two callers. Keeping the walk in one place is the point: the
+  // two copies drifted before, and a `equal?` that terminates in one file and
+  // hangs in another is worse than one that is wrong in both.
+  function _eqLeaf(a, b) {
     if (a == null || b == null) return false
+    // R7RS §6.1: `equal?` on two strings is `string=?` — by CONTENT. A mutable
+    // string (lib/base/mutable-string.js) is a heap object, so the `===`
+    // identity test above misses two equal ones and `(equal? (string-copy "a")
+    // "a")` answered #f. `eqv?` deliberately does NOT get this branch: two
+    // separately allocated strings are distinct locations, which is exactly
+    // what `(eqv? (string #\a) (string #\a))` => #f asks for.
+    if (isStr(a) && isStr(b)) return _str(a) === _str(b)
     // R7RS §6.1 guarantees that `eqv?` IMPLIES `equal?` — equal? is defined
     // to return #t "if eqv? would". Exact rationals are heap objects, so the
     // `a === b` identity test above misses two separately-allocated 1/2s, and
@@ -441,7 +699,15 @@ export function makeBaseEnv(fuel) {
     // answered #f while `(eqv? 1/2 1/2)` answered #t, inverting the one
     // ordering the standard promises. Delegate to `_eqvQ`, so the two can
     // never disagree about a number again.
-    if (isRational(a) || isRational(b)) return _eqvQ(a, b)
+    // Same guarantee for every number, not just the rationals: an inexact
+    // integer is a `Flo` heap object, so `(equal? 7.0 7.0)` answered #f.
+    if (isNum(a) && isNum(b)) return _eqvQ(a, b)
+    // Complex numbers are heap objects for the same reason, and the same
+    // eqv? ⟹ equal? guarantee applies: `(equal? (complex/make 3 4)
+    // (complex/make 3 4))` answered #f while `eqv?` answered #t. Delegate.
+    const _CPXQ = Symbol.for('motoi:complex')
+    const _isCpxV = (v) => v != null && typeof v === 'object' && v[_CPXQ] === true
+    if (_isCpxV(a) || _isCpxV(b)) return _eqvQ(a, b)
     // Sym comparison by .name (reader interns these consistently).
     if (a && b && typeof a === 'object' && typeof b === 'object'
         && 'name' in a && 'name' in b
@@ -449,22 +715,9 @@ export function makeBaseEnv(fuel) {
         && typeof a.name === 'string') {
       return a.name === b.name
     }
-    if (Array.isArray(a) && Array.isArray(b)) {
-      if (a.length !== b.length) return false
-      for (let i = 0; i < a.length; i++) if (!_eqQ(a[i], b[i])) return false
-      return true
-    }
-    if (a instanceof Pair || b instanceof Pair) {
-      return a instanceof Pair && b instanceof Pair
-        && _eqQ(a.car, b.car) && _eqQ(a.cdr, b.cdr)
-    }
-    // R7RS §6.8: two vectors are `equal?` when same length + element-wise equal.
-    if (isVec(a) && isVec(b)) {
-      if (a.items.length !== b.items.length) return false
-      for (let i = 0; i < a.items.length; i++) if (!_eqQ(a.items[i], b.items[i])) return false
-      return true
-    }
     // R7RS §6.9: two bytevectors are `equal?` when same length + byte-wise equal.
+    // A bytevector holds bytes, never a reference, so it cannot be circular and
+    // belongs with the leaves.
     if (a instanceof Uint8Array && b instanceof Uint8Array) {
       if (a.length !== b.length) return false
       for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
@@ -472,7 +725,17 @@ export function makeBaseEnv(fuel) {
     }
     return false
   }
-  def('=?', _eqQ)
+  const _eqQ = (a, b) => deepEqual(a, b, _eqLeaf)
+  // `=?` is the friendly n-ary equality, and it holds when EVERY adjacent
+  // pair holds — the same chain rule `=` and `string=?` follow. It was a
+  // two-argument arrow until 2026-08-02, so JS DROPPED every argument past
+  // the second and `(=? 1 1 2)` answered #t while `(= 1 1 2)` correctly
+  // answered #f. The two most-taught equality verbs disagreed on the same
+  // form, and the one that was wrong was the one beginners are told to use.
+  def('=?', (...xs) => {
+    for (let i = 0; i + 1 < xs.length; i++) if (!_eqQ(xs[i], xs[i + 1])) return false
+    return true
+  })
   // `equal?` IS the deep one — R7RS §6.1 defines it recursively over pairs,
   // vectors, strings and bytevectors. `=?` is its friendly spelling.
   def('equal?', _eqQ)
@@ -501,13 +764,33 @@ export function makeBaseEnv(fuel) {
   function _eqvQ(a, b) {
     if (a === b) return true
     if (a == null || b == null) return false
+    // Every number goes through the one tower comparison, which requires equal
+    // VALUE and equal EXACTNESS. An inexact integer is a `Flo` — a heap object
+    // — so `===` said #f for `(eqv? 7.0 7.0)`, and with it `memv`, `assv`,
+    // `case`, and every test suite that checks a float result.
+    if (isNum(a) && isNum(b)) return numEqv(a, b)
     if (a instanceof Sym && b instanceof Sym) return a.name === b.name
     // R7RS §6.1 lists the empty list among the objects `eqv?` must answer #t
-    // for: there is only ONE empty list. Motoi spells it as a JS array, and
-    // every `'()` literal allocates a fresh one, so `===` said #f — which
-    // made `(eq? '() '())` #f and quietly broke the identity a learner leans
-    // on hardest when writing a recursive list walk.
-    if (Array.isArray(a) && Array.isArray(b)) return a.length === 0 && b.length === 0
+    // for: there is only ONE empty list. The cell representation gives that for
+    // free — `NIL` is a single frozen object and `===` already answered it
+    // above — but the array spelling still reaches here from the far side of
+    // the sequence boundary, and an empty array is not `===` to `NIL`.
+    //
+    // This test was `isList(a) && isList(b)` and then `a.length === 0`, which
+    // is the trap: `isList` answers #t for a cell chain too, and a chain has no
+    // `.length`. Two non-empty chains fell in here and left with #f before the
+    // rational branch below ever ran — harmless for lists, but the guard was
+    // claiming to be about emptiness while testing membership in a much larger
+    // set. `isNull` asks the question the comment says it is asking.
+    if (isNull(a) || isNull(b)) return isNull(a) && isNull(b)
+    // Complex numbers are heap objects too, so `===` missed two equal ones and
+    // `(eqv? (make-rectangular 3 4) (make-rectangular 3 4))` answered #f while
+    // `memv` found them — two verbs in one language disagreeing about equality.
+    if (isCpx(a) || isCpx(b)) {
+      // Componentwise through the tower: a component is a tower value, so
+      // `===` missed two equal `Flo`s and ignored exactness entirely.
+      return isCpx(a) && isCpx(b) && numEqv(a.re, b.re) && numEqv(a.im, b.im)
+    }
     // Exact rationals are heap objects, so `===` misses two equal ones.
     // Exactness must still separate them: R7RS says 1/2 and 0.5 are not eqv?.
     if (isRational(a) || isRational(b)) {
@@ -531,19 +814,62 @@ export function makeBaseEnv(fuel) {
     if (v === true) return '#t'
     if (v === null) return 'null'
     if (typeof v === 'number') return String(v)
-    if (typeof v === 'string') {
-      return v.length > 80 ? JSON.stringify(v.slice(0, 80)) + '…' : JSON.stringify(v)
+    if (isStr(v)) {
+      const t = _str(v)
+      return t.length > 80 ? JSON.stringify(t.slice(0, 80)) + '…' : JSON.stringify(t)
     }
     if (typeof v === 'function') return '<fn>'
     if (v instanceof Closure) return '<fn>'
     if (v && typeof v === 'object' && 'name' in v && typeof v.name === 'string'
         && Object.keys(v).length === 1) return v.name
+    // `NIL` and the array spelling. The cell chain has its own branch below,
+    // and it has to: this test was `isList(v)`, which is #t for a chain and for
+    // `NIL`, neither of which has a `.slice` — so the next line threw a raw
+    // JavaScript TypeError rather than printing a list.
+    if (isNull(v)) return '()'
     if (Array.isArray(v)) {
       if (depth > 4) return '(…)'
       const inner = v.slice(0, 12).map((x) => _show(x, depth + 1)).join(' ')
       const tail = v.length > 12 ? ' …' : ''
       return '(' + inner + tail + ')'
     }
+    // Scheme values print in SCHEME surface syntax. Until 2026-08-02 these
+    // three fell through to the generic JS-object branch below and leaked
+    // the engine's internals at the learner: a vector showed as
+    // `{items: (1 2)}`, `(cons 1 2)` as `{car: 1, cdr: 2}`, and `1/2` as
+    // `{n: 1, d: 2}`. A teaching language must not answer with the names of
+    // its own JavaScript fields — the reader cannot type any of that back in.
+    if (isVec(v)) {
+      if (depth > 4) return '#(…)'
+      const items = v.items
+      const inner = items.slice(0, 12).map((x) => _show(x, depth + 1)).join(' ')
+      return '#(' + inner + (items.length > 12 ? ' …' : '') + ')'
+    }
+    if (v instanceof Pair) {
+      if (depth > 4) return '(…)'
+      // Walk the cdr chain so `(1 . (2 . 3))` prints as `(1 2 . 3)`, the
+      // way it is read. The 12-cell cap matches the list branch above and
+      // also keeps a list made circular by `list-set!` from hanging here.
+      const parts = []
+      let x = v
+      let n = 0
+      while (x instanceof Pair && n < 12) { parts.push(_show(x.car, depth + 1)); x = x.cdr; n++ }
+      if (x instanceof Pair) return '(' + parts.join(' ') + ' …)'
+      // A chain that ended at NIL is a proper list and prints with no dot.
+      // This test was `isList(x)`, which is #t for `NIL` — and `NIL` is a
+      // frozen singleton with no `.slice` and no `.length`, so the very next
+      // line threw a raw JavaScript TypeError at anyone who inspected a cell
+      // chain that reached its end.
+      if (isNull(x)) return '(' + parts.join(' ') + ')'
+      // The array spelling of a tail, from across the sequence boundary.
+      if (Array.isArray(x)) {
+        for (const el of x.slice(0, 12)) parts.push(_show(el, depth + 1))
+        return '(' + parts.join(' ') + (x.length > 12 ? ' …' : '') + ')'
+      }
+      return '(' + parts.join(' ') + ' . ' + _show(x, depth + 1) + ')'
+    }
+    if (isRational(v)) return `${v.n}/${v.d}`
+    if (v instanceof Ch) return `#\\${v.value}`
     if (typeof v === 'object') {
       if (depth > 3) return '{…}'
       const entries = Object.entries(v).slice(0, 8)
@@ -575,15 +901,14 @@ export function makeBaseEnv(fuel) {
     if (v === null) return '()'
     if (v === true) return '#t'
     if (v === false) return '#f'
-    if (typeof v === 'string') return v
-    if (typeof v === 'bigint') return String(v)
-    if (typeof v === 'number') {
-      if (v === Infinity) return '+inf.0'
-      if (v === -Infinity) return '-inf.0'
-      if (Number.isNaN(v)) return '+nan.0'
-      return String(v)
-    }
+    if (isStr(v)) return _str(v)
+    // One printer for the whole tower (lib/math/tower.js), so an inexact
+    // integer shows its point — `1.0`, not `1` — and cannot read back exact.
+    if (typeof v === 'number' || typeof v === 'bigint' || isFlo(v)) return numToString(v)
     if (v instanceof Pair) return pairToString(v, _displayFormat)
+    if (isNull(v)) return '()'
+    // An ARRAY reaching `pairToString` would print `( . <array>)` — the walker
+    // there only knows cells. The cell case is already handled above.
     if (Array.isArray(v)) return '(' + v.map(_displayFormat).join(' ') + ')'
     if (typeof v === 'function') return '<fn>'
     if (v instanceof Closure) return '<fn>'
@@ -595,16 +920,7 @@ export function makeBaseEnv(fuel) {
       return v.d === 1n ? String(v.n) : `${v.n}/${v.d}`
     }
     // Complex numbers (lib/math/complex.js) — carry the shared tag.
-    const CPX_TAG = Symbol.for('motoi:complex')
-    if (v && typeof v === 'object' && v[CPX_TAG] === true) {
-      const { re, im } = v
-      if (im === 0) return String(re)
-      if (re === 0) return im === 1 ? 'i' : im === -1 ? '-i' : `${im}i`
-      const sign = im >= 0 ? '+' : '-'
-      const ai = Math.abs(im)
-      const imPart = ai === 1 ? 'i' : `${ai}i`
-      return `${re}${sign}${imPart}`
-    }
+    if (isCpx(v)) return cpxToString(v)
     // Promise objects (from delay/make-promise) — show shape not JS repr.
     if (v && typeof v === 'object' && v.__promise__ === true) {
       return v.forced ? _displayFormat(v.value) : '<promise>'
@@ -616,6 +932,14 @@ export function makeBaseEnv(fuel) {
     if (v && typeof v === 'object' && Array.isArray(v.vals)) {
       return v.vals.map(_displayFormat).join(' ')
     }
+    // Host-backed opaque values — entities, hash tables, random sources, audio
+    // records, SLAT records. All of these reached String(v) below and printed
+    // `[object Object]`, a JavaScript artifact with no meaning in Scheme. The
+    // rule is shared with the other three renderers (src/opaque-print.js) so
+    // `display` and the CLI's auto-print cannot answer differently for the
+    // same value again.
+    const opaque = opaqueRepr(v)
+    if (opaque) return opaque
     return String(v)
   }
   def('display', (v) => { process.stdout.write(_displayFormat(v)); return undefined })
@@ -628,44 +952,94 @@ export function makeBaseEnv(fuel) {
   // SRFI-1: any/every/count take one or more parallel lists, stopping at the
   // shortest. any returns the first true value; every returns the last true
   // value (or #t when all lists are empty); both short-circuit.
+  // All three walk through `_cursors`, so a circular argument is fine as long
+  // as one other argument is finite — `(any < '(3 1 4 1 5) (circular-list 2 7
+  // 1 8 2))` is #t. They also short-circuit, which means a circular argument
+  // paired with a finite one can stop even earlier than the finite one ends.
   def('any', (pred, ...lists) => {
-    if (lists.length === 0 || lists.some((l) => !Array.isArray(l))) return false
-    const n = Math.min(...lists.map((l) => l.length))
-    for (let i = 0; i < n; i++) {
-      const r = apply(pred, lists.map((l) => l[i]), fuelBox)
+    if (lists.length === 0) return false
+    const cs = _cursors('any', lists)
+    while (_allMore(cs)) {
+      const r = apply(pred, _step(cs), fuelBox)
       if (r !== false) return r
     }
     return false
   })
   def('every', (pred, ...lists) => {
-    if (lists.length === 0 || lists.some((l) => !Array.isArray(l))) return true
-    const n = Math.min(...lists.map((l) => l.length))
+    if (lists.length === 0) return true
+    const cs = _cursors('every', lists)
     let last = true
-    for (let i = 0; i < n; i++) {
-      last = apply(pred, lists.map((l) => l[i]), fuelBox)
+    while (_allMore(cs)) {
+      last = apply(pred, _step(cs), fuelBox)
       if (last === false) return false
     }
     return last
   })
   def('count', (pred, ...lists) => {
-    if (lists.length === 0 || lists.some((l) => !Array.isArray(l))) return 0
-    const n = Math.min(...lists.map((l) => l.length))
+    if (lists.length === 0) return 0
+    const cs = _cursors('count', lists)
     let c = 0
-    for (let i = 0; i < n; i++) {
-      if (apply(pred, lists.map((l) => l[i]), fuelBox) !== false) c++
-    }
+    while (_allMore(cs)) if (apply(pred, _step(cs), fuelBox) !== false) c++
     return c
   })
-  def('take', (lst, n) => Array.isArray(lst) ? lst.slice(0, Math.max(0, n|0)) : [])
-  def('drop', (lst, n) => Array.isArray(lst) ? lst.slice(Math.max(0, n|0)) : [])
-  // list-head is the R7RS name for take's prefix operation (SRFI-1 `take`).
-  def('list-head', (lst, n) => Array.isArray(lst) ? lst.slice(0, Math.max(0, n|0)) : [])
-  def('zip', (a, b) => {
-    if (!Array.isArray(a) || !Array.isArray(b)) return []
-    const n = Math.min(a.length, b.length)
-    const out = new Array(n)
-    for (let i = 0; i < n; i++) out[i] = [a[i], b[i]]
-    return out
+  // SRFI-1 `take` / `drop` (and the R7RS spelling `list-head`) are an ERROR
+  // when the list is shorter than n. Until 2026-08-02 all three CLAMPED, so
+  // `(take '(1 2) 5)` answered `(1 2)` — a plausible-looking list that is
+  // not what was asked for, and the learner then believes the list had five
+  // elements. `list-tail` in lib/std/r7rs-completions-core.js already raised
+  // on exactly this overshoot, so the two halves of the same operation
+  // disagreed. A non-list argument answered `()` instead of a type error.
+  //
+  // `lst` reaches `take`/`list-head` as an ARRAY (they cross the sequence
+  // boundary) and reaches `drop` as CELLS (it does not — see below), so the
+  // length is asked for in whichever way the argument is spelled rather than
+  // by reading `.length` off it. `isList` says #t to both spellings, and a
+  // chain's `.length` is `undefined`: `k > undefined` is false, so the
+  // past-the-end guard this helper exists to enforce would have waved every
+  // overshoot straight through.
+  const _ckCount = (op, lst, n) => {
+    if (!isList(lst)) throw new Error(`${op}: expected a proper list, got ${_describe(lst)}`)
+    if (!_isNum(n)) throw new Error(`${op}: expected a non-negative integer, got ${_describe(n)}`)
+    const k = _toFloat(n)
+    if (!Number.isInteger(k) || k < 0) {
+      throw new Error(`${op}: expected a non-negative integer, got ${k}`)
+    }
+    const len = Array.isArray(lst) ? lst.length : listLength(lst)
+    if (k > len) {
+      throw new Error(`${op}: ${k} is past the end of a list of length ${len}`)
+    }
+    return k
+  }
+  def('take', (lst, n) => lst.slice(0, _ckCount('take', lst, n)))
+  // SRFI-1: `drop` is `list-tail` — it answers the CELL n cdrs along, not a
+  // copy of the rest. `(eq? (cdddr x) (drop x 3))` is #t and `(eq? x (drop x
+  // 0))` is #t, so `(set-car! (drop x 3) 9)` writes through into x.
+  //
+  // It is installed RAW for that reason: wrapped, it received an array, and
+  // `slice` copies. This is the single clearest thing the cell representation
+  // bought — the flat-array spelling had no interior cell to hand back, so
+  // `drop` could not have been written correctly at all.
+  def('drop', (lst, n) => {
+    const k = _ckCount('drop', lst, n)
+    let p = toScheme(lst)
+    for (let i = 0; i < k; i++) p = p.cdr
+    return p
+  })
+  // list-head is a Motoi-own alias for take. It is NOT the R7RS name, as this
+  // comment used to claim — R7RS-small has no list-head at all, and the
+  // standard spelling for the prefix operation is SRFI-1's `take`. Prefer
+  // `take` in new code; another Scheme will not recognise this one.
+  def('list-head', (lst, n) => lst.slice(0, _ckCount('list-head', lst, n)))
+  // `zip` pairs up ANY number of lists, stopping at the shortest. It was a
+  // two-argument arrow until 2026-08-02, so a third list was silently
+  // DISCARDED: `(zip '(1 2) '(3 4) '(5 6))` answered `((1 3) (2 4))` and
+  // the fifth and sixth values were simply gone with nothing said.
+  def('zip', (...ls) => {
+    if (ls.length === 0) return NIL
+    const cs = _cursors('zip', ls)
+    const out = []
+    while (_allMore(cs)) out.push(arrayToList(_step(cs)))
+    return arrayToList(out)
   })
   // R7RS §6.4: every argument but the last must be a proper list; the last
   // may be any object, and becomes the tail — so `(append '(1) '(2 . 3))`
@@ -675,94 +1049,165 @@ export function makeBaseEnv(fuel) {
   // `(7 1)` — silently promoting a number to a one-element list. The learner
   // then believes `append` cons-es, which is the wrong model of the verb.
   def('append', (...ls) => {
-    if (ls.length === 0) return []
+    if (ls.length === 0) return NIL
     for (let i = 0; i < ls.length - 1; i++) {
-      if (!Array.isArray(ls[i])) {
+      if (!isList(ls[i])) {
         throw new Error(`append: every argument but the last must be a proper list; ` +
           `argument ${i + 1} is ${_describe(ls[i])}. Only the LAST argument may be any object.`)
       }
     }
+    // R7RS §6.4: the LAST argument is not copied — it becomes the tail, shared.
+    // Only the arguments before it are copied cell by cell, which is why
+    // `(let ((t '(3))) (eq? (cddr (append '(1 2) t)) t))` is #t.
+    //
+    // Through `toScheme` first: `isList` above accepts an array-spelled list,
+    // and `listToArray` only walks cells, so an array argument cleared the
+    // guard and then threw "expected a proper list" from inside — an error
+    // message contradicting the check that had just passed it.
     const last = ls[ls.length - 1]
-    const front = [].concat(...ls.slice(0, -1))
-    if (Array.isArray(last)) return front.concat(last)
-    let acc = last
-    for (let i = front.length - 1; i >= 0; i--) acc = new Pair(front[i], acc)
-    return acc
+    const front = []
+    for (let i = 0; i < ls.length - 1; i++) front.push(...listToArray(toScheme(ls[i])))
+    return arrayToList(front, last)
   })
   def('reverse', (a) => {
     if (a instanceof Pair) throw new Error('reverse: improper list')
     return a.slice().reverse()
   })
-  def('first', (a) => a[0])
-  def('last', (a) => a[a.length - 1])
-  def('nth', (a, i) => a[i])
+  // `first` / `last` / `nth` are `list-ref` under friendlier names, and they
+  // now fail where `list-ref` fails. Until 2026-08-02 they were bare JS
+  // indexing: `(first '())`, `(nth '(1 2) 9)` and `(last '())` each answered
+  // a truthy non-value that prints as nothing, so the mistake travelled
+  // several steps before surfacing somewhere unrelated. They also accepted a
+  // STRING — `(first "abc")` answered "a" — teaching that a string is a list.
+  const _ckListArg = (op, a) => {
+    if (!isList(a)) throw new Error(`${op}: expected a proper list, got ${_describe(a)}`)
+    return a
+  }
+  def('first', (a) => _ckListArg('first', a)[_ckIndex('first', 0, a.length, 'list')])
+  def('last', (a) => _ckListArg('last', a)[_ckIndex('last', a.length - 1, a.length, 'list')])
+  def('nth', (a, i) => _ckListArg('nth', a)[_ckIndex('nth', i, a.length, 'list')])
 
   // ── more math ───────────────────────────────────────────────────────
   // R7RS §6.2.6: the result is exact when the argument is exact and the root
   // is exactly representable. `(sqrt 1/4)` is 1/2; `(sqrt 2)` stays inexact.
   def('sqrt', (x) => {
-    if (isRational(x)) {
-      const sn = _bigISqrt(x.n)
-      const sd = _bigISqrt(x.d)
-      if (sn !== null && sd !== null && sn * sn === x.n && sd * sd === x.d) {
-        return makeRational(sn, sd)
-      }
-      return Math.sqrt(_toFloat(x))
+    // §6.2.6: `sqrt` is closed over the tower, so a negative argument has an
+    // IMAGINARY root rather than an error. Motoi raised until 2026-08-03,
+    // which made `(sqrt -1)` a dead end instead of `+i`.
+    //
+    // The principal square root of a+bi is
+    //   sqrt((|z|+a)/2) + sgn(b)·sqrt((|z|-a)/2)i
+    // and it is inexact in both components — the magnitude goes through a
+    // transcendental, so there is nothing exact to preserve.
+    if (isCpx(x)) {
+      const a = num(x.re), b = num(x.im)
+      const m = Math.hypot(a, b)
+      const im = Math.sqrt((m - a) / 2)
+      // `b >= 0` and not `b > 0`, so a NEGATIVE ZERO imaginary part takes the
+      // positive branch: `(sqrt -1.0-0.0i)` is `0.0+1.0i`.
+      return makeComplex(flo(Math.sqrt((m + a) / 2)), flo(b >= 0 ? im : -im))
     }
-    // R7RS §6.2.3 permits a limited tower, and Motoi's stops short of complex
-    // numbers. Returning NaN let `(sqrt -1)` flow onward as a number-shaped
-    // non-number; saying so is the teachable answer.
-    if (typeof x === 'number' && x < 0) {
-      throw new Error(`sqrt: ${x} has no real square root, and Motoi has no complex numbers`)
+    if (num(x) < 0) {
+      // Negate through the exact fold, so `(sqrt -4)` is the exact `+2i` while
+      // `(sqrt -2)` and `(sqrt -1.0)` fall to an inexact imaginary part. The
+      // real part stays the EXACT zero — that is what chibi writes, and it is
+      // what makes the answer read back as the number it prints.
+      const pos = _subR(0, x)
+      const r = exactSqrt(pos)
+      return makeComplex(0, r !== null ? r : flo(Math.sqrt(num(pos))))
     }
-    return Math.sqrt(x)
+    // An exact argument with an exact root keeps its exactness: `(sqrt 4)` is
+    // the exact 2, `(sqrt 1/4)` is 1/2, `(sqrt 2)` is inexact.
+    const r = exactSqrt(x)
+    return r !== null ? r : flo(Math.sqrt(num(x)))
   })
-  def('cos', (x) => Math.cos(x))
-  def('sin', (x) => Math.sin(x))
-  def('tan', (x) => Math.tan(x))
-  def('atan2', (y, x) => Math.atan2(y, x))
-  def('pi', Math.PI)                            // (pi) → 3.14159…
-  def('expt', (b, p) => Math.pow(b, p))
+  // §6.2.6: the transcendental functions are permitted to return an inexact
+  // result even for an exact argument, and in practice always do — there is no
+  // exact double for cos(1). They were returning bare JS doubles, so `(exp 0)`
+  // answered an EXACT 1 and `(/ 1 (+ 1 (exp 0)))` then went down the exact path
+  // and produced the rational 1/2 where a learner asked for 0.5.
+  const _transcendental = (name, f) => def(name, (...a) => {
+    _ckNums(name, a)
+    return flo(f(...a.map(num)))
+  })
+  _transcendental('cos', Math.cos)
+  _transcendental('sin', Math.sin)
+  _transcendental('tan', Math.tan)
+  _transcendental('atan2', Math.atan2)
+  def('pi', flo(Math.PI))                       // (pi) → 3.14159…
+  // §6.2.6: `expt` on exact arguments with an exact integer power is EXACT, so
+  // `(expt 2 62)` is the whole integer and not the double that rounds it.
+  def('expt', (b, p) => {
+    _ckNums('expt', [b, p])
+    return exptNum(b, p)
+  })
   // Exp/log family — Wave 0, per architect-motoi-core-runtime-completion
   // 2026-07-16 §4 :exp-log. Thin wrappers over the ES Math intrinsics.
   // `log` is the natural logarithm (R7RS §6.2.6), `log10`/`log2`/`exp2`
   // are pedagogical conveniences the kid picks up in growth-curve carts.
   // Also surfaced as math/* in lib/math/basic.js during Wave 1.
-  def('exp', (x) => Math.exp(x))
+  _transcendental('exp', Math.exp)
   // R7RS §6.2.6: `(log z)` is the natural logarithm; `(log z1 z2)` is the
   // logarithm of z1 in base z2, defined as (/ (log z1) (log z2)). The
   // two-argument form was a one-parameter JS arrow until 2026-08-02, so
   // `(log 8 2)` discarded the base and answered 2.0794…, the natural log of 8
   // — a plausible-looking number, which is exactly what makes it dangerous.
+  // §6.2.6: `log` is closed over the tower, so a NEGATIVE argument has a
+  // complex logarithm rather than a NaN — `(log -1)` is `0.0+3.141592653589793i`
+  // (iπ), and the branch cut is the standard one along the negative real axis.
+  //   log(a+bi) = log|a+bi| + i·atan2(b, a)
+  const _logC = (v) => {
+    const a = isCpx(v) ? num(v.re) : num(v)
+    const b = isCpx(v) ? num(v.im) : 0
+    return makeComplex(flo(Math.log(Math.hypot(a, b))), flo(Math.atan2(b, a)))
+  }
   def('log', (x, base) => {
-    _ckNums('log', base === undefined ? [x] : [x, base])
-    const z = Math.log(_toFloat(x))
-    if (base === undefined) return z
-    return z / Math.log(_toFloat(base))
+    const args = base === undefined ? [x] : [x, base]
+    if (args.some((v) => isCpx(v) || num(v) < 0)) {
+      _ckNumsC('log', args)
+      // A base turns into a quotient of two logs, which is complex division.
+      return base === undefined ? _logC(x) : _cDiv(_logC(x), _logC(base))
+    }
+    _ckNums('log', args)
+    const z = Math.log(num(x))
+    return flo(base === undefined ? z : z / Math.log(num(base)))
   })
-  def('log2', (x) => Math.log2(x))
-  def('log10', (x) => Math.log10(x))
-  def('exp2', (x) => Math.pow(2, x))
-  def('floor', (x) => isRational(x) ? _ratFloor(x) : Math.floor(x))
-  def('ceil', (x) => isRational(x) ? _ratCeil(x) : Math.ceil(x))
+  _transcendental('log2', Math.log2)
+  _transcendental('log10', Math.log10)
+  _transcendental('exp2', (x) => Math.pow(2, x))
+  // §6.2.6: these preserve exactness, so `(floor 2.5)` is 2.0 and not 2.
+  def('floor', (x) => isRational(x) ? _ratFloor(x) : withExactness([x], Math.floor(num(x))))
+  def('ceil', (x) => isRational(x) ? _ratCeil(x) : withExactness([x], Math.ceil(num(x))))
   // R7RS §6.2.6 spells it `ceiling`. We keep `ceil` as the short-form
   // alias the cart authors learned first; both point to the same impl.
-  def('ceiling', (x) => isRational(x) ? _ratCeil(x) : Math.ceil(x))
+  def('ceiling', (x) => isRational(x) ? _ratCeil(x) : withExactness([x], Math.ceil(num(x))))
   // R7RS §6.2.6: `round` returns the closest integer, rounding to EVEN
   // when x is halfway between two integers (banker's rounding).
   // JS Math.round is half-up (2.5=>3), which diverges — so we roll our own.
   def('round', (x) => {
     if (isRational(x)) return _ratRound(x)
-    const f = Math.floor(x)
-    const diff = x - f
-    if (diff < 0.5) return f
-    if (diff > 0.5) return f + 1
-    return (f % 2 === 0) ? f : f + 1   // exactly halfway: pick the even one
+    const v = num(x)
+    const f = Math.floor(v)
+    const diff = v - f
+    const r = diff < 0.5 ? f
+      : diff > 0.5 ? f + 1
+        : (f % 2 === 0) ? f : f + 1   // exactly halfway: pick the even one
+    return withExactness([x], r)
   })
-  def('round2', (x) => Math.round(x * 100) / 100)   // money-friendly
-  def('sign', (x) => Math.sign(x))
-  def('clamp', (x, lo, hi) => Math.min(hi, Math.max(lo, x)))
-  def('lerp', (a, b, t) => a + (b - a) * t)
+  def('round2', (x) => Math.round(num(x) * 100) / 100)   // money-friendly
+  def('sign', (x) => Math.sign(num(x)))
+  // `clamp` hands back one of its own arguments, exactness included. The lower
+  // bound is applied FIRST and the upper second, so an inverted range (hi below
+  // lo) still collapses to hi, matching the old `Math.min(hi, Math.max(lo, x))`.
+  // It diverges from that old form on arity: with `hi` undefined `num(hi)` is
+  // NaN and `r > NaN` is false, so a 2-arg call returns x unclamped where the
+  // old form gave +nan.0. Verified 2026-08-04; the reference now documents the
+  // returns-x behaviour. Whether a 2-arg call should raise is task #64.
+  def('clamp', (x, lo, hi) => {
+    const r = num(x) < num(lo) ? lo : x
+    return num(r) > num(hi) ? hi : r
+  })
+  def('lerp', (a, b, t) => num(a) + (num(b) - num(a)) * num(t))
   // `rng-uniform` is the plain uniform in [0,1). It is intentionally NOT
   // named `random`. Every draw below goes through seededRandom so one seed
   // governs the whole random surface no matter which verb a cart reaches
@@ -786,33 +1231,111 @@ export function makeBaseEnv(fuel) {
   def('random-int', (n) => Math.floor(seededRandom() * Math.max(1, n | 0)))
   def('random-range', (lo, hi) => lo + seededRandom() * (hi - lo))
   def('random-pick', (lst) => (lst && lst.length ? lst[Math.floor(seededRandom() * lst.length)] : null))
-  def('sum', (lst) => lst.reduce((x, y) => x + y, 0))
-  def('mean', (lst) => (lst.length ? lst.reduce((x, y) => x + y, 0) / lst.length : 0))
+  // `sum` and `mean` are the base-library twins of `stat/sum` and
+  // `stat/mean` and must answer what those answer (reference ch 59-stat).
+  // Until 2026-08-02 neither checked anything: `(sum (list 1 "a" 3))`
+  // answered the STRING "1a3", because the fold is JS `+` and one string
+  // turns addition into concatenation — a verb contracted to return a
+  // number handing back a string with no error. `(sum 5)` leaked
+  // `lst.reduce is not a function`, naming a JavaScript method at a
+  // learner who has never seen one. `(mean 5)` took the empty branch (a
+  // number has no `.length`) and answered a confident 0.
+  const _ckNumList = (op, lst) => {
+    if (!isList(lst)) {
+      throw new Error(`${op}: expected a list of numbers, got ${_describe(lst)}`)
+    }
+    const out = new Array(lst.length)
+    for (let i = 0; i < lst.length; i++) {
+      if (!_isNum(lst[i])) {
+        throw new Error(`${op}: expected a list of numbers, got ${_describe(lst[i])} in the list`)
+      }
+      out[i] = _toFloat(lst[i])
+    }
+    return out
+  }
+  def('sum', (lst) => _ckNumList('sum', lst).reduce((x, y) => x + y, 0))
+  // The mean of no numbers is not 0 — it is the question with no answer.
+  // `'nan` is the sentinel chapter 59 documents and `stat/mean` returns.
+  def('mean', (lst) => {
+    const a = _ckNumList('mean', lst)
+    return a.length ? a.reduce((x, y) => x + y, 0) / a.length : new Sym('nan')
+  })
 
   // ── finance ─────────────────────────────────────────────────────────
-  def('pct', (a, b) => (b === 0 ? 0 : (a / b) * 100))                 // a as % of b
-  def('pct-change', (oldV, newV) => (oldV === 0 ? 0 : ((newV - oldV) / oldV) * 100))
-  def('margin', (price, cost) => (price === 0 ? 0 : ((price - cost) / price) * 100))
+  // Every rate below is a division, and every one of them used to answer a
+  // confident 0 when its denominator was undefined: `(pct 7 0)` said seven
+  // is nought percent of nothing, `(pct-change 0 9)` said nothing changed
+  // when the value went from nothing to nine, `(cagr 0 500 4)` said no
+  // growth where the growth is infinite. `/` has always raised on the same
+  // input, so two verbs in one language disagreed about dividing by zero.
+  // They now agree: an undefined denominator raises, with `/`'s wording.
+  def('pct', (a, b) => {                                              // a as % of b
+    _ckNums('pct', [a, b]); _ckNonZero('pct', [b])
+    return (_toFloat(a) / _toFloat(b)) * 100
+  })
+  def('pct-change', (oldV, newV) => {
+    _ckNums('pct-change', [oldV, newV]); _ckNonZero('pct-change', [oldV])
+    const o = _toFloat(oldV)
+    return ((_toFloat(newV) - o) / o) * 100
+  })
+  def('margin', (price, cost) => {
+    _ckNums('margin', [price, cost]); _ckNonZero('margin', [price])
+    const p = _toFloat(price)
+    return ((p - _toFloat(cost)) / p) * 100
+  })
   def('markup', (cost, pctUp) => cost * (1 + pctUp / 100))
   def('markdown', (price, pctOff) => price * (1 - pctOff / 100))
   def('profit', (revenue, cost) => revenue - cost)
   def('fee', (amount, ratePct) => amount * (ratePct / 100))
   def('net', (gross, ...fees) => gross - fees.reduce((x, y) => x + y, 0))
-  def('cagr', (begin, end, years) => (begin <= 0 || years <= 0 ? 0 : (Math.pow(end / begin, 1 / years) - 1) * 100))
-  def('sma', (lst, n) => {            // simple moving average → array
+  // A beginning value of 0 and a span of 0 years are both divisions by
+  // zero. A NEGATIVE beginning value is a different fault — the growth
+  // factor end/begin is defined but its root is not a rate — so it says
+  // what it wanted instead of borrowing the division message.
+  def('cagr', (begin, end, years) => {
+    _ckNums('cagr', [begin, end, years])
+    _ckNonZero('cagr', [begin, years])
+    const b = _toFloat(begin), y = _toFloat(years)
+    if (b < 0) throw new Error(`cagr: expected a positive beginning value, got ${_describe(begin)}`)
+    if (y < 0) throw new Error(`cagr: expected a positive number of years, got ${_describe(years)}`)
+    return (Math.pow(_toFloat(end) / b, 1 / y) - 1) * 100
+  })
+  // simple moving average → array. A window of 0 used to produce one MORE
+  // entry than the list held, every one of them 0/0 = +nan.0: `(sma '(1 2 3) 0)`
+  // answered (+nan.0 +nan.0 +nan.0 +nan.0). A window is a count of values to
+  // average, and there is no averaging nothing.
+  def('sma', (lst, n) => {
+    const a = _ckNumList('sma', lst)
+    if (!_isNum(n)) throw new Error(`sma: expected a positive window width, got ${_describe(n)}`)
+    const w = _toFloat(n)
+    if (!Number.isInteger(w) || w < 1) {
+      throw new Error(`sma: expected a positive window width, got ${_describe(n)}`)
+    }
     const out = []
-    for (let i = n - 1; i < lst.length; i++) {
+    for (let i = w - 1; i < a.length; i++) {
       let s = 0
-      for (let j = i - n + 1; j <= i; j++) s += lst[j]
-      out.push(s / n)
+      for (let j = i - w + 1; j <= i; j++) s += a[j]
+      out.push(s / w)
     }
     return out
   })
 
   // ── thresholds (over values/series the host provides) ───────────────
-  def('above?', (x, t) => x > t)
-  def('below?', (x, t) => x < t)
-  def('crossed?', (prev, now, t) => (prev <= t && now > t) || (prev >= t && now < t))
+  //
+  // These were raw JS `>` / `<`, which compares two exact rationals as OBJECTS
+  // and answers #f whichever way round they go: `(above? 1/2 1/3)` was #f and
+  // so was `(above? 1/3 1/2)`. A threshold verb that says "no" to both
+  // directions never fires, and nothing announces it. They also accepted
+  // non-numbers. Route through the same `_numRel` the `<` family uses so a
+  // threshold check and a bare comparison can never disagree.
+  const _thr = (op, a) => { _ckNums(op, a); return a }
+  def('above?', (x, t) => (_thr('above?', [x, t]), _numRel('>', x, t)))
+  def('below?', (x, t) => (_thr('below?', [x, t]), _numRel('<', x, t)))
+  def('crossed?', (prev, now, t) => {
+    _thr('crossed?', [prev, now, t])
+    return (_numRel('<=', prev, t) && _numRel('>', now, t))
+      || (_numRel('>=', prev, t) && _numRel('<', now, t))
+  })
 
   // ── collisions (the game kit) ───────────────────────────────────────
   def('dist', (x1, y1, x2, y2) => Math.hypot(x2 - x1, y2 - y1))
@@ -830,9 +1353,15 @@ export function makeBaseEnv(fuel) {
   // We keep the smart definitions in force here. Both `eq?` and `equal?`
   // remain structural per Motoi's `=?` doctrine (PICO-8-style DWIM
   // equality — Dr. Imani's beginner-friendliness research pass).
-  def('zero?', (x) => isRational(x) ? x.n === 0n : x === 0)
-  def('positive?', (x) => isRational(x) ? x.n > 0n : x > 0)
-  def('negative?', (x) => isRational(x) ? x.n < 0n : x < 0)
+  // An inexact number is a `Flo` heap object, so `x === 0` said #f for 0.0
+  // and `>`/`<` on the object worked only by accident of valueOf.
+  // §6.2.6 defines `zero?` on the whole tower, and a complex is zero when both
+  // components are — `(zero? 0.0+0.0i)` is #t.
+  def('zero?', (x) => isCpx(x)
+    ? num(x.re) === 0 && num(x.im) === 0
+    : isNum(x) && num(x) === 0)
+  def('positive?', (x) => isNum(x) && num(x) > 0)
+  def('negative?', (x) => isNum(x) && num(x) < 0)
   // `x % 2` on a Rational object is NaN, so `(even? 4/2)` answered #f even
   // though 4/2 IS the integer 2. A Rational with denominator 1 is an integer
   // and its parity is the parity of the numerator; anything else is not an
@@ -845,14 +1374,19 @@ export function makeBaseEnv(fuel) {
       if (x.d !== 1n) return false
       return ((x.n % 2n) + 2n) % 2n === want
     }
-    if (typeof x !== 'number') throw new Error(`${op}: expected a number, got ${_describe(x)}`)
-    if (!Number.isInteger(x)) return false
-    return ((x % 2) + 2) % 2 === Number(want)
+    if (!isNum(x)) throw new Error(`${op}: expected a number, got ${_describe(x)}`)
+    const v = num(x)
+    if (!Number.isInteger(v)) return false
+    return ((v % 2) + 2) % 2 === Number(want)
   }
   def('even?', (x) => _parity('even?', x, 0n))
   def('odd?', (x) => _parity('odd?', x, 1n))
-  def('number?', (x) => typeof x === 'number' || isRational(x))
-  def('string?', (x) => typeof x === 'string')
+  // A complex value is a number (R7RS §6.2.1: the numeric tower's widest
+  // type). Without the tag test `(number? (make-rectangular 3 4))` was #f
+  // while `real-part` happily took the same value apart.
+  def('number?', (x) => isNum(x) ||
+    (x != null && typeof x === 'object' && x[Symbol.for('motoi:complex')] === true))
+  def('string?', (x) => isStr(x))
   def('boolean?', (x) => x === true || x === false)
   // R7RS §6.7 takes strings only. The old `a.map(String)` coerced anything,
   // and the character case was the damaging one: `(string-append acc (string-ref s i))`
@@ -860,11 +1394,11 @@ export function makeBaseEnv(fuel) {
   // grid row came out as `#\k#\h#\o` instead of letters — no error, just garbage.
   def('string-append', (...a) => {
     for (const x of a) {
-      if (typeof x !== 'string') {
+      if (!isStr(x)) {
         throw new Error(`string-append: expected a string, got ${_describe(x)}`)
       }
     }
-    return a.join('')
+    return a.map(_str).join('')
   })
   // ── Indexed access: range + type checks. ───────────────────────────
   //
@@ -892,15 +1426,16 @@ export function makeBaseEnv(fuel) {
   def('string-length', (s) => {
     // `(string-length 5)` used to answer 1 — JS stringified the number and
     // measured THAT. A length is not a plausible answer to a type error.
-    if (typeof s !== 'string') throw new Error(`string-length: expected a string, got ${_describe(s)}`)
-    return s.length
+    if (!isStr(s)) throw new Error(`string-length: expected a string, got ${_describe(s)}`)
+    return _str(s).length
   })
   // → single-char string. (lib/base/r7rs-small.js overrides this with a
   // character-returning version per R7RS §6.7; the bounds check is repeated
   // here so the base env alone is never silently wrong.)
   def('string-ref', (s, i) => {
-    if (typeof s !== 'string') throw new Error(`string-ref: expected a string, got ${_describe(s)}`)
-    return s.charAt(_ckIndex('string-ref', i, s.length, 'string'))
+    if (!isStr(s)) throw new Error(`string-ref: expected a string, got ${_describe(s)}`)
+    const t = _str(s)
+    return t.charAt(_ckIndex('string-ref', i, t.length, 'string'))
   })
   // R7RS §6.7: `string=?` is n-ary and holds when EVERY adjacent pair holds,
   // exactly like the numeric chain above. It was a two-argument JS arrow until
@@ -922,7 +1457,7 @@ export function makeBaseEnv(fuel) {
   // to make it "pass".
   const _ckStrs = (op, a) => {
     for (const x of a) {
-      if (typeof x !== 'string') throw new Error(`${op}: expected a string, got ${_describe(x)}`)
+      if (!isStr(x)) throw new Error(`${op}: expected a string, got ${_describe(x)}`)
     }
     return a
   }
@@ -933,12 +1468,20 @@ export function makeBaseEnv(fuel) {
     }
     return true
   }
-  def('string-eq?', _strChain('string-eq?', (x, y) => x === y))
-  def('string=?', _strChain('string=?', (x, y) => x === y))
+  def('string-eq?', _strChain('string-eq?', (x, y) => _str(x) === _str(y)))
+  def('string=?', _strChain('string=?', (x, y) => _str(x) === _str(y)))
+  // R7RS §6.8 takes a VECTOR. Proper lists are JS arrays underneath, so the
+  // old `isList(v) ? v` arm let `(vector-ref (list 1 2 3) 0)` answer
+  // 1 — the one shape that slipped through, since an out-of-range index, a
+  // string, and vector?/vector-length/vector-set! all rejected a list
+  // already. A learner who reaches for vector-ref on a list gets a plausible
+  // answer and never learns they wanted list-ref, so the error names it.
   def('vector-ref', (v, i) => {
-    const items = isVec(v) ? v.items : Array.isArray(v) ? v : null
-    if (items === null) throw new Error(`vector-ref: expected a vector, got ${_describe(v)}`)
-    return items[_ckIndex('vector-ref', i, items.length, 'vector')]
+    if (!isVec(v)) {
+      const hint = isList(v) || v instanceof Pair ? '; use list-ref for a list' : ''
+      throw new Error(`vector-ref: expected a vector, got ${_describe(v)}${hint}`)
+    }
+    return v.items[_ckIndex('vector-ref', i, v.items.length, 'vector')]
   })
   // (substring s start [end]) — R7RS §6.7, which requires
   // 0 <= start <= end <= (string-length s). This used to be raw JS
@@ -973,7 +1516,7 @@ export function makeBaseEnv(fuel) {
   def('number->string', (n, radix) => {
     // Standard Scheme: (number->string n [radix]). Default radix 10.
     // Radix 16 emits lowercase hex (matches the `"#rrggbb"` convention).
-    const r = (typeof radix === 'number') ? (radix | 0) : 10
+    const r = isNum(radix) ? (num(radix) | 0) : 10
     // `Number(rational)` is NaN, so `(number->string 1/2)` used to answer the
     // string "NaN". R7RS §6.2.7 requires the result to read back as the same
     // number, and `1/2` is exactly what the reader accepts.
@@ -984,8 +1527,21 @@ export function makeBaseEnv(fuel) {
       }
       return `${n.n}/${n.d}`
     }
+    // §6.2.7 covers the whole tower. A complex has no positional spelling in
+    // another radix, so only radix 10 is offered rather than emitting text
+    // that cannot be read back.
+    if (isCpx(n)) {
+      if (r !== 10) {
+        throw new Error(`number->string: radix ${r} is not supported for a complex number`)
+      }
+      return cpxToString(n)
+    }
     if (!_isNum(n)) throw new Error(`number->string: expected a number, got ${_describe(n)}`)
-    return Number(n).toString(r)
+    // §6.2.7 requires the text to read back as the SAME number, exactness
+    // included: an inexact integer must print `1.0`, or string->number hands
+    // back an exact 1 and the round trip silently changes the value.
+    if (r === 10) return numToString(n)
+    return num(n).toString(r)
   })
   // (string->number s [radix]) — R7RS §6.2.7. Default radix 10.
   //
@@ -1015,56 +1571,96 @@ export function makeBaseEnv(fuel) {
     return neg ? -acc : acc
   }
   def('string->number', (s, radix) => {
-    if (typeof s !== 'string') {
+    if (!isStr(s)) {
       throw new Error(`string->number: expected a string, got ${_describe(s)}`)
     }
-    let r = (typeof radix === 'number') ? (radix | 0) : 10
+    s = _str(s)
+    let r = isNum(radix) ? (num(radix) | 0) : 10
     if (!_RADIX_DIGITS[r]) {
       throw new Error(`string->number: radix must be 2, 8, 10 or 16, got ${r}`)
     }
     let str = s
-    // §6.2.5 radix prefixes. An explicit prefix wins over the radix argument.
-    const pfx = /^#([bodxBODX])/.exec(str)
-    if (pfx) {
-      r = { b: 2, o: 8, d: 10, x: 16 }[pfx[1].toLowerCase()]
+    // §6.2.5 prefixes. A radix prefix and an exactness prefix may both appear,
+    // in either order — `#e#x24` and `#x#e24` are the same 36. An explicit
+    // radix prefix wins over the radix argument.
+    let want = null                       // 'e' | 'i' | null
+    let sawRadix = false
+    for (;;) {
+      const pfx = /^#([bodxeiBODXEI])/.exec(str)
+      if (!pfx) break
+      const c = pfx[1].toLowerCase()
+      if (c === 'e' || c === 'i') {
+        if (want !== null) return false    // two exactness prefixes
+        want = c
+      } else {
+        if (sawRadix) return false         // two radix prefixes
+        sawRadix = true
+        r = { b: 2, o: 8, d: 10, x: 16 }[c]
+      }
       str = str.slice(2)
-    } else if (r === 16 && (str.startsWith('0x') || str.startsWith('0X'))) {
+    }
+    if (!sawRadix && r === 16 && (str.startsWith('0x') || str.startsWith('0X'))) {
       // Motoi-own convenience carried over from the pre-2026-08-02 version so
       // the "#rrggbb" colour code that passes "0xff" keeps parsing.
       str = str.slice(2)
     }
     if (str === '') return false
     const D = _RADIX_DIGITS[r]
+    const fin = (v) => (want === 'i' ? toInexact(v) : v)
     // Exact rational — valid in every radix.
     if (new RegExp(`^[+-]?${D}+/${D}+$`).test(str)) {
       const [nS, dS] = str.split('/')
       const d = _digitsToBig(dS, r)
       if (d === 0n) return false          // 1/0 is not a representable number
-      return makeRational(_digitsToBig(nS, r), d)
+      return fin(normExact(_digitsToBig(nS, r), d))
     }
-    // Exact integer.
+    // Exact integer. Normalised through the tower rather than through
+    // `Number()`, which silently rounded every integer past 2^53 — reading
+    // "9007199254740993" back gave …992, and a 30-digit literal came back as
+    // a float.
     if (new RegExp(`^[+-]?${D}+$`).test(str)) {
-      const v = Number(_digitsToBig(str, r))
-      return Number.isFinite(v) ? v : false
+      return fin(normExact(_digitsToBig(str, r), 1n))
     }
+    // §7.1.1 <complex R> — rectangular and polar, in every radix. The grammar
+    // is spelled once, in the reader, so the two cannot drift apart.
+    const z = complexFromString(str, r, want)
+    if (z !== null) return z
     if (r !== 10) return false            // §6.2.5: decimals only in radix 10
     // Infinities and NaN are part of the numeric grammar in radix 10, and
     // `display` already writes them back in this spelling — so they have to
-    // read back in, or the round trip is broken.
-    if (str === '+inf.0') return Infinity
-    if (str === '-inf.0') return -Infinity
-    if (str === '+nan.0' || str === '-nan.0') return NaN
+    // read back in, or the round trip is broken. None of them has an exact
+    // value, so `#e` on one is not a representable number.
+    if (str === '+inf.0') return want === 'e' ? false : Infinity
+    if (str === '-inf.0') return want === 'e' ? false : -Infinity
+    if (str === '+nan.0' || str === '-nan.0') return want === 'e' ? false : NaN
     // Decimal, with an optional exponent. `1.`, `.5` and `1e3` are all legal.
-    if (!/^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)(e[+-]?[0-9]+)?$/i.test(str)) return false
+    const dec = /^([+-]?)([0-9]*)(?:\.([0-9]*))?(?:e([+-]?[0-9]+))?$/i.exec(str)
+    if (!dec || (dec[2] === '' && !dec[3])) return false
+    if (want === 'e') {
+      const ex = exactFromDecimal(str)
+      return ex === null ? false : ex
+    }
     const n = Number(str)
-    return Number.isNaN(n) ? false : n
+    // §6.2.5: decimal notation IS inexact, so "1.0" must not read back as the
+    // exact 1 — that broke the number->string / string->number round trip.
+    return Number.isNaN(n) ? false : flo(n)
   })
   // (hex-byte "#rrggbb" i) → 0..255. Convenience for the conway.sks
   // additive-blend code — reads 2 hex chars at offset i without forcing
   // operators to remember the radix argument to string->number.
+  // Every failure used to come back as 0 — and 0 is also a legitimate byte,
+  // so (hex-byte "zz" 0), (hex-byte "" 0) and (hex-byte "00" 0) were
+  // indistinguishable. A decoder built on that turns corrupt hex into a run
+  // of zero bytes and reports success. Unparseable input raises instead.
   def('hex-byte', (s, i) => {
-    const n = parseInt(String(s).substr(i, 2), 16)
-    return Number.isNaN(n) ? 0 : n
+    const str = String(s)
+    const at = Math.trunc(Number(i) || 0)
+    const pair = str.substr(at, 2)
+    if (!/^[0-9a-f]{2}$/i.test(pair)) {
+      throw new Error(`hex-byte: ${JSON.stringify(str)} has no two hex digits at index ${at}` +
+        (pair ? `; found ${JSON.stringify(pair)}` : ' — the string ends there'))
+    }
+    return parseInt(pair, 16)
   })
   // (byte->hex n) → 2-char lowercase hex string. Pads single digits.
   def('byte->hex', (n) => {
@@ -1072,8 +1668,14 @@ export function makeBaseEnv(fuel) {
     return v.length === 1 ? '0' + v : v
   })
   def('list-ref', (a, i) => {
-    if (!Array.isArray(a)) throw new Error(`list-ref: expected a proper list, got ${_describe(a)}`)
-    return a[_ckIndex('list-ref', i, a.length, 'list')]
+    if (Array.isArray(a)) return a[_ckIndex('list-ref', i, a.length, 'list')]
+    if (a instanceof Pair) {
+      if (!_isNum(i) || !Number.isInteger(_toFloat(i)) || _toFloat(i) < 0) {
+        throw new Error(`list-ref: expected a non-negative integer index, got ${_describe(i)}`)
+      }
+      return _car(_walkCdrs('list-ref', a, _toFloat(i)), 'list-ref')
+    }
+    throw new Error(`list-ref: expected a proper list, got ${_describe(a)}`)
   })
   // R7RS §6.4: `(member obj list [compare])` and `(assoc obj alist [compare])`.
   // The optional third argument REPLACES the default `equal?` comparison and
@@ -1092,19 +1694,23 @@ export function makeBaseEnv(fuel) {
     }
     return (x, y) => apply(cmp, [x, y], fuelBox) !== false
   }
+  // R7RS §6.4: a successful search answers the SUBLIST — the cell the match
+  // sits in — not a copy of the rest. `(eq? (member 2 x) (cdr x))` is #t, and
+  // `(set-car! (member 2 x) 9)` writes through into x. A slice broke both.
   def('member', (x, lst, cmp) => {
-    if (!Array.isArray(lst)) throw new Error(`member: expected a proper list, got ${_describe(lst)}`)
+    if (!isListish(lst)) throw new Error(`member: expected a proper list, got ${_describe(lst)}`)
     const eq = _memberEq('member', cmp)
-    for (let i = 0; i < lst.length; i++) if (eq(x, lst[i])) return lst.slice(i)
+    for (let p = toScheme(lst); p instanceof Pair; p = p.cdr) if (eq(x, p.car)) return p
     return false
   })
-  // Entries may be `(k v)` lists or `(k . v)` dotted pairs — match both.
+  // Likewise assoc answers the ENTRY cell, so `(set-cdr! (assoc k a) v)` — the
+  // canonical alist update — reaches the alist instead of a discarded copy.
   def('assoc', (key, alist, cmp) => {
-    if (!Array.isArray(alist)) throw new Error(`assoc: expected a proper list of pairs, got ${_describe(alist)}`)
+    if (!isListish(alist)) throw new Error(`assoc: expected a proper list of pairs, got ${_describe(alist)}`)
     const eq = _memberEq('assoc', cmp)
-    for (const pair of alist) {
-      if (pair instanceof Pair) { if (eq(key, pair.car)) return pair }
-      else if (Array.isArray(pair) && pair.length > 0) { if (eq(key, pair[0])) return pair }
+    for (let p = toScheme(alist); p instanceof Pair; p = p.cdr) {
+      const entry = p.car
+      if (entry instanceof Pair && eq(key, entry.car)) return entry
     }
     return false
   })
@@ -1134,7 +1740,7 @@ export function makeBaseEnv(fuel) {
     return out
   })
   def('list-set', (lst, i, value) => {
-    if (!Array.isArray(lst)) return lst
+    if (!isList(lst)) return lst
     const out = lst.slice()
     if (i >= 0 && i < out.length) out[i] = value
     return out
@@ -1144,7 +1750,7 @@ export function makeBaseEnv(fuel) {
   // The two-argument arrow it used to be discarded every list past the first,
   // so `(list-index = '(1 2 3) '(4 5 3))` answered on the first list alone.
   def('list-index', (pred, ...lists) => {
-    if (lists.length === 0 || lists.some((l) => !Array.isArray(l))) return false
+    if (lists.length === 0 || lists.some((l) => !isList(l))) return false
     const n = Math.min(...lists.map((l) => l.length))
     for (let i = 0; i < n; i++) {
       if (apply(pred, lists.map((l) => l[i]), fuelBox) !== false) return i
@@ -1152,7 +1758,7 @@ export function makeBaseEnv(fuel) {
     return false
   })
   def('argmin', (lst) => {
-    if (!Array.isArray(lst) || lst.length === 0) return false
+    if (!isList(lst) || lst.length === 0) return false
     let best = 0
     let bestV = lst[0]
     for (let i = 1; i < lst.length; i++) {
@@ -1163,22 +1769,40 @@ export function makeBaseEnv(fuel) {
   // `sort` accepts a LIST or a VECTOR and returns the same kind, freshly
   // built — the source is never mutated (that would be `sort!`).
   //
-  // Until 2026-08-02 the guard was `if (!Array.isArray(lst)) return lst`, and
+  // Until 2026-08-02 the guard was `if (!isList(lst)) return lst`, and
   // a vector is a SchemeVector, not a JS array, so `(sort (vector 3 1 2) <)`
   // handed back `#(3 1 2)`: the untouched input, wearing the shape of an
   // answer, with no error. Silent-wrong of the worst kind — the caller reads
   // a sorted vector and the first element they trust is the wrong one.
-  // Anything that is neither list nor vector still returns unchanged, which
-  // is the pre-existing behaviour and not this pass's call to change.
-  def('sort', (seq, less) => {
-    const items = isVec(seq) ? seq.items : Array.isArray(seq) ? seq : null
-    if (items === null) return seq
+  // Second 2026-08-02 pass: anything that is neither list nor vector used to
+  // come back unchanged too, so `(sort "cba" char<?)` answered "cba" and
+  // `(sort 5 <)` answered 5 — the same silent-wrong shape, one argument over.
+  // Worse, `(sort < '(3 1 2))` — the argument order every other Scheme with a
+  // `sort` uses — returned the PREDICATE, which then flows on as if it were
+  // the sorted data. Both raise now, and the swapped case says so by name.
+  // Third 2026-08-02 pass: the optional KEY extractor is honoured. Motoi's
+  // argument order already matches SRFI-95's `(sort seq less? [key])`, but a
+  // third argument used to be dropped on the floor, so `(sort rows < car)`
+  // ran `<` on the whole rows and raised a message about numbers that named
+  // neither the key nor the mistake. It now projects each element through
+  // key once and compares the projections. (Whether the verb should ALSO be
+  // spelled SRFI-132's `list-sort` is a separate open question — see the
+  // :status-note on 33-higher-order.slat's sort record.)
+  def('sort', (seq, less, key) => {
+    const items = isVec(seq) ? seq.items : isList(seq) ? seq : null
+    if (items === null) {
+      const swapped = typeof seq === 'function' || seq instanceof Closure
+      throw new Error(swapped
+        ? 'sort: expected a list or vector first, got a procedure — the order is (sort seq less?)'
+        : `sort: expected a list or vector, got ${_describe(seq)}`)
+    }
     // Decorate-sort-undecorate so JS Array.sort can be stable on the
     // shared key while honouring the user's less? predicate.
-    const indexed = items.map((v, i) => [v, i])
+    const proj = key === undefined ? (v) => v : (v) => apply(key, [v], fuelBox)
+    const indexed = items.map((v, i) => [v, i, proj(v)])
     indexed.sort((a, b) => {
-      const ab = apply(less, [a[0], b[0]], fuelBox) !== false
-      const ba = apply(less, [b[0], a[0]], fuelBox) !== false
+      const ab = apply(less, [a[2], b[2]], fuelBox) !== false
+      const ba = apply(less, [b[2], a[2]], fuelBox) !== false
       if (ab && !ba) return -1
       if (ba && !ab) return 1
       return a[1] - b[1]   // stable
@@ -1229,7 +1853,7 @@ export function makeBaseEnv(fuel) {
   // but the JS overhead is two orders of magnitude smaller than the
   // Scheme equivalent — see bricklay.test.js benchmark notes).
   def('bricklay-pack-native', (cards, vw, marginX, marginY, gapX, gapY) => {
-    if (!Array.isArray(cards) || cards.length === 0) return []
+    if (!isList(cards) || cards.length === 0) return []
     // ── Memoization (#415) ───────────────────────────────────────────
     // The packer is deterministic — same input, same output. Cache by a
     // 32-bit FNV hash over the canonical (rows, vw, margins, gaps) key.
@@ -1259,7 +1883,7 @@ export function makeBaseEnv(fuel) {
 
     for (let i = 0; i < cards.length; i++) {
       const c = cards[i]
-      if (!Array.isArray(c)) continue
+      if (!isList(c)) continue
       const id = c[0]
       const w = +c[1]
       const h = +c[2]
@@ -1465,7 +2089,7 @@ function registerBaseMetadata() {
     ['<=',       [1, Infinity], 'Non-decreasing across the whole chain.',                       '(<= 1 1 2) => #t',     'compare'],
     ['>=',       [1, Infinity], 'Non-increasing across the whole chain.',                       '(>= 2 2 1) => #t',     'compare'],
     ['not',      1, 'Logical negation of #f/#t.','(not #f) => #t',      'logic'],
-    ['=?',       2, 'Smart equality — numbers/strings by value, lists deep, symbols by name.', "(=? '(1 2) '(1 2)) => #t", 'compare'],
+    ['=?',       [1, Infinity], 'Smart equality across the whole chain — numbers/strings by value, lists deep, symbols by name.', '(=? 1 1 2) => #f', 'compare'],
     ['eq?',      2, 'Reference / structural equality.',    '(eq? 3 3) => #t',   'compare'],
     ['eqv?',     2, 'Equivalence (numbers/chars by value); collapses to =? in Motoi.', '(eqv? 3 3) => #t', 'compare'],
     ['equal?',   2, 'Structural equality (deep, list-aware).', "(equal? '(1 2) '(1 2)) => #t", 'compare'],
@@ -1494,7 +2118,7 @@ function registerBaseMetadata() {
     ['cadr',    1,             'The second element. Alias for (car (cdr x)).',     '(cadr (list 1 2 3)) => 2',          'list'],
     ['caddr',   1,             'The third element. Alias for (car (cdr (cdr x))).', '(caddr (list 1 2 3)) => 3',         'list'],
     ['length',  1,             'How many elements in the list.',                   '(length (list 1 2 3)) => 3',        'list'],
-    ['range',   2,             '(range a b) → list [a, a+1, …, b-1].',             '(range 0 5) => (0 1 2 3 4)',        'list'],
+    ['range',   [2, 3],        '(range a b [step]) → list [a, a+step, …) stopping before b. Step defaults to 1; 0 is an error.', '(range 0 5 2) => (0 2 4)', 'list'],
     ['append',  [0, Infinity], 'Concatenate lists.',                               '(append (list 1) (list 2 3)) => (1 2 3)', 'list'],
     ['reverse', 1,             'Reverse a list.',                                  '(reverse (list 1 2 3)) => (3 2 1)', 'list'],
     ['first',   1,             'First element.',                                   '(first (list 1 2 3)) => 1',         'list'],
@@ -1505,9 +2129,9 @@ function registerBaseMetadata() {
     ['assoc',   [2, 3],        '(assoc key alist [compare]) — first pair whose car equals key, or #f.', "(assoc 'a '((a 1)(b 2))) => (a 1)", 'list'],
     ['make-list', 2,           '(make-list n v) → list of length n filled with v.', '(make-list 3 0) => (0 0 0)',       'list'],
     ['list-set', 3,            '(list-set lst i v) → a NEW list with element i replaced.', '(list-set (list 1 2 3) 1 9) => (1 9 3)', 'list'],
-    ['take',    2,             '(take lst n) — first n elements.',                 '(take (list 1 2 3 4) 2) => (1 2)',  'list'],
-    ['drop',    2,             '(drop lst n) — everything AFTER the first n.',     '(drop (list 1 2 3 4) 2) => (3 4)',  'list'],
-    ['zip',     2,             'Pair up two lists element-wise.',                  '(zip (list 1 2) (list 3 4)) => ((1 3) (2 4))', 'list'],
+    ['take',    2,             '(take lst n) — first n elements. An error if the list is shorter than n (SRFI-1).', '(take (list 1 2 3 4) 2) => (1 2)',  'list'],
+    ['drop',    2,             '(drop lst n) — everything AFTER the first n. An error if the list is shorter than n (SRFI-1).', '(drop (list 1 2 3 4) 2) => (3 4)',  'list'],
+    ['zip',     [1, Infinity], 'Pair up any number of lists element-wise, stopping at the shortest.', '(zip (list 1 2) (list 3 4)) => ((1 3) (2 4))', 'list'],
     ['sort',    2,             '(sort seq less?) — stable ascending sort of a list or vector; returns the same kind.', '(sort (list 3 1 2) <) => (1 2 3)',  'list'],
     ['argmin',  1,             'Index of the smallest number in the list.',        '(argmin (list 5 2 8 2)) => 1',      'list'],
 
@@ -1641,22 +2265,145 @@ function rectOverlapsAny(x, y, w, h, px, py, pw, ph, n) {
   return false
 }
 
-function deepEqual(a, b) {
-  if (a === b) return true
-  // Symbols/keywords compare by name — two `Sym` instances with the same
-  // name are `equal?` even when they are distinct objects (e.g. one from the
-  // reader, one built in JS via `new Sym`). Without this, assoc/member/equal?
-  // silently miss symbol keys.
-  if (a instanceof Sym && b instanceof Sym) return a.name === b.name
-  // A dotted pair is equal? to another dotted pair, component-wise. It is
-  // never equal? to a list — `(a . 1)` and `(a 1)` are distinct values,
-  // which is exactly the distinction that was missing before 2026-08-01.
-  if (a instanceof Pair || b instanceof Pair) {
-    return a instanceof Pair && b instanceof Pair &&
-      deepEqual(a.car, b.car) && deepEqual(a.cdr, b.cdr)
+// ── deep equality, with a stop for circular structure ───────────────────
+//
+// R7RS §6.1 requires `equal?` to TERMINATE on a circular structure, and since
+// the cell representation landed a learner can build one three different ways
+// — `circular-list`, `set-cdr!`, or a `#0=` datum label — so this is no longer
+// a corner the implementation can decline to have an opinion about.
+//
+// Two structures that are equal FOREVER are equal. The walk therefore stops
+// the moment it revisits a state it has already compared, and answers #t: that
+// is the greatest-fixed-point reading of `equal?` every Scheme uses, and it is
+// what makes `#1=(a b . #1#)` equal? to `#2=(a b a b . #2#)` — one has period
+// 2, the other period 4, and the two spell the same endless sequence.
+//
+// THE SPINE is walked at two speeds at once (Floyd), over BOTH chains as a
+// single product state. When the fast pair of cursors lands on the same two
+// cells the slow pair is on, the lockstep walk has closed into a cycle — and
+// because the fast cursor has passed through every distinct state at least
+// once before the meet, every position in that cycle has already had its cars
+// compared. This costs no memory at all, which matters: `equal?` is the verb a
+// learner's code calls most, and paying an allocation per call to defend
+// against a shape almost no program has would be the wrong trade.
+//
+// DEPTH — a car, or a vector slot, that leads back to its own container — has
+// no spine to walk with, so it is caught the only way it can be: by
+// remembering which pairs of nodes are already under comparison.
+//
+// That table is built lazily, and only after a BUDGET of aggregate visits runs
+// out, so ordinary data pays nothing for it. The budget is counted in visits
+// and not in depth, which matters: a cycle that alternates list → vector →
+// list branches, so a depth limit is reached along 2^(limit/2) different paths
+// and the walk is finished long before it ever trips. `#0=#(#1=(1 2 #0# 4 .
+// #1#) (#0#) #1#)` — larceny's circular write case — did exactly that and ran
+// until it was killed. A visit counter cannot be outrun by branching.
+//
+// The table keys on the PAIR of nodes, not on either one alone: `equal?` is a
+// question about two structures walked in step, and the same node can legally
+// be compared against several different partners.
+//
+// Marking a pair as "assumed equal" before it is proven is safe, because a #f
+// anywhere aborts the ENTIRE comparison — a remembered pair can never be one
+// that later turns out unequal.
+const _EQ_BUDGET = 4000
+
+// The leaf test used when no richer one is supplied. Symbols/keywords compare
+// by name: two `Sym` instances with the same name are `equal?` even when they
+// are distinct objects (one from the reader, one built in JS via `new Sym`).
+// Without this, assoc/member/equal? silently miss symbol keys.
+function _symAtomEq(a, b) {
+  return a instanceof Sym && b instanceof Sym && a.name === b.name
+}
+
+export function deepEqual(a, b, atomEq = _symAtomEq) {
+  let seen = null
+  let budget = _EQ_BUDGET
+  const assume = (x, y) => {
+    if (seen === null) seen = new Map()
+    const held = seen.get(x)
+    if (held === undefined) { seen.set(x, y); return false }
+    if (held === y) return true
+    if (held instanceof Set) {
+      if (held.has(y)) return true
+      held.add(y)
+      return false
+    }
+    seen.set(x, new Set([held, y]))
+    return false
   }
-  if (Array.isArray(a) && Array.isArray(b)) {
-    return a.length === b.length && a.every((x, i) => deepEqual(x, b[i]))
+  const go = (x, y) => {
+    if (x === y) return true
+    if (x == null || y == null) return atomEq(x, y)
+    // Both spellings of a list meet here. `equal?` is RAW, so it normally sees
+    // cells — but a list stored inside a VECTOR is still an array, because the
+    // `vector` verb crossed the sequence boundary on the way in. Normalize
+    // whichever side needs it and then walk.
+    //
+    // Reaching for `.length` after an `isList` guard is what this branch used
+    // to do, and `isList` answers #t for a cell chain as well: `a.length` on a
+    // chain is `undefined`, `undefined !== undefined` is false, the loop bound
+    // was `undefined` — so the loop never ran and EVERY pair of chains
+    // compared equal. `(equal? '(1 2) '(3 4 5))` answered #t.
+    if (isListish(x) && isListish(y)) {
+      let p = toScheme(x)
+      let q = toScheme(y)
+      if (p === q) return true
+      if (--budget < 0 && assume(p, q)) return true
+      let sp = p
+      let sq = q
+      let tick = false
+      while (p instanceof Pair && q instanceof Pair) {
+        if (!go(p.car, q.car)) return false
+        p = p.cdr
+        q = q.cdr
+        if (tick) {
+          sp = sp.cdr
+          sq = sq.cdr
+          if (p === sp && q === sq) return true
+        }
+        tick = !tick
+      }
+      // Ran off one chain before the other, or two unequal improper tails. A
+      // dotted pair is never equal? to a list — `(a . 1)` and `(a 1)` are
+      // distinct values, which is exactly the distinction that was missing
+      // before 2026-08-01.
+      if (p instanceof Pair || q instanceof Pair) return false
+      return go(p, q)
+    }
+    // R7RS §6.8: two vectors are `equal?` when same length + element-wise
+    // equal. A vector can hold itself, so it needs the same stop the spine has.
+    if (isVec(x) && isVec(y)) {
+      const xi = x.items
+      const yi = y.items
+      if (xi.length !== yi.length) return false
+      if (--budget < 0 && assume(x, y)) return true
+      for (let i = 0; i < xi.length; i++) if (!go(xi[i], yi[i])) return false
+      return true
+    }
+    return atomEq(x, y)
   }
-  return false
+  return go(a, b)
+}
+
+// Is this a chain that leads back into itself? Floyd's two-speed walk, the
+// same one `isList` uses — but `isList` folds "circular" together with
+// "improper" into a single #f, and the shortest-stop verbs need to tell those
+// two apart: a circular argument is LEGAL (SRFI-1) as long as some other
+// argument runs out, while an improper one is always an error.
+//
+// A JavaScript array cannot hold a cycle, so the array spelling of a list is
+// never circular.
+export function isCircularList(v) {
+  if (!(v instanceof Pair)) return false
+  let slow = v
+  let fast = v
+  for (;;) {
+    fast = fast.cdr
+    if (!(fast instanceof Pair)) return false
+    fast = fast.cdr
+    if (!(fast instanceof Pair)) return false
+    slow = slow.cdr
+    if (fast === slow) return true
+  }
 }

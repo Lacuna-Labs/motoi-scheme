@@ -92,9 +92,13 @@ A motion program begins with a world. The world holds entities, steps time forwa
 ;; reads as data — the chapter's declarative spawn form, made real.
 (define (spawn-clause? x)
   (and (pair? x) (symbol? (car x)) (memq (car x) '(c-pos c-sprite c-vel c-mass))))
+;; the property-list form (world/spawn 'coin '((x . 100) (y . 200) ...)) is
+;; the one the rest of the chapter writes, so spawn has to read it too.
+(define (prop-list? x) (and (pair? x) (pair? (car x)) (symbol? (caar x))))
 (define (world/spawn a . rest)
   (let ((all (cons a rest)))
-    (if (any spawn-clause? all)
+    (cond
+      ((any spawn-clause? all)
         (let ((e (vector 'thing (vec/make 0 0) (vec/make 0 0) 1.0 1.0 0.0 \"*\" #f (make-hash-table))))
           (for-each
            (lambda (c)
@@ -104,12 +108,22 @@ A motion program begins with a world. The world holds entities, steps time forwa
                      ((eq? (car c) 'c-mass)   (vector-set! e 3 (cadr c)))
                      ((eq? (car c) 'c-sprite) (vector-set! e 0 (cadr c)) (vector-set! e 6 (cadr c))))))
            all)
-          (set! *world* (cons e *world*)) e)
+          (set! *world* (cons e *world*)) e))
+      ((and (pair? rest) (prop-list? (car rest)))
+        (let* ((props (car rest))
+               (get (lambda (k d) (let ((c (assq k props))) (if c (cdr c) d))))
+               (e (vector a
+                          (vec/make (get 'x 0) (get 'y 0))
+                          (vec/make (get 'vx 0) (get 'vy 0))
+                          (get 'mass 1.0) 1.0 0.0
+                          (get 'sprite \"*\") #f (make-hash-table))))
+          (set! *world* (cons e *world*)) e))
+      (else
         (let* ((tag (if (num? a) 'thing a))
                (x   (if (num? a) a (car rest)))
                (y   (if (num? a) (car rest) (cadr rest)))
                (e   (vector tag (vec/make x y) (vec/make 0 0) 1.0 1.0 0.0 \"*\" #f (make-hash-table))))
-          (set! *world* (cons e *world*)) e))))
+          (set! *world* (cons e *world*)) e)))))
 (define (entity/set-vel! e vx vy) (vector-set! e 2 (vec/make vx vy)) e)
 (define (entity/set-pos! e x y)   (vector-set! e 1 (vec/make x y)) e)
 ;; entity accessors resolve a string glyph through the sprite registry
@@ -129,7 +143,8 @@ A motion program begins with a world. The world holds entities, steps time forwa
   (if (null? g) (list 'c-sprite e) (begin (vector-set! (E e) 6 (car g)) (E e))))
 (define (world/wind! wx . wy)
   (set! *wind* (if (null? wy) (vec/make wx 0) (vec/make wx (car wy)))) 'ok)
-(define (entity/pin! e) (vector-set! e 7 #t) e)
+;; entity/pin! id [bool] -- second arg optional, #f unpins (see reference 24-entity).
+(define (entity/pin! e . on) (vector-set! e 7 (if (null? on) #t (car on))) e)
 (define (entity/pinned? e) (vector-ref e 7))
 (define (world/attract! a b strength)
   (let* ((pa (entity/pos a)) (pb (entity/pos b))
@@ -420,19 +435,46 @@ A motion program begins with a world. The world holds entities, steps time forwa
 
 ;; --- articulated part sway: shift each (dx dy) offset horizontally by a
 ;;     sinusoid. A \"part\" is a list of 2-element offset pairs. ---
-(define (part/sway tag part amp period)
-  (let ((s (* amp (dsin (/ (* TAU *frame*) period)))))
-    (if (and (pair? part) (pair? (car part)))
-        (map (lambda (o) (list (+ (car o) s) (cadr o))) part)
-        part)))
-(define (part/breathe tag part amp period)
-  (let ((k (+ 1.0 (* amp (dsin (/ (* TAU *frame*) period))))))
-    (if (and (pair? part) (pair? (car part)))
-        (map (lambda (o) (list (* (car o) k) (* (cadr o) k))) part)
-        part)))
+;; The part/* verbs take a sprite plus OPTIONAL arguments (reference 48-part:
+;;   (part/sway sprite [options]) / (part/breathe [sprite] [pace] [depth])),
+;; so the shim is variadic. Callers write either positional numbers
+;;   (part/breathe hero 0.3 2.0)
+;; or a keyword option list
+;;   (part/sway head :angle 5 :period 100)
+;; -- amp and period are read off the numbers in the rest-list either way, and
+;; the offsets form (part/sway tag offsets amp period) still works.
+(define (part-amp rest default)
+  (let ((nums (filter num? rest)))
+    (if (pair? nums) (car nums) default)))
+(define (part-period rest default)
+  (let ((nums (filter num? rest)))
+    (if (and (pair? nums) (pair? (cdr nums)) (not (= 0 (cadr nums))))
+        (cadr nums)
+        default)))
+(define (part-offsets rest) (if (pair? rest) (car rest) '()))
+
+(define (part/sway tag . rest)
+  (let ((part   (part-offsets rest))
+        (amp    (part-amp rest 1.0))
+        (period (part-period rest 60)))
+    (let ((s (* amp (dsin (/ (* TAU *frame*) period)))))
+      (if (and (pair? part) (pair? (car part)))
+          (map (lambda (o) (list (+ (car o) s) (cadr o))) part)
+          part))))
+(define (part/breathe tag . rest)
+  (let ((part   (part-offsets rest))
+        (amp    (part-amp rest 0.3))
+        (period (part-period rest 60)))
+    (let ((k (+ 1.0 (* amp (dsin (/ (* TAU *frame*) period))))))
+      (if (and (pair? part) (pair? (car part)))
+          (map (lambda (o) (list (* (car o) k) (* (cadr o) k))) part)
+          part))))
 ;; part/tilt: rotate each (dx dy) offset by a time-varying angle (amp in degrees).
-(define (part/tilt tag part amp period)
-  (let* ((rad (* (/ (* amp PI) 180.0) (dsin (/ (* TAU *frame*) period))))
+(define (part/tilt tag . rest)
+  (let* ((part (part-offsets rest))
+         (amp  (part-amp rest 1.0))
+         (period (part-period rest 60))
+         (rad (* (/ (* amp PI) 180.0) (dsin (/ (* TAU *frame*) period))))
          (c (dcos rad)) (s (dsin rad)))
     (if (and (pair? part) (pair? (car part)))
         (map (lambda (o)
@@ -900,12 +942,12 @@ Once spawned, we can ask where an entity is.
 (define coin (world/spawn 'coin '((x . 400) (y . 300) (sprite . \"coin\"))))
 (world/step)
 
-(entity/pos coin)  ;; => (400 . 300)
+(entity/pos coin)  ;; => (400 300)
 (entity/x coin)    ;; => 400
 (entity/y coin)    ;; => 300
 ```
 
-`entity/pos` returns a pair `(x . y)`. `entity/x` and `entity/y` return the components. These are the bread and butter of motion logic — we'll use them in every chapter.
+`entity/pos` returns the two-element LIST `(x y)` — which is what the reference states: `(entity/pos id) -> [x y]`. It is not a dotted pair, so you read the y with `(cadr p)`, not `(cdr p)`. `entity/x` and `entity/y` hand you the components directly. These are the bread and butter of motion logic — we'll use them in every chapter.
 
 ---
 
@@ -1237,7 +1279,7 @@ Measuring space is as important as setting it.
 (define coin-b (world/spawn 'coin-b '((x . 600) (y . 300) (sprite . \"coin\"))))
 (world/step)
 
-(entity/distance coin-a coin-b)  ;; => 400.0
+(entity/distance coin-a coin-b)  ;; => 400
 ```
 
 `entity/distance` returns the Euclidean distance in pixels. Here, same y, 400 pixels apart horizontally.
@@ -1255,7 +1297,7 @@ Distance works in two dimensions.
 (define coin-b (world/spawn 'coin-b '((x . 400) (y . 400) (sprite . \"coin\"))))
 (world/step)
 
-(entity/distance coin-a coin-b)  ;; => ~424.26 (sqrt of 300^2 + 300^2)
+(entity/distance coin-a coin-b)  ;; => 424.26406871192853   (sqrt of 300^2 + 300^2)
 ```
 
 The diagonal distance is longer than the horizontal or vertical component alone.
@@ -1274,10 +1316,19 @@ Given a point, which entity is closest?
 (world/spawn 'coin-c '((x . 700) (y . 500) (sprite . \"coin\")))
 (world/step)
 
-(world/nearest 350 280)  ;; => coin-b
+(entity/kind (world/nearest 350 280))  ;; => coin-b
 ```
 
-`world/nearest` returns the entity closest to the given (x, y) point. Useful for interaction, selection, aim.
+`world/nearest` hands back the ENTITY itself, not its name — so ask
+the entity what it is with `entity/kind`. Useful for interaction,
+selection, aim.
+
+Two forms, and the difference matters. `(world/nearest x y)` is the
+point form used above: closest entity to a bare coordinate. The
+reference's form is `(world/nearest id [kind])` — closest OTHER
+entity to an entity you already have, optionally filtered by kind.
+The point form asks \"what is near here\"; the entity form asks \"what
+is near me\", and it never answers with the entity you asked about.
 
 ---
 
@@ -1293,15 +1344,20 @@ Sometimes we need to touch every entity in the world.
 (world/spawn 'coin-c '((x . 500) (y . 300) (sprite . \"coin\")))
 (world/step)
 
-(world/each
-  (lambda (e)
-    (let ((x (entity/x e))
-          (y (entity/y e)))
-      (list x y))))
+;; world/each visits every entity and hands it to your lambda. It returns
+;; 'ok, not a list — whatever the lambda gives back is thrown away. To keep
+;; the positions, collect them yourself.
+(let ((seen '()))
+  (world/each
+    (lambda (e)
+      (set! seen (cons (list (entity/x e) (entity/y e)) seen))))
+  seen)
 ;; => ((100 200) (300 250) (500 300))
 ```
 
 `world/each` calls a function on every entity. The lambda receives each entity in turn.
+The world holds entities newest-first, so consing each position onto `seen` hands
+them back in the order they were spawned.
 
 ---
 
@@ -1669,17 +1725,23 @@ The golden angle (≈137.5°) produces a phyllotactic spiral, like sunflower see
 Entities can carry arbitrary state beyond position.
 
 ```scheme
-;; Spawn coins with custom \"value\" property, then read it.
+;; Spawn coins, then attach a custom \"value\" property with entity/set!.
 (world/reset!)
-(define coin-small (world/spawn 'coin-small '((x . 200) (y . 300) (sprite . \"coin\") (value . 1))))
-(define coin-large (world/spawn 'coin-large '((x . 600) (y . 300) (sprite . \"coin\") (value . 10))))
+(define coin-small (world/spawn 'coin-small '((x . 200) (y . 300) (sprite . \"coin\"))))
+(define coin-large (world/spawn 'coin-large '((x . 600) (y . 300) (sprite . \"coin\"))))
 (world/step)
+
+(entity/set! coin-small 'value 1)
+(entity/set! coin-large 'value 10)
 
 (entity/get coin-small 'value)  ;; => 1
 (entity/get coin-large 'value)  ;; => 10
+(entity/get coin-small 'colour) ;; => #f    ; never set, so the default answers
 ```
 
-`entity/get` retrieves a custom property. We can store type, health, color, weight — anything the motion logic needs.
+`entity/get` retrieves a custom property, and `entity/set!` puts one there. We can store type, health, color, weight — anything the motion logic needs.
+
+Note where custom properties do NOT come from. The spawn alist is not a general property bag: `world/spawn` reads the keys it knows about — `x`, `y`, `vx`, `vy`, `mass`, `sprite` — and ignores the rest. Writing `(value . 1)` into the spawn list looks like it should work and quietly does nothing; `entity/get` then answers `#f`, the default for a key that was never set. Set custom properties explicitly, after the spawn.
 
 ---
 
@@ -1924,10 +1986,12 @@ The world has a deterministic hash.
 (world/spawn 'coin-c '((x . 500) (y . 400) (sprite . \"coin\")))
 (world/step)
 
-(world/hash)  ;; => a deterministic integer
+(world/hash)  ;; => 3
 ```
 
-`world/hash` returns a hash of the entire world state. Same initial state → same hash. Useful for replay verification, network sync checks, regression tests.
+`world/hash` returns a deterministic integer digest of the world state: same initial state, same hash. Useful for replay verification, network sync checks, regression tests.
+
+The `3` above is not a coincidence and it is worth being honest about. In the full engine `world/hash` is a 32-bit FNV digest over every entity's quantized numeric fields — position, velocity, mass, the lot — so two worlds that differ anywhere differ in the hash. The small stand-in this chapter runs on digests only the entity COUNT, and there are three coins. It is deterministic, which is what the examples need, but it is a much weaker check: move a coin and the stand-in's hash does not budge.
 
 ---
 

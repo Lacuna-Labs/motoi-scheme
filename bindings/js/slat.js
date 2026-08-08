@@ -26,14 +26,30 @@ const isSymbol = (v) => v instanceof SlatValue && v.kind === 'symbol'
 // Tokenizer
 // ─────────────────────────────────────────────────────────────────────
 
+// The set of characters that END an atom. The tokenizer used to skip only
+// ' ' and '\t' while ending atoms on all of /\s/, so every OTHER whitespace
+// character (vertical tab, form feed, NBSP, and the whole U+2000 space
+// family) reached the atom branch, matched the terminator on its very first
+// character, and produced a zero-width atom WITHOUT advancing `i`. The loop
+// then pushed an empty SYM token forever until the host heap died — a hang,
+// not a wrong answer. A bare apostrophe did the same, having no branch at
+// all. One shared definition now serves both roles so they cannot drift.
+const ATOM_END = /[\s()"';]/
+const isSlatSpace = (c) => c !== undefined && /\s/.test(c)
+
 function tokenize(src) {
   const tokens = []
   let i = 0
   const n = src.length
   while (i < n) {
     const c = src[i]
-    if (c === ' ' || c === '\t') { i++; continue }
     if (c === '\n' || c === '\r') throw new Error('newline inside form (slat lines are single-line)')
+    if (isSlatSpace(c)) { i++; continue }
+    if (c === "'") {
+      throw new Error(
+        "apostrophe is not slat syntax: slat is a data format and has no quote "
+        + '(write the symbol bare, or put the text inside a "double-quoted string")')
+    }
     if (c === '(') { tokens.push(['(', null]); i++; continue }
     if (c === ')') { tokens.push([')', null]); i++; continue }
     if (c === ';') { while (i < n && src[i] !== '\n') i++; continue }
@@ -59,7 +75,7 @@ function tokenize(src) {
     }
     if (c === ':' && /[A-Za-z_]/.test(src[i + 1] || '')) {
       let j = i + 1
-      while (j < n && !/[\s()"';]/.test(src[j])) j++
+      while (j < n && !ATOM_END.test(src[j])) j++
       tokens.push(['KW', src.slice(i + 1, j)])
       i = j
       continue
@@ -70,7 +86,14 @@ function tokenize(src) {
     }
     // atom (symbol, number, or bare word)
     let j = i
-    while (j < n && !/[\s()"';]/.test(src[j])) j++
+    while (j < n && !ATOM_END.test(src[j])) j++
+    // A zero-width atom means the character at `i` ends an atom but no branch
+    // above consumed it. Every such character is a hang, so this is a hard
+    // stop rather than a skip: a new terminator can never again spin the loop.
+    if (j === i) {
+      throw new Error(
+        `unexpected character U+${src.codePointAt(i).toString(16).toUpperCase().padStart(4, '0')} in slat text`)
+    }
     const atom = src.slice(i, j)
     if (atom === 'nil') tokens.push(['NIL', null])
     else if (/^-?\d+$/.test(atom)) tokens.push(['INT', parseInt(atom, 10)])
@@ -138,14 +161,42 @@ function parseListFrom(tokens, idx) {
  * @returns {any|any[]} one parsed value (single line) or array of values (multi-line)
  */
 export function slatLoads(src) {
+  const out = slatLoadsAll(src)
+  return out.length === 1 ? out[0] : out
+}
+
+/**
+ * Parse slat text into an array of top-level data, ALWAYS one array
+ * element per top-level form.
+ *
+ * slatLoads collapses a one-element result to the element itself, which
+ * makes its return shape ambiguous: a single datum that happens to be a
+ * list is indistinguishable from N top-level data. A caller that has to
+ * count forms — a whole-document parse, say — cannot do it from that
+ * value, and guessing produced wrong answers in BOTH directions.
+ *
+ * @param {string} src — slat text
+ * @returns {any[]} one entry per top-level form
+ */
+export function slatLoadsAll(src) {
   const lines = src.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith(';'))
   const out = []
   for (const line of lines) {
     const tokens = tokenize(line)
-    const [value] = parseFrom(tokens, 0)
-    out.push(value)
+    // Every form on the line, not just the first. This used to parse one
+    // datum and discard the rest of the token stream without a word, so
+    // `(a 1) (b 2)` silently became `(a 1)` — input that read as valid and
+    // lost half its content. Trailing forms now surface as extra values,
+    // which is the same rule multi-LINE input already followed.
+    let idx = 0
+    while (idx < tokens.length) {
+      const [value, next] = parseFrom(tokens, idx)
+      out.push(value)
+      if (next <= idx) throw new Error('slat parser made no progress')
+      idx = next
+    }
   }
-  return out.length === 1 ? out[0] : out
+  return out
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -158,16 +209,43 @@ function emit(v) {
   if (v === true) return '#t'
   if (v === false) return '#f'
   if (typeof v === 'number') return Number.isInteger(v) ? String(v) : String(v)
+  // An exact integer is a bigint here. The tokenizer has always READ
+  // arbitrary integers, so refusing to write one made the writer and the
+  // reader disagree about the format.
+  if (typeof v === 'bigint') return String(v)
   if (typeof v === 'string') return emitString(v)
   if (v instanceof SlatValue) {
-    if (v.kind === 'symbol') return String(v.value)
-    if (v.kind === 'keyword') return `:${v.value}`
+    if (v.kind === 'symbol') return emitBareName('symbol', v.value)
+    if (v.kind === 'keyword') return ':' + emitBareName('keyword', v.value)
     if (v.kind === 'rational') return String(v.value)
     if (v.kind === 'char') return `#\\${v.value}`
   }
   if (Array.isArray(v)) return '(' + v.map(emit).join(' ') + ')'
   if (typeof v === 'object') return emitForm(v)
   throw new TypeError(`cannot emit ${typeof v}`)
+}
+
+// Slat has no escape syntax for symbols, so a name holding a delimiter
+// cannot be written down at all. Emitting it anyway produced text the
+// reader could not read back, and the corruption was silent and shape-
+// changing: the one-symbol list holding `a b` came out as `(a b)`, which
+// reads back as TWO symbols. Refusing is the only honest answer available
+// without inventing grammar the format does not have.
+function emitBareName(kind, name) {
+  const s = String(name)
+  if (s === '') throw new TypeError(`cannot emit an empty ${kind} name`)
+  const bad = s.match(ATOM_END)
+  if (bad) {
+    throw new TypeError(
+      `cannot emit ${kind} ${JSON.stringify(s)}: `
+      + `slat has no escape for ${JSON.stringify(bad[0])} in a name`)
+  }
+  // The keyword scanner only recognises `:` followed by a letter or
+  // underscore; anything else reads back as a plain symbol, not a keyword.
+  if (kind === 'keyword' && !/^[A-Za-z_]/.test(s)) {
+    throw new TypeError(`cannot emit keyword ${JSON.stringify(s)}: a keyword name must start with a letter or underscore`)
+  }
+  return s
 }
 
 function emitString(s) {

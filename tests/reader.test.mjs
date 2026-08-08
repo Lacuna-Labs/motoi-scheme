@@ -10,6 +10,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { parse, tokenize, Sym, clearParseCache } from '../src/reader.js'
+import { isFlo } from '../lib/math/tower.js'
+
+// REBASELINED 2026-08-03. R7RS §6.2.5: a number written in decimal notation —
+// with a point or an exponent marker — is INEXACT. `1e5` and `5.` used to read
+// as the same JS double as `100000` and `5`, so `(exact? 1e5)` answered #t.
+// They now carry an inexactness tag (lib/math/tower.js `Flo`), which is what
+// chibi-scheme answers too: `1e5` prints `100000.0`, `(exact? 1e5)` is #f.
+// The VALUE assertions below are unchanged; each one now also states that the
+// literal came back inexact, which is the half that used to be missing.
 
 // ── Patch 4: scientific notation ─────────────────────────────────────
 
@@ -17,7 +26,8 @@ test('reader — 1e5 parses as number 100000', () => {
   clearParseCache()
   const forms = parse('1e5')
   assert.equal(forms.length, 1)
-  assert.equal(forms[0], 100000)
+  assert.equal(Number(forms[0]), 100000)
+  assert.equal(isFlo(forms[0]), true)
 })
 
 test('reader — 1e-5 parses as number 0.00001', () => {
@@ -31,7 +41,8 @@ test('reader — 1.5e10 parses as number 15000000000', () => {
   clearParseCache()
   const forms = parse('1.5e10')
   assert.equal(forms.length, 1)
-  assert.equal(forms[0], 1.5e10)
+  assert.equal(Number(forms[0]), 1.5e10)
+  assert.equal(isFlo(forms[0]), true)
 })
 
 test('reader — -2E-3 parses as number -0.002', () => {
@@ -45,14 +56,16 @@ test('reader — .5e3 parses as number 500', () => {
   clearParseCache()
   const forms = parse('.5e3')
   assert.equal(forms.length, 1)
-  assert.equal(forms[0], 500)
+  assert.equal(Number(forms[0]), 500)
+  assert.equal(isFlo(forms[0]), true)
 })
 
 test('reader — 2e0 parses as number 2', () => {
   clearParseCache()
   const forms = parse('2e0')
   assert.equal(forms.length, 1)
-  assert.equal(forms[0], 2)
+  assert.equal(Number(forms[0]), 2)
+  assert.equal(isFlo(forms[0]), true)
 })
 
 test('reader — bare `e` still a symbol (no exponent digits)', () => {
@@ -67,7 +80,7 @@ test('reader — sci notation inside a list works', () => {
   clearParseCache()
   const forms = parse('(list 1e-5 1e5 3.14)')
   assert.equal(forms.length, 1)
-  assert.deepEqual(forms[0].slice(1), [1e-5, 100000, 3.14])
+  assert.deepEqual(forms[0].slice(1).map(Number), [1e-5, 100000, 3.14])
 })
 
 // ── Backwards-compat: normal numbers still parse ─────────────────────
@@ -94,7 +107,9 @@ test('reader — leading dot .5 unchanged', () => {
 
 test('reader — trailing dot 5. unchanged', () => {
   clearParseCache()
-  assert.equal(parse('5.')[0], 5)
+  const v = parse('5.')[0]
+  assert.equal(Number(v), 5)
+  assert.equal(isFlo(v), true)
 })
 
 // ── Smoke: reader basics still work ──────────────────────────────────

@@ -12,8 +12,9 @@
 // the Book documents is registered here, so the introspection surface
 // is one source of truth.
 
-import { parse, sym, Pair, pairToString } from './reader.js'
+import { parse, sym, Pair, pairToString, writeString } from './reader.js'
 import { evaluate, Env, noteError } from './interp.js'
+import { isStr, str as _sstr } from '../lib/base/mutable-string.js'
 import { makeBaseEnv } from './base.js'
 import { expandProgram } from './macro.js'
 import { help, describe, typeOf, arityOf, docOf, sourceOf, allVerbs } from './introspect.js'
@@ -21,6 +22,7 @@ import { snapshotRegistry } from './verbRegistry.js'
 import { VERSION } from './index.js'
 import { TREE_LOGO } from '../lib/brand/tree-logo.js'
 
+import { NIL, arrayToList, isList, isListish, isNull, isPair, listLength, listToArray, seqVerb, toJS, toScheme } from '../lib/base/list.js'
 // ---------------------------------------------------------------------------
 // Splash / brand banner
 // ---------------------------------------------------------------------------
@@ -454,7 +456,7 @@ export const META_COMMANDS = {
       const fn = ctx.env.get('book/list')
       if (typeof fn !== 'function') return ctx.output('(,books: book/list not registered)')
       const list = fn()
-      if (!Array.isArray(list) || list.length === 0) return ctx.output('(no books found)')
+      if (!isList(list) || list.length === 0) return ctx.output('(no books found)')
       for (const name of list) ctx.output(`  ${name}`)
     },
   },
@@ -508,7 +510,7 @@ export const META_COMMANDS = {
       const fn = ctx.env.get('book/search')
       if (typeof fn !== 'function') return ctx.output('(,search: book/search not registered)')
       const hits = fn(q)
-      if (!Array.isArray(hits) || hits.length === 0) return ctx.output('(no results)')
+      if (!isList(hits) || hits.length === 0) return ctx.output('(no results)')
       for (const hit of hits.slice(0, 5)) ctx.output(format(hit))
     },
   },
@@ -576,9 +578,10 @@ function format(v) {
   if (v === null) return '()'
   if (v === true) return '#t'
   if (v === false) return '#f'
-  if (typeof v === 'string') return JSON.stringify(v)
+  if (isStr(v)) return writeString(_sstr(v))
   if (v instanceof Pair) return pairToString(v, format)
-  if (Array.isArray(v)) return '(' + v.map(format).join(' ') + ')'
+  if (isNull(v)) return '()'
+    if (isList(v) || v instanceof Pair) return pairToString(v, format)
   return String(v)
 }
 

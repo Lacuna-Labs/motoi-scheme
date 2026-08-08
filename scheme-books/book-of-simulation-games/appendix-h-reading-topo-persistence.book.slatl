@@ -45,39 +45,49 @@ You have a cloud of points. You run:
                  (+ (* r (geom/sin a)) (- (* 4 (random)) 2)))))
        (iota n)))
 
-(define points  (ring-cloud 40 50))
-(define complex (topo/rips-filtration points 100))
-(define diagram (topo/persistence complex))
+(define points (ring-cloud 40 50))
+(define filt   (topo/rips-filtration points 100))
+(define loops  (topo/persistence filt 1))
 ```
 
-`diagram` is a list of tuples: `(dim, birth, death)`. Each tuple is
-one topological feature.
+`topo/persistence` asks about **one dimension at a time**, and hands
+back a *barcode* for that dimension: a list of `(birth death)`
+intervals, one per feature. `(topo/persistence filt 1)` is the
+question "where are the loops?"; `(topo/persistence filt 0)` is the
+question "where are the components?". They are different questions,
+so they are different calls.
 
-- `dim = 0` : a connected component. Born at scale 0 (each point is
-  its own component initially), dies when it merges with another
-  component.
-- `dim = 1` : a loop (a 1-dimensional hole).
-- `dim = 2` : a void (a 3-dimensional cavity, only meaningful in 3D
-  point clouds).
+- dimension `0` : a connected component. Born at the smallest scale
+  (each point is its own component initially), dies when it merges
+  with another component.
+- dimension `1` : a loop (a 1-dimensional hole).
+- dimension `2` : a void (a 3-dimensional cavity, only meaningful in
+  3D point clouds).
+
+A feature that never dies gets the symbol `inf` as its death. That is
+a real answer, not a failure — but it means any arithmetic you do on
+a barcode has to expect it, because `(- 'inf 12.0)` raises.
 
 ## H.2 Reading a diagram
 
 For 100 points sampled from a circle (radius 50, some noise):
 
 ```
-Persistence diagram:
-  (0, 0.0, 5.0)      <- 99 dots like this, close to (0,0) — points merging into components early
-  (0, 0.0, +inf)     <- 1 dot: the final surviving component
-  (1, 12.0, 48.0)    <- 1 dot far from diagonal: THE circle's loop!
-  (1, 3.0, 5.0)      <- a few short-lived loops (noise)
+(topo/persistence filt 0)  ; components
+  ((0.0 5.0) ... )   <- 99 bars like this, short — points merging into components early
+  ((0.0 inf))        <- 1 bar: the final surviving component
+
+(topo/persistence filt 1)  ; loops
+  ((12.0 48.0))      <- 1 long bar: THE circle's loop!
+  ((3.0 5.0) ...)    <- a few short-lived loops (noise)
 ```
 
-The `(1, 12.0, 48.0)` dot is your signal. The circle exists as a
+The `(12.0 48.0)` bar is your signal. The circle exists as a
 topological feature from scale 12 (loop closes) to scale 48 (loop
 gets filled in when triangles cover it). Its persistence
 `death - birth = 36` is high — this is a REAL feature.
 
-The short `(1, 3.0, 5.0)` loops are noise.
+The short `(3.0 5.0)` loops are noise.
 
 ## H.3 Standard patterns
 
@@ -118,10 +128,10 @@ frames. The second: 500 random points in the same region.
   (map (lambda (i) (list (* 120 (random)) (* 120 (random))))
        (iota 120)))
 
-(define orbit-diag (topo/persistence
-                      (topo/rips-filtration orbit-pts 100)))
-(define random-diag (topo/persistence
-                       (topo/rips-filtration random-pts 100)))
+(define orbit-loops  (topo/persistence
+                       (topo/rips-filtration orbit-pts 100) 1))
+(define random-loops (topo/persistence
+                       (topo/rips-filtration random-pts 100) 1))
 ```
 
 Orbit diagram: has 3 persistent 1-dim features (the orbit crosses
@@ -135,11 +145,14 @@ structure; second doesn't.'
 
 ## H.5 The bottleneck distance
 
-Compare two diagrams via a bottleneck-distance measure — conceptually
-`(bottleneck-distance diag-1 diag-2)` returns a scalar where `0` means
-identical and larger values mean more different. (A distance verb is
-not part of the base topo toolkit yet; you compute it from the two
-diagrams once the engine exposes one.)
+`(topo/bottleneck barcode-1 barcode-2)` returns a scalar where `0`
+means identical and larger values mean more different. It compares
+the finite bars; an essential class has no lifetime to match, so it
+sits out.
+
+```scheme
+(topo/bottleneck orbit-loops random-loops)
+```
 
 This gives you a rigorous 'how different are these two shapes?'
 score. Useful for time-series topology (are two runs of the same sim
@@ -168,9 +181,9 @@ in, compute its diagram and pick the labeled diagram with the smallest
 bottleneck distance:
 
 ```
-new-diag   = topo/persistence (topo/rips-filtration new-pts 100)
-best-match = the labeled-diagram minimizing
-             bottleneck-distance(new-diag, labeled-diagram)
+new-bars   = topo/persistence (topo/rips-filtration new-pts 100) 1
+best-match = the labeled barcode minimizing
+             topo/bottleneck(new-bars, labeled-bars)
 ```
 
 Topological data analysis is what many pattern-recognition systems
@@ -199,35 +212,42 @@ natural similarity measure.
 ;; A small filled square standing in for a plotted dot.
 (define (paint-dot x y size color) (fb/rect x y size size color))
 
-(define (paint-persistence-diagram diagram region)
-  ;; region is (x0 y0 w h)
+;; Paint the axes and the diagonal once.
+(define (paint-diagram-frame region)
+  (let ((x0 (list-ref region 0))
+        (y0 (list-ref region 1))
+        (w  (list-ref region 2))
+        (h  (list-ref region 3)))
+    (paint-line x0 (+ y0 h) (+ x0 w) (+ y0 h) gray)   ;; x-axis
+    (paint-line x0 (+ y0 h) x0 y0 gray)               ;; y-axis
+    (paint-line x0 (+ y0 h) (+ x0 w) y0 light-gray))) ;; diagonal
+
+;; Paint ONE dimension's barcode in one color. A barcode is a list of
+;; (birth death) pairs -- there is no dimension column, because you
+;; asked for a dimension when you called topo/persistence. An infinite
+;; bar has no y-coordinate on this plot, so it is drawn at the top edge
+;; rather than skipped: it is the most persistent feature there is.
+(define (paint-barcode bars region color)
   (let ((x0 (list-ref region 0))
         (y0 (list-ref region 1))
         (w  (list-ref region 2))
         (h  (list-ref region 3))
         (max-scale 100))
-    ;; Axes
-    (paint-line x0 (+ y0 h) (+ x0 w) (+ y0 h) gray)   ;; x-axis
-    (paint-line x0 (+ y0 h) x0 y0 gray)               ;; y-axis
-    ;; Diagonal
-    (paint-line x0 (+ y0 h) (+ x0 w) y0 light-gray)
-    ;; Each feature as a dot
     (for-each
-      (lambda (feature)
-        (let ((dim   (car feature))
-              (birth (cadr feature))
-              (death (caddr feature)))
-          (let ((px (+ x0 (* w (/ birth max-scale))))
-                (py (- (+ y0 h) (* h (/ death max-scale))))
-                (color (case dim
-                         ((0) green)
-                         ((1) blue)
-                         (else red))))
-            (paint-dot px py 3 color))))
-      diagram)))
+      (lambda (bar)
+        (let* ((birth (car bar))
+               (death (cadr bar))
+               (dy    (if (eq? death 'inf) max-scale death))
+               (px    (+ x0 (* w (/ birth max-scale))))
+               (py    (- (+ y0 h) (* h (/ dy max-scale)))))
+          (paint-dot px py 3 color)))
+      bars)))
 
-;; Draw the diagram we built at the top into a 120x120 box.
-(paint-persistence-diagram diagram (list 10 10 120 120))
+;; Draw components in green and loops in blue, into a 120x120 box.
+(define region (list 10 10 120 120))
+(paint-diagram-frame region)
+(paint-barcode (topo/persistence filt 0) region green)
+(paint-barcode (topo/persistence filt 1) region blue)
 ```
 
 Persistent features are far above the diagonal. Noise clusters near

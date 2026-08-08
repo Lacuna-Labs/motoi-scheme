@@ -7,6 +7,7 @@ import assert from 'node:assert/strict'
 import { Sym } from '../src/reader.js'
 import { makeCoreEnv } from '../core/index.js'
 
+import { plain } from './_cells.mjs'
 function fresh() {
   const env = makeCoreEnv()
   env.vars.get('world/reset!')()
@@ -18,17 +19,19 @@ function fresh() {
 // entity/spawn is ratified as "(entity/spawn kind x y) -> entity" —
 // scheme/reference/24-entity.slat:2711, :impl-status "wired",
 // :impl-file "lib/game/world.js". Its :impl-notes read: "returns the entity
-// object (displays as [object Object] — never assert its raw display; feed it
-// to an accessor)" and "the first spawn in a fresh process gets id 1". The old
+// object" and "the first spawn in a fresh process gets id 1". The old
 // `typeof id === 'string'` assertion contradicted that. Updated 2026-08-01 to
-// assert through the accessors the reference names.
+// assert through the accessors the reference names. The :impl-notes used to
+// add "displays as [object Object] — never assert its raw display"; as of
+// 2026-08-04 it displays as `#<entity 1 ball>` and the warning is gone from
+// the reference, so this comment no longer quotes it.
 test('entity/spawn returns an entity handle, entity/pos matches', () => {
   const env = fresh()
   const id = env.vars.get('entity/spawn')(new Sym('ball'), 10, 20)
   assert.equal(typeof id, 'object')
   assert.equal(env.vars.get('entity/id')(id), 1)
   assert.equal(String(env.vars.get('entity/kind')(id)), 'ball')
-  assert.deepEqual(env.vars.get('entity/pos')(id), [10, 20])
+  assert.deepEqual(plain(env.vars.get('entity/pos')(id)), [10, 20])
 })
 test('entity/alive? #t after spawn', () => {
   const env = fresh()
@@ -49,13 +52,13 @@ test('entity/set-vel! + entity/vel', () => {
   const env = fresh()
   const id = env.vars.get('entity/spawn')(new Sym('ball'), 0, 0)
   env.vars.get('entity/set-vel!')(id, 3, 4)
-  assert.deepEqual(env.vars.get('entity/vel')(id), [3, 4])
+  assert.deepEqual(plain(env.vars.get('entity/vel')(id)), [3, 4])
 })
 test('entity/move! is additive', () => {
   const env = fresh()
   const id = env.vars.get('entity/spawn')(new Sym('ball'), 10, 10)
   env.vars.get('entity/move!')(id, 5, -5)
-  assert.deepEqual(env.vars.get('entity/pos')(id), [15, 5])
+  assert.deepEqual(plain(env.vars.get('entity/pos')(id)), [15, 5])
 })
 // entity/damage! is ratified "(entity/damage! id hp-loss) -> void"
 // (scheme/reference/24-entity.slat:262) — it does NOT return the remaining hp.
@@ -114,7 +117,8 @@ test('object/spawn adds an entity to the scene', () => {
   const env = fresh()
   env.vars.get('object/spawn')(new Sym('rock'), new Sym(':at'), [5, 5])
   assert.equal(env.vars.get('world/count')(), 1)
-  assert.deepEqual(env.vars.get('entity/pos')(env.vars.get('world/find')(new Sym('rock'))[0]), [5, 5])
+  const found = plain(env.vars.get('world/find')(new Sym('rock')))
+  assert.deepEqual(plain(env.vars.get('entity/pos')(found[0])), [5, 5])
 })
 test('object/fetch instantiates by class', () => {
   const env = fresh()
@@ -154,7 +158,7 @@ test('world/collisions on overlapping entities', () => {
   env.vars.get('world/spawn')(new Sym('a'), 0, 0)
   env.vars.get('world/spawn')(new Sym('b'), 5, 5)
   env.vars.get('world/step')()
-  const cols = env.vars.get('world/collisions')()
+  const cols = plain(env.vars.get('world/collisions')())
   assert.equal(cols.length, 1)
   assert.equal(cols[0].length, 2)
 })
@@ -170,7 +174,7 @@ test('world/gravity! sets gravity', () => {
   const p = env.vars.get('world/spawn')(new Sym('player'), 0, 0)
   assert.equal(env.vars.get('world/gravity!')(0, 0.7), undefined)
   env.vars.get('world/step')()
-  assert.deepEqual(env.vars.get('entity/vel')(p), [0, 0.7])
+  assert.deepEqual(plain(env.vars.get('entity/vel')(p)), [0, 0.7])
 })
 test('world/count reflects spawns', () => {
   const env = fresh()
@@ -183,7 +187,7 @@ test('world/count reflects spawns', () => {
 
 test('grid-init allocates', () => {
   const env = fresh()
-  assert.deepEqual(env.vars.get('grid-init')(8, 8), [8, 8])
+  assert.deepEqual(plain(env.vars.get('grid-init')(8, 8)), [8, 8])
   assert.equal(env.vars.get('grid-cols')(), 8)
   assert.equal(env.vars.get('grid-rows')(), 8)
 })
@@ -197,7 +201,7 @@ test('grid-cell-set!/cell?', () => {
 test('grid-neighbors returns 8', () => {
   const env = fresh()
   env.vars.get('grid-init')(8, 8)
-  const n = env.vars.get('grid-neighbors')(3, 3)
+  const n = plain(env.vars.get('grid-neighbors')(3, 3))
   assert.equal(n.length, 8)
 })
 test('grid-live-count', () => {
@@ -212,7 +216,7 @@ test('grid/card-center', () => {
   env.vars.get('grid-init')(8, 8)
   env.vars.get('grid-step')(4)
   const c = env.vars.get('grid/card-center')(2, 2)
-  assert.deepEqual(c, [10, 10])
+  assert.deepEqual(plain(c), [10, 10])
 })
 
 // ── camera- ─────────────────────────────────────────────────────────
@@ -254,7 +258,7 @@ test('camera-zoom-to', () => {
   const env = fresh()
   env.vars.get('camera-zoom-to')(3)
   assert.equal(env.vars.get('camera-scale')(), 3)
-  const st = env.vars.get('camera-state')()
+  const st = plain(env.vars.get('camera-state')())
   const k = st.find(e => String(e[0]) === 'k')
   assert.equal(k[1], 3)
 })

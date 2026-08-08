@@ -56,8 +56,8 @@ The pattern is documented in `engineering/HOW-TO-REGISTER-A-VERB.md`. Short vers
 The sister dialect is a variant of Motoi. It uses the same loader and the same mode flags. If you're reading the sister dialect's reference and see the same three verbs (`require`, `loaded-libs`, `available-libs`), they behave identically."
 
   :verbs (
-    (:name "require"        :signature "(require lib-name-symbol) -> ok | unknown"
-     :summary "Install a lazy library by name. Returns 'ok if it installed (or was already loaded), 'unknown if no library matches."
+    (:name "require"        :signature "(require lib-name-symbol) -> ok | #f"
+     :summary "Install a lazy library by name. Returns 'ok if it installed (or was already loaded), #f if no library matches."
      :example "(require 'matrix) ; → ok")
     (:name "loaded-libs"    :signature "(loaded-libs) -> list-of-symbols"
      :summary "List of libraries that have actually installed so far in this session."
@@ -65,3 +65,191 @@ The sister dialect is a variant of Motoi. It uses the same loader and the same m
     (:name "available-libs" :signature "(available-libs) -> list-of-symbols"
      :summary "List of every library the manifest knows about, whether loaded or not."
      :example "(available-libs) ; → (ai/ai ai/steering audio/tick base/alg ...)")))
+
+;; ═══ 3 verbs in library loading ═══
+
+(verb
+  :name "require" :std "Motoi"
+  :library "loading"
+  :kind "io"
+  :signature "(require lib-name-symbol) -> ok | #f"
+  :summary "Installs a library from the manifest by name; returns ok if it matched, #f if nothing did."
+  :provenance "lib/system/require-verb.js; Motoi-own. Read 2026-08-02; miss value corrected from the symbol unknown to #f the same day."
+  :explanation "require forces a library to install now rather than waiting for its first use. It looks the name up in core/verb-manifest.js twice: first for an EXACT match against the full manifest name, then for a trailing-segment match, so (require 'matrix) finds math/matrix and (require 'math/matrix) finds it too. If nothing matches it returns #f — it does not raise, and it does not tell you what it looked for. Until 2026-08-02 the miss was the symbol unknown, and every symbol is truthy in Motoi, so a require that matched nothing read as a success in any conditional. If a match is found and has already been required, it returns ok immediately. Otherwise it runs the library's installer and records the name. An installer that throws is NOT swallowed: require re-raises with the library name attached, which is the one case where this verb fails loudly."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(require 'matrix)" :note "ok — the trailing-segment match found math/matrix and installed it.")
+    (:dialect "motoi" :tier "intermediate" :code "(require 'math/matrix)" :note "ok — the full manifest name works too; both spellings reach the same entry.")
+    (:dialect "motoi" :tier "expert" :code "(require 'no-such-lib)" :note "#f — a miss is a returned value, not an error, so a typo does nothing except answer no.")
+  )
+  :caveats ("A miss returns #f rather than raising. A typo in a library name costs you nothing at the require and everything at the first unbound verb, one screen later — unless you check the answer." "Trailing-segment matching means an ambiguous short name resolves to whichever manifest entry the exact-match pass missed and the suffix pass found FIRST — manifest order decides, not you. Spell the full name when it matters." "Requiring an already-EAGER library still runs its installer the first time you ask, because the require bookkeeping is separate from the boot bookkeeping." "Success is the symbol ok, not #t. (if (require 'x) …) is now a correct test, but (eq? (require 'x) #t) is not — compare with eq? against 'ok when you want the positive case by name." "Before 2026-08-02 a miss was the symbol unknown, which is truthy; code written against that engine had to use eq? against 'ok and still reads correctly.")
+  :drawbacks ("No error detail on a miss: you cannot tell a typo from a library that was never registered." "No dependency resolution — requiring a library does not require what it depends on." "No way to unload; installation is one-way for the life of the process." "The name matching is a suffix rule rather than a namespace lookup, so two libraries whose names end in the same segment cannot both be reached by the short spelling.")
+  :usecases ("Paying a lazy library's install cost during setup instead of inside a game loop." "Making a script's dependencies explicit at the top of the file." "Pulling in an optional SRFI part before code that needs it." "Checking whether a library name is known to this build, by comparing the result against 'ok.")
+  :related ("loaded-libs" "available-libs" "lib-info" "std-parts")
+  :learn (:concept "Lazy loading trades boot time for a first-call cost; requiring is how you choose which of the two you pay and when." :prerequisites ("available-libs") :progression "Learn require to force an install, loaded-libs to see what it did, and available-libs to see what you could have asked for.")
+  :row-2-audit (
+    (:eng-program "(define (need lib)\n  (if (eq? (require lib) 'ok) 'ready 'missing))\n(display (need 'matrix)) (newline)\n(display (need 'no-such-lib)) (newline)"
+     :math-program "(define (idempotent? lib)\n  (eq? (require lib) (require lib)))\n(display (idempotent? 'matrix)) (newline)\n(display (idempotent? 'no-such-lib)) (newline)"
+     :cs-program "(define (require-all libs)\n  (map (lambda (l) (list l (require l))) libs))\n(display (require-all (list 'matrix 'nope))) (newline)"
+     :problem "The operator's game stutters on frame 47, every time, on the same frame. The cause is a lazy library installing on its first call in the middle of the frame budget. The audit question is which verb moves that cost into setup — and then, immediately, whether the setup code CHECKED the answer, because a mistyped library name answers #f and the stutter comes back unchanged."
+     :explanation "eng: a helper that turns the symbol result into a decision, which is the shape the caller actually wants. math: requiring twice gives the same answer both times, so setup code can be re-run safely. cs: requiring a whole list and keeping the per-library outcome, so the miss is visible in the log rather than inferred later."
+     :meta "Why require and not simply calling a verb from the library: calling it works, but the install happens at whatever moment the call happens, which is exactly the frame you are trying to protect. Why the check is not optional in either engine: on the pre-2026-08-02 engine the miss was the truthy symbol unknown, so the obvious (if (require 'matrix) …) succeeded for a name that matched nothing; today it answers #f, and the failure mode is simply not looking at the answer at all. The tell that this went wrong is a stutter that survives a fix that appeared to be applied.")
+    (:eng "Log the pair (name . result) for every require in setup. A bare require whose result is discarded cannot be audited."
+     :math "The result is a symbol from a two-element set; treat it as an enumeration, never as a boolean."
+     :cs "The CS pattern is explicit eager initialization. Related: preloading, JIT warm-up, DNS prefetch.")
+)
+  :row-3-dimension (
+    (:setup "The deliberate pre-payment: moving a cost you will certainly incur out of the moment where it hurts and into a moment where it does not."
+     :rungs ((:domain "loading (installing a lazy library during setup rather than mid-frame)" :code "(define (need lib)\n  (if (eq? (require lib) 'ok) 'ready 'missing))\n(display (need 'matrix)) (newline)")
+             (:domain "kitchen (mise en place — everything chopped before the first pan is hot)" :code "(define (prep items) (map (lambda (i) (list i 'ready)) items))\n(display (prep (list 'onion 'garlic))) (newline)")
+             (:domain "amortized analysis (paying a cost up front so no single later operation is expensive)" :code "(define (amortized total ops) (/ total ops))\n(display (amortized 100 100)) (newline)\n(display (amortized 100 1)) (newline)"))
+     :explanation "Requiring a library before the loop moves a one-millisecond cost out of a sixteen-millisecond budget. Mise en place moves the chopping out of the minute when the pan is hot. Amortized analysis is the formal version: the same total work, redistributed so no individual operation blows its budget. All three share the shape 'the total cost is unchanged and its placement is everything.'"
+     :meta "The shape transfers wherever there is a deadline inside the work. Without a deadline, lazy is strictly better — which is exactly why scratchpads should stay lazy and games should not.")
+    (:eng "Identify the budgeted region first, then move every deferred cost out of it. Do not optimize costs that fall outside a deadline."
+     :math "Amortization redistributes a total; it does not reduce it."
+     :cs "The CS analog is warm-up — JIT compilation, connection pool pre-fill, cache priming."))
+  :row-4-proof (
+    (:eng-program "(display (list (require 'matrix) (require 'no-such-lib))) (newline)"
+     :math-program "(define (stable? lib) (eq? (require lib) (require lib)))\n(display (and (stable? 'matrix) (stable? 'no-such-lib))) (newline)"
+     :cs-program "(display (eq? (require 'matrix) 'ok)) (newline)\n(display (eq? (require 'no-such-lib) #f)) (newline)\n(display (if (require 'no-such-lib) 'truthy 'falsy)) (newline)"
+     :claim "require is idempotent — the second call returns the same value as the first — and its two results are the symbol ok and #f, so it reads correctly both as a condition and under eq?."
+     :invariant "∀ lib. require(lib) = require(lib) ∧ require(lib) ∈ {ok, #f} ∧ ¬truthy(#f)"
+     :meta "The pattern is a two-valued result where the negative case is the language's own false — the opposite of a C function returning 0 for success, where the natural conditional reads backwards. See book-of-code ch on return-value conventions. What the third cs-program line pins down: it prints falsy, and on the engine before 2026-08-02 it printed truthy for a library that does not exist. Idempotence is proved by construction: the installer runs at most once per name because the name is recorded in a set.")
+    (:eng "Smoke test: both symbols come back as documented, and the truthiness trap is demonstrated rather than described."
+     :math "The result lives in a two-element set; equality on that set is the only meaningful test."
+     :cs "The CS pattern is idempotent initialization guarded by a memo set.")
+)
+  :row-5-emergence (
+    (:eng-composition "(define (require-all libs)\n  (map (lambda (l) (cons l (eq? (require l) 'ok))) libs))\n(define (missing report)\n  (let loop ((xs report) (acc '()))\n    (cond ((null? xs) (reverse acc))\n          ((cdr (car xs)) (loop (cdr xs) acc))\n          (else (loop (cdr xs) (cons (car (car xs)) acc))))))\n(define r (require-all (list 'matrix 'assert 'no-such-lib)))\n(display (missing r)) (newline)"
+     :math-composition "(define (all-ok? report)\n  (let loop ((xs report))\n    (cond ((null? xs) #t)\n          ((cdr (car xs)) (loop (cdr xs)))\n          (else #f))))\n(display (all-ok? (list (cons 'a #t) (cons 'b #t)))) (newline)\n(display (all-ok? (list (cons 'a #t) (cons 'b #f)))) (newline)"
+     :cs-composition "(define (preflight libs)\n  (let ((bad (let loop ((xs libs) (acc '()))\n               (cond ((null? xs) (reverse acc))\n                     ((eq? (require (car xs)) 'ok) (loop (cdr xs) acc))\n                     (else (loop (cdr xs) (cons (car xs) acc)))))))\n    (if (null? bad) 'all-present (list 'missing bad))))\n(display (preflight (list 'matrix 'assert))) (newline)\n(display (preflight (list 'matrix 'nope))) (newline)"
+     :base "require installs one library and reports ok or #f."
+     :emergent "preflight check — a setup block that requires every dependency at once and reports the complete list of names that did not resolve, before any of them is called"
+     :meta "The composition chains require over a list and partitions the results. What emerges is the manifest-check family: verify every dependency up front and fail with the FULL list rather than one at a time. Same family: npm install reporting all unmet peers, a linker listing every undefined symbol, a config validator collecting all missing keys before it exits. In book-of-composition this is the collect-all-failures shape — the opposite of fail-fast, and the right choice when the operator is going to have to fix them all anyway.")
+    (:eng "Report every missing library in one pass. Fixing typos one run at a time is the slowest possible loop."
+     :math "The composition is a partition of the library list into the resolved and unresolved sets."
+     :cs "The CS pattern name is preflight / dependency check. Familiar analogs: linker error batching, schema validation collecting all violations.")
+))
+
+(verb
+  :name "loaded-libs" :std "Motoi"
+  :library "loading"
+  :kind "rd"
+  :signature "(loaded-libs) -> list-of-symbols"
+  :summary "Lists every library actually installed in this session, sorted — the eager ones from boot and any pulled in later by require."
+  :provenance "lib/system/require-verb.js and core/index.js; Motoi-own. Read and re-verified 2026-08-02 after the boot path was wired to record eager installs."
+  :explanation "loaded-libs returns a sorted list of symbols naming the libraries whose install function has actually run in this session. That is both halves: the parts installed eagerly when the interpreter booted, and any part a later require pulled in. It is deduplicated, and it uses the FULL manifest name (math/matrix), not the short name you may have typed at a require. Until 2026-08-02 the backing set was populated only inside require, so a fresh session reported () while hundreds of verbs were already bound and callable — the verb said nothing was loaded while the whole eager surface was live. The boot path now records the installers that RETURNED, so a part whose install threw stays out of the list rather than being reported on the manifest's say-so."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(list? (loaded-libs))" :note "#t — always a list, and on a fresh session it is already long, because booting installs most of the language.")
+    (:dialect "motoi" :tier "intermediate" :code "(memq 'math/matrix (loaded-libs))" :note "a non-empty list — math/matrix installs eagerly at boot, so it is present before anyone requires it.")
+    (:dialect "motoi" :tier "expert" :code "(begin (require 'matrix) (require 'matrix) (memq 'matrix (loaded-libs)))" :note "#f — the FULL manifest name math/matrix is recorded, never the short name that was typed at the require.")
+  )
+  :caveats ("It is NOT a subset of available-libs. available-libs reads the require manifest, which lists 61 parts; boot installs 76. The 22 that are loaded but unlisted — media/media, net/http-serve, the composer parts and others — are live and callable but cannot be named at a require." "Names come back in full manifest form (math/matrix), so a membership test against the short name you typed will fail." "The list is sorted alphabetically, not in load order, so it cannot be used to reconstruct the sequence of installs." "A require of an already-eager part is a no-op that still answers 'ok, so the length does not move and the receipt cannot tell you whether YOUR require did the work.")
+  :drawbacks ("Cannot answer the question people actually ask, which is 'is this verb available?' — for that, test the binding itself." "No load timestamps or ordering, so it is useless for diagnosing a load-order problem." "The underlying set lives at module scope, so it persists for the process and cannot be reset between tests." "Because boot fills it, the list is nearly the same in every session; the few entries that differ are the ones worth reading, and nothing highlights them.")
+  :usecases ("Confirming that a setup block's requires all landed." "Logging the lazy dependencies a script actually pulled in." "Deciding whether a library still needs requiring before a hot loop." "Auditing which optional parts a cart depends on.")
+  :related ("require" "available-libs" "lib-info" "std-parts")
+  :learn (:concept "An introspection verb reports what its bookkeeping recorded, not what is true of the system; the gap between those two is where its caveats live." :prerequisites ("require") :progression "Learn require first, then loaded-libs as its receipt, then available-libs for the full catalogue.")
+  :row-2-audit (
+    (:eng-program "(define (confirm lib)\n  (begin (require lib)\n         (if (memq 'math/matrix (loaded-libs)) 'recorded 'not-recorded)))\n(display (confirm 'matrix)) (newline)"
+     :math-program "(define (set-like? a b) (= (length a) (length b)))\n(begin (require 'matrix) (require 'matrix))\n(display (set-like? (loaded-libs) (loaded-libs))) (newline)\n(display (length (loaded-libs))) (newline)"
+     :cs-program "(display (if (memq 'base/assert (loaded-libs)) 'loaded 'not-loaded)) (newline)\n(display (if (memq 'base/assert (available-libs)) 'in-manifest 'absent)) (newline)"
+     :problem "The operator added a require to their setup block to kill a mid-frame stutter, and the stutter is still there. The audit question is whether the require landed. Checking that the verb works proves nothing — it worked before, lazily. The only evidence is the ledger, and reading it requires knowing that the ledger records the FULL manifest name rather than the short name that was typed."
+     :explanation "eng: a confirmation helper that requires and then checks the ledger under the full name. math: the ledger is a set, so a double require does not double the length. cs: the two questions side by side — 'is it installed' and 'is it nameable at a require' — which are not the same question and do not always agree."
+     :meta "Why loaded-libs and not just calling a verb: calling a verb from a lazy library installs it, which destroys the evidence you were gathering. Why the full name matters: (memq 'matrix (loaded-libs)) is #f after (require 'matrix) succeeded, which reads exactly like a failed require. That is the single most likely way to misread this verb. The second most likely: reading a stable length across a require as proof the require failed, when the part was simply already eager.")
+    (:eng "Check the ledger under the manifest name, not the name you typed. The two differ whenever the short spelling was used."
+     :math "The record is a set: unordered, deduplicated, and unable to answer questions about sequence."
+     :cs "The CS pattern is the install ledger. Related: package lockfiles, dpkg -l, pip freeze.")
+)
+  :row-3-dimension (
+    (:setup "The partial ledger: a record that is accurate about what it tracks and silent about everything outside its tracking, so its emptiness means 'nothing recorded' rather than 'nothing happened'."
+     :rungs ((:domain "loading (a ledger of installed parts read against a catalogue of requirable ones — neither contains the other)" :code "(display (if (memq 'base/assert (loaded-libs)) 'loaded 'not-loaded)) (newline)\n(display (if (memq 'media/media (available-libs)) 'in-manifest 'absent)) (newline)")
+             (:domain "accounting (a petty-cash book that is complete about petty cash and silent about the payroll)" :code "(define (book entries) (list 'recorded (length entries) 'of 'petty-cash-only))\n(display (book (list 'coffee 'stamps))) (newline)")
+             (:domain "measure theory (a measure defined on a sigma-algebra says nothing about sets outside it)" :code "(define (measurable? s domain) (if (memq s domain) 'measurable 'outside-the-algebra))\n(display (measurable? 'a (list 'a 'b))) (newline)\n(display (measurable? 'z (list 'a 'b))) (newline)"))
+     :explanation "A part missing from available-libs is not a part that is missing — media/media is loaded and callable while being absent from the require catalogue. An empty petty-cash book does not mean the company spent nothing. A set outside the sigma-algebra has no measure, which is not the same as measure zero. All three share the shape 'absence from the record is not evidence of absence in the world.' This verb used to be the loading example of that shape in the worst way: it reported () at boot while the whole language was live. It now reports what installed, and the residual partiality has moved to the catalogue beside it."
+     :meta "The shape transfers to every log, ledger and index. The tell is a question the record was never designed to answer being asked of it anyway — and answered, confidently, wrongly.")
+    (:eng "State the scope of a log next to the log. A reader who does not know what is excluded will read exclusions as zeros."
+     :math "Undefined outside the domain is a third value, distinct from zero and from false."
+     :cs "The CS analog is a partial index — fast for what it covers, silent for what it does not."))
+  :row-4-proof (
+    (:eng-program "(display (list? (loaded-libs))) (newline)\n(display (list? (available-libs))) (newline)"
+     :math-program "(define n (length (loaded-libs)))\n(begin (require 'matrix) (require 'matrix))\n(display (= (length (loaded-libs)) n)) (newline)\n(display (equal? (loaded-libs) (loaded-libs))) (newline)"
+     :cs-program "(display (null? (loaded-libs))) (newline)\n(display (> (length (loaded-libs)) (length (available-libs)))) (newline)"
+     :claim "loaded-libs is a deduplicated set of the installers that actually ran, so it is already non-empty at boot, requiring an eager part twice does not change its length, and it is LARGER than the available-libs catalogue rather than a subset of it."
+     :invariant "∀ sessions. loaded-libs ≠ ∅ at startup ∧ |loaded-libs after n requires of one already-eager lib| = |loaded-libs| ∧ loaded-libs ⊄ available-libs"
+     :meta "The pattern is a monotone set that now over-covers the catalogue rather than under-covering the truth: everything it names really did install, and it names 22 parts the require manifest does not list. See book-of-math ch on subsets. The third conjunct is the surviving asymmetry, proved directly by the cs-program. What would falsify the record as written: a build where (null? (loaded-libs)) is #t at startup — that was the behaviour until 2026-08-02, and it is the exact regression this row is here to catch.")
+    (:eng "The one-line regression test is (null? (loaded-libs)) at the top of a fresh session. It is #f today; it was #t before the boot path recorded eager installs."
+     :math "The ledger is neither a subset nor a superset of the catalogue — the two sets overlap in 54 of 76 and neither contains the other."
+     :cs "The CS pattern is two indexes over one population, each complete for a different question. Asking one the other's question is the bug.")
+)
+  :row-5-emergence (
+    (:eng-composition "(define (ensure libs)\n  (begin\n    (for-each (lambda (l) (require l)) libs)\n    (loaded-libs)))\n(display (length (ensure (list 'matrix 'assert)))) (newline)"
+     :math-composition "(define (subset? a b)\n  (let loop ((xs a))\n    (cond ((null? xs) #t)\n          ((memq (car xs) b) (loop (cdr xs)))\n          (else #f))))\n(begin (require 'matrix))\n(display (subset? (loaded-libs) (available-libs))) (newline)\n(display (subset? (available-libs) (loaded-libs))) (newline)"
+     :cs-composition "(define (unrequired)\n  (let loop ((xs (available-libs)) (acc '()))\n    (cond ((null? xs) (length acc))\n          ((memq (car xs) (loaded-libs)) (loop (cdr xs) acc))\n          (else (loop (cdr xs) (cons (car xs) acc))))))\n(display (> (unrequired) 0)) (newline)"
+     :base "loaded-libs reports the set of installers that actually ran, eager and required alike."
+     :emergent "dependency manifest with a coverage figure — the pair of loaded-libs and available-libs gives you both what a session installed and which catalogue entries it never touched"
+     :meta "The composition chains the ledger against the catalogue with a membership test. What emerges is the coverage family: an installed-set measured against a requirable-set, which is how you find both missing dependencies and dead weight. Same family: code coverage against the source tree, tree-shaking against the module graph, inventory turns against catalogue breadth. In book-of-composition this is the used-versus-available shape — and the honest caveat is that the two sets are drawn from different populations, so the difference in each direction means something different: available ∖ loaded is the catalogue you never pulled in, loaded ∖ available is the 22 parts that install at boot and cannot be named at a require at all.")
+    (:eng "Read the difference in BOTH directions before calling it coverage. One direction is unused catalogue; the other is uncatalogued installs, and only the first is dead weight."
+     :math "The composition is a pair of set differences, available ∖ loaded and loaded ∖ available, neither of which is empty. The sets overlap without either containing the other."
+     :cs "The CS pattern name is used-versus-available coverage. Familiar analogs: tree-shaking reports, unused-dependency linters.")
+))
+
+(verb
+  :name "available-libs" :std "Motoi"
+  :library "loading"
+  :kind "rd"
+  :signature "(available-libs) -> list-of-symbols"
+  :summary "Lists every library name the manifest knows about, sorted, whether or not it is loaded."
+  :provenance "lib/system/require-verb.js; Motoi-own, reads core/verb-manifest.js. Read 2026-08-02."
+  :explanation "available-libs is the catalogue. It maps every entry in core/verb-manifest.js to a symbol and sorts the result alphabetically. Names are the full two-part manifest form: a category and a file, joined by a slash — ai/ai, base/assert, graphics/framebuffer, math/matrix, system/require. Registration in the manifest is INTENT: a file dropped into lib/ that is not in the manifest does not appear here and cannot be required, which is what stops a broken file from breaking the language for everyone else. The list does not say which entries are eager and which are lazy, and it does not say which are loaded — those are different questions with different verbs."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(list? (available-libs))" :note "#t — a plain list of symbols, safe to walk with map or memq.")
+    (:dialect "motoi" :tier "intermediate" :code "(> (length (available-libs)) 10)" :note "#t — the catalogue holds dozens of libraries; the exact count moves as the language grows.")
+    (:dialect "motoi" :tier "expert" :code "(car (available-libs))" :note "ai/ai — sorted alphabetically, so the first entry is the alphabetically first manifest name.")
+  )
+  :caveats ("The names are full manifest names with a slash (math/matrix), not the short names require accepts. Build membership tests against the full form." "It reports registration, not loading. An entry appearing here says nothing about whether its verbs are bound yet." "It does not report the eager/lazy mode. That lives in the library file's own LAZY flag, and for standard parts in lib-info." "The count is not stable across versions; never assert a literal length.")
+  :drawbacks ("No metadata at all — no mode, no verb count, no description. It is a list of names and nothing else." "Cannot be filtered by category without string surgery on the symbol names." "Says nothing about the standard-library parts, which have their own registry reachable through std-parts.")
+  :usecases ("Discovering what a build ships without reading the source tree." "Checking that a library name is spelled correctly before requiring it." "Measuring how much of the catalogue a program actually uses." "Generating documentation or a menu of loadable parts.")
+  :related ("require" "loaded-libs" "std-parts" "lib-info")
+  :learn (:concept "A catalogue answers 'what exists', a receipt answers 'what happened', and a registry answers 'what is standard'; three different questions that look alike until you ask one of the wrong verb." :prerequisites ("require") :progression "Learn available-libs to see the catalogue, require to install from it, loaded-libs to confirm, and std-parts for the standard-library registry that sits alongside all three.")
+  :row-2-audit (
+    (:eng-program "(define (known? name)\n  (if (memq name (available-libs)) 'known 'unknown))\n(display (known? 'math/matrix)) (newline)\n(display (known? 'matrix)) (newline)"
+     :math-program "(define (sorted? xs)\n  (cond ((null? xs) #t)\n        ((null? (cdr xs)) #t)\n        ((string<? (symbol->string (car xs)) (symbol->string (cadr xs))) (sorted? (cdr xs)))\n        (else #f)))\n(display (sorted? (available-libs))) (newline)"
+     :cs-program "(define (count-in-category prefix)\n  (let loop ((xs (available-libs)) (n 0))\n    (cond ((null? xs) n)\n          ((string=? prefix (substring (symbol->string (car xs)) 0 (string-length prefix)))\n           (loop (cdr xs) (+ n 1)))\n          (else (loop (cdr xs) n)))))\n(display (> (count-in-category \"math/\") 0)) (newline)\n(display (count-in-category \"zzz/\")) (newline)"
+     :problem "The operator wants to require a library but is not sure of its name, and require's miss path answers #f without saying what it looked for. The audit question is which verb lets them look BEFORE guessing — and the trap is that the catalogue uses full names while require accepts short ones, so (memq 'matrix (available-libs)) is #f for a library that (require 'matrix) installs perfectly."
+     :explanation "eng: a membership helper shown against both spellings, so the naming mismatch is visible rather than described. math: the list really is sorted, which is what makes a bisecting reader or a diff against a previous build meaningful. cs: counting a category by string prefix, because the symbol name is the only structure the list carries."
+     :meta "Why available-libs and not trial-and-error with require: a failed require costs nothing and teaches nothing, and repeated guessing is how a typo survives into a shipped cart. Why not loaded-libs: that is a receipt for this session, not a catalogue of the build. The tell that the wrong verb was reached for is a membership test that comes back #f for a library whose verbs demonstrably work.")
+    (:eng "Search the catalogue by full name. If a short name must be supported, match on the suffix the way require does."
+     :math "The list is totally ordered by the symbol names, which makes set operations against it cheap and diffs meaningful."
+     :cs "The CS pattern is the registry listing. Related: apt list, npm ls, a package index.")
+)
+  :row-3-dimension (
+    (:setup "The published catalogue: an authoritative list of what may be reached for, maintained separately from the things themselves so that presence in the list is a deliberate act."
+     :rungs ((:domain "loading (the manifest, where registration is intent)" :code "(define (known? name)\n  (if (memq name (available-libs)) 'known 'unknown))\n(display (known? 'math/matrix)) (newline)")
+             (:domain "library science (the card catalogue — a book not in the catalogue cannot be found even if it is on a shelf)" :code "(define (findable? title catalogue)\n  (if (member title catalogue) 'findable 'invisible))\n(display (findable? \"Odyssey\" (list \"Odyssey\" \"Iliad\"))) (newline)\n(display (findable? \"Notebook\" (list \"Odyssey\" \"Iliad\"))) (newline)")
+             (:domain "set theory (an element belongs to a set by the set's definition, not by its own properties)" :code "(define (member-of? x s) (if (memq x s) 'in 'out))\n(display (member-of? 'a (list 'a 'b))) (newline)\n(display (member-of? 'c (list 'a 'b))) (newline)"))
+     :explanation "A library file not in the manifest cannot be required, however correct it is. A book not in the catalogue cannot be found, however real it is. An element is in a set because the set says so. All three share the shape 'membership is conferred by the register, not claimed by the member.'"
+     :meta "The shape transfers to every allowlist, every route table, every plugin registry. The value it buys is exactly the one the chapter prose names: a broken file dropped into lib/ cannot break the language for anyone else, because nothing looks at it.")
+    (:eng "Registration is a deliberate act and should stay one. A directory scan would make every stray file a dependency."
+     :math "Membership is defined by the set, which is why an unregistered element has no status rather than a false one."
+     :cs "The CS analog is the allowlist — enumerate what is permitted, ignore everything else."))
+  :row-4-proof (
+    (:eng-program "(display (list? (available-libs))) (newline)\n(display (> (length (available-libs)) 10)) (newline)"
+     :math-program "(define (sorted? xs)\n  (cond ((null? xs) #t)\n        ((null? (cdr xs)) #t)\n        ((string<? (symbol->string (car xs)) (symbol->string (cadr xs))) (sorted? (cdr xs)))\n        (else #f)))\n(display (sorted? (available-libs))) (newline)\n(display (equal? (available-libs) (available-libs))) (newline)"
+     :cs-program "(define (all-symbols? xs)\n  (let loop ((ys xs))\n    (cond ((null? ys) #t)\n          ((symbol? (car ys)) (loop (cdr ys)))\n          (else #f))))\n(display (all-symbols? (available-libs))) (newline)"
+     :claim "The catalogue is a stable, strictly sorted list of symbols: two calls return the same list, no two adjacent entries are out of order, and every element is a symbol."
+     :invariant "∀ calls. available-libs is a list of symbols, strictly increasing under string<?, and equal across calls within a session"
+     :meta "The pattern is a sorted immutable index. See book-of-math ch on total orders. Strict sortedness is a stronger claim than sortedness and it is the one proved here, because string<? rejects equal neighbours — which also proves there are no duplicate names in the manifest. What falsifies it: a manifest entry registered twice, which would break the strict comparison at that pair and is exactly the kind of merge accident this test catches.")
+    (:eng "Smoke test: list of symbols, strictly sorted, stable across calls — and the strictness doubles as a duplicate-registration check."
+     :math "Strict sortedness implies distinctness, so one predicate proves both order and uniqueness."
+     :cs "The CS pattern is the sorted index with an implied uniqueness constraint.")
+)
+  :row-5-emergence (
+    (:eng-composition "(define (category-of name)\n  (let* ((s (symbol->string name))\n         (i (let loop ((k 0))\n              (cond ((>= k (string-length s)) #f)\n                    ((char=? (string-ref s k) #\\/) k)\n                    (else (loop (+ k 1)))))))\n    (if i (substring s 0 i) s)))\n(display (category-of 'math/matrix)) (newline)\n(display (category-of 'ai/ai)) (newline)"
+     :math-composition "(define (unique xs)\n  (let loop ((ys xs) (acc '()))\n    (cond ((null? ys) (reverse acc))\n          ((member (car ys) acc) (loop (cdr ys) acc))\n          (else (loop (cdr ys) (cons (car ys) acc))))))\n(display (unique (list \"math\" \"math\" \"game\" \"math\"))) (newline)\n(display (length (unique (list \"a\" \"a\" \"a\")))) (newline)"
+     :cs-composition "(define (categories)\n  (let loop ((xs (available-libs)) (acc '()))\n    (cond ((null? xs) (length acc))\n          (else\n           (let* ((s (symbol->string (car xs)))\n                  (i (let scan ((k 0))\n                       (cond ((>= k (string-length s)) #f)\n                             ((char=? (string-ref s k) #\\/) k)\n                             (else (scan (+ k 1))))))\n                  (c (if i (substring s 0 i) s)))\n             (loop (cdr xs) (if (member c acc) acc (cons c acc))))))))\n(display (> (categories) 1)) (newline)"
+     :base "available-libs returns the full sorted catalogue of manifest names."
+     :emergent "category index — the flat name list folded into its distinct prefixes, recovering the lib/ directory structure from the names alone"
+     :meta "The composition chains a prefix extractor with a uniqueness fold. What emerges is the faceting family: a flat list carrying structure in its keys, folded back into the hierarchy that produced it. Same family: Java package trees from class names, S3 prefix listings faking directories, tag clouds from flat labels. In book-of-composition this is the recover-the-hierarchy shape — and it works here only because the manifest names encode the directory, which is a convention the verb itself does not enforce.")
+    (:eng "Fold to categories before showing a catalogue to a person. Sixty flat names is a wall; six categories is a menu."
+     :math "The composition is the quotient of the name set by the prefix relation."
+     :cs "The CS pattern name is faceting by key prefix. Familiar analogs: object-store prefix listing, hierarchical tag navigation.")
+))

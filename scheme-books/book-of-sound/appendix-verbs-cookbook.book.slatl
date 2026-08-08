@@ -15,41 +15,51 @@
   :prose
 "# Appendix — The Verbs Cookbook
 
-Notes on drum-kit playback via `synth/kit`. Verified against `bin/motoi eval`.
+Notes on the synth and live-audio verbs. Every value below is the value the engine actually returns, checked against `bin/motoi eval`.
 
 ---
 
 ## Drum kit hit: `synth/kit`
 
-`synth/kit patch step?` plays one hit from the internal drum kit. `patch` is a symbol naming which drum to hit; `step` is an optional integer identifying which step of a pattern the hit belongs to (defaults to zero). Returns the symbol `'ok` on success, or `'error` if the audio engine is unavailable.
+`synth/kit name pattern [voice]` lays down a whole drum pattern at once. `name` is a symbol naming the kit (`'acoustic`, `'electronic`); `pattern` is a string of `1` and `0` characters where each `1` is a strike and each `0` is a rest; `voice` is an optional symbol picking which drum in the kit gets struck, defaulting to `'kick`. It returns a kit spec describing what was scheduled: the kit name, how many steps the pattern has, the step indices that strike, and the voice.
 
 ```scheme
-(synth/kit)                             ; => ok    (default patch, defaults to 440Hz fallback)
-(synth/kit 'kick)                       ; => ok
-(synth/kit 'snare)                      ; => ok
-(synth/kit 'hat)                        ; => ok
-(synth/kit 'kick 3)                     ; => ok    (kick, on step 3 of a pattern)
+(synth/kit 'acoustic \"1000100010001000\")
+;; => ((:kind kit) (:name acoustic) (:steps 16) (:hits (0 4 8 12)) (:voice kick))
+(synth/kit 'acoustic \"0000100000001000\" 'snare)
+;; => ((:kind kit) (:name acoustic) (:steps 16) (:hits (4 12)) (:voice snare))
+(synth/kit 'electronic \"1010101010101010\" 'hihat)
+;; => ((:kind kit) (:name electronic) (:steps 16) (:hits (0 2 4 6 8 10 12 14)) (:voice hihat))
 ```
 
-The built-in patch names are `'kick`, `'snare`, `'hat`, `'crash`, `'clap`. Unknown patches still play — they fall back to a 440Hz tone marked with the requested patch name — which is convenient during development but a bug to catch before ship. If a beat is not landing on the drum you expect, check the patch name first.
+Read the spec back and you can see the pattern you asked for: `\"1000100010001000\"` is sixteen steps with strikes at 0, 4, 8 and 12 — four on the floor. The `:hits` list is the pattern string decoded, so it is the quickest way to check that a rhythm says what you meant it to say before you ever hear it.
 
-Under the CLI harness the audio engine is a no-op, so every call returns `'ok` without producing sound. In a browser host with the audio engine wired up, each call triggers the corresponding synth-model hit.
+The kit name and the voice name are carried straight through into the spec — an unrecognised name is not rejected, it is simply reported back to you. That means a misspelling is silent: it builds a perfectly good spec for a drum nobody plays. If a beat is not landing on the drum you expect, read the `:name` and `:voice` in the returned spec first.
 
-The `step` argument is a hint — some engines use it to skip re-triggers when a step has already fired this bar. In CORE it is stored and available to the engine; how the engine uses it is implementation-defined.
+Only the character `1` counts as a strike. Anything else in the pattern string is a rest, so `\"10xx\"` is four steps striking on step 0 only. The length of the string is the length of the pattern, which is why `:steps` is the string's length — an empty string is a pattern of no steps at all.
+
+Under the CLI harness nothing reaches your speakers. The spec is still built and returned, so you can read and test a rhythm without an audio host. In a browser host with the audio engine wired up, the same spec drives the actual kit.
 
 ---
 
 ## Chord playback: `synth/chord`
 
-`synth/chord notes dur?` plays a list of MIDI note numbers together as a chord. `dur` is the duration in seconds; defaults to 0.5. The notes argument must be a proper list — `(list 60 64 67)` or `'(60 64 67)`. Passing a non-list returns the symbol `'error` without touching the audio engine; a valid list dispatches into the audio engine and returns `'ok` if the engine accepts the notes, `'error` if it does not.
+`synth/chord section pitches [duration [dynamic]]` sounds several pitches at once. The **first** argument is the `section` — a symbol naming which group of instruments plays the chord — and the pitches come **second**. `duration` is in beats and defaults to 1; `dynamic` is a symbol like `'mf` or `'ff` and defaults to `'mf`. It returns a chord spec.
 
 ```scheme
-(synth/chord 'not-a-list)                       ; => error   (arg-shape guard)
-(synth/chord '(60 64 67))                       ; => error   (headless CLI: no audio adapter)
-(synth/chord (list 60 64 67))                   ; => error   (same reason)
+(synth/chord 'strings '(60 64 67))
+;; => ((:kind chord) (:section strings) (:pitches (60 64 67)) (:duration 1) (:dynamic mf))
+(synth/chord 'strings '(60 64 67) 0.5)
+;; => ((:kind chord) (:section strings) (:pitches (60 64 67)) (:duration 0.5) (:dynamic mf))
+(synth/chord 'brass (list 60 64 67) 2 'ff)
+;; => ((:kind chord) (:section brass) (:pitches (60 64 67)) (:duration 2) (:dynamic ff))
 ```
 
-Under the CLI harness the audio engine is not wired and every real dispatch returns `'error`. In a browser host with the audio engine installed, `(synth/chord '(60 64 67))` starts a C major triad — all three notes at the same cursor position, sustained for `dur` seconds.
+Forgetting the section is the easy mistake: `(synth/chord '(60 64 67))` is not a chord of three notes, it is the *section* `(60 64 67)` with no pitches given at all. Nothing complains — you get a spec back either way — so if a chord sounds wrong, check that `:section` and `:pitches` in the returned spec are the ones you meant.
+
+A single pitch does not have to be wrapped in a list; `(synth/chord 'strings 60)` gives `:pitches (60)`.
+
+Under the CLI harness nothing reaches your speakers. In a browser host with the audio engine installed, `(synth/chord 'strings '(60 64 67))` sounds a C major triad — all three notes together, held for `duration` beats.
 
 The chord verb rewinds the audio cursor between notes so they truly overlap rather than playing sequentially — this is the difference from calling `note/strike` in a loop.
 
@@ -74,13 +84,17 @@ The verb is pure — no clock, no state. Pass in the beat position you *would* b
 
 The reference documents fourteen dashed-name verbs that read (and in some cases mutate) the live audio bus. All fourteen are wired in `bin/motoi run` as of 2026-07-22. In headless mode they return honest-zero (empty snapshot); in a browser host with a wired analyser bridge they return real FFT numbers.
 
-`audio-band n` returns amplitude 0..1 in log-spaced band `n`. `audio-bands` returns the whole vector of eight bands (bass → treble). Prefer `audio-bands` if you need more than one band per frame — it's snap-cached, so eight `audio-band` calls in one frame all read the same underlying frame's bytes.
+`audio-band n` returns amplitude 0..1 in log-spaced band `n`, where `n` runs from 0 to 31. `audio-bands` returns the whole list of thirty-two bands (bass → treble). Prefer `audio-bands` if you need more than one band per frame — it's snap-cached, so thirty-two `audio-band` calls in one frame all read the same underlying frame's bytes.
 
 ```scheme
 (audio-band 0)             ; => 0        (bass band, no audio bridge)
-(audio-bands)              ; => (0 0 0 0 0 0 0 0)
-(audio-perceptual-bands)   ; => (0 0 0 0)   ; bass low-mid high-mid brilliance
+(audio-bands)              ; => (0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+(audio-perceptual-bands)   ; => (0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+(length (audio-bands))              ; => 32
+(length (audio-perceptual-bands))   ; => 32
 ```
+
+`audio-perceptual-bands` is the same thirty-two bands re-weighted so the middle of the spectrum — where human hearing is most sensitive — counts for more. It is a reshaping of the band list, not a shorter summary of it, so both lists are always the same length.
 
 `audio-rms` returns overall loudness this frame; `audio-peak` returns the loudest band. Both live in 0..1. Together they let a cart animate one dimension (brightness, particle count, camera scale) off *loudness* rather than a specific frequency.
 
@@ -94,38 +108,52 @@ The reference documents fourteen dashed-name verbs that read (and in some cases 
 ```scheme
 (audio-bpm)                ; => #f       (headless mode, detector never locks)
 (audio-beat?)              ; => #f
-(audio-time)               ; => <secs>   (seconds since first audio-* call)
+(audio-time)               ; => 0        (the clock has not been pumped)
 (audio-playing?)           ; => #f       (no bridge, nothing to play)
 ```
 
-`audio-tempo bpm?` is the getter / setter for a *manually asserted* tempo — useful when a cart wants to run a rhythm-locked animation before the detector has any signal to look at. `audio-master-volume level?` is the master fader (0.0 = mute, 1.0 = full).
+`audio-tempo bpm` *sets* a manually asserted tempo — useful when a cart wants to run a rhythm-locked animation before the detector has any signal to look at. It is a setter, not a getter: it hands back an AudioHandle, not the number you gave it. To *read* the tempo back, use `audio/tempo`. `audio-master-volume level` is the master fader (0.0 = mute, 1.0 = full), and it returns a handle too.
 
 ```scheme
-(audio-tempo)              ; => 0        (no tempo asserted or detected)
-(audio-tempo 120)          ; => 120      (setter form)
-(audio-master-volume 0.5)  ; => 0.5      (halved)
+(audio-tempo 120)          ; => #<procedure>   (an AudioHandle, not the number)
+(audio/tempo)              ; => 120            (this is the getter)
+(audio-master-volume 0.5)  ; => #<procedure>   (a handle, not the level)
 ```
 
-`audio-bar-clock handle [bars-per-rotation]` returns a bar-aligned phase clock as an alist with keys `'phase` (0..1 fractional bar progress), `'radians` (equivalent angle), `'bpm`, and `'bars`. Kids reach for this when they want a rotating vinyl-record graphic to spin in sync with the song.
+This trips people up, so it is worth saying plainly: the dashed setters answer with a **handle**. If you write `(if (= (audio-tempo 120) 120) ...)` the comparison fails, because you are comparing a procedure to a number. Set with `audio-tempo`, read with `audio/tempo`.
+
+`audio-bar-clock handle [bars-per-rotation]` returns a bar-aligned phase **clock**, and a clock is something you *call*. Ask it for `'phase` (0..1 fractional bar progress), `'radians` (the equivalent angle), or `'bars`. Kids reach for this when they want a rotating vinyl-record graphic to spin in sync with the song: feed `(clk 'radians)` straight into a rotation.
 
 ```scheme
-(audio-bar-clock 1 1)      ; => ((phase 0.0002) (radians 0.001) (bpm 120) (bars 1))
+(audio-bar-clock (audio-play 'song) 1)
+;; => #<procedure>   (the clock itself — call it to read it)
+
+(let ((clk (audio-bar-clock (audio-play 'song) 1)))
+  (list (clk 'phase) (clk 'radians) (clk 'bars)))
+;; => (0 0 1)
 ```
 
-`audio-play source [opts]` starts playback and returns an opaque numeric handle. `audio-halt handle` stops the given handle and returns a zero-duration handle (0). The reference treats `audio-halt` as the inverse of `audio-play`.
+Both readings are zero here because the audio clock has not been advanced — in a headless run nothing pumps it. Advance it with `audio-tick!` and the phase moves.
+
+`audio-play source` starts playback and returns an AudioHandle — also a callable, which answers `'name`, `'id` and `'playing?`. `audio-halt handle` stops the given handle and hands back a handle in turn. Neither one is a number.
 
 ```scheme
-(define h (audio-play 'kick))    ; => 1     (fresh handle)
-(audio-halt h)                   ; => 0     (zero-duration handle)
+(define h (audio-play 'kick))
+(h 'name)                        ; => \"kick\"
+(audio-halt h)                   ; => #<procedure>   (a handle, not 0)
 ```
 
-**Honest null.** In terminal Motoi none of these produce sound and every reader returns a sensible-typed zero. That is by design: a program that reads `audio-rms` and multiplies by 100 should get 0, not a crash. Cart authors write against the shape of the readers, not against the assumption that a bridge is present.
+**Honest null.** In terminal Motoi none of these produce sound, and every *reader* returns a sensible-typed zero. That is by design: a program that reads `audio-rms` and multiplies by 100 should get 0, not a crash. Cart authors write against the shape of the readers, not against the assumption that a bridge is present.
+
+The *setters* are the exception, and the honest-zero rule does not cover them. `audio-tempo`, `audio-master-volume`, `audio-play` and `audio-halt` all answer with an AudioHandle whether or not a bridge is present. A handle is a procedure, so it is never zero and never a number — read state back with the `audio/*` getters instead.
 
 ---
 
 ## Closing note
 
-Every example in this appendix was checked against `bin/motoi eval` on 2026-07-17. `'ok` from the CLI does not mean sound emerged from your speakers — it means the verb was dispatched. Wire an audio host to hear anything.
+Every example in this appendix was re-checked on 2026-08-04 against the value its call actually returns, not merely against the fact that the call ran. A spec coming back from the CLI does not mean sound emerged from your speakers — it means the verb was dispatched and described what it would play. Wire an audio host to hear anything.
 
-The fourteen dashed `audio-*` entries were added 2026-07-22 during the wiring lane for CORE verbs the reference documented but the runtime had never bound. All fourteen verified via `printf '<verb>' | bin/motoi run /dev/stdin` — none returns `unbound symbol`. See `lib/audio/audio-core.js` for the installer and `setAudioBridge` for the hook a browser host uses to plug in a live analyser.
+That re-check mattered. The earlier pass had confirmed only that these verbs were bound — that none answered `unbound symbol` — and a verb can be bound, run cleanly, and still be called wrongly. Three entries here had been written to the wrong signature: `synth/kit` was documented as `patch step?` when it takes `name pattern [voice]`, `synth/chord` was documented as `notes dur?` when the section comes first, and `audio-bar-clock` was described as returning an alist when it returns a callable clock. Each ran without complaint and returned an answer-shaped nothing. Checking that code *runs* is not checking that it is *right*.
+
+The dashed `audio-*` entries were added 2026-07-22 during the wiring lane for CORE verbs the reference documented but the runtime had never bound. See `lib/audio/dsp.js` for the installer and the AudioHandle constructor, and `setAudioBridge` for the hook a browser host uses to plug in a live analyser.
 ")

@@ -36,9 +36,11 @@ We also define one small helper, `alist-get`, that reads a value out of an assoc
 ```scheme
 ;; ---- shape-robust alist accessor ----
 ;; Handles all three alist shapes Motoi produces:
-;;   dotted literal  '((k . v))   -> (assoc k) = (k <dot> v), value = caddr
-;;   cons-built      (cons 'k v)  -> (assoc k) = (k v),        value = cadr
-;;   list-built      (list 'k v)  -> (assoc k) = (k v),        value = cadr
+;;   dotted literal  '((k . v))   -> (assoc k) = (k . v),  value = cdr
+;;   cons-built      (cons 'k v)  -> (assoc k) = (k . v),  value = cdr
+;;   list-built      (list 'k v)  -> (assoc k) = (k v),    value = cadr
+;; The first two shapes are the same object once read: Motoi's reader builds
+;; real dotted pairs, so `(cdr entry)` IS the value there.
 ;; Returns #f when the key is absent (so callers can guard with `if`).
 (define (alist-get key al)
   (let ((entry (assoc key al)))
@@ -47,9 +49,11 @@ We also define one small helper, `alist-get`, that reads a value out of an assoc
         (let ((rest (cdr entry)))
           (cond
            ((null? rest) #f)
-           ;; dotted literal: (k <dot-symbol> v) -> rest = (<dot> v)
-           ((and (pair? rest) (pair? (cdr rest))) (cadr rest))
-           ;; plain: (k v) -> rest = (v)
+           ;; dotted/cons-built with a non-list value: cdr is the value
+           ((not (pair? rest)) rest)
+           ;; dotted/cons-built with a list value: cdr is the whole list
+           ((pair? (cdr rest)) rest)
+           ;; list-built: (k v) -> rest = (v)
            (else (car rest)))))))
 
 ;; A tiny serializer (write-to-string is not wired in Motoi base).
@@ -1160,6 +1164,7 @@ At the very top, you can write a pipeline *as data*—a list of verb-name/argume
           (let ((result (cond
                          ((eq? verb-name 'fetch) (apply web/fetch args))
                          ((eq? verb-name 'parse) (apply documents/parse args))
+                         ((eq? verb-name 'words) (string-split data \" \"))
                          ((eq? verb-name 'filter) (filter (car args) data))
                          (else '(escalate \"unknown-verb\" verb-name)))))
             (if (or (eq? result 'nan)
@@ -1167,10 +1172,15 @@ At the very top, you can write a pipeline *as data*—a list of verb-name/argume
                 result
                 (execute-pipeline (cdr pipeline-spec) result)))))))
 
-;; Example pipeline: fetch a URL, parse it, filter non-empty lines
-(let ((pipeline '((fetch . (\"https://example.com\"))
-                  (filter . ((lambda (line) (not (string=? line \"\"))))))))
+;; Example pipeline: fetch a URL, split it into words, drop the empty ones.
+;; Note the spec is built with `list`/`cons`, NOT quoted: a quoted
+;; `(lambda (w) ...)` is a *list*, not a procedure, and `filter` would
+;; refuse it. Data is data; a stage that carries a procedure must be built.
+(let ((pipeline (list (cons 'fetch (list \"https://example.com\"))
+                      (cons 'words '())
+                      (cons 'filter (list (lambda (w) (not (string=? w \"\"))))))))
   (execute-pipeline pipeline '()))
+;; => a list of the 10 words in the fetched body
 ```
 
 A recursive interpreter walks a pipeline-spec list, executes each verb, checks the result, recurs. The pipeline is *data*—you could store it in cortex, retrieve it, modify it, then execute it. This is the highest level of abstraction: the route itself is programmable.

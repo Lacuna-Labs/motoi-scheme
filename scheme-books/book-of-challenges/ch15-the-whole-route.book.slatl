@@ -139,7 +139,9 @@ Let's fetch live data from the web, parse it, filter it, and format the result. 
                       (map (lambda (n) (string-append n \", \")) names))))))))
 
 (fetch-expensive-products \"https://example.com/feed.json\" 100)
-;; => \"3 products: Widget A, Widget B, Gadget C, \" or \"Could not fetch...\"
+;; => \"Could not fetch product feed.\"
+;; On the bench `web/fetch` returns 'nan, so this is the fetch-failed branch.
+;; Wired to a live feed the same route returns \"3 products: Widget A, ...\".
 ```
 
 **The route:** fetch → parse → filter → format. Each stage depends on the last. If fetch fails, we return a message. If parse yields nothing, we filter an empty list and report zero products. The route is *linear*—no backtracking, no side effects, just data flowing forward through transformations.
@@ -203,7 +205,9 @@ Here's the full route:
          (if (= total-items 1) \".\" \"s.\")))))
 
 (answer-order-count-question \"cust-12345\")
-;; => \"You placed 3 orders in the last 30 days, totaling 7 items.\"
+;; => \"You haven't placed any orders in the last 30 days.\"
+;; The bench store is empty, so stage 2 recalls nothing and the count is 0.
+;; With real order history the same route says \"You placed 3 orders ...\".
 ```
 
 **The route:** intent → recall → enrich → filter → reply. Notice how each `let*` binding is a stage, and each stage uses only the bindings above it—data flows *forward*. If recall fails, we get an empty list, filter yields nothing, count is 0, and we return a truthful \"no orders\" message. No crashes, no lies.
@@ -245,7 +249,9 @@ We'll fetch a product, look up its inventory, compute reorder quantity, and retu
                     (list 'recommend \"sufficient\" sku on-hand))))))))
 
 (reorder-recommendation \"prod-999\")
-;; => (recommend \"reorder\" \"SKU-123\" 60) or (escalate \"product-not-found\" \"prod-999\")
+;; => (escalate \"product-not-found\" \"prod-999\")
+;; The bench store has no products, so the very first joint escalates.
+;; Wired to a real store this returns (recommend \"reorder\" \"SKU-123\" 60).
 ```
 
 **What's new:** we check the result of *each* recall and escalate immediately if it's `'nan` or `(escalate ...)`. This is **ESCAPE**—honest failure, no pretending. The route only proceeds if every stage succeeds. If you run this with a missing product or SKU, you get a clean escalation with context, not a crash.
@@ -283,7 +289,11 @@ We'll use **named let**—a tail-recursive loop—to walk the customer list, rec
                 (+ total-customers 1))))))
 
 (multi-customer-summary '(\"cust-1\" \"cust-2\" \"cust-3\"))
-;; => ((total-customers . 3) (total-orders . 8) (avg-orders-per-customer . 2.666...))
+;; => ((total-customers 3) (total-orders 0) (avg-orders-per-customer . 0))
+;; Three customers were walked; the bench store returned no orders for any of
+;; them, so the totals are 0. Note the shapes differ on purpose: the first two
+;; entries are built with `list` and print without a dot, the last with `cons`
+;; and prints with one.
 ```
 
 **Technique:** named `let` with an accumulator. We walk the list tail-recursively, recalling orders for each customer, counting them, and accumulating. If a recall fails, we treat it as zero orders for that customer—graceful, not catastrophic. The route is now *recursive over a collection*.
@@ -376,7 +386,10 @@ Let's build a recommendation engine in miniature. Given a query, we'll:
     (else (cons (car lst) (insert x (cdr lst) less?)))))
 
 (recommend-products \"vintage ceramic\")
-;; => \"Top matches: Vintage Teapot, Ceramic Bowl, Rustic Mug, \"
+;; => \"No matching products found.\"
+;; Nothing to match against on the bench: the catalog recall comes back empty,
+;; so ranking and filtering have nothing to rank. Against a real catalog this
+;; returns \"Top matches: Vintage Teapot, Ceramic Bowl, Rustic Mug, \".
 ```
 
 **The route:** read → recall → match → rank → filter → format. Six stages, each transforming the data from the last. Notice we define helpers (`string-contains`, `take`, `sort`) because they're not wired verbs—this is the *restraint* of BACK. We write only what we need, and we write it simply.
@@ -443,7 +456,10 @@ We'll fetch sales from an external API, validate the response, enrich each sale 
         report)))
 
 (category-sales-report \"ceramics\")
-;; => ((category . \"ceramics\") (sale-count . 12) (total-revenue . 3400) (avg-sale . 283.33...))
+;; => (escalate \"no-sales-in-category\" \"ceramics\")
+;; Stage 1 fetches nothing on the bench, so `count` is 0 and stage 7 escalates
+;; rather than hand back a report of zeros. With live sales data the same route
+;; returns the report: ((category \"ceramics\") (sale-count 12) ...).
 ```
 
 **Seven stages:** fetch → validate → enrich → filter → aggregate → compose → return. Notice the *enrichment* stage calls `route/recall` *inside* a map—that's an inner route, nested in the outer one. Each sale gets its category looked up. If a product isn't found, we label it \"unknown\" and continue—graceful degradation, not failure.
@@ -492,7 +508,10 @@ Not every route is linear. Sometimes you need to branch based on intermediate re
                    (list 'action \"hold\" sku price)))))))))
 
 (pricing-action \"prod-567\")
-;; => (action \"raise-price\" \"SKU-567\" 22.0) or (action \"hold\" \"SKU-567\" 20.0)
+;; => (escalate \"product-not-found\" \"prod-567\")
+;; The decision tree never runs on the bench — the first recall already fails,
+;; and that is the correct answer. Give it a real product and the cond ladder
+;; picks one of (action \"raise-price\" ...) / \"discount\" / \"hold\".
 ```
 
 **Branching route:** recall product → recall inventory → compute days-left → branch on conditions → return action. The `cond` ladder is the decision tree. Each branch returns a different action. This is how you encode business logic in a route—data flows forward, decisions branch, and the route converges on a result.
@@ -579,7 +598,10 @@ Let's use `fold` (also called `reduce`) to aggregate data across a route. We'll 
       (fold f (f (car lst) init) (cdr lst))))
 
 (top-customer '(\"cust-1\" \"cust-2\" \"cust-3\"))
-;; => (\"cust-2\" . 4500)
+;; => (\"none\" . 0)
+;; Every customer totals 0 on the bench, so nothing ever beats the seed value
+;; and the fold returns the seed itself. That seed is doing real work: it is
+;; what makes \"no data\" an answer instead of a crash on an empty list.
 ```
 
 **Fold route:** map over customers to compute lifetime value, then fold to find the max. Fold is the *aggregator*—it reduces a list to a single value by repeatedly applying a function. Here, we compare each customer to the current best and keep the higher one. Clean, functional, powerful.
@@ -615,7 +637,9 @@ We'll create a discount calculator that fetches discount rules and returns a fun
 ;; Example: fetch calculator and use it
 (define calc (make-discount-calculator))
 (calc 150)
-;; => 127.5 (if rules apply 15% discount over $100)
+;; => 150
+;; No rules on the bench, so the fold has nothing to fold and hands back the
+;; cart total untouched. With a 15%-over-$100 rule loaded it would be 127.5.
 ```
 
 **Higher-order route:** fetch rules → return a closure that captures them. The returned function *remembers* the rules and applies them to any cart total. This is **FORWARD** at the functional level—composition of behavior, not just data.
@@ -720,7 +744,10 @@ Now we bring it all together. A full route that answers a customer question with
   (inexact->exact (floor (+ x 0.5))))
 
 (restock-bestseller-advice)
-;; => \"Yes, restock recommended. Your bestseller (prod-42) has 8 units left, about 5 days of stock. Suggest ordering 60 units.\"
+;; => \"No sales data available to identify bestseller.\"
+;; Stage 1 finds no sales on the bench, so the bestseller fold returns its
+;; \"none\" seed and the route stops right there — it does not go on to invent
+;; an inventory number. With sales loaded it reaches the restock reply.
 ```
 
 **Six stages, fully orchestrated:** identify bestseller from sales → recall inventory → compute days-left → check threshold → compose reply. Every stage handles failure. If sales are missing, we say so. If inventory is missing, we say so. If everything works, we compute and reply truthfully. This is mastery—data flowing forward, failure handled honestly, reply grounded in real data.
@@ -770,7 +797,11 @@ We'll fetch sales from three channels, aggregate totals, and report.
           (list 'active-channels channel-count))))
 
 (multi-channel-summary)
-;; => ((etsy . 1200) (shopify . 3400) (ebay . 800) (total . 5400) (active-channels . 3))
+;; => ((etsy 0) (shopify 0) (ebay 0) (total 0) (active-channels 0))
+;; All three channels are empty on the bench, and the route still returns the
+;; full five-field shape rather than a failure. That is the resilience: one
+;; dead source zeroes one field, not the whole report. Entries are built with
+;; `list`, so they print as two-element lists with no dot.
 ```
 
 **Multi-source route:** fetch from three sources, compute totals independently, aggregate. If any source fails, we treat it as zero and continue. The route is *resilient*—it doesn't fail completely if one source is down. This is real-world orchestration: you rarely get perfect data, so you handle what you have and report honestly.
@@ -957,7 +988,7 @@ We'll fetch orders, map to extract totals, filter for high-value orders, and red
     revenue))
 
 (high-value-revenue 500)
-;; => 12400
+;; => 0
 ```
 
 **Map-filter-reduce:** the canonical functional pipeline. Map transforms, filter selects, reduce aggregates. This is the *essence* of data flow—each stage is a pure function over a list. Clean, composable, powerful.
@@ -1007,7 +1038,7 @@ Let's build a route using point-free composition—functions composed without na
       (pipeline (route/recall \"listings\" \"catalog\")))))
 
 (count-active-listings)
-;; => 42
+;; => 0
 ```
 
 **Point-free route:** we compose functions without naming intermediate values. `compose` creates a new function by chaining two functions. The pipeline is a single composed function applied to the result of `route/recall`. This is advanced functional style—elegant, but harder to debug. Use it when the flow is truly linear and the composition clarifies intent.
@@ -1037,12 +1068,14 @@ Scheme doesn't have native lazy evaluation, but we can simulate a generator with
 
 ;; Use the generator
 (define gen (make-product-generator (lambda (p) (> (cadr (assoc 'price p)) 50))))
-(gen)  ;; => first product
-(gen)  ;; => second product
-(gen)  ;; => 'done when exhausted
+(gen)  ;; => done
+(gen)  ;; => done
+(gen)  ;; => done
 ```
 
 **Generator route:** we create a closure that *remembers* the remaining items and yields one per call. This is a **stateful route**—each call advances the state. Useful for processing large datasets incrementally.
+
+On the bench the catalog recall is empty, so the generator starts exhausted and every call yields `done` — which is the honest answer, and worth seeing at least once. Point it at a real catalog and the first call yields the first product, the second the second, and `done` only after the last one. Note that `done` prints without its quote: the closure returns the *symbol* `done`, and a symbol prints as its name.
 
 ---
 
@@ -1073,7 +1106,9 @@ Let's build a route with multiple guard clauses that exit early if conditions ar
                     (list 'success \"order-processed\" order-id total))))))))
 
 (process-order \"order-999\")
-;; => (success \"order-processed\" \"order-999\" 150) or escalate
+;; => (escalate \"order-not-found\" \"order-999\")
+;; Guard 1 is the one that fires on the bench. With the order present and
+;; pending the route reaches (success \"order-processed\" \"order-999\" 150).
 ```
 
 **Guard route:** each `if` is a guard clause—if it fails, we exit early with escalation. Only if all guards pass do we proceed to the final action. This is defensive programming—check everything, fail fast, be honest.
@@ -1119,7 +1154,11 @@ Let's simulate a transactional route that tracks actions and can \"rollback\" by
                         (list 'success \"transaction-complete\" (cadr order-result) actions))))))))))
 
 (process-transaction \"cust-555\" 2)
-;; => (success \"transaction-complete\" \"order-789\" (charged reserved))
+;; => (escalate \"reserve-failed\")
+;; `stock/adjust` returns 'nan on the bench, so stage 1 never succeeds and
+;; there is nothing to roll back. That is the right shape of the failure: the
+;; transaction refuses to start rather than half-starting. With a live ledger
+;; the route ends at (success \"transaction-complete\" \"order-789\" (charged reserved)).
 ```
 
 **Transactional route:** we track actions in a list and undo them if a later stage fails. This is a *compensating transaction* pattern—common in distributed systems. Each stage has a rollback action. If any stage fails, we unwind. This is advanced orchestration—keeping state, handling partial failure, cleaning up.
@@ -1315,7 +1354,10 @@ Let's orchestrate a multi-step transaction across services, with compensation if
                           (cadr ship-result)))))))))
 
 (book-order (list (list 'sku \"SKU-999\") (list 'amount 100)))
-;; => (success \"order-complete\" \"charge-id-123\" \"label-456\")
+;; => (escalate \"inventory-unavailable\")
+;; Step 1 fails on the bench, so no compensation is needed — nothing was ever
+;; reserved. With a live ledger the saga runs all three steps and returns
+;; (success \"order-complete\" \"charge-id-123\" \"label-456\").
 ```
 
 **Saga route:** multi-step transaction with compensation. Each step has a compensating action if a later step fails. This is how you orchestrate distributed transactions without a global lock. The route is a **state machine** with rollback edges.
@@ -1355,7 +1397,11 @@ Let's add policy checks as middleware in a route—each policy is a guard that c
                     (list 'allow \"policies-passed\"))))))))
 
 (enforce-policies (list (list 'customer-id \"cust-777\") (list 'amount 200) (list 'sku \"SKU-888\")))
-;; => (allow \"policies-passed\") or (deny ...)
+;; => (deny \"credit-limit-exceeded\" 200 0)
+;; No credit record on the bench, so the fallback credit limit is 0 and the
+;; very first policy denies an order of 200. Worth noticing: defaulting a
+;; missing limit to 0 makes the chain fail CLOSED. Default it to a large
+;; number instead and a missing record would silently approve everything.
 ```
 
 **Policy route:** each policy is a guard. We check them in sequence. If any denies, we stop and return the denial. If all pass, we allow. This is **middleware**—cross-cutting concerns applied uniformly. The route is a **filter chain**.

@@ -671,7 +671,7 @@ test('song/config — no opts (defaults 16, oldest, 120)', () => {
   const { env, fuel } = freshEnv()
   const res = tryEval(env, fuel, '(song/config)')
   assert.equal(res.value.voices, 16)
-  assert.equal(res.value.voiceSteal, 'oldest')
+  assert.equal(res.value['voice-steal'], 'oldest')
   assert.equal(res.value.bpm, 120)
 })
 

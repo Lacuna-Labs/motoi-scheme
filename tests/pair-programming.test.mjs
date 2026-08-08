@@ -17,6 +17,7 @@ import { evaluate } from '../src/interp.js'
 import { parse, Sym } from '../src/reader.js'
 import { READING_STATE_PATH, _resetSharedStateForTests } from '../lib/system/reading-state.js'
 
+import { plain } from './_cells.mjs'
 function evalSrc(src, envOpt) {
   const fuel = { n: 1_000_000 }
   const env = envOpt || makeCoreEnv({ fuel })
@@ -26,9 +27,12 @@ function evalSrc(src, envOpt) {
   return { out, env }
 }
 
+// Walks the alist with JS array methods, so it converts the SPELLING once at
+// the top (`plain`, tests/_cells.mjs) and asserts exactly what it did before.
 function alistGet(alist, key) {
-  if (!Array.isArray(alist)) return undefined
-  for (const pair of alist) {
+  const rows = plain(alist)
+  if (!Array.isArray(rows)) return undefined
+  for (const pair of rows) {
     if (Array.isArray(pair) && pair.length === 2 && pair[0] instanceof Sym) {
       if (pair[0].name === key) return pair[1]
     }
@@ -184,7 +188,7 @@ test('motoi/bug-spot — unknown variable surfaces error', () => {
 test('motoi/ambient-complete — vec/ prefix returns vec/* verbs', () => {
   cleanState()
   const env = makeCoreEnv({ fuel: { n: 500000 } })
-  const { out } = evalSrc('(motoi/ambient-complete "vec/")', env)
+  const out = plain(evalSrc('(motoi/ambient-complete "vec/")', env).out)
   assert.ok(Array.isArray(out))
   assert.ok(out.length > 0, 'should suggest at least one vec/* verb')
   const names = out.map((row) => alistGet(row, ':name'))
@@ -195,7 +199,7 @@ test('motoi/ambient-complete — short prefix returns empty', () => {
   cleanState()
   const env = makeCoreEnv({ fuel: { n: 500000 } })
   const { out } = evalSrc('(motoi/ambient-complete "v")', env)
-  assert.deepEqual(out, [])
+  assert.deepEqual(plain(out), [])
 })
 
 // ── pair-narrate ──────────────────────────────────────────────────────
@@ -226,7 +230,7 @@ test('pair events log via reading-state session log', () => {
   const env = makeCoreEnv({ fuel: { n: 500000 } })
   evalSrc('(motoi/pair-on!)', env)
   evalSrc('(motoi/explain "(+ 1 2)")', env)
-  const { out } = evalSrc('(motoi/session-log 20)', env)
+  const out = plain(evalSrc('(motoi/session-log 20)', env).out)
   // We expect at least the pair-on + explain events to be logged.
   const kinds = out.map((row) => (alistGet(row, ':kind') || {}).name)
   assert.ok(kinds.includes('pair-on'))

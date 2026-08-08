@@ -10,6 +10,7 @@ import { existsSync, unlinkSync } from 'node:fs'
 import { startIdeServer } from '../../src/ide-server.js'
 import { READING_STATE_PATH, _resetSharedStateForTests } from '../../lib/system/reading-state.js'
 
+import { plain } from '../_cells.mjs'
 function cleanState() {
   _resetSharedStateForTests()
   try { if (existsSync(READING_STATE_PATH)) unlinkSync(READING_STATE_PATH) } catch { /* fine */ }
@@ -79,7 +80,7 @@ test('IDE server — /api/reading-state returns snapshot alist', async () => {
     const r = await fetchJson(url + 'api/reading-state')
     assert.equal(r.ok, true)
     assert.ok(r.state)
-    assert.ok(Array.isArray(r.state.chapters))
+    assert.ok(Array.isArray(plain(r.state.chapters)))
   } finally {
     server.close()
     cleanState()

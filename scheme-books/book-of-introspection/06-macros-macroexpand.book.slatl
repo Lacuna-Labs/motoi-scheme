@@ -28,7 +28,7 @@ Motoi's macro system uses `syntax-rules` with an auto-hygiene layer that gensyms
 - `macroexpand form` — fully expand a form, showing what the interpreter will actually evaluate.
 - `macroexpand-1 form` — do one step of expansion, so you can walk through nested macros one at a time.
 
-The live runtime evaluates macros internally but does not yet expose the expander as a verb — surfacing it is Wave-2 work. So that the examples run, we define a small expander here that knows the core rewrite rules (`when`, `unless`) and leaves other forms untouched. It also stands in for `gensym`, `macro-table`, and `macro-of`:
+The live runtime evaluates macros internally but does not yet expose the expander as a verb — `macroexpand` is unbound in Motoi today, and surfacing it is Wave-2 work. So that the examples run, we define a small expander here. It knows the core rewrite rules (`when`, `unless`), plus the handful of user macros this chapter demonstrates, and it leaves every other form untouched. It also stands in for `gensym`, `macro-table`, and `macro-of`:
 
 ```scheme
 ;; --- chapter setup: a small stand-in for the macro-introspection verbs ---
@@ -38,11 +38,40 @@ The live runtime evaluates macros internally but does not yet expose the expande
   (set! gensym-counter (+ gensym-counter 1))
   (string->symbol (string-append (symbol->string base) \"_gensym_\"
                                  (number->string gensym-counter))))
+;; replace every free occurrence of one symbol with another
+(define (subst-sym form old new)
+  (cond ((eq? form old) new)
+        ((pair? form) (cons (subst-sym (car form) old new)
+                            (subst-sym (cdr form) old new)))
+        (else form)))
 (define (macroexpand-1 form)
   (if (pair? form)
       (case (car form)
         ((when)   (list 'if (cadr form) (cons 'begin (cddr form))))
         ((unless) (list 'if (list 'not (cadr form)) (cons 'begin (cddr form))))
+        ;; the user macros defined later in this chapter
+        ((swap!)
+         (let ((a (cadr form)) (b (caddr form)))
+           (list 'let (list (list 'tmp a))
+                 (list 'set! a b)
+                 (list 'set! b 'tmp))))
+        ((bad-swap)
+         (let ((a (cadr form)) (b (caddr form)))
+           (list 'begin (list 'define 'tmp a)
+                 (list 'set! a b)
+                 (list 'set! b 'tmp))))
+        ((good-swap)
+         (let* ((a (cadr form)) (b (caddr form)) (g (gensym 'tmp)))
+           (list 'let (list (list g a))
+                 (list 'set! a b)
+                 (list 'set! b g))))
+        ((my-let)
+         (let* ((binding (car (cadr form)))
+                (v (car binding))
+                (init (cadr binding))
+                (body (caddr form))
+                (g (gensym v)))
+           (list (list 'lambda (list g) (subst-sym body v g)) init)))
         (else form))
       form))
 (define (macroexpand form)
@@ -67,10 +96,12 @@ The `when` macro expanded into an `if` wrapping a `begin`. Now you know what the
 
 ```scheme
 (macroexpand-1 '(unless (< x 0) (display x)))
-;; => (if (not (< x 0)) (display x))
+;; => (if (not (< x 0)) (begin (display x)))
 ```
 
-One step. `unless` becomes `if` + `not`. If `unless` expanded to something that itself contained macros, `macroexpand-1` would stop after one step; `macroexpand` would keep going.
+One step. `unless` becomes `if` + `not` — and note the `begin`, which is there even though the body is a single form. The expander does not know or care that one expression needs no sequencing; the rewrite rule says `(begin body ...)` and that is what you get. Expansions are frequently a little uglier than the code you would write by hand, and that is not a bug. It is the thing you came here to see.
+
+If `unless` expanded to something that itself contained macros, `macroexpand-1` would stop after one step; `macroexpand` would keep going.
 
 ## 6.3 The REPL shortcut
 
@@ -308,6 +339,8 @@ Expand the fixed version:
 ```
 
 Now `tmp` is inside a `let`, and the gensym rename means it cannot collide with the caller's `tmp`. The expansion shows the fix.
+
+Note the `_2`. The gensym counter is one running counter for the whole session, not one per macro — 6.23 already spent `tmp_gensym_1` on `my-let` a few pages back, so this expansion got the next number. Do not memorize the digit. If you run this expansion alone in a fresh REPL you will see `tmp_gensym_1`, and if you run it after an hour of macro work you will see some much larger number. What matters is that the name is *unique*, not what it counts to.
 
 This is the whole discipline. Write a macro, expand it, read the expansion, verify the shape is what you intended. Every time.
 

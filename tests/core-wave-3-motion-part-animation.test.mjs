@@ -28,6 +28,7 @@ import assert from 'node:assert/strict'
 import { Sym } from '../src/reader.js'
 import { makeCoreEnv } from '../core/index.js'
 
+import { plain } from './_cells.mjs'
 function fresh() {
   const env = makeCoreEnv()
   env.vars.get('world/reset!')()
@@ -37,9 +38,13 @@ function fresh() {
 // ── motion-spec readers ────────────────────────────────────────────
 // A composer motion-spec is an alist of [keyword-Sym, value] rows.
 
+// These readers walk the spec with JS array methods. A Scheme list is a chain
+// of cons cells now, so each one converts the SPELLING at its entry (`plain`,
+// tests/_cells.mjs) and asserts exactly what it asserted before.
 const specGet = (spec, key) => {
-  assert.ok(Array.isArray(spec), 'motion-spec should be an alist')
-  const row = spec.find((r) => r[0] instanceof Sym && r[0].name === ':' + key)
+  const rows = plain(spec)
+  assert.ok(Array.isArray(rows), 'motion-spec should be an alist')
+  const row = rows.find((r) => r[0] instanceof Sym && r[0].name === ':' + key)
   return row ? row[1] : undefined
 }
 const kindOf = (spec) => specGet(spec, 'kind').name
@@ -49,8 +54,8 @@ const channelOf = (spec, name) => {
   assert.ok(row, `spec should carry a '${name}' channel`)
   return row[1]
 }
-const peakOf = (curve) => Math.max(...curve.map(([, v]) => Math.abs(v)))
-const atFrame = (curve, i) => curve[i][1]
+const peakOf = (curve) => Math.max(...plain(curve).map(([, v]) => Math.abs(v)))
+const atFrame = (curve, i) => plain(curve)[i][1]
 
 // ── motion/ — timing planners (reference: 42-motion.slat) ──────────
 
@@ -72,10 +77,10 @@ test('motion/halt does NOT zero entity velocity (reference caveat)', () => {
   // 42-motion.slat :caveats — "Motion/halt does not reset the entity's
   // velocity to zero in the physics engine; use entity/set-vel! if you need
   // to clear inertia." This test pins that documented boundary.
-  assert.deepEqual(env.vars.get('entity/vel')(id), [10, 10])
+  assert.deepEqual(plain(env.vars.get('entity/vel')(id)), [10, 10])
   // ...and entity/set-vel! IS the documented way to clear it.
   env.vars.get('entity/set-vel!')(id, 0, 0)
-  assert.deepEqual(env.vars.get('entity/vel')(id), [0, 0])
+  assert.deepEqual(plain(env.vars.get('entity/vel')(id)), [0, 0])
 })
 
 test('motion/drop returns a beat-aligned articulation spec', () => {

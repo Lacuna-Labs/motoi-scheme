@@ -32,10 +32,17 @@ A map takes a function and a list, and it applies that function to every element
 Here's a program that takes a list of product prices (in cents) and converts them all to dollars, rounded to two decimal places:
 
 ```scheme
-;; Convert a list of prices from cents to dollar strings
+;; Convert a list of prices from cents to dollar strings.
+;; Stay in whole cents and split them, rather than dividing into a float and
+;; rounding back: Motoi has a single number type, so 2450/100 is 24.5 and
+;; `number->string` writes \"24.5\", not \"24.50\". Money needs a fixed two
+;; digits after the point, and only integer arithmetic plus an explicit pad
+;; will give you that.
 (define (cents-to-dollars price-cents)
-  (let ((dollars (/ price-cents 100.0)))
-    (string-append \"$\" (number->string (math/round dollars 2)))))
+  (let* ((whole (quotient price-cents 100))
+         (rem   (remainder price-cents 100)))
+    (string-append \"$\" (number->string whole) \".\"
+                   (if (< rem 10) \"0\" \"\") (number->string rem))))
 
 (define prices-in-cents '(1299 2450 599 10000 3333))
 
@@ -52,8 +59,12 @@ Now let's map a transformation we build ourselves. Suppose we have a list of pla
 
 ```scheme
 ;; normalize: lowercase and trim surrounding whitespace.
+;; Note string-trim-BOTH: in SRFI-13, plain `string-trim` strips only the LEFT
+;; end and `string-trim-right` only the right, so trimming \"surrounding\"
+;; whitespace needs the both-ends verb. Using `string-trim` here would leave
+;; every trailing space in place and quietly break the comparisons below.
 (define (normalize s)
-  (string-trim (string-downcase s)))
+  (string-trim-both (string-downcase s)))
 
 ;; slugify: keep letters/digits, collapse runs of other chars into single dashes.
 (define (slugify s)
@@ -103,12 +114,12 @@ Here's a program that takes a list of order totals and keeps only the ones above
           order-totals))
 
 high-value-orders
-;; => (87.50 150.00 99.99)
+;; => (87.5 150.0 99.99)
 ```
 
 The lambda here is the predicate: it returns true for any total above 50. Filter walks the list, applies the predicate to each element, and keeps the ones that pass.
 
-Now let's filter with a verb result. Suppose we have a list of keywords and we want to keep only the ones that are valid UTF-8 slugs (no special characters, no spaces):
+Now let's filter with a computed result. Suppose we have a list of keywords and we want to keep only the ones that are *already* slugs — the ones `slugify` leaves untouched:
 
 ```scheme
 ;; Keep only keywords that are already valid slugs
@@ -123,10 +134,12 @@ Now let's filter with a verb result. Suppose we have a list of keywords and we w
   (filter is-valid-slug? keywords))
 
 valid-slug-keywords
-;; => (\"motoi\" \"scheme-lang\")
+;; => (\"motoi\" \"scheme-lang\" \"café\")
 ```
 
-Each keyword is slugified, then compared to itself. If they match, the keyword was already a valid slug. Filter keeps only those.
+Each keyword is slugified, then compared to itself. If they match, the keyword was already a slug. Filter keeps only those.
+
+`café` surviving is not a bug — it is the definition doing exactly what it says. `slugify` keeps any character that `char-alphabetic?` or `char-numeric?` accepts, and R7RS defines `char-alphabetic?` by Unicode's Alphabetic property, so `é` is a letter just like `e`. `hello world` loses to the space, `map/filter` to the slash, `data_pipeline` to the underscore (an underscore is punctuation, not a letter or a digit). If you wanted ASCII-only slugs you would have to say so — write a predicate that also demands `(char<? c #\\x80)`. The filter can only be as strict as the predicate you hand it.
 
 ---
 
@@ -176,8 +189,11 @@ Let's do the same with wired verbs. Suppose we have a list of product titles and
 (define slugs
   (map slugify product-titles))
 
+;; \"short\" means twenty characters or fewer, so the test is <=, not <.
+;; Both surviving slugs are exactly 20 characters long — with a bare < this
+;; filter returns the empty list and the bug looks like a slugify problem.
 (define short-slugs
-  (filter (lambda (slug) (< (string-length slug) 20))
+  (filter (lambda (slug) (<= (string-length slug) 20))
           slugs))
 
 short-slugs
@@ -202,10 +218,12 @@ Here's a program that takes a list of order totals and sums them:
   (fold + 0 order-totals))
 
 total-revenue
-;; => 401.28
+;; => 401.28000000000003
 ```
 
 The function is `+`, the initial accumulator is 0, and fold walks the list, adding each total to the accumulator. At the end, you have the sum.
+
+And there is the tail: `401.28000000000003`, not `401.28`. Nothing is broken. Values like `12.99` and `87.50` cannot be represented exactly in binary floating point, so each one is stored as the nearest double, and folding seven of them together accumulates seven tiny errors into a visible one. This is the same fact that forced `cents-to-dollars` to stay in whole cents earlier in the chapter, and it is why real money code sums *integers* and divides only at the very end. If you ever want to test this sum, compare it against a tolerance, never with `=`.
 
 Now let's fold with a lambda. Suppose we want to count how many high-value orders (above $50) are in the list:
 
@@ -267,7 +285,7 @@ Here's a program that takes a list of product prices (in cents), converts them t
   (fold + 0 high-value-prices))
 
 total-high-value
-;; => 147.83
+;; => 257.82
 ```
 
 Three stages: map converts, filter selects, fold sums. Each stage is independent and clear.
@@ -318,7 +336,7 @@ Here's a program that creates a price-filter function. You give it a threshold, 
 (define premium (filter above-100 prices))
 
 (list high-value premium)
-;; => ((87.50 150.00 99.99) (150.00))
+;; => ((87.5 150.0 99.99) (150.0))
 ```
 
 `make-price-filter` returns a lambda that captures `threshold`. Each call to `make-price-filter` creates a new closure with its own threshold. The closures can be used directly with `filter`.
@@ -402,7 +420,7 @@ Now let's use that composed function with `map` to transform a list of raw strin
   (map normalize-slug-upper raw-strings))
 
 transformed
-;; => (\"HELLO-WORLD\" \"MOTOI-SCHEME\" \"MAPFILTERFOLD\")
+;; => (\"HELLO-WORLD\" \"MOTOI-SCHEME\" \"MAP-FILTER-FOLD\")
 ```
 
 One composed function, one map, three transformations applied to every element. This is the power of composition: you build the tool you need, then use it.
@@ -591,7 +609,7 @@ Now let's do a multi-stage pipeline with analytics data. We model the fetch with
   (fold + 0 user-counts))
 
 total-purchases
-;; => <sum>
+;; => 19  (the two purchase rows, 12 + 7)
 ```
 
 Five stages: fetch, check, filter by event type, extract counts, sum. If the fetch fails, we start with an empty list and get a sum of zero. The program never lies about what it got.
@@ -619,7 +637,7 @@ Here's a program that defines a pipeline to process a list of prices: convert ce
 (define prices-in-cents '(1299 2450 599 10000 3333 450 8700))
 
 (process-prices prices-in-cents)
-;; => 147.83
+;; => 257.82
 ```
 
 `process-prices` is the pipeline. The data (prices-in-cents) is passed once at the end. The transformation is a single expression that reads inside-out: map, then filter, then fold.
@@ -649,7 +667,7 @@ Now let's make it more readable by composing smaller functions:
 (define prices-in-cents '(1299 2450 599 10000 3333 450 8700))
 
 (process-prices prices-in-cents)
-;; => 147.83
+;; => 257.82
 ```
 
 Each step is named, then composed. The pipeline is built from small, clear pieces. The data flows through implicitly.
@@ -733,7 +751,7 @@ Here's a program that folds over a list of numbers and stops as soon as the sum 
 (define numbers '(10 20 30 40 50 60 70))
 
 (sum-until-threshold numbers 100)
-;; => 110
+;; => 150  (the loop tests the OLD acc, so it adds 50 before stopping)
 ```
 
 The loop stops as soon as `acc` exceeds the threshold. We don't process the whole list if we don't need to.
@@ -780,7 +798,7 @@ Here's a program that takes a list of orders (each order is a list of item price
   (map (lambda (order) (fold + 0 order)) orders))
 
 order-totals
-;; => (35.00 40.00 190.00 7.50)
+;; => (35.0 40.0 190.0 7.5)
 ```
 
 The outer `map` walks the list of orders. For each order, we fold to sum the items. The result is a list of totals, one per order.
@@ -807,7 +825,7 @@ Now let's do a nested map with association lists. Here's a program that takes a 
 
 products-in-dollars
 ;; => (((\"price\" . 12.99) (\"id\" . \"A1\") (\"name\" . \"Mug\"))
-;;     ((\"price\" . 24.50) (\"id\" . \"A2\") (\"name\" . \"Journal\"))
+;;     ((\"price\" . 24.5) (\"id\" . \"A2\") (\"name\" . \"Journal\"))
 ;;     ((\"price\" . 5.99) (\"id\" . \"A3\") (\"name\" . \"Soap\")))
 ```
 
@@ -834,7 +852,7 @@ Here's a program that takes a list of prices and applies a discount only to pric
   (map apply-selective-discount prices))
 
 discounted-prices
-;; => (12.99 70.00 5.00 120.00 42.30 79.992 3.50)
+;; => (12.99 70.0 5.0 120.0 42.3 79.992 3.5)
 ```
 
 High prices get a discount; low prices pass through unchanged. The branching logic is inside the transformation function.
@@ -858,7 +876,7 @@ Now let's branch with a cond ladder. Here's a program that categorizes prices in
   (map transform-by-tier prices))
 
 tiered-prices
-;; => ((low . 5.00) (medium . 22.50) (medium . 67.50) (high . 120.00) (low . 10.00) (high . 160.00))
+;; => ((low . 5.0) (medium . 22.5) (medium . 67.5) (high . 120.0) (low . 10.0) (high . 160.0))
 ```
 
 Each price is tagged with its tier and transformed accordingly. The `cond` ladder makes the branching logic clear.
@@ -912,7 +930,7 @@ Now let's do a parallel fold over a list of orders to compute total revenue and 
 (define result (fold-revenue-and-count order-totals))
 
 result
-;; => (401.28 7)
+;; => (401.28000000000003 7)  ;; same float tail as the single-accumulator fold
 ```
 
 One fold, two accumulators, two results. Much faster than two passes.
@@ -1002,13 +1020,15 @@ Here's a program that takes a list of product names and a list of prices and pai
             prices))
 
 products
-;; => (((name . \"Mug\") (price . 12.99))
-;;     ((name . \"Journal\") (price . 24.50))
-;;     ((name . \"Soap\") (price . 5.99))
-;;     ((name . \"Keychain\") (price . 8.00)))
+;; => (((\"name\" . \"Mug\") (\"price\" . 12.99))
+;;     ((\"name\" . \"Journal\") (\"price\" . 24.5))
+;;     ((\"name\" . \"Soap\") (\"price\" . 5.99))
+;;     ((\"name\" . \"Keychain\") (\"price\" . 8.0)))
 ```
 
 `zip-with` takes a function and two lists, and it applies the function to corresponding pairs. Here we use it to build product records.
+
+Two of the prices came back looking different from how they were written. `24.50` prints as `24.5` and `8.00` prints as `8.0`: the trailing zeros were never stored, because a decimal point makes the literal *inexact* and an inexact number carries a value, not a spelling. It is still `8.0` and not `8` — the dot is the engine telling you this number is a float, not an exact integer.
 
 Now let's zip with a simpler function — just cons the pairs together:
 
@@ -1144,12 +1164,23 @@ Here's a program that takes a product title, slugifies it, looks it up in cortex
         (cons \"top-id\" (if memory-id memory-id \"none\"))
         (cons \"views\" view-count)))
 
-summary
-;; => ((\"slug\" . \"vintage-leather-journal\")
-;;     (\"memories-found\" . <n>)
-;;     (\"high-score-count\" . <m>)
-;;     (\"top-id\" . <id or \"none\">)
-;;     (\"views\" . <count>))
+;; `summary` has the shape
+;;   ((\"slug\" . \"vintage-leather-journal\")
+;;    (\"memories-found\" . <n>)
+;;    (\"high-score-count\" . <m>)
+;;    (\"top-id\" . <id or \"none\">)
+;;    (\"views\" . <count>))
+;; but only the first field can be written down here as a fixed value. The other
+;; four are read out of the cortex store, and what is in that store depends on
+;; the machine you are sitting at — so a book cannot honestly print a number for
+;; them. What a book CAN promise is the part that does not depend on the store:
+(assoc \"slug\" summary)
+;; -> (\"slug\" . \"vintage-leather-journal\")
+
+;; This is worth saying plainly: when a value depends on state you do not
+;; control, do not guess at it. Assert what is actually invariant, and say out
+;; loud that the rest varies. A confident wrong number in a comment is worse
+;; than an honest gap.
 ```
 
 Seven stages: slugify, recall, filter, extract ID, fetch analytics, extract metric, summarize. Each stage checks for failure and routes cleanly. The final summary reflects the entire flow.
@@ -1165,18 +1196,21 @@ When your data is deeply nested (lists of lists of association lists), you need 
 Here's a program that takes a list of orders (each order has a list of items, each item has a quantity and price) and calculates the total revenue across all orders:
 
 ```scheme
-;; Nested fold: sum revenue across all orders and items
-(define orders
-  '(((\"item\" . \"Mug\") (\"qty\" . 2) (\"price\" . 12.99))
-    ((\"item\" . \"Mug\") (\"qty\" . 1) (\"price\" . 12.99))
-    ((\"item\" . \"Soap\") (\"qty\" . 3) (\"price\" . 5.99)))
-  
-  '(((\"item\" . \"Journal\") (\"qty\" . 1) (\"price\" . 24.50))
-    ((\"item\" . \"Keychain\") (\"qty\" . 5) (\"price\" . 8.00)))
-  
-  '(((\"item\" . \"Mug\") (\"qty\" . 10) (\"price\" . 12.99))))
+;; Nested fold: sum revenue across all orders and items.
+;; The three orders must be gathered by `list` into ONE value. Writing three
+;; quoted forms in a row inside a single `define` does not make a list of
+;; three — `define` binds the first one and silently ignores the rest, and
+;; the total comes out as the first order's revenue with no error anywhere.
+(define full-orders
+  (list
+   '(((\"item\" . \"Mug\") (\"qty\" . 2) (\"price\" . 12.99))
+     ((\"item\" . \"Mug\") (\"qty\" . 1) (\"price\" . 12.99))
+     ((\"item\" . \"Soap\") (\"qty\" . 3) (\"price\" . 5.99)))
 
-(define full-orders (list orders))
+   '(((\"item\" . \"Journal\") (\"qty\" . 1) (\"price\" . 24.50))
+     ((\"item\" . \"Keychain\") (\"qty\" . 5) (\"price\" . 8.00)))
+
+   '(((\"item\" . \"Mug\") (\"qty\" . 10) (\"price\" . 12.99)))))
 
 (define (sum-order-revenue order-items)
   (fold (lambda (item acc)
@@ -1193,7 +1227,7 @@ Here's a program that takes a list of orders (each order has a list of items, ea
         full-orders))
 
 total-revenue
-;; => <total>
+;; => 251.34  (56.94 + 64.5 + 129.9)
 ```
 
 The outer fold walks the list of orders. For each order, the inner fold walks the items and sums `qty * price`. The outer fold accumulates the sums. Two levels of folding, one clear result.
@@ -1227,7 +1261,7 @@ Now let's do a deeply nested fold with filtering. Here's a program that takes a 
         categories))
 
 total-high-value
-;; => 369.00
+;; => 369.0
 ```
 
 The outer fold walks categories. For each category, the inner fold walks products, filtering for high-value (> $20) and summing. Two levels, one filter, one sum.
@@ -1260,7 +1294,7 @@ Here's a program that takes a list of numbers and processes them in pairs: if th
 (define numbers '(10 45 20 35 5 10 60 5))
 
 (process-pairs numbers '())
-;; => (55 55)
+;; => (55 55 65)  (10+45, 20+35, and 60+5; the 5+10 pair is under 50)
 ```
 
 `process-pairs` handles the main loop. `process-pair` handles one pair. They call each other. The result: only pairs that sum above 50 are kept.
@@ -1287,8 +1321,12 @@ Here's a program that takes a list of values and applies different transformatio
                            (if (null? table)
                                (lambda (x) x)  ; identity
                                (let ((entry (car table)))
+                                 ;; Entries are built with `cons`, so an entry is
+                                 ;; the dotted pair (predicate . handler) and the
+                                 ;; handler is its CDR. `cadr` would be `(car (cdr
+                                 ;; entry))` — taking the car of a procedure.
                                  (if ((car entry) value)
-                                     (cadr entry)
+                                     (cdr entry)
                                      (find-handler (cdr table))))))))
     (let ((handler (find-handler dispatch-table)))
       (handler value))))
@@ -1352,16 +1390,18 @@ Here's a program that defines a `map-filter` operator: map a function, then filt
 
 (define numbers '(1 2 3 4 5 6 7 8 9 10))
 
-(define doubled-evens
+(define big-doubles
   (map-filter (lambda (x) (* x 2))
-              even?
+              (lambda (x) (> x 10))
               numbers))
 
-doubled-evens
-;; => (4 8 12 16 20)
+big-doubles
+;; => (12 14 16 18 20)
 ```
 
 `map-filter` is a composed operator: map, then filter. You could also define `filter-map` (filter, then map), or `map-fold` (map, then fold). Each is a small, reusable tool.
+
+The order is not a detail—it decides what the predicate is even looking at. Here the predicate runs on the *doubled* values, so `(> x 10)` keeps the doubles of 6 through 10. Had we filtered first and then doubled, `(> x 10)` would have tested the originals and kept only the double of 10, giving `(20)`. Note also what a badly chosen predicate hides: pairing this doubling with `even?` would return all ten doubles, because every doubled integer is even. A filter that never rejects anything looks exactly like a filter that works, so pick test data where the predicate has to make a real decision.
 
 Here's another: a `fold-map` that folds to accumulate, then maps over the accumulator:
 

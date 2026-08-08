@@ -12,8 +12,12 @@
 //   motoi slat parse <f>    Parse a .slat file; print as JSON.
 //   motoi slat emit <f>     Convert a JSONL log to slat.
 
-import { parse, Pair, pairToString } from './reader.js'
+import { parse, Pair, pairToString, writeString } from './reader.js'
 import { SchemeVector } from '../lib/base/r7rs-types.js'
+import { isFlo, numToString } from '../lib/math/tower.js'
+import { isStr, str as _sstr } from '../lib/base/mutable-string.js'
+import { isCpx, cpxToString } from '../lib/math/complex.js'
+import { opaqueRepr } from './opaque-print.js'
 import { evaluate, noteError } from './interp.js'
 import { makeCoreEnv } from '../core/index.js'
 import { expandProgram } from './macro.js'
@@ -23,12 +27,14 @@ import { emitDocs } from './docs-emitter.js'
 import { slatLoads, slatDumps, slatToJsonl, jsonlToSlat } from './slat.js'
 import { registerLib, stdParts, libInfo, validateStandard } from './lib-register.js'
 import { readFile, writeFile } from 'node:fs/promises'
+import path from 'node:path'
 import { VERSION } from './index.js'
 import { migrateLegacyMotoiData } from './paths.js'
 import { startIdeServer } from './ide-server.js'
 import { startTui } from '../tui/tui.js'
 import startBoot from '../tui/boot-shell.js'
 
+import { NIL, arrayToList, isList, isListish, isNull, isPair, listLength, listToArray, seqVerb, toJS, toScheme } from '../lib/base/list.js'
 // Brand pink for section headers, matching renderSplash()'s MOTOI_PINK_256.
 const PINK_256 = 218
 const ANSI_RESET = '\x1b[0m'
@@ -106,12 +112,21 @@ function format(v) {
   if (v === null) return '()'
   if (v === true) return '#t'
   if (v === false) return '#f'
-  if (typeof v === 'string') return JSON.stringify(v)
+  // Without this branch numbers fell through to String(v) at the bottom and the
+  // top level printed the JavaScript spellings NaN and Infinity, while `display`
+  // printed the R7RS ones. Two printers, one engine, different answers.
+  // One printer for the whole tower (lib/math/tower.js), so an inexact integer
+  // shows its point — `1.0`, not `1` — and cannot read back exact.
+  if (typeof v === 'number' || typeof v === 'bigint' || isFlo(v)) return numToString(v)
+  if (isStr(v)) return writeString(_sstr(v))
   // R7RS §6.9 bytevectors print as #u8(b0 b1 …).
   if (v instanceof Uint8Array) return '#u8(' + Array.from(v).join(' ') + ')'
   // R7RS §6.8 vectors print as #(e0 e1 …).
   if (v instanceof SchemeVector) return '#(' + v.items.map(format).join(' ') + ')'
   if (v instanceof Pair) return pairToString(v, format)
+  if (isNull(v)) return '()'
+  // Cells are handled above; `pairToString` only walks cells, so an array
+  // reaching it would print `( . <array>)`.
   if (Array.isArray(v)) return '(' + v.map(format).join(' ') + ')'
   // Symbol-tagged runtime values (Sym): print by name.
   if (v && typeof v === 'object' && 'name' in v && typeof v.name === 'string'
@@ -122,16 +137,7 @@ function format(v) {
     return v.d === 1n ? String(v.n) : `${v.n}/${v.d}`
   }
   // Motoi complex — Symbol.for('motoi:complex').
-  const CPX_TAG = Symbol.for('motoi:complex')
-  if (v && typeof v === 'object' && v[CPX_TAG] === true) {
-    const { re, im } = v
-    if (im === 0) return String(re)
-    if (re === 0) return im === 1 ? 'i' : im === -1 ? '-i' : `${im}i`
-    const sign = im >= 0 ? '+' : '-'
-    const ai = Math.abs(im)
-    const imPart = ai === 1 ? 'i' : `${ai}i`
-    return `${re}${sign}${imPart}`
-  }
+  if (isCpx(v)) return cpxToString(v)
   // Everything below used to fall through to String(v) and print the JS
   // artifact `[object Object]` — the same meaningless text for four unrelated
   // Scheme types, at the top level where a learner reads the answer.
@@ -143,16 +149,38 @@ function format(v) {
     return v.forced ? format(v.value) : '#<promise>'
   }
   if (typeof v === 'function') return '#<procedure>'
+  // A Scheme lambda is a Closure object, not a JS function, so it missed the
+  // test above and printed as `[object Object]` here and `#<record>` through
+  // display. `(display car)` said `#<procedure>` for the same kind of thing.
+  // Duck-typed rather than imported so all three renderers can agree without
+  // src/cli.js, src/base.js and lib/base/r7rs-small.js taking a dependency.
+  if (v && typeof v === 'object' && isList(v.params) && 'body' in v && 'env' in v) {
+    return '#<procedure>'
+  }
   if (v && typeof v === 'object' && typeof v.kind === 'string' && 'buffer' in v) {
     return `#<port ${v.kind}>`
   }
+  // Host-backed opaque values — entities, hash tables, random sources, audio
+  // records, SLAT records. All of these reached String(v) below and printed
+  // `[object Object]`, the same six characters for five unrelated Scheme
+  // types, at the top level where a learner reads the answer. The rule lives
+  // in ONE place (src/opaque-print.js) rather than being duck-typed into each
+  // of the four renderers, because four copies of a rule is four chances to
+  // drift and drift is how `display` came to say `#<record>` for a value the
+  // top level called `[object Object]`.
+  const opaque = opaqueRepr(v)
+  if (opaque) return opaque
   return String(v)
 }
 
-function evalSource(src, fuelBudget = 200000) {
+// `baseDir` is the directory of the file being run, so an `include` inside it
+// resolves the way §4.1.7 suggests — relative to the file that wrote it, not
+// to wherever the shell happened to be. Left undefined for `eval`, which has
+// no file, and falls back to the working directory.
+function evalSource(src, fuelBudget = 200000, baseDir = undefined) {
   const env = makeCoreEnv({ fuel: { n: fuelBudget } })
   const forms = parse(src)
-  const { forms: expanded } = expandProgram(forms, { fuel: { n: fuelBudget } })
+  const { forms: expanded } = expandProgram(forms, { fuel: { n: fuelBudget }, baseDir })
   const fuel = { n: fuelBudget }
   let result
   try {
@@ -372,7 +400,7 @@ export async function main(rawArgv = process.argv.slice(2), meta = {}) {
     if (!file) { process.stderr.write('usage: motoi run <file.scm>\n'); return 1 }
     try {
       const src = await readFile(file, 'utf8')
-      const result = evalSource(src, fuelBudget)
+      const result = evalSource(src, fuelBudget, path.dirname(path.resolve(file)))
       if (result !== undefined) {
         const out = json ? JSON.stringify(result) : format(result)
         process.stdout.write(out + '\n')

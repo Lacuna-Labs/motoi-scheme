@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 import { Sym } from '../src/reader.js'
 import { makeCoreEnv } from '../core/index.js'
 
+import { plain } from './_cells.mjs'
 function fresh() {
   const env = makeCoreEnv()
   env.vars.get('world/reset!')()
@@ -69,14 +70,23 @@ test('BUG-1 — entity/untag! works on entity/make-created entity (Array-shaped 
   const untag = get(env, 'entity/untag!')
   const count = get(env, 'world/count')
 
-  const e = make(sym('crate'), 5, 5)
+  // 2026-08-04: entity/make returns the ID, as a string — the reference locks
+  // it (24-entity.slat, entity/make :signature "... -> string", :doc "Returns
+  // the id as a string so it can be chained into further entity/* calls").
+  // This test used the return value as a handle, which is what the engine
+  // happened to hand back before the resolver was unified. The BUG-1 assertion
+  // is unchanged — the made entity's tags must be Set-shaped so untag! works —
+  // only the way the record is reached changed: world/find hands back handles.
+  const id = make(sym('crate'), 5, 5)
+  assert.equal(id, 'crate', 'entity/make returns the id as a string')
+  const e = plain(get(env, 'world/find')(sym('crate')))[0]
   // The legacy path must ALSO normalize to Set — that is the whole fix.
   assert.ok(e.tags instanceof Set, 'entity/make must produce Set-shaped tags')
-  tagFn(e, sym('heavy'))
+  tagFn(id, sym('heavy'))
   assert.equal(count(sym('heavy')), 1)
   // Before the fix: for entities made via entity/make (Array tags),
   // untag! called Array.delete which doesn't exist. Fix normalizes to Set.
-  untag(e, sym('heavy'))
+  untag(id, sym('heavy'))
   assert.equal(count(sym('heavy')), 0)
 })
 
@@ -107,7 +117,7 @@ test('BUG-1 — tag queries work across entity/spawn-created entities', () => {
   tagFn(coin, sym('pickup'))
   // Before the fix: the tag-scan path also used .includes() → TypeError
   // when the other entity's tags is a Set (spawn-created).
-  const result = find(sym('pickup'))
+  const result = plain(find(sym('pickup')))
   assert.ok(Array.isArray(result))
   assert.equal(result.length, 1)
 })
@@ -161,7 +171,7 @@ test('BUG-2 — with-seed also seeds (random-boolean) when present', () => {
   // 5-shot determinism check.
   const a = withSeed(7, () => [randomBool(), randomBool(), randomBool(), randomBool(), randomBool()])
   const b = withSeed(7, () => [randomBool(), randomBool(), randomBool(), randomBool(), randomBool()])
-  assert.deepEqual(a, b, 'same seed must produce same random-boolean sequence')
+  assert.deepEqual(plain(a), b, 'same seed must produce same random-boolean sequence')
 })
 
 // ── BUG-3: part/shake bypasses with-seed (Math.random directly) ──
@@ -189,12 +199,12 @@ test('BUG-3 — part/shake is reproducible (no unseeded randomness)', () => {
 
   const a = withSeed(2024, () => JSON.stringify(partShake()))
   const b = withSeed(2024, () => JSON.stringify(partShake()))
-  assert.deepEqual(a, b, 'same seed must produce same part/shake result')
+  assert.deepEqual(plain(a), b, 'same seed must produce same part/shake result')
 
   // Stronger: the gesture is a pure curve, so it must match even under a
   // DIFFERENT seed. If this ever fails, unseeded randomness has crept back in.
   const c = withSeed(999, () => JSON.stringify(partShake()))
-  assert.deepEqual(a, c, 'part/shake must be a deterministic curve, not RNG-driven')
+  assert.deepEqual(plain(a), c, 'part/shake must be a deterministic curve, not RNG-driven')
 })
 
 // ── BUG-4: ai/wander bypasses with-seed (Math.random directly) ──
@@ -209,8 +219,10 @@ test('BUG-4 — with-seed makes ai/wander deterministic', () => {
     wander([0, 0], [0, 1], 0.5),
     wander([0, 0], [1, 1], 0.5),
   ]
-  const a = withSeed(4242, draw)
-  const b = withSeed(4242, draw)
+  // Both sides are engine values, so both are converted the same way — the
+  // claim (identical sequences, element for element) is unchanged.
+  const a = plain(withSeed(4242, draw))
+  const b = plain(withSeed(4242, draw))
   assert.deepEqual(a, b, 'same seed must produce same ai/wander sequence')
 })
 
@@ -312,11 +324,14 @@ test('BUG-16 — cortex/write preserves nested Syms (shape-preserving round-trip
     const script = `
       const { Sym } = await import('./src/reader.js')
       const { makeCoreEnv } = await import('./core/index.js')
+      const { plain } = await import('./tests/_cells.mjs')
       const env = makeCoreEnv(); env.vars.get('world/reset!')()
       const write = env.vars.get('cortex/write'), read = env.vars.get('cortex/read')
       const alist = [[new Sym(':kind'), new Sym('sprite')], [new Sym(':pos'), [1, 2, 3]]]
       write(new Sym('bug16-key'), alist)
-      const back = read(new Sym('bug16-key'))
+      // Convert the cell spelling once, at the point the value enters JS. Syms
+      // pass through untouched, so the instanceof guards below keep their force.
+      const back = plain(read(new Sym('bug16-key')))
       console.log(JSON.stringify({
         isArray: Array.isArray(back),
         keyIsSym: back[0][0] instanceof Sym, keyName: back[0][0] && back[0][0].name,
@@ -360,10 +375,10 @@ async function _historicalBug16AssertionsFromCortexIoEra() {
     const back = read(new Sym(uniqueKey))
     // Before the fix, the inner Syms round-tripped as {name: '...'} objects.
     // After the fix, they arrive as plain strings.
-    assert.ok(Array.isArray(back), 'expected array')
+    assert.ok(Array.isArray(plain(back)), 'expected array')
     assert.equal(back[0][0], ':kind', 'nested Sym key should have unwrapped to string')
     assert.equal(back[0][1], 'sprite', 'nested Sym value should have unwrapped to string')
-    assert.deepEqual(back[1][1], [1, 2, 3])
+    assert.deepEqual(plain(back[1][1]), [1, 2, 3])
   }
 }
 
@@ -396,7 +411,7 @@ test('BUG-15 — big-bang runs a Scheme-closure frame handler (not silently drop
   const handler = () => { ticks += 1; return 42 }
   const setup = () => { onFrame(handler) }
 
-  const result = bigBang(setup, 5)
+  const result = plain(bigBang(setup, 5))
 
   // Reference: returns the list (frames N).
   assert.ok(Array.isArray(result), `big-bang must return a list, got ${result}`)
@@ -419,7 +434,7 @@ test('BUG-15 — big-bang accepts a real interp Closure as the frame handler', a
   const stepEnv = new Env()
   const closure = new Closure([], [42], stepEnv)
   // Must not throw and must not silently skip the closure.
-  const result = bigBang(() => { onFrame(closure) }, 3)
+  const result = plain(bigBang(() => { onFrame(closure) }, 3))
   assert.ok(Array.isArray(result) && result[1] === 3,
     `closure-shaped handler must be driven; got ${JSON.stringify(result)}`)
 })

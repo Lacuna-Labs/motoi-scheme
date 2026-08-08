@@ -97,7 +97,7 @@ When you tap, *when* matters as much as *what*. A beat machine needs to remember
 
 ;; show the log
 (display beat-log)
-;; => ((1 snare \"(noise 'white)\") (0 kick \"(tone 60 0.3)\"))
+;; the log would then read: ((1 snare \"(noise 'white)\") (0 kick \"(tone 60 0.3)\"))
 ```
 
 The log is a list of `(beat instrument code)` tuples. We can replay it, edit it, quantize it, or emit it as a `schedule` route.
@@ -181,10 +181,13 @@ Human taps are messy. A beat machine can snap them to the nearest eighth or sixt
 ;; => ((0.0 kick \"(tone 60 0.3)\")
 ;;     (1.0 snare \"(noise 'white)\")
 ;;     (2.0 kick \"(tone 60 0.3)\")
-;;     (3.0 hat \"(noise 'pink)\"))
+;;     (2.5 hat \"(noise 'pink)\"))
 ```
 
-Sloppy taps become a clean grid. The machine forgives your timing.
+Sloppy taps become a clean grid. The machine forgives your timing — but it
+forgives it toward the *nearest* line, not forward. The hat at 2.7 is closer
+to 2.5 than to 3.0, so it lands on the off-beat. If you wanted it on 3 you
+needed to play it later, or quantize on a coarser grid.
 
 ## Four-Step Loop — The Classic Drum Machine
 
@@ -467,18 +470,18 @@ The beat is now a *composition* of named patterns and a chosen kit. The code is 
 Euclidean rhythms are the even-as-possible distribution of onsets—ancient bell patterns, clave, tresillo.
 
 ```scheme
-;; euclidean rhythm: distribute k hits over n steps
+;; euclidean rhythm: distribute k hits over n steps as evenly as possible.
+;; This is Bjorklund's algorithm, which is Euclid's GCD wearing a drum kit:
+;; pair each hit with a rest, then pair the leftovers into the pairs, and
+;; keep going until one group is left over. Flatten and you have the pattern.
 (define (euclidean k n)
-  (let ((pattern (make-list n #f)))
-    (let loop ((i 0) (hits k) (acc pattern))
-      (if (>= i n)
-          acc
-          (let* ((step-val (>= (* hits n) (* k i)))
-                 (new-hits (if step-val (- hits 1) hits)))
-            (loop (+ i 1) new-hits
-                  (append (take acc i)
-                          (list step-val)
-                          (drop acc (+ i 1)))))))))
+  (let build ((hits  (map (lambda (i) (list #t)) (iota k)))
+              (rests (map (lambda (i) (list #f)) (iota (- n k)))))
+    (if (<= (length rests) 1)
+        (apply append (append hits rests))
+        (let ((m (min (length hits) (length rests))))
+          (build (map append (take hits m) (take rests m))
+                 (append (drop hits m) (drop rests m)))))))
 
 ;; 5 hits in 8 steps
 (euclidean 5 8)
@@ -486,7 +489,8 @@ Euclidean rhythms are the even-as-possible distribution of onsets—ancient bell
 ```
 
 ```scheme
-;; helper: take and drop
+;; euclidean needs take, drop and iota. Motoi binds all three already
+;; (they are SRFI-1); here is what they would look like if yours does not.
 (define (take lst n)
   (if (or (= n 0) (null? lst))
       '()
@@ -501,13 +505,6 @@ Euclidean rhythms are the even-as-possible distribution of onsets—ancient bell
   (if (= n 0)
       '()
       (cons val (make-list (- n 1) val))))
-
-(define (euclidean k n)
-  (let loop ((i 0) (pattern '()))
-    (if (>= i n)
-        (reverse pattern)
-        (loop (+ i 1)
-              (cons (< (* i k) (* (+ i 1) k (/ 1 n))) pattern)))))
 
 ;; 3 hits in 8 steps
 (euclidean 3 8)
@@ -874,11 +871,11 @@ The user taps in real time (seconds), but the beat machine thinks in beats.
 
 ;; you tapped at 0.5 seconds, tempo is 120
 (seconds->beats 0.5 120)
-;; => 1.0 beat
+;; => 1.0
 
 ;; you tapped at 1.0 seconds, tempo is 90
 (seconds->beats 1.0 90)
-;; => 1.5 beats
+;; => 1.5
 ```
 
 ```scheme
@@ -919,11 +916,15 @@ A beat machine can *suggest* variations.
                 (cdr p)
                 (cons (if (= i index) (not (car p)) (car p)) acc))))))
 
-(mutate-pattern '(#t #f #t #f))
-;; => (#t #f #f #f)  or  (#t #t #t #f)  or  (#f #f #t #f)  — varies
+(with-seed 42 (lambda () (mutate-pattern '(#t #f #t #f))))
+;; => (#t #t #t #f)   ; seed 42 picked step 1 and flipped it
+(with-seed 7  (lambda () (mutate-pattern '(#t #f #t #f))))
+;; => (#f #f #t #f)   ; seed 7 picked step 0
 ```
 
 The machine can *improvise* on your beat. Hit \"mutate\" and hear a variation.
+
+`with-seed` is here so the book can print an answer at all. `(random)` on its own gives a different step every run — exactly what you want in the machine, and exactly what a printed example cannot have. Wrapping the call in `(with-seed n (lambda () ...))` pins the random stream, so seed 42 always flips step 1 and seed 7 always flips step 0. Drop the wrapper in your own sequencer and let it surprise you.
 
 ## Copy and Paste — Duplicate a Pattern
 
@@ -946,12 +947,14 @@ You built a good hat pattern; now copy it to the clap track.
       state)))
 
 (copy-pattern beat-state 'hat 'snare)
-;; => ((kick . (#t #f #f #f))
-;;     (snare . (#t #t #t #t))
-;;     (hat . (#t #t #t #t)))
+;; => ((kick #t #f #f #f)
+;;     (snare #t #t #t #t)
+;;     (hat #t #t #t #t))
 ```
 
 The snare now has the same pattern as the hat. The machine supports editing operations.
+
+The answer prints as `(kick #t #f #f #f)` even though you wrote `(kick . (#t #f #f #f))`. Nothing changed — those are two spellings of the same object. A dot followed by a list is just the list's own spine, so `(a . (b c))` and `(a b c)` are the same pair chain, and Motoi always prints the shorter form. Keep the dot when you write it if it helps you see \"pad, then steps\"; do not expect to read it back.
 
 ## Clear Track — Erase a Row
 
@@ -966,9 +969,9 @@ The snare now has the same pattern as the hat. The machine supports editing oper
     state))
 
 (clear-track beat-state 'kick)
-;; => ((kick . (#f #f #f #f))
-;;     (snare . (#f #f #t #f))
-;;     (hat . (#t #t #t #t)))
+;; => ((kick #f #f #f #f)
+;;     (snare #f #f #t #f)
+;;     (hat #t #t #t #t))
 ```
 
 The kick is silent. The machine gives you a blank slate.
@@ -1217,7 +1220,10 @@ The machine can suggest completions based on what you've typed.
 ;; => #t  (continue the on-off pattern)
 
 (suggest-next '(#t #t #f))
-;; => #f  (no strong pattern, default to #f)
+;; => #t   (the LAST two steps are on-off, so the motif matches here too)
+
+(suggest-next '(#t #f #t))
+;; => #f   (last two are off-on — not the motif, so no suggestion)
 ```
 
 The machine can *predict* what you might want next. It's a co-composer.

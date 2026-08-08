@@ -35,14 +35,14 @@ test('v11 — song/config default voices is 16', () => {
   const cfg = evalSrc(env, fuel, '(song/config)')
   assert.equal(cfg.kind, 'song-config')
   assert.equal(cfg.voices, 16)
-  assert.equal(cfg.voiceSteal, 'oldest')
+  assert.equal(cfg['voice-steal'], 'oldest')
 })
 
 test('v11 — song/config :voices 16 :voice-steal oldest', () => {
   const { env, fuel } = freshEnv()
   const cfg = evalSrc(env, fuel, "(song/config :voices 16 :voice-steal (quote oldest) :bpm 120)")
   assert.equal(cfg.voices, 16)
-  assert.equal(cfg.voiceSteal, 'oldest')
+  assert.equal(cfg['voice-steal'], 'oldest')
   assert.equal(cfg.bpm, 120)
 })
 

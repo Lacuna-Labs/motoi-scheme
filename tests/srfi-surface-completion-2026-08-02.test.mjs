@@ -32,6 +32,7 @@ import { makeCoreEnv } from '../core/index.js'
 import { evaluate } from '../src/interp.js'
 import { parse } from '../src/reader.js'
 
+import { plain } from './_cells.mjs'
 function run (src) {
   const fuel = { n: 1_000_000 }
   const env = makeCoreEnv({ fuel })
@@ -53,8 +54,9 @@ function throwsWith (src, re) {
 // ── SRFI-1: constructors + predicates ────────────────────────────────
 
 test('xcons flips cons — the tail comes first', () => {
-  assert.deepEqual(run("(xcons (list 'b 'c) 'a)").map((s) => s.name), ['a', 'b', 'c'])
-  assert.deepEqual(run('(xcons (list 2 3) 1)'), [1, 2, 3])
+  const syms = plain(run("(xcons (list 'b 'c) 'a)"))
+  assert.deepEqual(syms.map((s) => s.name), ['a', 'b', 'c'])
+  assert.deepEqual(plain(run('(xcons (list 2 3) 1)')), [1, 2, 3])
   // Consing onto a non-list still mints a real improper pair.
   shows('(xcons 2 1)', '(1 . 2)')
   assert.equal(run('(pair? (xcons 2 1))'), true)
@@ -74,12 +76,12 @@ test('proper-list? separates lists from dotted pairs', () => {
 // ── SRFI-1: selectors ────────────────────────────────────────────────
 
 test('take-right / drop-right cut from the far end', () => {
-  assert.deepEqual(run('(take-right (list 1 2 3 4 5) 2)'), [4, 5])
-  assert.deepEqual(run('(drop-right (list 1 2 3 4 5) 2)'), [1, 2, 3])
-  assert.deepEqual(run('(take-right (list 1 2 3) 0)'), [])
-  assert.deepEqual(run('(drop-right (list 1 2 3) 0)'), [1, 2, 3])
-  assert.deepEqual(run('(take-right (list 1 2 3) 3)'), [1, 2, 3])
-  assert.deepEqual(run('(drop-right (list 1 2 3) 3)'), [])
+  assert.deepEqual(plain(run('(take-right (list 1 2 3 4 5) 2)')), [4, 5])
+  assert.deepEqual(plain(run('(drop-right (list 1 2 3 4 5) 2)')), [1, 2, 3])
+  assert.deepEqual(plain(run('(take-right (list 1 2 3) 0)')), [])
+  assert.deepEqual(plain(run('(drop-right (list 1 2 3) 0)')), [1, 2, 3])
+  assert.deepEqual(plain(run('(take-right (list 1 2 3) 3)')), [1, 2, 3])
+  assert.deepEqual(plain(run('(drop-right (list 1 2 3) 3)')), [])
 })
 
 test('split-at returns TWO values, not a list of two', () => {
@@ -125,9 +127,9 @@ test('reduce-right is element-first, like every SRFI-1 fold', () => {
 })
 
 test('append-reverse flushes an accumulator in one pass', () => {
-  assert.deepEqual(run('(append-reverse (list 3 2 1) (list 4 5 6))'), [1, 2, 3, 4, 5, 6])
-  assert.deepEqual(run('(append-reverse (list) (list 1 2))'), [1, 2])
-  assert.deepEqual(run('(append-reverse (list 1 2) (list))'), [2, 1])
+  assert.deepEqual(plain(run('(append-reverse (list 3 2 1) (list 4 5 6))')), [1, 2, 3, 4, 5, 6])
+  assert.deepEqual(plain(run('(append-reverse (list) (list 1 2))')), [1, 2])
+  assert.deepEqual(plain(run('(append-reverse (list 1 2) (list))')), [2, 1])
   // A non-list tail is legal; the result is then improper.
   shows('(append-reverse (list 3 2 1) 9)', '(1 2 3 . 9)')
 })
@@ -199,8 +201,6 @@ test('a dotted pair handed to a list verb gets a sentence about lists', () => {
   for (const src of [
     '(span odd? (cons 1 2))',
     '(break odd? (cons 1 2))',
-    '(take-right (cons 1 2) 1)',
-    '(drop-right (cons 1 2) 1)',
     '(split-at (cons 1 2) 1)',
     '(reduce-right + 0 (cons 1 2))',
     '(append-reverse (cons 1 2) (list))',
@@ -210,6 +210,16 @@ test('a dotted pair handed to a list verb gets a sentence about lists', () => {
     // Never a raw JS message.
     assert.throws(() => run(src), (e) => !/is not a function/.test(e.message))
   }
+})
+
+// take-right/drop-right are the two SRFI-1 selectors that ACCEPT a dotted
+// list — they count k pairs back from the end, so the improper tail is part
+// of the answer, not an error. They were guarded like the rest until
+// 2026-08-03; the guard was the bug.
+test('take-right and drop-right walk a dotted list per SRFI-1', () => {
+  shows("(take-right (cons 1 (cons 2 (cons 3 4))) 2)", '(2 3 . 4)')
+  shows("(take-right (cons 1 (cons 2 (cons 3 4))) 0)", '4')
+  shows("(drop-right (cons 1 (cons 2 (cons 3 4))) 0)", '(1 2 3)')
 })
 
 test('a non-list handed to a list verb names what it got', () => {
@@ -382,7 +392,7 @@ test('all five standard parts still pass the 5-point gate', async () => {
   const env = makeCoreEnv({ fuel })
   for (const report of validateStandard(env, fuel)) {
     const failed = report.checks.filter((c) => !c.pass).map((c) => `${c.id}: ${c.detail}`)
-    assert.deepEqual(failed, [], `${report.name} failed: ${failed.join(' | ')}`)
+    assert.deepEqual(plain(failed), [], `${report.name} failed: ${failed.join(' | ')}`)
   }
 })
 

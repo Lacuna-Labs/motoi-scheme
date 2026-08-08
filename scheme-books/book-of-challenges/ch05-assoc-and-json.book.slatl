@@ -25,15 +25,14 @@ We'll start with the basics—reading a single field from an association list—
 
 ## A Small JSON-Object Toolbox
 
-Base Motoi doesn't ship a JSON object type—but an association list *is* a JSON object, and everything we need is a few lines of real Scheme over `assoc`. We'll build the toolbox once and use it for the rest of the chapter. Records are written as alists of `(key . value)` pairs; our helpers read the value out of a pair whether it's written in dotted form or as a plain two-element list.
+Base Motoi doesn't ship a JSON object type—but an association list *is* a JSON object, and everything we need is a few lines of real Scheme over `assoc`. We'll build the toolbox once and use it for the rest of the chapter. Records are written as alists of `(key . value)` pairs, always in dotted form; our helpers read the value out of a pair with `cdr`. Sticking to one shape matters: `(orders . (x))` and `(orders x)` are the *same* object, so a helper that tried to support both spellings could not tell a one-element list apart from a plain pair.
 
 ```scheme
-;; obj-value: pull the value out of an alist entry, dotted or plain.
+;; obj-value: pull the value out of an alist entry written (key . value).
 (define (obj-value entry)
-  (cond ((not (pair? entry)) 'nan)
-        ((= (length entry) 3) (caddr entry))   ; (key . value)
-        ((= (length entry) 2) (cadr entry))    ; (key value)
-        (else 'nan)))
+  (if (pair? entry)
+      (cdr entry)
+      'nan))
 
 ;; obj-get1: read one key (symbol or string) from an alist; 'nan if absent.
 (define (obj-get1 obj key)
@@ -52,12 +51,12 @@ Base Motoi doesn't ship a JSON object type—but an association list *is* a JSON
           ((null? segs) cur)
           (else (loop (obj-get1 cur (car segs)) (cdr segs))))))
 
-;; obj-set: return a NEW alist with key set to value (plain 2-element entry).
+;; obj-set: return a NEW alist with key set to value (dotted entry).
 (define (obj-set obj key value)
   (let ((k (if (string? key) (string->symbol key) key)))
     (if (assq k obj)
-        (map (lambda (e) (if (eq? (car e) k) (list k value) e)) obj)
-        (append obj (list (list k value))))))
+        (map (lambda (e) (if (eq? (car e) k) (cons k value) e)) obj)
+        (append obj (list (cons k value))))))
 
 ;; obj-delete: return a NEW alist without key.
 (define (obj-delete obj key)
@@ -249,6 +248,8 @@ Let's take a list of products and compute a discounted price:
 
 `obj-set` returns a *new* alist with the updated field; the original is untouched. That's functional purity—no mutation, just transformation.
 
+The prices went in as exact integers and came out as `720.0`, `1080.0`, `855.0`. That is `0.9` doing it: an inexact number anywhere in a multiplication makes the whole result inexact, and Scheme prints an inexact whole number with a trailing `.0` so you can tell the two apart. If you want to keep working in exact cents, discount with an exact ratio instead—`(* price 9/10)` gives `720`, `1080`, `855` with no decimal point anywhere.
+
 Now let's add a computed field—`tax`, derived from `price`:
 
 ```scheme
@@ -271,7 +272,7 @@ Now let's add a computed field—`tax`, derived from `price`:
 ;;     ((item . \"Notebook\") (price . 600) (tax . 60.0)))
 ```
 
-Each record grows a new field. `obj-set` does the work; `map` does it for all.
+Each record grows a new field. `obj-set` does the work; `map` does it for all. Same story as the discount above: `price` is still exact because nothing touched it, while `tax` is inexact because `0.1` is.
 
 ---
 
@@ -405,11 +406,13 @@ Now let's build a nested structure—an order with a `customer` sub-map:
 
 order
 ;; => ((id . 701)
-;;     (customer . ((name . \"Haru\") (email . \"haru@example.jp\")))
+;;     (customer (name . \"Haru\") (email . \"haru@example.jp\"))
 ;;     (total . 4200))
 ```
 
 Two layers, built by hand. This is BACK—no magic, just pairs and lists.
+
+Look closely at how the nested field printed: we built `(cons 'customer customer)`, where the value is itself a list of pairs, and it came back as `(customer (name . \"Haru\") (email . \"haru@example.jp\"))`—no dot after `customer`. That is not a different value. A dot is only printed when the `cdr` is *not* a list; when the `cdr` is a list, the printer splices it in. `(customer . ((name . \"Haru\")))` and `(customer (name . \"Haru\"))` are two spellings of one object. Expect the second spelling in every nested result below.
 
 ---
 
@@ -607,10 +610,16 @@ Let's read a deeply nested field—`customer.address.postal`:
 
 One call, three layers. If any segment were missing, `'nan`.
 
-Now let's write a nested field—update the city inside the address:
+Now let's write a nested field—update the city inside the address. `obj-set` only knows flat keys, so a dot-path needs its own helper: rebuild each layer on the way back out.
 
 ```scheme
 ;; Update the city inside a customer's address.
+(define (obj-set-in obj path value)
+  (let loop ((o obj) (segs (map string->symbol (string-split path \".\"))))
+    (if (null? (cdr segs))
+        (obj-set o (car segs) value)
+        (obj-set o (car segs) (loop (obj-get1 o (car segs)) (cdr segs))))))
+
 (define order
   '((id . 902)
     (customer . ((name . \"Emi\")
@@ -618,15 +627,15 @@ Now let's write a nested field—update the city inside the address:
                              (city . \"Nagoya\")
                              (postal . \"460-0008\")))))))
 
-(obj-set order \"customer.address.city\" \"Osaka\")
+(obj-set-in order \"customer.address.city\" \"Osaka\")
 ;; => ((id . 902)
-;;     (customer . ((name . \"Emi\")
-;;                  (address . ((street . \"Chuo 1-8\")
-;;                              (city . \"Osaka\")
-;;                              (postal . \"460-0008\"))))))
+;;     (customer (name . \"Emi\")
+;;               (address (street . \"Chuo 1-8\")
+;;                        (city . \"Osaka\")
+;;                        (postal . \"460-0008\"))))
 ```
 
-The city changed; everything else stayed. `obj-set` rebuilt the path, preserving structure.
+The city changed; everything else stayed. `obj-set-in` rebuilt the path, preserving structure.
 
 ---
 
@@ -688,11 +697,11 @@ This is a harder pattern—nested structure, conditional accumulation. Walk it c
               (cons (cons status (list order)) acc))))))
 
 (fold group-by-status '() orders)
-;; => ((\"pending\" . (((id . 1002) (status . \"pending\"))
-;;                   ((id . 1005) (status . \"pending\"))))
-;;     (\"cancelled\" . (((id . 1004) (status . \"cancelled\"))))
-;;     (\"shipped\" . (((id . 1001) (status . \"shipped\"))
-;;                   ((id . 1003) (status . \"shipped\")))))
+;; => ((\"pending\" ((id . 1002) (status . \"pending\"))
+;;                ((id . 1005) (status . \"pending\")))
+;;     (\"cancelled\" ((id . 1004) (status . \"cancelled\")))
+;;     (\"shipped\" ((id . 1001) (status . \"shipped\"))
+;;                ((id . 1003) (status . \"shipped\"))))
 ```
 
 Three groups, built by folding. Each status appears once as a key; its value is a list of orders. This is harder—nested structure, conditional branching, list surgery—but it's all core Scheme + obj-get. No magic.
@@ -750,9 +759,9 @@ You have a list of products, each with an `id`. You want a lookup table—an ali
         (cons (cons id product) acc))))
 
 (fold index-by-id '() products)
-;; => ((\"C3\" . ((id . \"C3\") (name . \"Hat\") (price . 1500)))
-;;     (\"B2\" . ((id . \"B2\") (name . \"Pants\") (price . 4200)))
-;;     (\"A1\" . ((id . \"A1\") (name . \"Shirt\") (price . 2500))))
+;; => ((\"C3\" (id . \"C3\") (name . \"Hat\") (price . 1500))
+;;     (\"B2\" (id . \"B2\") (name . \"Pants\") (price . 4200))
+;;     (\"A1\" (id . \"A1\") (name . \"Shirt\") (price . 2500)))
 ```
 
 Now you can `assoc` by `id` and get the product in O(n) time. If you need it in code, `obj-get` works too—treat the table as an alist.
@@ -877,7 +886,7 @@ Actually, `filter-map` isn't in the core, so we'll compose our own: map, then fi
 ;;     ((name . \"Carol\") (dept . \"engineering\") (salary . 95000) (bonus . 9500.0)))
 ```
 
-Two employees in engineering, both got a bonus. Everyone else was filtered out. One `map`, one `filter`, one pass (logically).
+Two employees in engineering, both got a bonus. Everyone else was filtered out. One `map`, one `filter`, one pass (logically). The bonuses print as `8000.0` and `9500.0` for the same reason the tax did: `0.1` is inexact, so the product is too.
 
 ---
 
@@ -960,11 +969,11 @@ We'll simplify: group by user, then for each user, list actions:
               (cons (cons user (list event)) acc))))))
 
 (fold group-by-user '() events)
-;; => ((\"Bob\" . (((user . \"Bob\") (action . \"purchase\") (date . \"2025-01-15\"))
-;;               ((user . \"Bob\") (action . \"logout\") (date . \"2025-01-16\"))))
-;;     (\"Alice\" . (((user . \"Alice\") (action . \"login\") (date . \"2025-01-15\"))
-;;                 ((user . \"Alice\") (action . \"logout\") (date . \"2025-01-15\"))
-;;                 ((user . \"Alice\") (action . \"login\") (date . \"2025-01-16\")))))
+;; => ((\"Bob\" ((user . \"Bob\") (action . \"purchase\") (date . \"2025-01-15\"))
+;;            ((user . \"Bob\") (action . \"logout\") (date . \"2025-01-16\")))
+;;     (\"Alice\" ((user . \"Alice\") (action . \"login\") (date . \"2025-01-15\"))
+;;              ((user . \"Alice\") (action . \"logout\") (date . \"2025-01-15\"))
+;;              ((user . \"Alice\") (action . \"login\") (date . \"2025-01-16\"))))
 ```
 
 Two users, each with their events. You could go further—group each user's events by date—but that's another fold. The pattern is the same.
@@ -1131,15 +1140,15 @@ Sometimes a record contains nested lists of records—a tree. You want to transf
 
 (add-level tree 0)
 ;; => ((name . \"root\")
-;;     (level . 0)
-;;     (children . (((name . \"child1\")
-;;                   (level . 1)
-;;                   (children . (((name . \"grandchild1\") (level . 2))
-;;                                ((name . \"grandchild2\") (level . 2)))))
-;;                  ((name . \"child2\") (level . 1)))))
+;;     (children ((name . \"child1\")
+;;                (children ((name . \"grandchild1\") (level . 2))
+;;                          ((name . \"grandchild2\") (level . 2)))
+;;                (level . 1))
+;;               ((name . \"child2\") (level . 1)))
+;;     (level . 0))
 ```
 
-Each node got a `level` field. Recursion walked the tree, `map` handled the children. This is deep recursion + transformation—hard, but clean.
+Each node got a `level` field. Recursion walked the tree, `map` handled the children. This is deep recursion + transformation—hard, but clean. Note where `level` landed: `obj-set` appends a *new* key at the end of the alist and only overwrites in place when the key already exists, so `level` trails `children` at every node. Field order in an alist carries no meaning—`obj-get` finds the key wherever it sits—but it does show up in the printed result, so don't be surprised by it.
 
 ---
 
@@ -1165,8 +1174,8 @@ You have a list of products; you want to return a JSON-like structure suitable f
 response
 ;; => ((status . \"ok\")
 ;;     (count . 2)
-;;     (data . (((id . \"X1\") (name . \"Scarf\") (price . 1500))
-;;              ((id . \"X2\") (name . \"Gloves\") (price . 1200)))))
+;;     (data ((id . \"X1\") (name . \"Scarf\") (price . 1500))
+;;           ((id . \"X2\") (name . \"Gloves\") (price . 1200))))
 ```
 
 Three fields, one alist. You could serialize this with `obj-encode` (if it existed) or pass it to a wired verb that expects a map. The shape is what matters—metadata + payload.

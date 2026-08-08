@@ -17,6 +17,7 @@ import { makeBaseEnv } from '../src/base.js'
 import { Sym, sym, parse, tokenize } from '../src/reader.js'
 import { evaluate } from '../src/interp.js'
 
+import { plain } from './_cells.mjs'
 function fresh() { return makeCoreEnv() }
 function baseOnly() { return makeBaseEnv({ n: 1_000_000 }) }
 
@@ -59,13 +60,13 @@ test('math/expanded-form 0 returns (0), not empty list', () => {
   const env = fresh()
   const ef = env.vars.get('math/expanded-form')
   // Before fix: []. After fix: [0].
-  assert.deepEqual(ef(0), [0])
+  assert.deepEqual(plain(ef(0)), [0])
 })
 
 test('math/expanded-form 205 skips zero digits properly', () => {
   const env = fresh()
   const ef = env.vars.get('math/expanded-form')
-  assert.deepEqual(ef(205), [200, 5])
+  assert.deepEqual(plain(ef(205)), [200, 5])
 })
 
 // ── src/base.js — even?/odd? on non-integer inputs ─────────────────────
@@ -176,8 +177,8 @@ test('car on empty list returns undefined (documented) — but member on non-lis
 test('vec/normalize on zero vector returns a zero vector (no NaN)', () => {
   const env = fresh()
   const norm = env.vars.get('vec/normalize')
-  assert.deepEqual(norm([0, 0]), [0, 0])
-  assert.deepEqual(norm([0, 0, 0]), [0, 0, 0])
+  assert.deepEqual(plain(norm([0, 0])), [0, 0])
+  assert.deepEqual(plain(norm([0, 0, 0])), [0, 0, 0])
 })
 
 test('vec/dim on scalar returns 1', () => {
@@ -239,12 +240,21 @@ test('exact-integer?: NaN is not', () => {
   assert.equal(q(Infinity), false)
 })
 
-test('complex?: NaN is not (Number.isFinite requirement)', () => {
+// Rewritten 2026-08-02. The old assertions (NaN and Infinity are not complex?)
+// broke R7RS §6.2.1's stated implication (real? x) => (complex? x): Motoi
+// answers #t to (real? +inf.0), (real? +nan.0) and (number? …) for both.
+// complex? is the top of the numeric tower, so it now says yes to everything
+// real? and number? say yes to, plus Motoi's own complex values.
+test('complex?: top of the tower — every number, including a complex one', () => {
   const env = fresh()
   const q = env.vars.get('complex?')
-  assert.equal(q(NaN), false)
+  const mk = env.vars.get('make-rectangular')
   assert.equal(q(3), true)
-  assert.equal(q(Infinity), false)
+  assert.equal(q(NaN), true)
+  assert.equal(q(Infinity), true)
+  assert.equal(q(mk(3, 4)), true)
+  assert.equal(q('hi'), false)
+  assert.equal(q(false), false)
 })
 
 // ── src/interp.js — case matches numbers correctly ─────────────────────
@@ -403,9 +413,9 @@ test('caar/cdar/cddr — 2-deep accessors present', () => {
   // (caar '((1 2) (3 4))) → 1
   assert.equal(caar([[1, 2], [3, 4]]), 1)
   // (cdar '((1 2) (3 4))) → (2)
-  assert.deepEqual(cdar([[1, 2], [3, 4]]), [2])
+  assert.deepEqual(plain(cdar([[1, 2], [3, 4]])), [2])
   // (cddr '(1 2 3 4)) → (3 4)
-  assert.deepEqual(cddr([1, 2, 3, 4]), [3, 4])
+  assert.deepEqual(plain(cddr([1, 2, 3, 4])), [3, 4])
 })
 
 test('caaar/caadr/cadar/cdaar/cdadr/cddar/cdddr — 3-deep accessors present', () => {
@@ -415,7 +425,7 @@ test('caaar/caadr/cadar/cdaar/cdadr/cddar/cdddr — 3-deep accessors present', (
     assert.ok(typeof env.vars.get(n) === 'function', `${n} missing`)
   }
   // (cdddr '(1 2 3 4 5)) → (4 5)
-  assert.deepEqual(env.vars.get('cdddr')([1, 2, 3, 4, 5]), [4, 5])
+  assert.deepEqual(plain(env.vars.get('cdddr')([1, 2, 3, 4, 5])), [4, 5])
   // (caadr '((1) (2 3) (4))) → 2
   //   cdr → ((2 3) (4)); car → (2 3); car → 2
   assert.equal(env.vars.get('caadr')([[1], [2, 3], [4]]), 2)
@@ -430,7 +440,7 @@ test('cadddr/cddddr — 4-deep accessors present (were missing)', () => {
   // (cadddr '(1 2 3 4 5)) → 4
   assert.equal(cadddr([1, 2, 3, 4, 5]), 4)
   // (cddddr '(1 2 3 4 5 6)) → (5 6)
-  assert.deepEqual(cddddr([1, 2, 3, 4, 5, 6]), [5, 6])
+  assert.deepEqual(plain(cddddr([1, 2, 3, 4, 5, 6])), [5, 6])
 })
 
 // ── lib/graphics/framebuffer-verbs.js — after-frame callbacks fire ─────

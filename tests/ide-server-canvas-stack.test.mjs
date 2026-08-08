@@ -17,6 +17,7 @@ import { strict as assert } from 'node:assert'
 
 import { startIdeServer } from '../src/ide-server.js'
 
+import { plain } from './_cells.mjs'
 async function withServer(fn) {
   const { server, url } = await startIdeServer({ port: 0, silent: true })
   try { await fn(url) } finally { await new Promise((res) => server.close(res)) }
@@ -41,11 +42,11 @@ test('/api/canvas returns framebuffer JSON with palette + base64 pixels', async 
     assert.equal(r.ok, true, 'canvas endpoint should succeed')
     assert.equal(typeof r.w, 'number', 'canvas has width')
     assert.equal(typeof r.h, 'number', 'canvas has height')
-    assert.ok(Array.isArray(r.palette), 'palette is an array')
+    assert.ok(Array.isArray(plain(r.palette)), 'palette is an array')
     assert.ok(r.palette.length >= 16, 'palette has at least 16 entries')
     // Each entry is [r,g,b,a] quad.
     for (const p of r.palette) {
-      assert.ok(Array.isArray(p) && p.length >= 3, 'palette entry is rgba array')
+      assert.ok(Array.isArray(plain(p)) && p.length >= 3, 'palette entry is rgba array')
     }
     assert.equal(typeof r.pixels, 'string', 'pixels is base64 string')
     // Base64 decodes to exactly w*h bytes.
@@ -86,7 +87,7 @@ test('/api/stack returns frames after an evaluation', async () => {
     // Now peek at the peak stack — should have >=1 frame from fact.
     const s = await jget(url, '/api/stack?which=peak')
     assert.equal(s.ok, true, 'stack endpoint should succeed')
-    assert.ok(Array.isArray(s.frames), 'frames is an array')
+    assert.ok(Array.isArray(plain(s.frames)), 'frames is an array')
     // Live may be empty at rest, but peak should show something.
     // The hook fires around closure application, so at least one frame
     // reflects fact's execution.
@@ -104,6 +105,6 @@ test('/api/stack survives when evaluator has never run user code', async () => {
     // Fresh server, no user code. Expect ok=true + empty frames.
     const s = await jget(url, '/api/stack?which=live')
     assert.equal(s.ok, true, 'stack endpoint tolerates a cold session')
-    assert.ok(Array.isArray(s.frames))
+    assert.ok(Array.isArray(plain(s.frames)))
   })
 })

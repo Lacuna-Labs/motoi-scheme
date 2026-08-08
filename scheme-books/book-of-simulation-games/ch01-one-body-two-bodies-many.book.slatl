@@ -58,14 +58,27 @@ The smallest possible physics simulation is a dot that falls.
   (world/gravity! 0 0.5)          ;; a = (0, 0.5) px/frame^2
   (world/floor! 240)              ;; hard floor at y=240
   (let ((dot (world/spawn 'dot 160 40)))
+    (entity/gravity-scale! dot 1)  ;; make it a DYNAMIC body
     (entity/bounce! dot 0.0)      ;; no bounce
     (let loop ((n 60))
       (world/step)
       (if (> n 0) (loop (- n 1)) (entity/pos dot)))))
 
 (drop-one-dot)
-;; => (160.0 . 240.0)
+;; => (160 224)
 ```
+
+That `(entity/gravity-scale! dot 1)` is not decoration. A freshly spawned
+entity is STATIC — world geometry, not a falling thing — unless its kind
+is `player`. Setting a gravity scale above zero is what marks it dynamic.
+Leave the line out and the dot sits at `(160 40)` forever, sixty frames
+of nothing, and you will stare at the gravity call wondering why it did
+not take.
+
+The landing y is `224`, not `240`. The floor is at 240 and the dot's box
+is 16 pixels tall, so its TOP rests at 224 while its bottom sits on the
+floor. Positions in this world name the top-left corner of a body, not
+its centre.
 
 Twenty acceleration units per second squared, forty pixels of headroom,
 sixty frames. The dot lands. `world/step` is where the physics
@@ -96,8 +109,13 @@ part of the algorithm move on the page.
             (loop (- n 1) y* vy*))))))
 
 (euler-drop 60)
-;; => (930.0 . 30.0)   -> if we had no floor, this is where we'd be
+;; => (955.0 . 30.0)   ;; if we had no floor, this is where we'd be
 ```
+
+Check the arithmetic by hand. After frame `n` the velocity is `0.5n`, so
+after sixty frames it is `30`. The position is the starting `40` plus the
+sum of every velocity we moved at: `0.5 * (1 + 2 + ... + 60)` = `0.5 * 1830`
+= `915`. Forty plus 915 is 955.
 
 Read that inner `let*` twice. First we compute the acceleration; then
 the velocity that comes out of applying that acceleration for one
@@ -123,105 +141,157 @@ and gravity between two marbles on a table, are all the SAME
 phenomenon with different masses. We do not have to teach the marbles
 about the apple. We just apply the formula.
 
-```scheme
-;; Two bodies. Each pulls on the other with F = G m1 m2 / r^2.
-(define (two-body-attract)
-  (world/reset!)
-  (let ((a (world/spawn 'a  80 120))
-        (b (world/spawn 'b 240 120)))
-    (entity/mass! a 5000)
-    (entity/mass! b 5000)
-    (entity/set-vel! a 0 -1.2)         ;; a drifts up
-    (entity/set-vel! b 0  1.2)         ;; b drifts down
-    (world/attract! a b 1.0)           ;; mutual gravity, G-effective = 1
-    (world/attract! b a 1.0)
-    (let loop ((n 400))
-      (world/step)
-      (if (> n 0) (loop (- n 1))
-          (list (entity/pos a) (entity/pos b))))))
+`world/gravity!` is a single constant pull in one direction — good for a
+dot falling onto a floor, useless for two bodies pulling on each other,
+because the direction of the pull depends on where the bodies ARE. There
+is no built-in verb for mutual gravity, and there does not need to be:
+the formula is four lines.
 
-(two-body-attract)
-;; => ((~89 ~118) (~231 ~122))    <- they drifted, then curled back
+A body here is a plain list — `(x y vx vy mass)`. No world, no entities,
+just numbers we integrate ourselves, exactly like §1.2.
+
+```scheme
+;; A body is (x y vx vy mass). Five numbers, no object system.
+(define (body x y vx vy m) (list x y vx vy m))
+(define (b-x b) (list-ref b 0))
+(define (b-y b) (list-ref b 1))
+(define (b-m b) (list-ref b 4))
+
+;; Acceleration on `self` caused by `other`: magnitude G*m_other/r^2,
+;; pointed from self toward other. This IS F = G m1 m2 / r^2, divided
+;; through by m_self — which is why the mass of the falling thing
+;; cancels out and a feather orbits like a cannonball.
+(define (pull-accel self other g)
+  (let* ((dx (- (b-x other) (b-x self)))
+         (dy (- (b-y other) (b-y self)))
+         (r2 (+ (* dx dx) (* dy dy)))
+         (r  (math/sqrt r2))
+         (a  (/ (* g (b-m other)) r2)))
+    (list (* a (/ dx r)) (* a (/ dy r)))))
+
+;; One semi-implicit Euler frame for one body, same as §1.2.
+(define (advance b acc dt)
+  (let* ((vx (+ (list-ref b 2) (* (car acc) dt)))
+         (vy (+ (list-ref b 3) (* (cadr acc) dt))))
+    (list (+ (b-x b) (* vx dt)) (+ (b-y b) (* vy dt)) vx vy (b-m b))))
+
+;; Two equal masses 160 apart, each given the sideways speed that turns
+;; the fall into a circle: v = sqrt(G*m*(r/2)/r^2) = 3.9528...
+(define (two-body-orbit steps)
+  (let loop ((n steps)
+             (a (body  80 120 0 -3.9528470752104738 5000))
+             (b (body 240 120 0  3.9528470752104738 5000)))
+    (if (<= n 0)
+        (list (list (round (b-x a)) (round (b-y a)))
+              (list (round (b-x b)) (round (b-y b))))
+        (loop (- n 1)
+              (advance a (pull-accel a b 1.0) 1.0)
+              (advance b (pull-accel b a 1.0) 1.0)))))
+
+(two-body-orbit 127)
+;; => ((80.0 122.0) (240.0 118.0))
 ```
 
-`world/attract!` installs a persistent inverse-square force from source
-to target. We install it twice, once each way, because gravity is
-mutual. Give them opposing initial velocities and they will curl
-around each other in an ellipse, come back near their starting
-positions, and do it again. It is a repeating orbit — the two-body
-problem has closed-form solutions, and our numerical sim reproduces
-one.
+They started at `(80 120)` and `(240 120)`. After 127 frames they are at
+`(80 122)` and `(240 118)` — back where they began, two pixels of
+numerical drift after a whole lap. That is one orbital period, computed
+by nothing but the formula and the loop.
 
-Notice the shape of the loop. Whether we have one body or two, the
-outer loop is the same: `(world/step)` then check if we're done. This
-is what makes the whole book possible — every simulation, from a
-falling dot to a fifty-body cluster, uses this same shape. The only
-thing that changes is what's in the world when the loop starts.
+Try other frame counts and watch the lap happen:
+
+```scheme
+(two-body-orbit 32)
+;; => ((165.0 42.0) (155.0 198.0))
+```
+
+A quarter of the way round, they are one above the other instead of side
+by side.
+
+Two warnings, both real. First: give them a slower start and they fall
+straight through each other, `r` goes to nearly zero, `G*m/r^2` explodes,
+and the pair slingshots apart at absurd speed. That is not physics, it is
+division by a small number. Real n-body codes add a *softening* term to
+`r2` to stop it. Second: this loop costs fuel. A few hundred frames of two
+bodies is fine; a few thousand will exhaust the default 200,000-fuel
+budget and Motoi will stop you.
+
+Notice the shape of the loop. Whether we have one body or two, the outer
+loop is the same: advance every body by one frame, then check if we're
+done. This is what makes the whole book possible — every simulation, from
+a falling dot to an n-body cluster, uses this same shape. The only thing
+that changes is what is in the list when the loop starts.
 
 ## 1.4 Many bodies — the arrival of emergence
 
-Now fifty bodies. Each one pulls on every other one. We didn't tell
-them to form a cluster; we told them to obey `F = G m1 m2 / r^2`.
-Watch what happens.
+Now many bodies, each pulled by every other one. We do not tell them to
+form a cluster; we tell them to obey `F = G m1 m2 / r^2`. Watch what
+happens.
+
+The only new idea is summing the pulls. One body's acceleration is the
+vector sum of the pull from every OTHER body:
 
 ```scheme
-;; Fifty bodies, mutual gravity, no floor. Let them find their shape.
-(define (cluster n)
-  (world/reset!)
-  (let loop ((i 0) (bodies '()))
-    (if (>= i n)
-        (bodies-attract-all bodies)
-        (let* ((x  (+ 100 (* 200 (random))))
-               (y  (+  80 (* 160 (random))))
-               (vx (- (* 0.5 (random)) 0.25))
-               (vy (- (* 0.5 (random)) 0.25))
-               (b  (world/spawn 'star x y)))
-          (entity/mass!    b (+ 50 (* 200 (random))))
-          (entity/set-vel! b vx vy)
-          (loop (+ i 1) (cons b bodies))))))
+;; Total acceleration on `self` from everything else in the list.
+(define (accel-from-all self others g)
+  (fold (lambda (other acc)
+          (if (eq? other self)
+              acc
+              (let ((a (pull-accel self other g)))
+                (list (+ (car acc) (car a)) (+ (cadr acc) (cadr a))))))
+        (list 0 0)
+        others))
 
-(define (bodies-attract-all bs)
-  ;; Every body attracts every other body. (n^2) force installs.
-  (for-each
-    (lambda (a)
-      (for-each
-        (lambda (b)
-          (when (not (eq? a b))
-            (world/attract! a b 1.0)))
-        bs))
-    bs))
-
-(cluster 50)
-(let loop ((n 600)) (world/step) (when (> n 0) (loop (- n 1))))
+;; One frame for the whole system.
+(define (step-all bodies g dt)
+  (map (lambda (b) (advance b (accel-from-all b bodies g) dt)) bodies))
 ```
 
-After a few hundred frames you see it: the outliers get flung, the
-inner bodies fall together, and a knot forms in the middle. Nothing
-you wrote said 'form a knot.' The knot emerges because inverse-square
-attraction pulls hard at short range, and once two heavy stars pass
-close they capture each other, and once they capture each other other
-stars fall in. Structure appears. This is the first surprise of the
-book, and it will be repeated many times: give the pieces a rule,
-apply it many times, and watch shapes appear that no line of code
-demanded.
-
-We can wrap the two helpers above into one call so the n-body cluster
-is a single function — spawn the bodies, then install every attraction:
+Start them cold — a ring of eight equal masses, radius 80 around the
+point (160, 120), all at rest — and let go. `spread` measures how far the
+outermost body is from the centre, so a shrinking spread means the ring
+is collapsing:
 
 ```scheme
-;; The same thing wrapped into one verb: spawn, then attract-all.
-(define (cluster-nice n)
-  (cluster n)                 ;; spawns n bodies with random mass + velocity
-  (world/each                 ;; (world/each visits every live entity)
-    (lambda (e) e))
-  (world/count))              ;; how many bodies are in the world now?
+;; Eight bodies evenly spaced on a circle of radius `radius`, at rest.
+(define (ring n radius m)
+  (let loop ((i 0) (out '()))
+    (if (>= i n) (reverse out)
+        (let ((th (* (/ (* 2 math/pi) n) i)))
+          (loop (+ i 1)
+                (cons (body (+ 160 (* radius (math/cos th)))
+                            (+ 120 (* radius (math/sin th)))
+                            0 0 m)
+                      out))))))
 
-(cluster-nice 50)
+;; How far is the furthest body from the centre?
+(define (spread bodies)
+  (round (fold max 0
+               (map (lambda (b)
+                      (math/sqrt (+ (* (- (b-x b) 160) (- (b-x b) 160))
+                                    (* (- (b-y b) 120) (- (b-y b) 120)))))
+                    bodies))))
+
+(define (collapse n frames)
+  (let loop ((k frames) (bs (ring n 80 400)))
+    (if (<= k 0) (spread bs) (loop (- k 1) (step-all bs 1.0 1.0)))))
+
+(list (collapse 8 0) (collapse 8 20))
+;; => (80.0 34.0)
 ```
 
-`cluster` already installs the (n(n-1)) attractions for you via
-`bodies-attract-all`; wrapping it lets one call set up the whole
-system. Under the hood: exactly the code above.
+Eighty pixels of radius becomes thirty-four in twenty frames. Nothing
+in the code says \"fall inward.\" No body knows there IS a ring. Each one
+only ever computes the sum of seven pulls. The ring collapses because
+every pull points roughly at the middle, and that is emergence: give the
+pieces a rule, apply it many times, and watch a shape appear that no line
+of code demanded.
+
+Run it thirty frames instead of twenty and the number goes UP, to 185.
+That is the singularity from §1.3 arriving in bulk: the bodies reach the
+centre, `r2` collapses toward zero, the accelerations explode, and the
+ring turns into shrapnel. A real astrophysics code softens `r2` or merges
+bodies that get too close. Ours does neither, on purpose, so you can see
+exactly where the naive version breaks.
 
 ---
 

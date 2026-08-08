@@ -24,6 +24,7 @@ import { evaluate } from '../src/interp.js'
 import { parse } from '../src/reader.js'
 import { setStackRecording, isStackRecording } from '../lib/system/stack.js'
 
+import { plain } from './_cells.mjs'
 function freshEnv() {
   const fuel = { n: 1_000_000 }
   return { env: makeCoreEnv({ fuel }), fuel }
@@ -47,7 +48,7 @@ test('a fresh env does not record frames', () => {
 
 test('motoi/stack says it is off rather than reporting an empty stack', () => {
   off()
-  const frames = run('(motoi/stack)')
+  const frames = plain(run('(motoi/stack)'))
   assert.ok(Array.isArray(frames) && frames.length === 1,
     'the off answer is still shaped like a frame list so existing readers render it')
   const flat = JSON.stringify(frames)
@@ -81,7 +82,7 @@ test('arming the ledger actually records frames', () => {
        (define (g) (h) 2)
        (define (f) (g) 3)
        (f)`, ctx)
-  const peak = run('(motoi/stack-peak)', ctx)
+  const peak = plain(run('(motoi/stack-peak)', ctx))
   assert.equal(peak.length, 3, 'f > g > h should be three frames deep')
   assert.doesNotMatch(JSON.stringify(peak), /recording is off/)
   off()
@@ -108,7 +109,7 @@ test('KNOWN LIMIT: single-expression bodies never nest in the ledger', () => {
   run('(motoi/stack-record! #t)', ctx)
   run(`(define (sum n) (if (= n 0) 0 (+ n (sum (- n 1)))))
        (sum 12)`, ctx)
-  const peak = run('(motoi/stack-peak)', ctx)
+  const peak = plain(run('(motoi/stack-peak)', ctx))
   assert.equal(peak.length, 1,
     'if this now reports 12, the trampoline was fixed — delete this test and '
     + 'the note above it, and tighten the frame assertions elsewhere')

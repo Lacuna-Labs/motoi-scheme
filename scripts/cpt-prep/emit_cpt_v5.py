@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import sys
@@ -53,7 +54,11 @@ QWEN_FIM_SUFFIX = "<|fim_suffix|>"
 QWEN_CHAT_TOKENS_BLACKLIST = ("<|im_start|>", "<|im_end|>")
 
 OLD_CORPUS = Path.home() / ".forge/data/motoi-mk2-cpt"
-MK3_CPT_DIR = Path.home() / ".forge/data/motoi-mk3-cpt"
+# CPT ZERO. A CPT emit is a SNAPSHOT of the language, not a lane — snapshots
+# supersede, they never accumulate, and no prior emit is a valid mix-in. So this
+# writes its own tree rather than layering onto a previous generation's.
+MK3_CPT_DIR = Path(os.environ.get(
+    "CPT_OUT_DIR", str(Path.home() / ".forge/data/motoi-cpt-zero")))
 MK3_MIRROR_DIR = REPO / "training-data/mk3-cpt"
 
 # Books that carry Motoi's first-person voice + limits + values → identity/doctrine
@@ -711,8 +716,10 @@ def emit_book_shapes():
                     chapter=chapter_title[:60], material=f"book-{book_type}")
         base["book-type"] = book_type
 
-        code_blocks = CODE_FENCE_RE.findall(prose)
-        code_blocks = [c.strip() for c in code_blocks if 30 < len(c) < 800]
+        # Take the extractor's ALREADY-QUARANTINED blocks, never a fresh
+        # findall on prose: a block the book gate calls a mismatch would
+        # otherwise be emitted verbatim, `;; =>` claim and all.
+        code_blocks = [c.strip() for c in ch["code_blocks"] if 30 < len(c) < 800]
 
         code_ctx = []
         for code in code_blocks[:6]:
@@ -1209,29 +1216,59 @@ _LIB_BOOK_RE = re.compile(
     r"^export\s+const\s+BOOK\s*=\s*['\"]([^'\"]+)['\"]",
     re.MULTILINE,
 )
+# Run to the `]` that closes the array in column 0, not the first `]` seen —
+# a non-greedy stop lands on the end of the FIRST pair and silently discards
+# every other smoke test in the file.
 _LIB_TESTS_RE = re.compile(
-    r"^export\s+const\s+TESTS\s*=\s*(\[.*?\])",
+    r"^export\s+const\s+TESTS\s*=\s*(\[.*?^\])",
     re.MULTILINE | re.DOTALL,
 )
 
-# Extract quoted strings from a JS array literal
-_JS_STR_RE = re.compile(r"['\"]([^'\"]+)['\"]")
+# Extract quoted strings from a JS array literal. Escapes matter: a Scheme
+# test reads `'(chem/atomic-weight \'H)'`, and a pattern that stops at the
+# first inner quote yields `(chem/atomic-weight \` — not a form at all, but
+# still emitted as a training assertion.
+_JS_STR_RE = re.compile(r"'((?:[^'\\]|\\.)*)'|\"((?:[^\"\\]|\\.)*)\"")
+
+
+_LIB_TESTS_VERIFIED_PATH = REPO / "scratch" / "cpt-lib-tests-verified.json"
+
+
+def _load_lib_tests_verified() -> dict[str, list]:
+    """Smoke tests the engine actually confirms, keyed by lib path.
+
+    Absent file means no gate has run, which is itself worth knowing: emitting
+    an unconfirmed `; =>` teaches a value the interpreter may not produce.
+    """
+    if not _LIB_TESTS_VERIFIED_PATH.exists():
+        print(f"  WARNING: no {_LIB_TESTS_VERIFIED_PATH.name} — dropping all "
+              f"lib smoke tests rather than emitting unverified claims",
+              file=sys.stderr)
+        return {}
+    return json.loads(_LIB_TESTS_VERIFIED_PATH.read_text())
+
+
+_LIB_TESTS_VERIFIED = _load_lib_tests_verified()
+
+
+def _js_strings(literal: str) -> list[str]:
+    out = []
+    for m in _JS_STR_RE.finditer(literal):
+        raw = m.group(1) if m.group(1) is not None else m.group(2)
+        out.append(re.sub(r"\\(['\"\\])", r"\1", raw))
+    return out
 
 
 def _parse_verbs_literal(literal: str) -> list[str]:
-    return _JS_STR_RE.findall(literal)
+    return _js_strings(literal)
 
 
 def _parse_tests_literal(literal: str) -> list[tuple[str, str]]:
-    """Parse a TESTS = [ [in, out], ... ] literal into (in_str, out_str) pairs.
-
-    Best-effort — the literal may contain escapes; we return raw pair strings.
-    """
-    # Find inner arrays [..., ...] — top level
+    """Parse a TESTS = [ [in, out], ... ] literal into (in_str, out_str) pairs."""
     pairs = []
     inner = re.findall(r"\[\s*(['\"].*?)\s*\]", literal, re.DOTALL)
     for entry in inner:
-        strs = _JS_STR_RE.findall(entry)
+        strs = _js_strings(entry)
         if len(strs) >= 2:
             pairs.append((strs[0], strs[1]))
     return pairs
@@ -1309,10 +1346,12 @@ def emit_type_F_lib_runtime():
                 f"Its {len(verbs)} verb(s) are taught there in context.",
                 {"type": "F", "shape": "F-lib-book", "substrate": "lib-runtime"})
 
-        # F-lib-tests — smoke tests
+        # F-lib-tests — smoke tests, ONLY those the engine confirms. Nothing
+        # runs these assertions otherwise, and each is emitted verbatim as a
+        # `; =>` claim. Rebuild with scratch/build_lib_tests_gate.py.
         m_tests = _LIB_TESTS_RE.search(src)
         if m_tests:
-            pairs = _parse_tests_literal(m_tests.group(1))
+            pairs = [tuple(p) for p in _LIB_TESTS_VERIFIED.get(rel, [])]
             if pairs:
                 for i, (in_expr, out_expr) in enumerate(pairs[:5]):
                     yield _rec(
@@ -1661,6 +1700,451 @@ def emit_type_LE_langeng():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# NEW SOURCES (2026-08-07): CORTEX + REPL family + spec + broken-examples +
+# error-cards + intro. Per Alfred's PERFECT-CORPUS ask. WEAVE-RECIPE stays
+# excluded (procedure is proprietary — do not teach).
+#
+# Doctrine: SRE-MANUAL/chapters/04-cpt-sft-authoring-per-data-type § 1a
+# Shape choices below match §1a shape catalog + § 1b book-type → shape
+# mapping. Every doc gets Qwen header, S00-implicit paraphrase-idx=0 (this
+# emitter emits the canonical form; paraphrase multiplication happens
+# downstream via the SHAPE_BLOOM mapping into the packing stage).
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+# ── Variant helpers for the new emitters (mirror _s01/_s06 pattern) ────────
+# SRE-04 §200 doctrine: M≈5 paraphrases per shape per fact.
+
+def _prose_variants_5(text: str, source_label: str = "Motoi") -> list[str]:
+    """5 templated wrappers around a prose paragraph. Deterministic, no model.
+    Not free-form paraphrase — this is prefix/suffix variation so the model
+    sees the same fact anchored in five different reader-postures.
+    """
+    return [
+        text,
+        f"From the {source_label} documentation:\n\n{text}",
+        f"The {source_label} reference states:\n\n{text}",
+        f"Written in the source:\n\n{text}\n\n— {source_label}",
+        f"On this point, {source_label} reads:\n\n{text}",
+    ]
+
+
+def _spec_verb_variants_5(name: str, std: str, doc: str,
+                          example: str, arity: str) -> list[str]:
+    """S01 encyclopedic-canonical, 5 rewrites per spec verb.
+    Mirrors _s01_variants pattern from H emitter.
+    """
+    arity_str = f" arity {arity}" if arity else ""
+    v = []
+    v.append(f"Standard verb `{name}` from `{std}`{arity_str}. {doc}"
+             + (f" Example: {example}" if example else ""))
+    v.append(f"`{name}` — {doc}\n\nDefined in {std}{arity_str}."
+             + (f"\n\nExample: {example}" if example else ""))
+    v.append(f"In the `{std}` bundle{arity_str.replace(' arity', ', arity')}: "
+             f"`{name}` — {doc}"
+             + (f" Illustrated: {example}" if example else ""))
+    v.append(f"Signature and purpose. `{name}`: {doc}\n\nStandard: {std}."
+             + (f"\n\nExample: {example}" if example else ""))
+    v.append(f"The `{std}` verb `{name}` is documented as: {doc}"
+             + (f"\n\nWorked case: {example}" if example else ""))
+    return v
+
+
+def _spec_verb_s06_reversals(name: str, std: str, doc: str,
+                             example: str) -> list[tuple[str, str]]:
+    """S06 reversed / bidirectional — 5 reversals per spec verb.
+    Reversal Curse (arXiv:2309.12288) coverage: doc→name, example→name,
+    std→name-list, definition→name, sig-fragment→name.
+    """
+    r = []
+    if doc:
+        r.append(("reversed-doc",
+                  f"Which {std} verb is documented as: \"{doc}\"?\n\n`{name}`."))
+    if example:
+        r.append(("reversed-example",
+                  f"Which {std} verb produces this pattern: `{example}`?\n\n`{name}`."))
+    r.append(("reversed-std-membership",
+              f"Name a verb from the `{std}` standard.\n\n`{name}`."))
+    if doc:
+        first_clause = doc.split(".")[0].strip()
+        r.append(("reversed-first-clause",
+                  f"Which {std} verb {first_clause.lower()}?\n\n`{name}`."))
+    r.append(("reversed-family",
+              f"When you need a `{std}` verb by the name `{name}`, "
+              f"what does it do?\n\n{doc or '(no documentation on file)'}"))
+    return r
+
+
+def _iter_slat_prose_paragraphs(rel_path: str, extra_fields: str = ""):
+    """Yield (rel, para) from a SLAT file's prose fields, applying the same
+    filters as emit_type_LE_langeng. Reusable across CORTEX/REPL/spec.
+
+    `extra_fields` is a `|`-joined list of additional field names (without
+    the leading `:`) to include beyond the LE default set.
+    """
+    p = REPO / rel_path
+    if not p.exists():
+        return
+    fields = (r'prose|body|text|note|summary|explanation|rationale|intro|'
+              r'caption|source|description|detail|para|lesson|why|fix|broken|'
+              r'lesson-slug|repair|remediation|goal|doc|title|purpose|meaning|'
+              r'context|reason')
+    if extra_fields:
+        fields = fields + '|' + extra_fields
+    prose_re = re.compile(rf':(?:{fields})\s+"((?:[^"\\]|\\.)*)"', re.DOTALL)
+    text = p.read_text(encoding="utf-8", errors="replace")
+    seen: set[str] = set()
+    for m in prose_re.finditer(text):
+        s = m.group(1).replace('\\n', '\n').replace('\\"', '"').replace('\\t', '\t')
+        for para in s.split("\n\n"):
+            para = para.strip()
+            if not para or para in seen:
+                continue
+            if para.startswith(("(", "[FLOW", "┌", "│", "└", "├", "```")):
+                continue
+            # Alfred: NOTHING named Sakura in the Motoi fold.
+            if re.search(r'sakura', para, re.IGNORECASE):
+                continue
+            if any(ch in para for ch in ("↓", "├", "└", "│", "┌", "→", "⟶")):
+                continue
+            if "](#" in para:
+                continue
+            if para.count("/") > 8:
+                continue
+            letters = sum(c.isalpha() for c in para)
+            if letters < len(para) * 0.55:
+                continue
+            if _approx_tokens(para) < _MIN_PARAGRAPH_TOKENS:
+                continue
+            seen.add(para)
+            if len(para) > _MAX_PARAGRAPH_CHARS:
+                para = para[:_MAX_PARAGRAPH_CHARS].rsplit(" ", 1)[0] + "…"
+            yield (rel_path, para)
+
+
+def _iter_markdown_paragraphs(rel_path: str):
+    """Yield (rel, para) from a Markdown file. Skips code fences, headers-only
+    lines, TOC anchor lists, and short/dense fragments.
+    """
+    p = REPO / rel_path
+    if not p.exists():
+        return
+    text = p.read_text(encoding="utf-8", errors="replace")
+    # Strip fenced code blocks
+    text = re.sub(r'```[\s\S]*?```', '', text)
+    # Strip inline code (keep prose)
+    text = re.sub(r'`[^`\n]+`', 'CODE', text)
+    seen: set[str] = set()
+    for para in text.split("\n\n"):
+        para = para.strip()
+        if not para or para in seen:
+            continue
+        # Skip pure headings
+        if all(ln.strip().startswith("#") or not ln.strip() for ln in para.splitlines()):
+            continue
+        # Skip TOC anchor lists
+        if para.count("](#") >= 2:
+            continue
+        # Skip Sakura mentions (Motoi-only fold)
+        if re.search(r'sakura', para, re.IGNORECASE):
+            continue
+        # Skip bullet-only paragraphs of paths / URLs
+        if para.count("/") > 8:
+            continue
+        letters = sum(c.isalpha() for c in para)
+        if letters < len(para) * 0.55:
+            continue
+        if _approx_tokens(para) < _MIN_PARAGRAPH_TOKENS:
+            continue
+        seen.add(para)
+        if len(para) > _MAX_PARAGRAPH_CHARS:
+            para = para[:_MAX_PARAGRAPH_CHARS].rsplit(" ", 1)[0] + "…"
+        yield (rel_path, para)
+
+
+def _emit_prose_source(rel_path, para, type_code, shape, substrate, material,
+                       audience, mode, speech_act, cpt_shape_name,
+                       paraphrase_idx=0):
+    """Uniform emit for a prose-paragraph source. Applies Qwen header +
+    tag stack + provenance per SRE-04 §1a stamp template.
+    """
+    qwen_header, qwen_tag = _qwen_header(rel_path)
+    base = dict(dialect="motoi", substrate=substrate, material=material)
+    return _rec(
+        f"{qwen_header}\n" + qwen_tag + " " + _tag(**base, shape=shape, **{
+            "cpt-shape-name": cpt_shape_name,
+            "speech-act": speech_act, "mode": mode,
+            "paraphrase-idx": paraphrase_idx, "audience": audience}) +
+        f" {_prov(rel_path)}" +
+        f"\n\n{para}",
+        {"type": type_code, "shape": shape, "substrate": substrate,
+         "paraphrase-idx": paraphrase_idx})
+
+
+# ── TYPE CE — Cortex engineering doc (self/memory model, filtered) ─────────
+# SRE-04 §1a: S16 third-person biography/reason-giving (engineering-exposition).
+# Alfred 2026-08-07: "take out the boring shit" — the LE filter stack drops
+# path-heavy, flow-diagram, and code-dense paragraphs. What survives is the
+# conceptual "what/why" prose that teaches self-model.
+
+CORTEX_DOCS = [
+    "engineering/motoi-eng/CORTEX-1.0.ENG.slat",
+]
+
+
+def emit_type_CE_cortex():
+    for rel in CORTEX_DOCS:
+        for rel_out, para in _iter_slat_prose_paragraphs(rel):
+            for i, variant in enumerate(_prose_variants_5(para, "Motoi Cortex")):
+                yield _emit_prose_source(
+                    rel_out, variant, type_code="CE", shape="S16",
+                    substrate="cortex-eng", material="engineering",
+                    audience="programmer", mode="expository",
+                    speech_act="assertive",
+                    cpt_shape_name="engineering-exposition",
+                    paraphrase_idx=i)
+
+
+# ── TYPE RP — REPL + REPL-FEATURES + REFERENCE-ALIASES ─────────────────────
+# SRE-04 §1a: S01 encyclopedic canonical — REPL UX + name alias resolution.
+# audience programmer; mode expository.
+
+REPL_DOCS = [
+    "Scheme/REPL.slat",
+    "Scheme/REPL-FEATURES.slat",
+    "Scheme/REFERENCE-ALIASES.slat",
+]
+
+
+def emit_type_RP_repl():
+    for rel in REPL_DOCS:
+        for rel_out, para in _iter_slat_prose_paragraphs(rel):
+            for i, variant in enumerate(_prose_variants_5(para, "the Motoi REPL")):
+                yield _emit_prose_source(
+                    rel_out, variant, type_code="RP", shape="S01",
+                    substrate="repl", material="reference",
+                    audience="programmer", mode="expository",
+                    speech_act="assertive",
+                    cpt_shape_name="encyclopedic-canonical",
+                    paraphrase_idx=i)
+
+
+# ── TYPE SP — Language spec files (R7RS-small + adopted SRFIs) ─────────────
+# SRE-04 §1a: S01 encyclopedic canonical. Per CLAUDE.md: "Spec kept
+# alongside" — the model must see the actual standard to reason about
+# conformance. Includes R7RS-small + SRFI-1 (default bundle) + SRFI-13/27/125
+# (adopted lazy parts). Excludes .MOVED files and CPU-SPEC (implementation).
+
+SPEC_DOCS = [
+    "spec/r7rs-small.slatl",
+    "spec/srfi-1.slatl",
+    "spec/srfi-13.slatl",
+    "spec/srfi-27.slatl",
+    "spec/srfi-125.slatl",
+    "spec/BOOK-LAYOUT.slat",
+    "spec/VIRTUAL-SHAPE-VOCABULARY.slat",
+    "spec/SLAT-CONVENTION.slat",
+    "spec/MOTOI-SCHEME-REFERENCE-SCHEMA.slat",
+]
+
+# Per-verb spec extractor. Spec files are dominated by short
+# `(verb :name X :std Y :arity N :doc "…" :example "…")` blocks; the LE-style
+# paragraph extractor undercounts because each `:doc` field is one line.
+# Combine each verb's fields into one encyclopedic record per SRE-04 §1a S01.
+
+_SPEC_VERB_RE = re.compile(
+    r'\(verb\s+((?::[a-z-]+\s+(?:"(?:[^"\\]|\\.)*"|[^\s()]+)\s*)+)\)',
+    re.DOTALL)
+_SPEC_FIELD_RE = re.compile(r':([a-z-]+)\s+(?:"((?:[^"\\]|\\.)*)"|([^\s()]+))')
+_SPEC_PART_HEADER_RE = re.compile(
+    r'\(part\s+((?::[a-z-]+\s+(?:"(?:[^"\\]|\\.)*"|[^\s()]+)\s*)+)\)',
+    re.DOTALL)
+
+
+def _iter_spec_verb_records(rel):
+    p = REPO / rel
+    if not p.exists():
+        return
+    text = p.read_text(encoding="utf-8", errors="replace")
+    # Part header (once per file)
+    for m in _SPEC_PART_HEADER_RE.finditer(text):
+        fields = dict(
+            (k, (v or w).replace('\\n', '\n').replace('\\"', '"'))
+            for k, v, w in _SPEC_FIELD_RE.findall(m.group(1)))
+        std = fields.get("std") or fields.get("title") or "spec"
+        title = fields.get("title") or std
+        note = fields.get("note", "")
+        prov = fields.get("provenance", "")
+        para = f"{title}. {note} Provenance: {prov}".strip()
+        if _approx_tokens(para) >= 8:
+            yield (rel, para)
+    # Per-verb records
+    for m in _SPEC_VERB_RE.finditer(text):
+        fields = dict(
+            (k, (v or w).replace('\\n', '\n').replace('\\"', '"'))
+            for k, v, w in _SPEC_FIELD_RE.findall(m.group(1)))
+        name = fields.get("name")
+        if not name:
+            continue
+        std = fields.get("std", "spec")
+        doc = fields.get("doc", "").strip()
+        example = fields.get("example", "").strip()
+        arity = fields.get("arity", "")
+        parts = [f"Standard verb `{name}` from `{std}`."]
+        if arity:
+            parts.append(f"Arity: {arity}.")
+        if doc:
+            parts.append(doc)
+        if example:
+            parts.append(f"Example: {example}")
+        para = " ".join(parts)
+        if para:
+            yield (rel, para)
+
+
+def _iter_spec_verb_raw(rel):
+    """Same as _iter_spec_verb_records but returns the structured fields
+    per verb so we can build variants + reversals.
+    """
+    p = REPO / rel
+    if not p.exists():
+        return
+    text = p.read_text(encoding="utf-8", errors="replace")
+    for m in _SPEC_VERB_RE.finditer(text):
+        fields = dict(
+            (k, (v or w).replace('\\n', '\n').replace('\\"', '"'))
+            for k, v, w in _SPEC_FIELD_RE.findall(m.group(1)))
+        name = fields.get("name")
+        if not name:
+            continue
+        yield (rel, name, fields.get("std", "spec"),
+               fields.get("doc", "").strip(),
+               fields.get("example", "").strip(),
+               fields.get("arity", ""))
+
+
+def emit_type_SP_spec():
+    for rel in SPEC_DOCS:
+        # Per-verb: 5 canonical variants + 5 S06 reversals (Reversal Curse coverage)
+        for rel_out, name, std, doc, example, arity in _iter_spec_verb_raw(rel):
+            for i, variant in enumerate(_spec_verb_variants_5(name, std, doc, example, arity)):
+                yield _emit_prose_source(
+                    rel_out, variant, type_code="SP", shape="S01",
+                    substrate="spec", material="spec",
+                    audience="programmer", mode="expository",
+                    speech_act="assertive",
+                    cpt_shape_name="encyclopedic-canonical",
+                    paraphrase_idx=i)
+            for i, (slug, body) in enumerate(_spec_verb_s06_reversals(name, std, doc, example)):
+                # Emit S06 with slug in cpt-shape-name (mirrors H emitter S06 pattern)
+                yield _emit_prose_source(
+                    rel_out, body, type_code="SP", shape="S06",
+                    substrate="spec", material="spec",
+                    audience="programmer", mode="expository",
+                    speech_act="interrogative",
+                    cpt_shape_name=slug,
+                    paraphrase_idx=i)
+        # Part-header + spec-meta prose fallback (BOOK-LAYOUT, SLAT-CONVENTION, etc.)
+        for rel_out, para in _iter_spec_verb_records(rel):
+            # part-header records already handled above via _iter_spec_verb_raw; skip
+            # We only want the (part ...) header prose from this generator
+            if not para.startswith("Standard verb"):  # part-header only
+                for i, variant in enumerate(_prose_variants_5(para, "the spec")):
+                    yield _emit_prose_source(
+                        rel_out, variant, type_code="SP", shape="S01",
+                        substrate="spec", material="spec",
+                        audience="programmer", mode="expository",
+                        speech_act="assertive",
+                        cpt_shape_name="encyclopedic-canonical",
+                        paraphrase_idx=i)
+        # Fallback prose extraction for meta-spec files with :prose / :note fields
+        for rel_out, para in _iter_slat_prose_paragraphs(rel):
+            for i, variant in enumerate(_prose_variants_5(para, "the spec")):
+                yield _emit_prose_source(
+                    rel_out, variant, type_code="SP", shape="S01",
+                    substrate="spec", material="spec",
+                    audience="programmer", mode="expository",
+                    speech_act="assertive",
+                    cpt_shape_name="encyclopedic-canonical",
+                    paraphrase_idx=i)
+
+
+# ── TYPE BE — broken-examples/ (contrastive teaching) ──────────────────────
+# SRE-04 §1a: S07 concept-then-example (learn by contrast). Per CLAUDE.md:
+# "Bad examples are kept — they are teaching signal." Iterates every .slatl
+# under Scheme/reference/broken-examples/ and extracts prose (broken, fix,
+# lesson, why fields) via widened prose regex.
+
+BROKEN_EXAMPLES_DIR = REPO / "Scheme" / "reference" / "broken-examples"
+
+
+def emit_type_BE_broken_examples():
+    if not BROKEN_EXAMPLES_DIR.exists():
+        return
+    for path in sorted(BROKEN_EXAMPLES_DIR.glob("*.slatl")):
+        rel = str(path.relative_to(REPO))
+        for rel_out, para in _iter_slat_prose_paragraphs(rel):
+            for i, variant in enumerate(_prose_variants_5(para,
+                                                          "the Motoi broken-example set")):
+                yield _emit_prose_source(
+                    rel_out, variant, type_code="BE", shape="S07",
+                    substrate="broken-example", material="reference",
+                    audience="programmer", mode="expository",
+                    speech_act="assertive",
+                    cpt_shape_name="concept-then-example",
+                    paraphrase_idx=i)
+
+
+# ── TYPE EC — error-cards/ (error taxonomy + repair patterns) ──────────────
+# SRE-04 §1a: S12 guided modification — teach fault → repair walks.
+
+ERROR_CARDS_DIR = REPO / "Scheme" / "reference" / "error-cards"
+
+
+def emit_type_EC_error_cards():
+    if not ERROR_CARDS_DIR.exists():
+        return
+    for path in sorted(list(ERROR_CARDS_DIR.glob("*.slatl")) +
+                       list(ERROR_CARDS_DIR.glob("*.slat"))):
+        rel = str(path.relative_to(REPO))
+        for rel_out, para in _iter_slat_prose_paragraphs(rel):
+            for i, variant in enumerate(_prose_variants_5(para,
+                                                          "the Motoi error-cards")):
+                yield _emit_prose_source(
+                    rel_out, variant, type_code="EC", shape="S12",
+                    substrate="error-card", material="reference",
+                    audience="programmer", mode="expository",
+                    speech_act="directive",
+                    cpt_shape_name="guided-modification",
+                    paraphrase_idx=i)
+
+
+# ── TYPE IN — Intro (README.md + PUBLIC-API.md) ────────────────────────────
+# SRE-04 §1a: README = S19 origin-story/narrative (SAFETY low);
+# PUBLIC-API = S01 encyclopedic canonical.
+
+def emit_type_IN_intro():
+    for rel_out, para in _iter_markdown_paragraphs("README.md"):
+        for i, variant in enumerate(_prose_variants_5(para, "the Motoi README")):
+            yield _emit_prose_source(
+                rel_out, variant, type_code="IN", shape="S19",
+                substrate="intro", material="prose",
+                audience="any", mode="narrative",
+                speech_act="assertive",
+                cpt_shape_name="origin-narrative",
+                paraphrase_idx=i)
+    for rel_out, para in _iter_markdown_paragraphs("PUBLIC-API.md"):
+        for i, variant in enumerate(_prose_variants_5(para, "the Motoi PUBLIC-API")):
+            yield _emit_prose_source(
+                rel_out, variant, type_code="IN", shape="S01",
+                substrate="intro", material="reference",
+                audience="programmer", mode="expository",
+                speech_act="assertive",
+                cpt_shape_name="encyclopedic-canonical",
+                paraphrase_idx=i)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1670,6 +2154,12 @@ EMITTERS = [
     ("E-book", emit_book_shapes),
     ("W", emit_type_W_wordbooks),
     ("LE", emit_type_LE_langeng),
+    ("CE", emit_type_CE_cortex),
+    ("RP", emit_type_RP_repl),
+    ("SP", emit_type_SP_spec),
+    ("BE", emit_type_BE_broken_examples),
+    ("EC", emit_type_EC_error_cards),
+    ("IN", emit_type_IN_intro),
     ("L", emit_type_L_carts),
     ("I", emit_type_I_identity),
     ("J", emit_type_J_doctrine),
@@ -1697,6 +2187,30 @@ def main():
     args = ap.parse_args()
 
     print("=== Mk 3 CPT emit v5 — defect-fix pass ===\n")
+
+    # ── Pre-emit assertion (Alfred 2026-08-07: "never happen again") ────────
+    # The Python extractor undercounted programs four times in a row. This
+    # gate runs the canonical grep-based counter and refuses to proceed if
+    # the HP emitter is about to ship <90% of the on-disk program count.
+    import subprocess as _sp
+    try:
+        _canon = _sp.check_output(
+            ["python3", str(REPO / "scratch/count-reference-programs.py"), "--json"],
+            text=True, timeout=30)
+        _canon_total = json.loads(_canon)["totals"]["_total_programs"]
+        # Dry-count HP without emitting (cheap: EMITTERS entry lookup)
+        _hp_fn = dict(EMITTERS).get("HP")
+        _hp_count = sum(1 for _ in _hp_fn()) if _hp_fn else 0
+        _ratio = _hp_count / _canon_total if _canon_total else 0
+        print(f"\nPre-emit gate: canonical programs={_canon_total:,}  "
+              f"HP records={_hp_count:,}  ratio={_ratio:.3f}")
+        if _ratio < 0.90 and not args.dry_run:
+            raise SystemExit(
+                f"HALT: HP emitter would ship only {_hp_count:,} of {_canon_total:,} "
+                f"canonical programs ({_ratio:.1%}). Below 90% floor. Fix or override.")
+        print(f"  ✓ ≥ 90% floor — proceeding\n")
+    except FileNotFoundError:
+        print("  ⚠ canonical counter not found; skipping pre-emit gate")
 
     counters: Counter = Counter()
     shape_dist: Counter = Counter()

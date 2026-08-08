@@ -54,14 +54,20 @@ The composer subsystem is live in this build: `composer/canvas`, `composer/slide
 
 ## 14.2 composer/emit — canvas to form
 
-`composer/emit` walks the canvas and produces the current form.
+`composer/emit` walks the canvas and produces a form.
 
 ```scheme
 (composer/emit my-canvas)
-;; => (cart/main :bpm 120 :song (sequence (note ...) ...))
+;; => (composer/canvas (:bind (quote (cart/main))) (composer/slider :label \"BPM\" :bind (quote (cart/main :bpm)) :min 60 :max 240 :step 1 :value 60) ...)
 ```
 
-The return is Scheme. Readable. Runnable. This is the canvas asked *what form do you produce right now?*.
+Read the head carefully, because it is probably not what you expected. You might have guessed the emitted form would be the *target* — a `(cart/main :bpm 120 ...)`, the thing the canvas is editing. It is not. What comes back is a `composer/canvas` declaration: the canvas itself, its widgets, and each widget's current state, written out as data.
+
+That is deliberate, and 14.4 is the reason. The guarantee is that applying the emitted form to the canvas reconstructs the canvas exactly — so the form has to carry everything needed to rebuild the widget tree, not just the values the widgets currently hold. Look at the slider in the output: `:label`, `:bind`, `:min`, `:max`, `:step` are all there alongside `:value 60`. Emit the target form only and you would know the BPM but not that a slider from 60 to 240 was the thing that set it.
+
+Note the `:value 60` too. The chapter setup never gave the slider a `:value`; it gave it `:min 60`. An unset slider reports its minimum, which is a small honest default and a thing worth knowing before you read a canvas's numbers as if a person had chosen them.
+
+The return is Scheme. Readable. Runnable. This is the canvas asked *describe yourself as a form, completely enough that I could rebuild you*.
 
 ## 14.3 composer/apply — form to canvas
 
@@ -117,32 +123,41 @@ You build a composer for a synth patch.
 ```scheme
 (define c
   (composer/canvas :bind '(synth)
-    (composer/slider :label \"Attack\" :bind '(synth :env :a) :min 0 :max 2 :step 0.01)
-    (composer/slider :label \"Decay\" :bind '(synth :env :d) :min 0 :max 2 :step 0.01)
-    (composer/slider :label \"Sustain\" :bind '(synth :env :s) :min 0 :max 1 :step 0.01)
-    (composer/slider :label \"Release\" :bind '(synth :env :r) :min 0 :max 4 :step 0.01)))
+    (composer/slider :label \"Attack\" :bind '(synth :env :a) :min 0 :max 2 :step 0.01 :value 0.01)
+    (composer/slider :label \"Decay\" :bind '(synth :env :d) :min 0 :max 2 :step 0.01 :value 0.1)
+    (composer/slider :label \"Sustain\" :bind '(synth :env :s) :min 0 :max 1 :step 0.01 :value 0.7)
+    (composer/slider :label \"Release\" :bind '(synth :env :r) :min 0 :max 4 :step 0.01 :value 0.5)))
 ```
 
-Emit:
+Emit. This is the part people guess wrong, so read the answer carefully:
 
 ```scheme
-(composer/emit c)
-;; => (synth :env (:a 0.01 :d 0.1 :s 0.7 :r 0.5))
+(car (composer/emit c))
+;; => composer/canvas
 ```
 
-Save:
+`composer/emit` does **not** hand you the value the canvas is bound to. It hands you a `composer/canvas` declaration form — the canvas as source code, with every widget's current `:value` baked in. Six elements: the head verb, the canvas's own keyword args, and one sub-form per slider.
+
+```scheme
+(length (composer/emit c))
+;; => 6
+```
+
+```scheme
+(list-ref (composer/emit c) 2)
+;; => (composer/slider :label \"Attack\" :bind (quote (synth :env :a)) :min 0 :max 2 :step 0.01 :value 0.01)
+```
+
+Every field you declared comes back, plus `:value` — which is the live state. That is the whole trick. The emitted form is not a summary of the canvas; it *is* the canvas, in a shape you can print, diff, store, and re-evaluate.
+
+Save and load use that same form:
 
 ```scheme
 (composer/save c \"my-patch.slat\")
-```
-
-The file on disk is the emitted form. Next session load and apply:
-
-```scheme
 (define c2 (composer/load \"my-patch.slat\"))
-(composer/emit c2)
-;; => (synth :env (:a 0.01 :d 0.1 :s 0.7 :r 0.5))   ;; identical
 ```
+
+The file on disk is the emitted declaration. `composer/load` reads it back and rebuilds the widget tree, so `(composer/emit c2)` equals `(composer/emit c)` element for element. One caution: `composer/save` is sandboxed — it will refuse a path that resolves outside the project root or your Motoi home, which is why the example uses a bare relative filename.
 
 Round-trip preserved. No composer-specific serialization. Just Scheme forms and the composer's emit/apply pair.
 
@@ -232,15 +247,25 @@ Turn the page. Chapter 15 opens performance introspection.
 Composer canvases can be inspected the same way any value is inspected.
 
 ```scheme
-(runtime-shape c)              ;; => canvas-record
+(runtime-shape c)              ;; => record
 (car (composer/emit c))        ;; => composer/canvas  (the head verb)
-(cddr (composer/emit c))       ;; => the widget sub-forms, as data
+(cddr (composer/emit c))       ;; => ((composer/slider :label \"BPM\" :bind (quote (cart/main :bpm)) :min 60 :max 240 :step 1 :value 60))
 ```
 
-Every widget is a record value:
+Every widget is a record value too:
 
 ```scheme
 (runtime-shape a-slider)   ;; => record
+```
+
+And now notice what just happened: the canvas and the slider gave the *same answer*. `runtime-shape` is the two-line helper from the chapter setup — `(cond ((pair? v) 'canvas-record) (else 'record))` — and neither a canvas nor a widget is a pair, so both fall through to `record`. The helper cannot tell them apart. That is not a bug in the composer; it is a bug in the helper, and it is the sort of thing you find only by running your own introspection tool against two values you know are different.
+
+If you actually need to tell a canvas from a widget, ask a question that distinguishes them. `composer/emit` is that question: it returns a form for a canvas and the empty list for anything else.
+
+```scheme
+(define (canvas? v) (not (null? (composer/emit v))))
+(canvas? c)          ;; => #t
+(canvas? a-slider)   ;; => #f
 ```
 
 The composer surface is just records with structured metadata. To read a widget's label, bind path, and config, emit the canvas that holds it (via `composer/emit`) and read the widget sub-form as data — the same introspection reflex used everywhere else in the book.

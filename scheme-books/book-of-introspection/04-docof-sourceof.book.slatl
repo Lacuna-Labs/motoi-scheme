@@ -26,16 +26,16 @@ Learn these three well and you can navigate any Motoi codebase without a docs si
 
 ```scheme
 (doc-of 'map)
-;; => \"Apply a procedure to each element of one or more lists, returning a new list of results.\"
+;; => \"Apply fn to every element, collect the results.\"
 
 (doc-of 'car)
-;; => \"Return the first element of a pair.\"
+;; => \"The first element of a non-empty list.\"
 
 (doc-of 'cortex/query)
-;; => \"Query Cortex records. Kwargs: :subject :predicate :object :at :source :order-by.\"
+;; => ()
 ```
 
-That is the entire behavior. Symbol in, string out. If no doc, nil out.
+That is the entire behavior. Symbol in, string out. If no doc, nil out — and `cortex/query` is a live example of the nil case: it is bound and callable, but nobody has written its docstring yet. Documentation coverage is a property of the registry, not a guarantee.
 
 Before we go further, a small setup block. This chapter demonstrates several helpers — `apropos`, `verbs-in-namespace`, `meta-field`, `extract-verb-calls` — as thin Scheme wrappers over the real primitives (`all-verbs`, `help`, `string-contains`, `string-prefix?`). Defining them once here lets the rest of the chapter run:
 
@@ -118,18 +118,20 @@ If you are working on Motoi itself and want to check what the reference manual s
 
 ## 4.5 source-of — the last-resort pointer
 
-`source-of` returns the source-pointer field from the metadata. Path plus line number.
+`source-of` returns the source-pointer field from the metadata: the file the verb is registered in.
 
 ```scheme
 (source-of 'car)
-;; => \"src/base.js:73\"
+;; => \"src/base.js\"
+
+(source-of 'string-upcase)
+;; => \"lib/std/r7rs-completions-core.js\"
 
 (source-of 'cortex/query)
-;; => \"lib/ai/cortex-io.js:121\"
-
-(source-of 'composer/slider)
-;; => \"lib/composer/widgets.js:42\"
+;; => ()
 ```
+
+Three things to read off that. `car` lives in the engine core. `string-upcase` lives in a standard-library part, loaded alongside the core. And `cortex/query` has no pointer at all — same nil you saw from `doc-of`, for the same reason.
 
 The pointer is what you use when the doc, contract, and examples were not enough. If a verb's behavior surprises you, `source-of` tells you where to go read the implementation.
 
@@ -137,24 +139,24 @@ This is the last-resort tool for a reason. Reading source is more work than read
 
 ## 4.6 The source pointer format
 
-Every source pointer follows the format `path:line`. Path is relative to the runtime root. Line is 1-indexed.
+Every source pointer is a plain `path`, relative to the runtime root. It names a FILE, not a line. That is a deliberate choice, and section 4.7 explains why.
 
 Some examples of what to do with the pointer:
 
-**Open in an editor.** If your editor supports `file:line` navigation (most do), you can copy-paste the pointer and jump straight to the implementation.
+**Open in an editor.** Copy-paste the path and open it, then search inside for the verb name.
 
 ```
-$ vim src/base.js +73
+$ vim src/base.js
 ```
 
-**Read from the REPL.** You can compose the pointer with a file-reader verb to see the surrounding lines (shown as a definition; `read-file-lines-around` is a file-reader you would supply in a source-enabled runtime):
+**Read from the REPL.** You can compose the pointer with a file-reader verb (shown as a definition; `read-file-text` is a file-reader you would supply in a source-enabled runtime — Motoi itself is hermetic and has no file I/O):
 
 ```scheme
-(define (show-source-around name radius)
-  (display (read-file-lines-around (source-of name) radius)))
+(define (show-source-file name)
+  (display (read-file-text (source-of name))))
 ```
 
-where `read-file-lines-around` reads the file and returns the ten lines centered on the target line.
+where `read-file-text` reads the file the pointer names and returns its contents.
 
 **Grep for related verbs.** If a verb's source is in `lib/composer/widgets.js`, other verbs in that file are probably related. `grep register lib/composer/widgets.js` gives you the sibling verbs.
 
@@ -162,34 +164,31 @@ The source pointer is a bridge from the metadata layer to the source-code layer.
 
 ## 4.7 The source-pointer drift problem
 
-As mentioned in Chapter 2, source pointers are manually maintained strings. If a verb's implementation moves within its file, the line number drifts.
+As mentioned in Chapter 2, source pointers are manually maintained strings. Nothing in the runtime checks them against reality, so they can go stale.
 
-There is no runtime check for drift. If a verb's `source` field says `src/base.js:73` and the actual implementation is at line 85, `source-of` will still return line 73. Following the pointer takes you to the wrong line.
+A file path drifts far more slowly than a line number would. Verbs get shuffled around inside a file constantly; they change file rarely. That is exactly why the pointer stops at the file: a `path:line` pointer would be wrong within a week of anyone touching `src/base.js`, and a pointer that is confidently wrong is worse than a coarse one that is right.
 
-Two mitigations:
+So the contract is: `source-of` tells you which file to open, and you search inside it for the verb name. Two mitigations for the cases where even that goes stale:
 
-1. **Search within the file.** Once you are in `src/base.js`, search for the verb name (`grep 'car'` or your editor's search) to find the actual current line.
+1. **Search the tree.** If the verb is not in the file the pointer names, `grep` the whole `src/` and `lib/` tree for the registration.
 
 2. **File a bug.** If you notice a drift, file it. The fix is a metadata update: change the `source` field in the registration call.
 
-There is a planned auto-source-pointer feature (`engineering/AUTO-SOURCE-POINTERS.slat`, not yet landed) that would derive the source pointer from the JS stack trace at registration time. When that lands, drift will not be possible. Until then, treat source pointers as helpful-but-approximate.
+Treat source pointers as helpful-but-approximate, and never build a tool that assumes a line number is in there.
 
 ## 4.8 What source-of does not do
 
 `source-of` does not read the source. It returns the pointer.
 
-If you want the source code itself, you need a separate file-reader verb. Motoi's `read-file` and `read-file-lines` verbs do this; combine them with `source-of` to get the code.
+It cannot read the source, either. Motoi is hermetic — there is no file I/O in the language. A host that embeds Motoi can supply a file-reader verb; combine that with `source-of` to get the code.
 
 ```scheme
 (define (source-of-verb-code name)
-  (let* ((ptr (source-of name))
-         (parts (string-split ptr \":\"))
-         (path (car parts))
-         (line (string->number (cadr parts))))
-    (read-file-lines-around path line 10)))
+  (let ((path (source-of name)))
+    (and (string? path) (read-file-text path))))
 ```
 
-Now `(source-of-verb-code 'car)` returns twenty lines of source centered on the registration site. That is a small custom tool composed from primitives.
+`(source-of-verb-code 'car)` then returns the text of `src/base.js`, and you search it for the registration. Note the `string?` guard: `source-of` returns nil for a verb with no pointer, and nil is not a path. That is a small custom tool composed from primitives.
 
 ## 4.9 source-of and confidentiality
 
@@ -205,18 +204,24 @@ Chapter 16 covers redaction policies in detail.
 
 ## 4.10 examples-of — the third habit
 
-`examples-of` returns the tiered examples list from the metadata.
+`examples-of` returns the tiered examples list from the metadata. It is a LIST, and you can count it:
 
 ```scheme
-(examples-of 'map)
-;; => ((:level novice :code \"(map (lambda (x) (* x 2)) '(1 2 3))\")
-;;     (:level intermediate :code \"(map + '(1 2 3) '(10 20 30))\")
-;;     (:level expert :code \"(map (lambda (kv) (cons (car kv) (* (cdr kv) 2))) alist)\"))
+(length (examples-of 'map))
+;; => 1
+
+(length (examples-of 'cortex/query))
+;; => 0
 ```
 
-The return is a list of records. Each record has `:level` (`novice`, `intermediate`, or `expert`) and `:code` (a runnable string).
+Each element carries a `:level` (`novice`, `intermediate`, or `expert`) and a `:code` string. But here is the honest caveat, and it matters: in today's runtime those elements are OPAQUE from Scheme. They are host records, not alists, so `assq` will not open them and printing one gives you a placeholder rather than its contents. You can count them and you can hand the whole list to a host-side tool; you cannot yet destructure one in Scheme.
 
-The three levels are the pedagogical arc. Novice is the verb in isolation. Intermediate is one composition. Expert is a realistic pattern.
+```scheme
+(examples-of 'cortex/query)
+;; => ()
+```
+
+The three levels are the pedagogical arc. Novice is the verb in isolation. Intermediate is one composition. Expert is a realistic pattern. Most core verbs currently ship the novice tier only, so a length of `1` is the common case and `0` means nobody has written an example yet.
 
 Why is `examples-of` its own habit? Because you use it more than you might think. Every time you look up a verb, the examples are what save you from having to invent a call to it. `(help 'map)` gives you the full record; `(examples-of 'map)` is the shortcut when all you need is a call you can adapt.
 
@@ -372,43 +377,47 @@ You are writing a cart. You want to sort a list of records by one of their field
 
 ```scheme
 (apropos \"sort\")
-;; => (sort sort-by sort! sorted?)
+;; => (\"sort\")
 ```
 
-`sort-by` looks right. What does it do?
+Exactly one hit. (`apropos` matches on the printed name, and `all-verbs` hands back STRINGS, which is why the answer comes back quoted.) There is no `sort-by`, no `sort!`, no `sorted?` — one verb does the whole job. What does it do?
 
 **Second move — doc-of.**
 
 ```scheme
-(doc-of 'sort-by)
-;; => \"Sort a list by applying a key function to each element and comparing keys.\"
+(doc-of 'sort)
+;; => \"(sort seq less?) — stable ascending sort of a list or vector; returns the same kind.\"
 ```
 
-Perfect. That is what you want. But how do you call it?
+That one docstring answered three questions at once. It takes a comparison procedure, not a key function. It is STABLE, so equal elements keep their original order. And it works on vectors as well as lists, returning whichever kind you gave it.
 
 **Third move — examples-of.**
 
 ```scheme
-(examples-of 'sort-by)
-;; => ((:level novice :code \"(sort-by identity '(3 1 2))\")
-;;     (:level intermediate :code \"(sort-by string-length '(\\\"aaa\\\" \\\"b\\\" \\\"cc\\\"))\")
-;;     (:level expert :code \"(sort-by (lambda (r) (record-field r :priority)) records)\"))
+(length (examples-of 'sort))
+;; => 1
 ```
 
-The expert example is exactly your case — sort records by a field. Copy it, adapt the field name to yours, paste into your buffer. Done.
+One example, the novice tier. Since the examples themselves are opaque from Scheme (section 4.10), read it at the REPL with `,examples sort` — or, now that `doc-of` has told you the signature, just write the call:
+
+```scheme
+(define recs (list (list 'a 3) (list 'b 1) (list 'c 2)))
+(sort recs (lambda (x y) (< (cadr x) (cadr y))))
+;; => ((b 1) (c 2) (a 3))
+```
+
+Sorting by a field is `less?` plus an accessor. There is no `sort-by` because there does not need to be one.
 
 **Optional fourth move — source-of.**
 
-You are curious about the implementation. Maybe the sort is unstable and you want to check.
+You are curious about the implementation. The docstring already promised stability, but you want to see it.
 
 ```scheme
-(source-of 'sort-by)
-;; => \"src/base.js:412\"
+(source-of 'sort)
+;; => \"src/base.js\"
 ```
 
-Open your editor, jump to line 412, read the impl. It uses a stable merge sort. Good, that is what you needed to know.
-
-Four calls. Complete answer. From \"I do not remember the verb\" to \"I have a working call in my buffer\" in under a minute.
+Open `src/base.js`, search for `'sort'`, read the impl. Four calls. Complete answer. From \"I do not remember the verb\" to \"I have a working call in my buffer\" in under a minute.
 
 ## 4.18 The three verbs and the training corpus
 
@@ -454,10 +463,12 @@ Run it:
 
 ```scheme
 (doc-quality-report)
-;; => (:complete 380 :partial 87 :doc-only 32 :undocumented 13)
+;; => (:complete 12 :partial 28 :doc-only 0 :undocumented 0)
 ```
 
-380 fully documented verbs. 87 partially documented. 32 with only a doc. 13 with nothing. The 13 undocumented ones are the most urgent — they are essentially invisible to the model and to any reader who cannot memorize their names.
+Forty verbs sampled: 12 complete, 28 partial, none doc-only, none undocumented. Read that honestly — `partial` dominates, and it dominates for one reason. Nearly every verb has a doc and a source pointer; what most of them lack is an examples list. Examples are the field that decays first, because a doc gets written when the verb is written and an example only gets written when someone bothers.
+
+Run the same report over `(all-verbs)` instead of `registry-sample` and the ratio holds. The `partial` bucket is the backlog, and it is where the leverage is: those verbs are already named, already documented, already pointed at a file. They are one example away from complete.
 
 You can extend this to name the offenders:
 
@@ -770,14 +781,16 @@ Every verb's examples, evaluated. A metadata-driven smoke test suite, built from
     (verbs-in-namespace ns)))
 
 (namespace-lesson-code \"cortex\")
-;; => ((:verb cortex/read :example \"(cortex/read 'my-key)\")
-;;     (:verb cortex/write :example \"(cortex/write 'my-key 42)\")
-;;     ...)
+;; => ((:verb \"cortex/associate\" :example #f) (:verb \"cortex/forget\" :example #f) ...)
 ```
 
-Now you have the seed of a lesson chapter. Format the list into prose and you have most of the chapter written.
+Now read what actually came back, because it is more instructive than the answer you were hoping for. Every verb in the namespace is there — fourteen of them — and every single `:example` is `#f`. Not one of the cortex verbs carries a novice example in the registry.
 
-This is what having introspection as verbs enables. Content-generation tasks become one-liners because the primitives compose.
+The `and` in `(and novice (cdr (assoc :code novice)))` is doing exactly its job: `find` came back empty, so the whole expression short-circuits to `#f` rather than crashing on `(assoc :code #f)`. That guard is why you got a readable report instead of an error, and it is why the report is honest.
+
+So the tool works and the data does not. That is the useful outcome. You did not get a lesson chapter; you got a precise list of fourteen verbs that need examples written, which is the actionable version of \"the cortex docs are thin.\" Run it against a namespace whose verbs do carry examples and you get the seed of a lesson chapter instead — format the list into prose and most of the chapter is written.
+
+This is what having introspection as verbs enables. Content-generation tasks become one-liners because the primitives compose — and when the composition returns nothing, that is a measurement, not a failure.
 
 ## 4.32 A user story — the confused programmer
 
@@ -798,40 +811,39 @@ Works. But they wonder if Motoi has a built-in.
 
 ```scheme
 (apropos \"avg\")
-;; => (avg avg-of)
+;; => (\"math/avg\")
 ```
 
-Two candidates. Which is which?
+One candidate, and its namespace prefix is already a hint: it lives in `math/`, so it is arithmetic and not, say, a moving average over a time series.
 
 **Step 3.** doc-of.
 
 ```scheme
-(doc-of 'avg)
-;; => \"Return the arithmetic mean of a list of numbers.\"
-
-(doc-of 'avg-of)
-;; => \"Return the arithmetic mean of a list, applying a key function to each element.\"
+(doc-of 'math/avg)
+;; => ()
 ```
 
-`avg` is what they want. `avg-of` is the higher-order variant.
+Nil. Nobody wrote the docstring. This is the case section 4.19 measured — a verb sitting in the `partial` bucket — and it is the case a real session actually hits, so do not skip past it.
 
 **Step 4.** examples-of.
 
 ```scheme
-(examples-of 'avg)
-;; => ((:level novice :code \"(avg '(1 2 3))\"))
+(length (examples-of 'math/avg))
+;; => 0
 ```
 
-One example. Copy, adapt, run.
+Also empty. Introspection has told them everything it knows, which is: the verb exists, it is in the math namespace, and it is readable (`:perm read`, so calling it cannot change anything). That is enough to justify trying it.
 
 ```scheme
-;; avg computes the arithmetic mean (shown here as its definition):
-(define (avg xs) (/ (apply + xs) (length xs)))
-(avg '(1 2 3 4 5))
+(math/avg '(1 2 3 4 5))
 ;; => 3
 ```
 
-Done. Four introspection calls (apropos, doc-of, doc-of, examples-of) and they have moved from a manual computation to a language primitive. Total time: less than a minute.
+It agrees with the hand-rolled version from Step 1. Done.
+
+Notice how the story actually ended. Introspection did not hand them a docstring — it handed them enough safety to run an experiment, and the experiment answered the question. That is the honest shape of the workflow: the metadata narrows the search, and the interpreter settles it.
+
+And there is a second obligation here. `math/avg` has no doc and no examples. That is a bug, and now they are the person who knows about it. File it. The whole point of section 4.19's report is that the backlog is visible; the whole point of noticing one by hand is that you can shrink it by one.
 
 Note what did not happen. They did not open a browser. They did not read a tutorial. They did not go to a documentation site. Every question was one verb call. Every answer was on stdout.
 
@@ -1027,48 +1039,56 @@ You have received a cart file — someone else wrote it, it does something inter
   '(begin
      (define state (list))
      (map (lambda (x) (display x)) (list 1 2 3))
+     (my-custom-thing 7)
      (cortex/write 'score 0)))
 (define verbs-called (delete-duplicates (extract-verb-calls cart-form)))
-;; => (\"begin\" \"define\" \"list\" \"map\" \"lambda\" \"display\" \"cortex/write\")
+
+verbs-called
+;; => (\"begin\" \"define\" \"list\" \"map\" \"lambda\" \"x\" \"display\"
+;;     \"my-custom-thing\" \"cortex/write\" \"quote\")
 ```
 
-`extract-verb-calls` walks the form tree and returns every symbol in call position. You now have a list.
+`extract-verb-calls` walks the form tree and returns every symbol in car position. It is a blunt instrument and the result shows it: `begin`, `define`, `lambda` and `quote` are SPECIAL FORMS rather than verbs, and `\"x\"` is there because `(x)` — the parameter list of the lambda — is also a list with a symbol in car position. A static scanner that over-reports is the right kind of wrong; you filter it down in the next step rather than trusting it to be clever.
 
 **Step 2 — check that every called verb is registered.**
 
+Compare against `(all-verbs)`, which is the registry's own name list:
+
 ```scheme
+(define registered (all-verbs))
 (define unknown-verbs
-  (filter (lambda (n) (not (help n))) verbs-called))
+  (filter (lambda (n) (not (member n registered))) verbs-called))
 
 unknown-verbs
-;; => (my-custom-thing)
+;; => (\"begin\" \"define\" \"lambda\" \"x\" \"my-custom-thing\" \"quote\")
 ```
 
-If any verb is not registered, the cart will fail to run. This is a static check that finds the problem before you evaluate the cart.
+There is the noise, and there — buried in it — is the real finding: `my-custom-thing` is not registered, so the cart will fail to run. Everything else on that list is a special form or the lambda's parameter, which you recognize by eye.
 
-**Step 3 — audit the perm tiers of every called verb.**
+A warning about the obvious shortcut. You might reach for `(not (help n))` instead of the `member` test. It does not work: in this runtime `help` on an unregistered name returns an unspecified value, and in Scheme every value except `#f` is true, so `not` never fires and `unknown-verbs` comes back empty. Membership in `(all-verbs)` is the test that actually answers the question.
+
+**Step 3 — audit the perm tiers of every registered verb.**
 
 ```scheme
+(define real-verbs (filter (lambda (n) (member n registered)) verbs-called))
 (define perm-audit
-  (map (lambda (n) (list n (meta-field ':perm n))) verbs-called))
+  (map (lambda (n) (list n (meta-field ':perm n))) real-verbs))
 
 perm-audit
-;; => ((paint-dot \"paint\")
-;;     (list \"read\")
-;;     (map \"read\")
-;;     (card/open \"state-change\")
-;;     (card/publish \"financial\")
-;;     (cortex/write \"state-change\"))
+;; => ((\"list\" \"read\")
+;;     (\"map\" \"read\")
+;;     (\"display\" \"read\")
+;;     (\"cortex/write\" \"paint\"))
 ```
 
-You now know exactly which permissions the cart requires. If any are `financial`, `personal-data`, or `destructive`, you probably want to think twice.
+You now know exactly which permissions the cart requires. Three reads and one `paint`. If any had come back `financial`, `personal-data`, or `destructive`, you would want to think twice.
 
 **Step 4 — read the docs on any surprising verbs.**
 
 ```scheme
 (for-each
   (lambda (n) (display (describe n)) (newline) (newline))
-  verbs-called)
+  real-verbs)
 ```
 
 For every verb, print its description. Reading through the list, you get a sense of what the cart does — without running it, without reading the cart's own code carefully, without trusting a README.

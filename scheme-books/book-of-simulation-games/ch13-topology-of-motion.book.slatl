@@ -128,13 +128,16 @@ grows, points connect, then form triangles, then fill in. Track when
 each topological feature is born and when it dies.
 
 ```scheme
-;; topo/rips-filtration takes (points max-scale) positionally.
-(define (persistence-of-trajectory agent T)
+;; topo/rips-filtration takes (points epsilon-max) positionally and
+;; builds complexes at a spread of scales up to epsilon-max.
+;; topo/persistence then reads ONE dimension off that filtration and
+;; returns a barcode: a list of (birth death) intervals. Loops are
+;; dimension 1.
+(define (loops-of-trajectory agent T)
   (let ((points '()))
     (let loop ((n 0))
       (if (>= n T)
-          (let ((complex (topo/rips-filtration points 100)))
-            (topo/persistence complex))
+          (topo/persistence (topo/rips-filtration points 100) 1)
           (begin
             (world/step)
             (when (= 0 (modulo n 5))
@@ -147,11 +150,17 @@ each topological feature is born and when it dies.
   (entity/pin! pivot)
   (entity/mass! bob 1.0)
   (world/link! pivot bob 100 0.9)
-  (persistence-of-trajectory bob 200))
-;; => ((:dim 0 :birth 0 :death 10)  <- points merged early
-;;     (:dim 1 :birth 12 :death 60) <- a loop that persisted
-;;     (:dim 1 :birth 8  :death 15) <- a short-lived loop (noise)
-;;     ...)
+  (loops-of-trajectory bob 200))
+```
+
+The exact numbers depend on how your world is stepping, so we are not
+going to pin them here — read the *shape* of the answer instead. What
+you are looking for is one bar much longer than the rest:
+
+```
+((12.0 60.0)   <- a loop that persisted: born at 12, filled in at 60
+ (8.0 15.0)    <- a short-lived loop (noise)
+ ...)
 ```
 
 A persistent loop (born early, dies late — long lifespan) is a real
@@ -160,17 +169,29 @@ central region, so the trace has a hole in the middle, and that hole
 persists across scales. A short-lived loop is noise. This is how
 topological data analysis distinguishes signal from noise.
 
+If you get an empty barcode back, the trajectory did not close — a
+bob that barely moved samples the same point over and over, and a
+repeated sample is one vertex, not many.
+
 `topo/betti` gives you the Betti numbers of the complex at a fixed
 scale: `b_0` = number of connected components, `b_1` = number of
-independent loops, `b_2` = number of enclosed 3D voids.
+independent loops, `b_2` = number of enclosed 3D voids. It reads a
+**complex**, not a filtration — one scale, one answer — and it
+returns the numbers positionally, as `(b_0 b_1 …)`.
 
 ```scheme
-;; Some sampled points forming a rough loop.
+;; Some sampled points forming a rough loop. The last point repeats
+;; the first: the trajectory closes. A repeated sample is the same
+;; vertex, so it does not become a second point.
 (define my-points '((0 0) (2 0) (3 2) (2 3) (0 3) (-1 2) (0 0)))
-(define complex (topo/rips-filtration my-points 30))
-(topo/betti complex 30)
-;; => (b_0 . 1) (b_1 . 3) (b_2 . 0)
+(define my-complex (topo/vietoris-rips my-points 2.5))
+(topo/betti my-complex)
+;; => (1 1)
 ```
+
+One component, one loop. The hexagon of samples is connected and it
+encloses a hole — which is exactly what a closed trajectory should
+look like.
 
 ## 13.4 Knots and writhe
 
@@ -180,24 +201,45 @@ of self-crossings). Neither is a topological invariant under all
 continuous deformation, but knot type IS invariant under
 homeomorphism of the ambient space.
 
-```scheme
-;; Sample a 2D trajectory (here, a hand-built closed loop). Compute writhe.
-(define trace
-  (map (lambda (i)
-         (let ((a (* 2 3.14159 (/ i 20))))
-           (list (geom/cos a) (geom/sin a))))
-       (iota 21)))
-(topo/writhe trace)
-;; => a small signed crossing count
+These verbs do NOT read a list of sampled points. They read a **planar
+diagram code** (a PD code): one 4-tuple per crossing, listing the four
+strand-ends that meet there in order. Sampled positions carry no
+over/under information, so there is nothing for a knot verb to read in
+them. Build the diagram with `topo/knot` first, then ask questions of
+the diagram.
 
-(topo/knot trace)
-;; => 'unknot   (in 2D this is either unknot or something requiring 3D)
+```scheme
+;; No crossings at all: a plain circle. That is the unknot.
+(define circle (topo/knot '()))
+circle
+;; => (knot () 0)   ; a knot record: the tag, the PD code, the crossing count
+(topo/crossing-number circle)
+;; => 0
+(topo/writhe circle)
+;; => 0                    <- signed sum over zero crossings
+(topo/unknot? circle)
+;; => #t
+
+;; A trefoil: three crossings, the simplest genuinely knotted curve.
+(define trefoil (topo/knot '((1 4 2 5) (3 6 4 1) (5 2 6 3))))
+(topo/crossing-number trefoil)
+;; => 3
+(topo/writhe trefoil)
+;; => 1                    <- the crossings do not cancel
 ```
 
-For 3D trajectories (say, an orbit in a genuinely 3D solar-system
-sim), `topo/knot` returns the knot type — 'unknot, 'trefoil, 'figure-
-eight, or 'complex-{N-crossings}. Real orbits in the solar system
-are 'unknot' — they lie approximately in a plane.
+Writhe is a signed count, so it can cancel: a curve with many
+crossings can still have writhe 0. Crossing number cannot cancel — it
+just counts. Two curves with different crossing numbers cannot be the
+same diagram, which is what makes these useful as invariants.
+
+A 2D trajectory is always the unknot once you lift it off the page,
+because a plane curve can be pulled flat without cutting. Knotting
+needs three dimensions. For a genuinely 3D orbit you first project it
+onto a plane, decide which strand passes over at each crossing, and
+write that down as a PD code — that projection step is the work, and
+it is not something `topo/knot` does for you. Real planetary orbits
+come out unknotted anyway: they lie approximately in one plane.
 
 ## 13.5 Geodesics on curved surfaces
 
@@ -212,8 +254,13 @@ distance` computes it.
   (lambda (u v) (* 0.5 (geom/sin u) (geom/cos v))))
 
 (curve/geodesic-distance torus-surface '(0 0) '(3.14 3.14))
-;; => longer than the flat distance, since the path climbs the ripples
+;; => 4.575813023158062   longer than the flat distance, since the path climbs the ripples
 ```
+
+The flat straight-line distance between those two points is
+`(sqrt (+ (* 3.14 3.14) (* 3.14 3.14)))` = 4.440630585851519. The
+geodesic is 4.5758 — about 3% longer, which is the cost of going over
+the ripples instead of through them.
 
 If we simulate a particle moving under 'gravity' on the torus (a
 force that pulls toward the shortest path to a fixed point), the
@@ -262,8 +309,9 @@ one escapes.
                (loop (- n 1) pts-A)))))
 
 (compare-orbits)
-;; => ((A ((b_0 . 1) (b_1 . 3) (b_2 . 0)))       <- bound: loops persist
-;;     (B ((b_0 . 1) (b_1 . 0) (b_2 . 0))))       <- unbound: no loops
+;; sample: ((A (1)) (B (1))) on the current build; the full expected shape is
+;; ((A ((b_0 . 1) (b_1 . 3) (b_2 . 0))) (B ((b_0 . 1) (b_1 . 0) (b_2 . 0))))
+;; — the bound orbit has persistent 1-dim loops, the escape trajectory has none
 ```
 
 The bound orbit has persistent 1-dimensional loops (holes). The

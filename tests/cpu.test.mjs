@@ -22,6 +22,7 @@ import assert from 'node:assert/strict'
 import { makeCoreEnv } from '../core/index.js'
 import { evaluate } from '../src/interp.js'
 import { parse, Sym } from '../src/reader.js'
+import { plain } from './_cells.mjs'
 import {
   makeState, stepState, assemble, disassemble, displayState, OPCODES,
   FLAG_Z, FLAG_N, FLAG_C, FLAG_H,
@@ -37,8 +38,9 @@ function evalSrc(src, envOpt) {
 }
 
 function alistGet(alist, key) {
-  if (!Array.isArray(alist)) return undefined
-  for (const pair of alist) {
+  const rows = plain(alist)
+  if (!Array.isArray(rows)) return undefined
+  for (const pair of rows) {
     if (Array.isArray(pair) && pair.length === 2 && pair[0] instanceof Sym) {
       if (pair[0].name === key) return pair[1]
     }
@@ -68,7 +70,7 @@ test('assemble — (LOAD 5) (LOAD 3) (ADD) (HALT) → correct bytes', () => {
     [new Sym('HALT')],
   ])
   // Opcodes: LOAD=0x02, ADD=0x06, HALT=0xFF
-  assert.deepEqual(bytes, [0x02, 5, 0x02, 3, 0x06, 0xFF])
+  assert.deepEqual(plain(bytes), [0x02, 5, 0x02, 3, 0x06, 0xFF])
 })
 
 // ── (3) LOAD / STORE / LOADM ──────────────────────────────────────────
@@ -319,9 +321,10 @@ test('disassemble — 2-byte instrs decode with pc, mnemonic, operand', () => {
 
 test('cpu/opcodes lists at least 16 opcodes with :mnemonic + :size', () => {
   const { out } = evalSrc('(cpu/opcodes)')
-  assert.ok(Array.isArray(out))
-  assert.ok(out.length >= 16, `expected ≥ 16 opcodes, got ${out.length}`)
-  const first = out[0]
+  const opcodes = plain(out)
+  assert.ok(Array.isArray(opcodes))
+  assert.ok(opcodes.length >= 16, `expected ≥ 16 opcodes, got ${opcodes.length}`)
+  const first = opcodes[0]
   assert.ok(alistGet(first, ':mnemonic') instanceof Sym)
   assert.equal(typeof alistGet(first, ':size'), 'number')
 })

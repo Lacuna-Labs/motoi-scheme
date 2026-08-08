@@ -24,14 +24,15 @@ import { Screen, ATTR } from '../tui/screen.js'
 import { InputReader } from '../tui/input.js'
 import { Session } from '../tui/session.js'
 
+import { plain } from './_cells.mjs'
 // ── palette ────────────────────────────────────────────────────────
 
 test('palette exposes the Sakura Cherry Tree tiers', () => {
-  assert.deepEqual(SAKURA.pink,  [244, 160, 181], 'sakura pink RGB')
-  assert.deepEqual(SAKURA.mint,  [159, 227, 197], 'sakura mint RGB')
-  assert.deepEqual(SAKURA.cedar, [163, 113,  82], 'sakura cedar RGB')
-  assert.deepEqual(SAKURA.cream, [245, 236, 217], 'sakura cream RGB')
-  assert.deepEqual(SAKURA.pearl, [244, 236, 220], 'sakura pearl RGB')
+  assert.deepEqual(plain(SAKURA.pink),  [244, 160, 181], 'sakura pink RGB')
+  assert.deepEqual(plain(SAKURA.mint),  [159, 227, 197], 'sakura mint RGB')
+  assert.deepEqual(plain(SAKURA.cedar), [163, 113,  82], 'sakura cedar RGB')
+  assert.deepEqual(plain(SAKURA.cream), [245, 236, 217], 'sakura cream RGB')
+  assert.deepEqual(plain(SAKURA.pearl), [244, 236, 220], 'sakura pearl RGB')
 })
 
 test('palette emits truecolor ANSI for the cherry-tree tiers', () => {
@@ -145,7 +146,7 @@ test('input handles partial ESC sequences by waiting for more bytes', () => {
 
 test('session boots with CORE + book list', () => {
   const s = new Session({ fuel: 200000 })
-  const books = s.bookList()
+  const books = plain(s.bookList())
   assert.ok(Array.isArray(books) && books.length > 0, 'books available')
   assert.ok(books.includes('code'), 'Book of Code is present')
 })
@@ -175,7 +176,7 @@ test('session explain returns Motoi voice text', () => {
 test('session ambient completion returns registry matches for prefix', () => {
   const s = new Session()
   const results = s.ambientComplete('cpu/')
-  assert.ok(Array.isArray(results))
+  assert.ok(Array.isArray(plain(results)))
   // The CPU module registers cpu/* — expect at least one hit.
   assert.ok(results.some((r) => r.name && r.name.startsWith('cpu/')), 'cpu/* verbs matched')
 })
@@ -374,7 +375,7 @@ test('session exposes motoi/stack via stackFrames()', () => {
   const depth = s.stackDepth()
   assert.equal(depth, 0, 'stack should be idle after evalSource returns')
   const frames = s.stackFrames()
-  assert.ok(Array.isArray(frames), 'stackFrames returns an array')
+  assert.ok(Array.isArray(plain(frames)), 'stackFrames returns an array')
 })
 
 test('canvas: framebufferSnapshot returns 80x80 buffer', () => {
@@ -383,8 +384,8 @@ test('canvas: framebufferSnapshot returns 80x80 buffer', () => {
   assert.ok(fb, 'framebuffer present')
   assert.equal(fb.w, 80)
   assert.equal(fb.h, 80)
-  assert.ok(fb.pixels instanceof Uint8Array || Array.isArray(fb.pixels))
-  assert.ok(Array.isArray(fb.palette) && fb.palette.length >= 16)
+  assert.ok(fb.pixels instanceof Uint8Array || Array.isArray(plain(fb.pixels)))
+  assert.ok(Array.isArray(plain(fb.palette)) && fb.palette.length >= 16)
 })
 
 test('screen: raw RGB spec paints truecolor ANSI', () => {

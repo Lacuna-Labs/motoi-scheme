@@ -7,23 +7,24 @@ import assert from 'node:assert/strict'
 import { Sym } from '../src/reader.js'
 import { makeCoreEnv } from '../core/index.js'
 
+import { plain } from './_cells.mjs'
 function fresh() { return makeCoreEnv() }
 
 // ── ai/steering ─────────────────────────────────────────────────
 
 test('ai/seek returns vector toward target', () => {
   const env = fresh()
-  const v = env.vars.get('ai/seek')([0, 0], [10, 0], 1)
+  const v = plain(env.vars.get('ai/seek')([0, 0], [10, 0], 1))
   assert.equal(v[0], 1)
 })
 test('ai/flee returns vector away from target', () => {
   const env = fresh()
-  const v = env.vars.get('ai/flee')([0, 0], [10, 0], 1)
+  const v = plain(env.vars.get('ai/flee')([0, 0], [10, 0], 1))
   assert.equal(v[0], -1)
 })
 test('ai/arrive slows near target', () => {
   const env = fresh()
-  const v = env.vars.get('ai/arrive')([0, 0], [5, 0], 1, 10)
+  const v = plain(env.vars.get('ai/arrive')([0, 0], [5, 0], 1, 10))
   assert.ok(v[0] > 0 && v[0] < 1)
 })
 test('ai/utility normalizes to 0..1', () => {
@@ -36,12 +37,12 @@ test('ai/decide picks highest weight', () => {
 })
 test('ai/align returns avg velocity', () => {
   const env = fresh()
-  const v = env.vars.get('ai/align')([[1, 0], [1, 0]], 5)
+  const v = plain(env.vars.get('ai/align')([[1, 0], [1, 0]], 5))
   assert.equal(v[0], 1)
 })
 test('ai/cohere targets centroid', () => {
   const env = fresh()
-  const v = env.vars.get('ai/cohere')([0, 0], [[10, 0], [10, 0]], 5)
+  const v = plain(env.vars.get('ai/cohere')([0, 0], [[10, 0], [10, 0]], 5))
   assert.equal(v[0], 5)
 })
 
@@ -75,21 +76,36 @@ test('ai/bt-selector any-pass returns success', () => {
 
 // ── ai/bb- ──────────────────────────────────────────────────────
 
+// The blackboard is per-entity and id-first: (ai/bb-set! id key val),
+// (ai/bb-get id key [default]). These tests used to call it key-first with no
+// id, which the old implementation accepted by treating the key as the board
+// name. See scheme/reference/02-ai.slat:170/234/298/362 for the locked
+// signatures and lib/ai/steering.js for the conformance note.
 test('ai/bb-set!/get!', () => {
   const env = fresh()
-  env.vars.get('ai/bb-set!')(new Sym('foo'), 42)
-  assert.equal(env.vars.get('ai/bb-get')(new Sym('foo')), 42)
+  env.vars.get('ai/bb-set!')(new Sym('hero'), new Sym('foo'), 42)
+  assert.equal(env.vars.get('ai/bb-get')(new Sym('hero'), new Sym('foo')), 42)
+})
+test('ai/bb-get returns the default, then no-key', () => {
+  const env = fresh()
+  assert.equal(env.vars.get('ai/bb-get')(new Sym('hero'), new Sym('nope'), 0), 0)
+  assert.equal(env.vars.get('ai/bb-get')(new Sym('hero'), new Sym('nope')).name, 'no-key')
+})
+test('ai/bb- boards are per-entity', () => {
+  const env = fresh()
+  env.vars.get('ai/bb-set!')(new Sym('a'), new Sym('k'), 1)
+  assert.equal(env.vars.get('ai/bb-has?')(new Sym('b'), new Sym('k')), false)
 })
 test('ai/bb-has?', () => {
   const env = fresh()
-  env.vars.get('ai/bb-set!')(new Sym('bar'), 1)
-  assert.equal(env.vars.get('ai/bb-has?')(new Sym('bar')), true)
+  env.vars.get('ai/bb-set!')(new Sym('hero'), new Sym('bar'), 1)
+  assert.equal(env.vars.get('ai/bb-has?')(new Sym('hero'), new Sym('bar')), true)
 })
 test('ai/bb-del!', () => {
   const env = fresh()
-  env.vars.get('ai/bb-set!')(new Sym('baz'), 1)
-  assert.equal(env.vars.get('ai/bb-del!')(new Sym('baz')), true)
-  assert.equal(env.vars.get('ai/bb-has?')(new Sym('baz')), false)
+  env.vars.get('ai/bb-set!')(new Sym('hero'), new Sym('baz'), 1)
+  assert.equal(env.vars.get('ai/bb-del!')(new Sym('hero'), new Sym('baz')), true)
+  assert.equal(env.vars.get('ai/bb-has?')(new Sym('hero'), new Sym('baz')), false)
 })
 
 // ── audio (CORE surface only) ───────────────────────────────────
@@ -140,7 +156,7 @@ test('note/strike sounds a pitch and returns null', () => {
 // echoes back the section and duration it was given.
 test('synth/chord returns an info-dict for the section played', () => {
   const env = fresh()
-  const r = env.vars.get('synth/chord')(new Sym('strings'), [new Sym('C4'), new Sym('E4'), new Sym('G4')], 2.0)
+  const r = plain(env.vars.get('synth/chord')(new Sym('strings'), [new Sym('C4'), new Sym('E4'), new Sym('G4')], 2.0))
   assert.ok(Array.isArray(r))
   const entry = k => r.find(e => String(e[0]) === k)
   assert.equal(String(entry(':kind')[1]), 'chord')
@@ -157,7 +173,7 @@ test('synth/chord returns an info-dict for the section played', () => {
 // meaning fixes the expected hits at steps 0, 4, 8, 12 of 16.
 test('synth/kit plays a pattern on a named kit', () => {
   const env = fresh()
-  const r = env.vars.get('synth/kit')(new Sym('electronic'), '1000100010001000', new Sym('kick'))
+  const r = plain(env.vars.get('synth/kit')(new Sym('electronic'), '1000100010001000', new Sym('kick')))
   assert.ok(Array.isArray(r))
   const entry = k => r.find(e => String(e[0]) === k)
   assert.equal(String(entry(':name')[1]), 'electronic')
@@ -173,7 +189,7 @@ test('artifact/save round-trip through /cite', () => {
   const p = env.vars.get('artifact/save')('test-verb-completion', 'hello world')
   assert.ok(typeof p === 'string')
   const cite = env.vars.get('artifact/cite')('test-verb-completion')
-  assert.ok(Array.isArray(cite))
+  assert.ok(Array.isArray(plain(cite)))
   env.vars.get('artifact/delete')('test-verb-completion')
 })
 
@@ -212,7 +228,7 @@ test('pixels-wide is positive', () => {
 })
 test('viewport returns (w h)', () => {
   const env = fresh()
-  const v = env.vars.get('viewport')()
+  const v = plain(env.vars.get('viewport')())
   assert.ok(Array.isArray(v))
   assert.equal(v.length, 2)
 })
@@ -220,13 +236,13 @@ test('begin-frame + end-frame + on-canvas-trace', () => {
   const env = fresh()
   env.vars.get('begin-frame')()
   const trace = env.vars.get('on-canvas-trace')()
-  assert.ok(Array.isArray(trace))
+  assert.ok(Array.isArray(plain(trace)))
   env.vars.get('end-frame')()
 })
 test('measure-content returns bbox alist', () => {
   const env = fresh()
   env.vars.get('begin-frame')()
-  const bbox = env.vars.get('measure-content')()
+  const bbox = plain(env.vars.get('measure-content')())
   assert.ok(Array.isArray(bbox))
   assert.equal(bbox.length, 4)
 })
@@ -250,7 +266,7 @@ test('tempo returns bpm', () => {
 test('at-beat returns tagged clause', () => {
   const env = fresh()
   const c = env.vars.get('at-beat')(1, () => 1)
-  assert.ok(Array.isArray(c))
+  assert.ok(Array.isArray(plain(c)))
 })
 
 // ── misc ────────────────────────────────────────────────────────
@@ -279,7 +295,7 @@ test('key? returns false', () => {
 })
 test('base/make-character returns tagged data', () => {
   const env = fresh()
-  const c = env.vars.get('base/make-character')(new Sym('sakura'))
+  const c = plain(env.vars.get('base/make-character')(new Sym('sakura')))
   assert.ok(Array.isArray(c))
   assert.equal(c[0].name, 'character')
 })

@@ -36,6 +36,7 @@ import { parse, Sym, Pair, pairToString } from './reader.js'
 import { expandProgram } from './macro.js'
 import { getVerbMeta, validateRegistry } from './verbRegistry.js'
 
+import { NIL, arrayToList, isList, isListish, isNull, isPair, listLength, listToArray, seqVerb, toJS, toScheme } from '../lib/base/list.js'
 // ── Hermetic side-effect seams (Motoi doctrine) ─────────────────────
 //
 // A dialect built on top of Motoi may need the dispatcher to write to
@@ -268,7 +269,7 @@ function _operatorId() {
 // guard). The chip says "motion.applied"; an envelope says it wasn't.
 // Recognise the shape so the chip gate below can skip emission.
 function isErrorEnvelope(value) {
-  return Array.isArray(value) && value[0] === 'error'
+  return isList(value) && value[0] === 'error'
 }
 
 function emitVerbChip(call, meta, traceId) {
@@ -339,7 +340,7 @@ const SPECIAL_FORMS = new Set([
  */
 export function walkVerbCalls(ast, out = [], locals = new Set()) {
   if (!ast) return { calls: out, locals }
-  if (Array.isArray(ast)) {
+  if (isList(ast)) {
     if (ast.length > 0 && ast[0] instanceof Sym) {
       const name = ast[0].name
       // Don't descend into `quote` / `quasiquote` — their bodies are data.
@@ -361,7 +362,7 @@ export function walkVerbCalls(ast, out = [], locals = new Set()) {
         const sig = ast[1]
         if (sig instanceof Sym) {
           locals.add(sig.name)
-        } else if (Array.isArray(sig) && sig.length > 0 && sig[0] instanceof Sym) {
+        } else if (isPair(sig) && sig[0] instanceof Sym) {
           locals.add(sig[0].name)
         }
       }
@@ -378,16 +379,16 @@ export function walkVerbCalls(ast, out = [], locals = new Set()) {
           bindIdx = 2
         }
         const binds = ast[bindIdx]
-        if (Array.isArray(binds)) {
+        if (isList(binds)) {
           for (const b of binds) {
-            if (Array.isArray(b) && b.length > 0 && b[0] instanceof Sym) {
+            if (isPair(b) && b[0] instanceof Sym) {
               locals.add(b[0].name)
             }
           }
         }
       }
       // (lambda (args...) body...) — collect arg names
-      if (name === 'lambda' && ast.length >= 2 && Array.isArray(ast[1])) {
+      if (name === 'lambda' && ast.length >= 2 && isList(ast[1])) {
         for (const a of ast[1]) {
           if (a instanceof Sym) locals.add(a.name)
         }
@@ -404,7 +405,7 @@ export function walkVerbCalls(ast, out = [], locals = new Set()) {
 }
 
 function walkQuasi(node, out) {
-  if (!Array.isArray(node)) return
+  if (!isList(node)) return
   if (node.length > 0 && node[0] instanceof Sym) {
     const name = node[0].name
     if (name === 'unquote' || name === 'unquote-splicing') {
@@ -422,15 +423,17 @@ function previewArg(arg, depth = 0) {
   if (arg instanceof Sym) return `'${arg.name}`
   if (typeof arg === 'string') return arg.length > 24 ? `${JSON.stringify(arg.slice(0, 24))}…` : JSON.stringify(arg)
   if (typeof arg === 'number' || typeof arg === 'boolean') return String(arg)
+  // Cells before the array branch — a chain answers `isList` but has no
+  // `.slice`, and this runs inside the trace logger where a throw is worst.
+  if (arg instanceof Pair) {
+    if (depth > 2) return '(…)'
+    return pairToString(arg, (a) => previewArg(a, depth + 1))
+  }
   if (Array.isArray(arg)) {
     if (depth > 2) return '(…)'
     if (arg.length === 0) return '()'
     return '(' + arg.slice(0, 4).map((a) => previewArg(a, depth + 1)).join(' ') +
       (arg.length > 4 ? ' …' : '') + ')'
-  }
-  if (arg instanceof Pair) {
-    if (depth > 2) return '(…)'
-    return pairToString(arg, (a) => previewArg(a, depth + 1))
   }
   return String(arg).slice(0, 24)
 }

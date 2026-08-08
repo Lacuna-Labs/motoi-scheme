@@ -53,8 +53,54 @@ def read_book_types() -> dict[str, str]:
     return out
 
 
-def extract_code_blocks(prose: str) -> list[str]:
-    return [m.group(1).strip() for m in CODE_FENCE_RE.finditer(prose)]
+QUARANTINE_PATH = MOTOI_ROOT / "scratch" / "cpt-quarantine-blocks.json"
+
+
+def _load_quarantine() -> dict[str, set[str]]:
+    """Blocks the book gate still calls a mismatch, keyed by chapter.
+
+    Code blocks are lifted VERBATIM, `;; =>` claims and all, so emitting a block
+    whose claim the interpreter contradicts would train the model on a false
+    assertion. Rebuild with scratch/build_cpt_quarantine.py; an absent file
+    means no gate has run, which is itself worth knowing.
+    """
+    import json
+    if not QUARANTINE_PATH.exists():
+        print(f"  WARNING: no {QUARANTINE_PATH.name} — emitting every book "
+              f"block unchecked", file=sys.stderr)
+        return {}
+    raw = json.loads(QUARANTINE_PATH.read_text())
+    return {k: set(v) for k, v in raw.items()}
+
+
+_QUARANTINE = _load_quarantine()
+_QUARANTINE_HITS = [0]
+
+
+def _norm_block(code: str) -> str:
+    return re.sub(r"\s+", " ", (code or "").strip())
+
+
+def extract_code_blocks(prose: str, rel: str | None = None) -> list[str]:
+    """Fenced blocks, minus any the gate judged to carry a false claim.
+
+    The gate reports the individual FORM whose `;; =>` was wrong, so a block is
+    dropped when it CONTAINS one. That over-quarantines a block that merely
+    repeats the same call correctly elsewhere — deliberately. Losing a good
+    block costs a little volume; emitting a bad one teaches a false answer.
+    """
+    blocks = [m.group(1).strip() for m in CODE_FENCE_RE.finditer(prose)]
+    banned = _QUARANTINE.get(rel or "", ())
+    if not banned:
+        return blocks
+    kept = []
+    for b in blocks:
+        nb = _norm_block(b)
+        if any(f in nb for f in banned):
+            _QUARANTINE_HITS[0] += 1
+            continue
+        kept.append(b)
+    return kept
 
 
 def extract_sections(prose: str) -> list[tuple[str, str]]:
@@ -93,7 +139,8 @@ def iter_all_chapters() -> Iterator[dict]:
                 "title": read_field(raw, "title") or "",
                 "voice": read_field(raw, "voice") or "motoi-copilot",
                 "prose": prose,
-                "code_blocks": extract_code_blocks(prose),
+                "code_blocks": extract_code_blocks(
+                    prose, str(chapter_path.relative_to(BOOKS_ROOT))),
                 "sections": extract_sections(prose),
             }
 

@@ -35,10 +35,12 @@
 //   • operands to function calls (their order/side-effects matter)
 //   • initialiser expressions of `let` / `let*` / `letrec`
 
-import { Sym, Pair } from './reader.js'
+import { Sym } from './reader.js'
 import { registerVerbMeta, defaultMetaFor } from './verbRegistry.js'
-import { Values, RaisedValue } from '../lib/base/r7rs-types.js'
+import { Values, RaisedValue, SchemeVector, mkVec, Ch } from '../lib/base/r7rs-types.js'
+import { isNum, numEqv } from '../lib/math/tower.js'
 
+import { NIL, Pair, arrayToList, installProcAdapter, isList, listToArray, toScheme } from '../lib/base/list.js'
 // v2.20.0-A5 — track which verb names have already emitted a
 // missing-perm warning, so a hot-mounted installer (test setup re-runs
 // `installCardVerbs` per test) doesn't drown the console with the same
@@ -90,6 +92,50 @@ export function noteError(err) {
   return err
 }
 
+// The `guard` ⇄ `dynamic-wind` seam (R7RS §4.2.7, fixed 2026-08-03).
+//
+// §4.2.7 defines `guard` via call/cc: when no clause matches, the condition is
+// re-raised "within the dynamic environment of the original call to raise" —
+// the implementation jumps BACK INTO the body's dynamic extent to re-raise,
+// then unwinds out of it again toward the next handler. So a dynamic-wind
+// between the guard and the raise point runs its before AND after thunks
+// TWICE, not once.
+//
+// Motoi is escape-only (decision-004): once the JS exception has unwound past
+// `dynamic-wind`'s `finally`, that extent no longer exists on the stack. The
+// seam instead has `dynamic-wind` leave its before/after pair on the condition
+// under this Symbol (see lib/base/r7rs-small.js), innermost-first, and `guard`
+// REPLAYS them here to rebuild the extent. `Symbol.for` is used so the two
+// modules agree on the key without an import cycle, and so the property never
+// shows up in Object.keys / JSON / author-visible error data.
+const GUARD_WINDERS = Symbol.for('motoi.guard.winders')
+
+// Re-enter the dynamic extent `winders` describes, re-raise `err` at the
+// bottom of it, and unwind back out. `winders` is innermost-first, so we walk
+// DOWN from the outermost index: before-thunks fire outermost→innermost on the
+// way in, after-thunks innermost→outermost on the way out, which is exactly
+// the order the original raise saw. Never returns — it always throws.
+//
+// The `catch` mirrors dynamic-wind's: an outer guard that also fails to match
+// must see this extent too and replay it in turn.
+function reraiseInRaiseExtent(err, winders, i, fuel) {
+  if (i < 0) throw err
+  const w = winders[i]
+  apply(w.before, [], fuel)
+  try {
+    reraiseInRaiseExtent(err, winders, i - 1, fuel)
+  } catch (e) {
+    if (e !== null && typeof e === 'object' && Object.isExtensible(e)) {
+      const ws = e[GUARD_WINDERS]
+      if (ws) ws.push(w)
+      else e[GUARD_WINDERS] = [w]
+    }
+    throw e
+  } finally {
+    apply(w.after, [], fuel)
+  }
+}
+
 export class Env {
   constructor(parent = null) {
     this.vars = new Map()
@@ -111,6 +157,16 @@ export class Env {
     if (this.vars.has(name)) return this.vars.get(name)
     if (this.parent) return this.parent.get(name)
     throw new Error('unbound symbol: ' + name)
+  }
+  // R7RS §4.3.1: a lexical VARIABLE shadows a syntactic keyword of the same
+  // name, so `(let ((if even?)) (if 4))` is a procedure call. The global frame
+  // is deliberately excluded — a top-level `(define list …)` must not stop
+  // `let` from being syntax for the whole program.
+  hasLexical(name) {
+    for (let e = this; e.parent !== null; e = e.parent) {
+      if (e.vars.has(name)) return true
+    }
+    return false
   }
   set(name, val) {
     if (this.vars.has(name)) {
@@ -152,6 +208,11 @@ export class Env {
       throw new Error('frozen sandbox: cannot redefine substrate binding: ' + name)
     }
     this.vars.set(name, val)
+    // Keyword shadowing is rare enough that nothing should pay for it. Record
+    // the name the first time a non-global frame binds one, so `evalStep` can
+    // skip the scope walk entirely for every program that never does — which
+    // is all 19,326 reference programs.
+    if (this.parent !== null && SPECIAL_FORMS.has(name)) SHADOWED_KEYWORDS.add(name)
     // Only treat function bindings as verbs — closures / data are
     // language values, not dispatcher-gated calls.
     if (typeof val === 'function') {
@@ -345,6 +406,11 @@ const SPECIAL_FORMS = new Set([
   'parameterize', 'cond-expand',
 ])
 
+// Names from SPECIAL_FORMS that some non-global frame has bound as a VARIABLE.
+// Empty for every program that does not shadow a keyword, which is the check
+// `evalStep` makes before paying for a scope walk.
+const SHADOWED_KEYWORDS = new Set()
+
 // Destructure a producer's result (a Values wrapper, or a bare single value)
 // against let-values formals and define each name in `env`. Formals may be a
 // proper list of symbols `(a b)` — positional — or a single symbol `rest`,
@@ -352,14 +418,41 @@ const SPECIAL_FORMS = new Set([
 function bindValues(formals, result, env) {
   const vals = result instanceof Values ? result.vals : [result]
   if (formals instanceof Sym) {            // (rest) — collect every value
-    env.define(formals.name, vals)
+    env.define(formals.name, arrayToList(vals))
     return
   }
-  if (Array.isArray(formals)) {
+  if (isList(formals)) {
     if (formals.length !== vals.length) {
       throw new Error(`let-values: expected ${formals.length} value(s), got ${vals.length}`)
     }
     for (let i = 0; i < formals.length; i++) env.define(formals[i].name, vals[i])
+    return
+  }
+  // DOTTED formals — `(x y . z)` binds x and y positionally and z to a
+  // list of every remaining value (R7RS §4.2.2 for let-values/let*-values,
+  // §5.3.3 for define-values: both take a lambda-style formals list, and
+  // §4.1.4 allows that list to be improper).
+  //
+  // The reader spells a proper list as a flat ARRAY and an improper one as
+  // a nested Pair chain, so dotted formals never reached the Array branch
+  // above and every use raised "malformed formals" — including the
+  // standard's own `(define-values (x y . z) (values 1 2 3 4))`. Walking
+  // the Pair chain here fixes all three forms at once, since they share
+  // this one binder (2026-08-02).
+  if (formals instanceof Pair) {
+    const fixed = []
+    let tail = formals
+    while (tail instanceof Pair) { fixed.push(tail.car); tail = tail.cdr }
+    const rest = tail instanceof Sym ? tail : null
+    if (rest === null) throw new Error('let-values: malformed formals')
+    if (!fixed.every((f) => f instanceof Sym)) {
+      throw new Error('let-values: malformed formals')
+    }
+    if (vals.length < fixed.length) {
+      throw new Error(`let-values: expected at least ${fixed.length} value(s), got ${vals.length}`)
+    }
+    for (let i = 0; i < fixed.length; i++) env.define(fixed[i].name, vals[i])
+    env.define(rest.name, arrayToList(vals.slice(fixed.length)))
     return
   }
   throw new Error('let-values: malformed formals')
@@ -367,14 +460,62 @@ function bindValues(formals, result, env) {
 
 // R7RS §4.2.1 cond-expand feature requirements.
 const FEATURES = new Set(['motoi', 'scheme', 'r7rs', 'exact-closed', 'ratios', 'full-unicode'])
-function featureMatch(req) {
+
+// R7RS §4.2.1 also allows `(library <name>)`, which asks whether a library is
+// available. This used to answer #f for EVERY library, which is not a harmless
+// conservative default: portable code guards its real implementation behind
+// `(library (scheme read))` and installs a do-nothing STUB in the `not` branch.
+// Answering #f silently selected the stubs.
+//
+// Motoi has no module system — one environment holds everything — so the
+// honest question is "are this library's procedures actually bound?". Each
+// name below is probed against the live environment rather than asserted from
+// a hand-kept list, so the answer cannot drift from what was really installed.
+// A library with no witness here (notably `(scheme complex)`) answers #f,
+// which is correct: those procedures are not bound.
+const LIBRARY_WITNESS = {
+  'scheme base': 'car',
+  'scheme read': 'read',
+  'scheme write': 'write',
+  'scheme char': 'char-upcase',
+  'scheme inexact': 'sin',
+  'scheme cxr': 'caddr',
+  'scheme eval': 'eval',
+  'scheme file': 'open-input-file',
+  'scheme lazy': 'make-promise',
+  'scheme process-context': 'command-line',
+  'scheme repl': 'interaction-environment',
+  'scheme time': 'current-jiffy',
+  'scheme case-lambda': 'case-lambda',
+  'srfi 1': 'fold',
+}
+
+function libraryAvailable(name, env) {
+  if (!isList(name)) return false
+  const key = name.map((p) => (p instanceof Sym ? p.name : String(p))).join(' ')
+  const witness = LIBRARY_WITNESS[key]
+  if (!witness || !env) return false
+  if (SPECIAL_FORMS.has(witness)) return true
+  try { env.get(witness); return true } catch { return false }
+}
+
+// `=>` is a clause keyword in cond/case/guard only while it is UNBOUND. R7RS
+// §4.2.1 spells this out: `(let ((=> #f)) (cond (#t => 'ok)))` is `ok`, because
+// once `=>` names a variable the clause is an ordinary expression sequence.
+// The keyword was matched by name alone, so that expression tried to apply `#f`.
+function isArrow(node, env) {
+  if (!(node instanceof Sym) || node.name !== '=>') return false
+  try { env.get('=>'); return false } catch { return true }
+}
+
+function featureMatch(req, env) {
   if (req instanceof Sym) return req.name === 'else' || FEATURES.has(req.name)
-  if (!Array.isArray(req) || req.length === 0) return false
+  if (!isList(req) || req.length === 0) return false
   const head = req[0] instanceof Sym ? req[0].name : ''
-  if (head === 'and') return req.slice(1).every(featureMatch)
-  if (head === 'or') return req.slice(1).some(featureMatch)
-  if (head === 'not') return !featureMatch(req[1])
-  if (head === 'library') return false   // no library registry to consult yet
+  if (head === 'and') return req.slice(1).every((r) => featureMatch(r, env))
+  if (head === 'or') return req.slice(1).some((r) => featureMatch(r, env))
+  if (head === 'not') return !featureMatch(req[1], env)
+  if (head === 'library') return libraryAvailable(req[1], env)
   return false
 }
 
@@ -385,21 +526,23 @@ function evalStep(form, env, fuel) {
     if (form.name.length > 1 && form.name.charCodeAt(0) === 58 /* ':' */) return form
     return env.get(form.name)
   }
-  if (!Array.isArray(form)) return form        // number / string / boolean / fn — self-evaluating
+  if (!isList(form)) return form        // number / string / boolean / fn — self-evaluating
   if (form.length === 0) return []
 
   const head = form[0]
-  if (head instanceof Sym && SPECIAL_FORMS.has(head.name)) {
+  if (head instanceof Sym && SPECIAL_FORMS.has(head.name) &&
+      !(SHADOWED_KEYWORDS.size !== 0 && head.introduced !== true &&
+        SHADOWED_KEYWORDS.has(head.name) && env.hasLexical(head.name))) {
     switch (head.name) {
       case 'quote':
-        return form[1]
+        return datumToCells(form[1])
       case 'if': {
         const test = evaluate(form[1], env, fuel)
         // Tail position: consequent or alternate. Bounce, don't recurse.
         return new Tail(test !== false ? form[2] : (form[3] ?? false), env)
       }
       case 'define': {
-        if (Array.isArray(form[1]) || form[1] instanceof Pair) { // (define (f a b) body...)
+        if (isList(form[1]) || form[1] instanceof Pair) { // (define (f a b) body...)
           const head = form[1]
           const isPairHead = head instanceof Pair
           const name = (isPairHead ? head.car : head[0]).name
@@ -513,7 +656,7 @@ function evalStep(form, env, fuel) {
         return new Tail(form[form.length - 1], e2)
       }
       case 'quasiquote':
-        return quasiExpand(form[1], env, fuel)
+        return datumToCells(quasiExpand(form[1], env, fuel))
       case 'when': {
         if (evaluate(form[1], env, fuel) !== false) {
           for (let i = 2; i < form.length - 1; i++) evaluate(form[i], env, fuel)
@@ -555,7 +698,7 @@ function evalStep(form, env, fuel) {
           if (t !== false) {
             if (clause.length === 1) return t            // (cond (x)) → x's value
             // R7RS `=>`: (cond (test => proc)) applies proc to test's value.
-            if (clause.length === 3 && clause[1] instanceof Sym && clause[1].name === '=>') {
+            if (clause.length === 3 && isArrow(clause[1], env)) {
               const proc = evaluate(clause[2], env, fuel)
               return apply(proc, [t], fuel)
             }
@@ -572,11 +715,16 @@ function evalStep(form, env, fuel) {
           const data = clause[0]
           const hit = (data instanceof Sym && data.name === 'else') ||
             (Array.isArray(data) && data.some((d) =>
-              d === key || (d instanceof Sym && key instanceof Sym && d.name === key.name)))
+              d === key || (d instanceof Sym && key instanceof Sym && d.name === key.name)
+              // §4.2.1 compares datums with `eqv?`, which for numbers means
+              // equal value AND equal exactness. `2.0` is a heap-allocated
+              // `Flo`, so `===` missed `(case 2.0 ((2.0) 'yes))`.
+              || (isNum(d) && isNum(key) && numEqv(d, key))
+              || (d instanceof Ch && key instanceof Ch && d.value === key.value)))
           if (hit) {
             if (clause.length === 1) return undefined
             // R7RS §4.2.1 — `(datums => proc)` applies proc to the key.
-            if (clause[1] instanceof Sym && clause[1].name === '=>') {
+            if (clause.length === 3 && isArrow(clause[1], env)) {
               return new TailCall(evaluate(clause[2], env, fuel), [key])
             }
             for (let j = 1; j < clause.length - 1; j++) evaluate(clause[j], env, fuel)
@@ -654,6 +802,15 @@ function evalStep(form, env, fuel) {
           // condition object). A value raised via `raise` arrives wrapped in
           // RaisedValue — unwrap so the guard variable binds the raw datum.
           const condition = err instanceof RaisedValue ? err.value : err
+          // Every dynamic-wind the condition unwound through on its way here
+          // left its before/after pair on the condition (see WINDERS in
+          // lib/base/r7rs-small.js). Take them now and clear the slot: if a
+          // clause matches they are simply dropped (no re-entry — the guard
+          // IS the escape), and if this same condition object is raised
+          // again later it must not inherit a stale extent.
+          const winders = (err !== null && typeof err === 'object')
+            ? err[GUARD_WINDERS] : undefined
+          if (winders !== undefined) err[GUARD_WINDERS] = undefined
           const e2 = new Env(env)
           e2.define(varSym.name, condition)
           for (const clause of clauses) {
@@ -662,12 +819,28 @@ function evalStep(form, env, fuel) {
             const t = isElse ? true : evaluate(test, e2, fuel)
             if (t !== false) {
               if (clause.length === 1) return t
+              // §6.11 gives guard clauses cond's full shape, `=>` included:
+              // `(guard (c ((assq 'a c) => cdr)) ...)`. It was not handled, so
+              // the clause body evaluated the bare symbol `=>` and died unbound.
+              if (clause.length === 3 && isArrow(clause[1], e2)) {
+                return apply(evaluate(clause[2], e2, fuel), [t], fuel)
+              }
               let result
               for (let j = 1; j < clause.length; j++) result = evaluate(clause[j], e2, fuel)
               return result
             }
           }
-          // No clause matched — re-raise.
+          // No clause matched — re-raise. R7RS §4.2.7: the re-raise happens
+          // "within the dynamic environment of the original call to raise",
+          // except that the current exception handler is the guard's. So
+          // before the condition goes back out we must re-ENTER the extent
+          // it unwound out of (running each before-thunk again), and then
+          // leave it again (running each after-thunk again) as the re-raise
+          // propagates. Without this, `(guard (e (#f 'x)) (dynamic-wind b t a))`
+          // ran b/a once where the standard runs them twice.
+          if (winders !== undefined && winders.length > 0) {
+            reraiseInRaiseExtent(err, winders, winders.length - 1, fuel)
+          }
           throw err
         }
       }
@@ -756,7 +929,7 @@ function evalStep(form, env, fuel) {
       case 'cond-expand': {
         for (let i = 1; i < form.length; i++) {
           const clause = form[i]
-          if (featureMatch(clause[0])) {
+          if (featureMatch(clause[0], env)) {
             let last
             for (let j = 1; j < clause.length; j++) last = evaluate(clause[j], env, fuel)
             return last
@@ -784,16 +957,36 @@ function evalStep(form, env, fuel) {
  * trampoline locally, same as `evaluate()`.
  */
 export function apply(fn, args, fuel) {
-  let cur = applyStep(fn, args, fuel)
-  while (cur instanceof Tail || cur instanceof TailCall) {
-    if (cur instanceof Tail) {
-      cur = evalStep(cur.form, cur.env, fuel)
-    } else {
-      cur = applyStep(cur.fn, cur.args, fuel)
+  const outer = _CUR_FUEL
+  _CUR_FUEL = fuel
+  try {
+    let cur = applyStep(fn, args, fuel)
+    while (cur instanceof Tail || cur instanceof TailCall) {
+      if (cur instanceof Tail) {
+        cur = evalStep(cur.form, cur.env, fuel)
+      } else {
+        cur = applyStep(cur.fn, cur.args, fuel)
+      }
     }
-  }
-  return cur
+    return cur
+  } finally { _CUR_FUEL = outer }
 }
+
+// The fuel box of the call currently in flight. `seqVerb`'s procedure adapter
+// (lib/base/list.js) needs one to call a Scheme callback back, and it is only
+// ever reached from inside a native that `apply` already entered — so the
+// ambient box is the RIGHT one, and a callback stays on the same meter as the
+// verb that invoked it. Fuel is the seatbelt; handing the adapter a fresh
+// budget would quietly unbuckle it for every higher-order verb.
+let _CUR_FUEL = null
+
+// Teach the sequence boundary how to call back into Scheme. Installed here
+// because this is the one module that has both `apply` and `Closure`; doing it
+// in list.js would be a cycle.
+installProcAdapter(
+  (fn, args) => apply(fn, args, _CUR_FUEL ?? { n: Infinity }),
+  (v) => v instanceof Closure || typeof v === 'function',
+)
 
 /**
  * One application step. JS functions resolve immediately; Closures
@@ -838,15 +1031,29 @@ function applyStep(fn, args, fuel) {
       // call; even tiny per-call wins matter on deep let-loops.
       const params = fn.params
       const pLen = params.length
+      // R7RS §4.1.4: it is an error to call a procedure with a number of
+      // arguments different from the number of formal parameters. Motoi used
+      // to accept any count — a missing argument silently became the
+      // unspecified value and an extra one was dropped on the floor. That is
+      // how `(flip cons '(meta approved))` on a one-parameter `flip` quietly
+      // discarded its second argument and printed `( . "Widget")` instead of
+      // reporting the call was wrong.
+      if (fn.restParam ? args.length < pLen : args.length !== pLen) {
+        const want = fn.restParam ? `at least ${pLen}` : `${pLen}`
+        const name = fn.name ? `${fn.name}: ` : 'procedure: '
+        throw new Error(`${name}expected ${want} argument${pLen === 1 ? '' : 's'} (${params.join(' ')}${fn.restParam ? ` . ${fn.restParam}` : ''}), got ${args.length}`)
+      }
       for (let i = 0; i < pLen; i++) e.define(params[i], args[i])
       // Variadic tail (R7RS §4.1.4) — gather any args past the fixed
       // params into a list bound to `restParam`. Covers both the fully-
       // variadic `(lambda args body)` shape (params=[]) and the future
       // dotted-tail `(lambda (a b . rest) body)` shape (params=['a','b']).
-      // Skip the slice when there are no extra args; an empty list is
-      // observably identical and we save one allocation per call.
+      // The rest arg is a VALUE the body can `cdr` down, `set-car!` through and
+      // hand to `pair?`, so it has to be a cell chain — binding a JS array here
+      // made `((lambda args (pair? args)) 1)` depend on which verb saw it first.
+      // R7RS §4.1.4 also requires a FRESH list per call, so no memoized shortcut.
       if (fn.restParam) {
-        e.define(fn.restParam, args.length > pLen ? args.slice(pLen) : [])
+        e.define(fn.restParam, args.length > pLen ? arrayToList(args.slice(pLen)) : NIL)
       }
       const body = fn.body
       const bLen = body.length
@@ -861,40 +1068,121 @@ function applyStep(fn, args, fuel) {
 }
 
 
+// ── the AST/value boundary ──────────────────────────────────────────────
+// The evaluator's spine is still JavaScript arrays: the reader hands `interp`
+// and `macro` arrays, and they walk arrays. Scheme VALUES are cons cells. The
+// two worlds meet at exactly two places — `quote` and `quasiquote` — because
+// Motoi has no `eval` (decision-005), so program text never has to BE program
+// data. That is what kept the cell change out of the evaluator entirely.
+//
+// The result is memoized on the source form. R7RS §4.1.2 makes a literal
+// constant a single object, so `(eq? '(1 2) '(1 2))` inside one procedure is
+// allowed to be #t and, more importantly, a literal evaluated in a loop must
+// not allocate a fresh list every pass.
+const DATUM_CELLS = new WeakMap()
+function datumToCells(d) {
+  if (Array.isArray(d)) {
+    const hit = DATUM_CELLS.get(d)
+    if (hit !== undefined) return hit
+    // Seed the cache BEFORE recursing. A datum label can make the form point at
+    // itself (`#0=(1 . #0#)`), and without the seed that is an infinite walk.
+    const cells = arrayToList(new Array(d.length))
+    DATUM_CELLS.set(d, cells)
+    let c = cells
+    for (let i = 0; i < d.length; i++) { c.car = datumToCells(d[i]); c = c.cdr }
+    return cells
+  }
+  if (d instanceof Pair) {
+    const hit = DATUM_CELLS.get(d)
+    if (hit !== undefined) return hit
+    const cell = new Pair(null, null)
+    DATUM_CELLS.set(d, cell)
+    cell.car = datumToCells(d.car)
+    cell.cdr = datumToCells(d.cdr)
+    return cell
+  }
+  if (d instanceof SchemeVector) {
+    const hit = DATUM_CELLS.get(d)
+    if (hit !== undefined) return hit
+    const v = mkVec(new Array(d.items.length))
+    DATUM_CELLS.set(d, v)
+    for (let i = 0; i < d.items.length; i++) v.items[i] = datumToCells(d.items[i])
+    return v
+  }
+  return d
+}
+
 // `quasiquote` expansion. Walks the template; `(unquote x)` evaluates `x`
 // in place; `(unquote-splicing x)` splices a list into the surrounding
 // list. Nested quasiquotes drop one level of "evaluate-through" per
 // nesting. This is the small-but-correct shape — sufficient for cards
 // and data-template code without dragging in a full macro expander.
-function quasiExpand(form, env, fuel) {
+// `depth` is the nesting level: 1 inside one quasiquote. A nested
+// `quasiquote` raises it and an `unquote`/`unquote-splicing` lowers it;
+// evaluation only happens at depth 1, so the inner template of
+// ``(a `(b ,(+ 1 2)) c)`` survives intact instead of being evaluated through.
+// Both were missing, along with vector templates and the multi-operand
+// `(unquote e1 e2 ...)` form of §4.2.8.
+function quasiExpand(form, env, fuel, depth = 1) {
   if (form instanceof Pair) {
-    return new Pair(quasiExpand(form.car, env, fuel), quasiExpand(form.cdr, env, fuel))
+    return new Pair(quasiExpand(form.car, env, fuel, depth),
+                    quasiExpand(form.cdr, env, fuel, depth))
   }
-  if (!Array.isArray(form)) return form
-  if (form.length === 0) return form
+  if (form instanceof SchemeVector) {
+    return mkVec(quasiExpandList(form.items, env, fuel, depth))
+  }
+  if (!isList(form) || form.length === 0) return form
   const head = form[0]
   if (head instanceof Sym) {
-    if (head.name === 'unquote') return evaluate(form[1], env, fuel)
+    if (head.name === 'quasiquote') {
+      return [head, ...quasiExpandList(form.slice(1), env, fuel, depth + 1)]
+    }
+    if (head.name === 'unquote') {
+      if (depth === 1) return evaluate(form[1], env, fuel)
+      return [head, ...quasiExpandList(form.slice(1), env, fuel, depth - 1)]
+    }
     if (head.name === 'unquote-splicing') {
-      throw new Error('unquote-splicing not at list position')
+      if (depth === 1) throw new Error('unquote-splicing not at list position')
+      return [head, ...quasiExpandList(form.slice(1), env, fuel, depth - 1)]
     }
   }
+  const out = quasiExpandList(form, env, fuel, depth)
+  return out instanceof Pair || isList(out) ? out : out
+}
+
+// Expands the ELEMENTS of a list template, which is where splicing and the
+// dotted `(x . ,y)` tail live. Returns an array, or a Pair chain when the
+// template had a dotted unquoted tail.
+function quasiExpandList(items, env, fuel, depth) {
   const out = []
-  for (let i = 0; i < form.length; i++) {
-    const item = form[i]
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]
     // `(1 . ,x)` reads as `(1 unquote x)` — the dotted tail of a quasiquote.
-    if (i > 0 && item instanceof Sym && item.name === 'unquote' && form.length === i + 2) {
-      let acc = evaluate(form[i + 1], env, fuel)
+    if (depth === 1 && i > 0 && item instanceof Sym && item.name === 'unquote'
+        && items.length === i + 2) {
+      let acc = evaluate(items[i + 1], env, fuel)
       for (let j = out.length - 1; j >= 0; j--) acc = new Pair(out[j], acc)
       return acc
     }
-    if (Array.isArray(item) && item[0] instanceof Sym
+    if (depth === 1 && isList(item) && item[0] instanceof Sym
         && item[0].name === 'unquote-splicing') {
-      const spliced = evaluate(item[1], env, fuel)
-      if (Array.isArray(spliced)) out.push(...spliced)
-      else out.push(spliced)
+      // §4.2.8 allows more than one operand; each is spliced in turn.
+      for (let k = 1; k < item.length; k++) {
+        // `spliced` is a VALUE, so it is a cell chain — the template around it
+        // is still the evaluator's array spine. Flatten before splicing rather
+        // than spreading, which only ever worked while a list was an array.
+        const spliced = evaluate(item[k], env, fuel)
+        if (spliced === NIL) continue
+        if (spliced instanceof Pair) out.push(...listToArray(spliced))
+        else if (isList(spliced)) out.push(...spliced)
+        else if (spliced !== null && spliced !== undefined) out.push(spliced)
+      }
+    } else if (depth === 1 && isList(item) && item.length > 2
+               && item[0] instanceof Sym && item[0].name === 'unquote') {
+      // `(unquote e1 e2 ...)` in list position contributes one element each.
+      for (let k = 1; k < item.length; k++) out.push(evaluate(item[k], env, fuel))
     } else {
-      out.push(quasiExpand(item, env, fuel))
+      out.push(quasiExpand(item, env, fuel, depth))
     }
   }
   return out

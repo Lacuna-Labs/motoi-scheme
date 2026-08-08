@@ -121,7 +121,7 @@ This program walks a nested list of channel IDs, reads occupancy for each via `s
   '((101 102) (103 (104 105)) 106))
 
 (read-channel-tree nested-ids)
-;; => ((101 . q) (102 . q) (103 . q) (104 . q) (105 . nan) (106 . q))
+;; -> ((101 . 3) (102 . 14) (103 . 9) (104 . 3) (105 . nan) (106 . 17))
 ;; Recursion flattens the tree; the instrument is checked at every leaf.
 ```
 
@@ -162,7 +162,11 @@ Now we add an accumulator to carry state down the recursion, and we guard every 
 (define test-ids '(12345 67890 11223))
 
 (collect-active-channels test-ids)
-;; => ((11223 . <metadata>) (12345 . <metadata>))
+;; -> ((11223 (\"state\" \"active\") (\"quantity\" 9)) (12345 (\"state\" \"active\") (\"quantity\" 3)))
+;; Channel 67890 is dark, so it is simply skipped. Note the printed shape:
+;; each entry is `(cons id meta)` where meta is itself a list, so the
+;; printer splices instead of showing a dot. Note also the ORDER — the
+;; accumulator conses, so the results come back last-kept-first.
 ;; or (escalate \"read failed\" <detail>) if any read fails structurally.
 ```
 
@@ -272,8 +276,13 @@ Closures let you carry state through recursion without explicit accumulators. Th
     (\"Airflow\" (\"Intake\"))))
 
 (gather-category-notes category-tree \"seasonal\")
-;; => ((\"Coolant\" \"note:Coolant\") ...)
+;; => ((\"Thermal\" . \"note:Thermal\") (\"Coolant\" . \"note:Coolant\")
+;;     (\"Primary\" . \"note:Primary\") (\"Secondary\" . \"note:Secondary\")
+;;     (\"Airflow\" . \"note:Airflow\") (\"Intake\" . \"note:Intake\"))
 ;; Closure captures \"seasonal\", recursion walks the tree, instrument read per node.
+;; Each entry is a PAIR, not a two-element list, because the walker conses:
+;; (cons cat-name note) gives (\"Thermal\" . \"note:Thermal\"), with a dot.
+;; The root node is in the result too — the walk starts at \"Thermal\" itself.
 ```
 
 **What's hard here:** The closure captures `axis` so `walk` stays clean; the recursion has to distinguish leaf strings from nested lists; `map` over children requires `apply append` to flatten; and every `bench-recall` is checked before cons-ing. This is higher-order + recursion + closure + instrument + guard, all at once.
@@ -379,8 +388,11 @@ A five-stage pipeline: read a list of specimens, transform each into a candidate
                         (cons 'resupply-candidate detail)))))))))))))
 
 (find-top-resupply 42)
-;; => (resupply-candidate (\"source\" \"LabA\") (\"stock\" . n) ...) or 'nan
-;; Five stages, each checked, one clean flow.
+;; => (resupply-candidate (\"source\" \"LabB\") (\"stock\" 2) (\"price\" 8))
+;; Five stages, each checked, one clean flow. If stage 3 filters everything
+;; out the whole thing is 'nan instead — that is the honest empty answer.
+;; The detail fields are two-element LISTS, not dotted pairs: `specimen-detail`
+;; builds them with `list`, so it is (\"stock\" 2), read with `cadr`.
 ```
 
 **What's hard here:** Five nested `let`s, each dependent on the last; map, filter, fold all in sequence; three separate reads, each guarded; and the final result tagged. This is the shape of real data routes—and it runs alone, top to bottom.
@@ -427,7 +439,10 @@ This program walks a nested decision tree (represented as an alist of conditions
                    (\"on-false\" \"hold-steady\")))))
 
 (route-decision decision-tree '((\"station\" \"S-12345\")))
-;; => \"increase-pumping\" or \"seal-line\" or \"hold-steady\", depending on live metrics.
+;; -> \"increase-pumping\"
+;; The bench reader is deterministic: the \"flow\" metric reports 0.05, which
+;; clears the 0.02 threshold, so the walk takes the on-true leaf and never
+;; looks at the nested leak-rate node.
 ```
 
 **What's hard here:** The tree is a nested alist, so you have to parse it while recursing; every node reads a metric, and the result determines which branch to take; the recursion can go deep; and every read is checked. This is a recursive interpreter—hard to write, satisfying to run.
@@ -521,8 +536,14 @@ This program walks a tree of specimen categories, calling `bench-topk` at each n
 (define cat-tree '(\"Coolant\" (\"Additives\" \"Buffers\")))
 
 (collect-in-stock-related cat-tree \"thermal-v2\")
-;; => ((id . stock) ...) for related specimens with stock > 0
+;; => ((1003 . 6) (1002 . 4) (1001 . 2) (1003 . 6) (1002 . 4) (1001 . 2)
+;;     (1003 . 6) (1002 . 4) (1001 . 2))
 ;; Recursion walks tree, topk at each leaf, specimen read per result, accumulate stock > 0.
+;; Nine entries for three leaves: this stub `bench-topk` returns the same three
+;; ids (1001-1003) whatever key you hand it, so every leaf contributes the same
+;; three specimens. A real instrument would return different neighbours per node
+;; — and a real accumulator would probably want to de-duplicate. The walk is
+;; correct; the duplication is the stub showing through.
 ```
 
 **What's hard here:** Recursive tree walk; read at each leaf; fold over the results, calling *another* read inside the fold; accumulator threaded through the recursion; and every read guarded. This is multi-instrument coordination inside recursion—genuinely hard, and it runs.
@@ -553,12 +574,12 @@ This program returns a function that itself returns a decision—a closure facto
 (define check-flow (make-metric-decision \"flow\" 0.03 \"invest\" \"hold\"))
 
 (check-flow \"S-98765\")
-;; => \"invest\" or \"hold\", depending on live flow rate.
+;; -> \"invest\"  ; \"flow\" reports 0.05, which is above the 0.03 threshold
 
 (define check-leak (make-metric-decision \"leak\" 0.6 \"seal-line\" \"ok\"))
 
 (check-leak \"S-11111\")
-;; => \"seal-line\" or \"ok\"
+;; -> \"ok\"  ; \"leak\" reports 0.05 too, which is BELOW the 0.6 threshold
 ```
 
 **What's hard here:** Three levels of lambda—`make-metric-decision` returns a closure that captures four parameters; the closure reads an instrument and checks it; and you can call `make-metric-decision` multiple times to create different decision functions. This is the power of closures + reads: reusable, configurable, and clean.
@@ -613,7 +634,7 @@ This program chains three stages: read all channels via `channel-list`, fold ove
                           (list \"turns_per_month\" (/ throughput total-value)))))))))))))
 
 (occupancy-value-vs-stats 77777)
-;; => ((\"occupancy_value\" . n) (\"throughput_30d\" . m) (\"turns_per_month\" . r))
+;; -> ((\"occupancy_value\" 39) (\"throughput_30d\" 939) (\"turns_per_month\" 24.076923076923077))
 ;; Three stages, fold in the middle, escalate if fold is empty, final comparison returned.
 ```
 
@@ -640,8 +661,10 @@ This program recursively walks a nested alist (representing a specimen catalog),
      (let ((key (caar catalog))
            (value (cdar catalog)))
        (if (equal? key \"specimen_id\")
-           ;; Read signal for this specimen
-           (let ((impressions (visibility-read station-id value)))
+           ;; Read signal for this specimen. Entries are list-built —
+           ;; (\"specimen_id\" \"spec-101\") — so `value` is the one-element
+           ;; list (\"spec-101\") and the id itself is its car.
+           (let ((impressions (visibility-read station-id (car value))))
              (cons (car catalog)
                    (cons (list \"visibility\" (if (eq? impressions 'nan)
                                                 'nan
@@ -753,7 +776,10 @@ This program orchestrates four reads in sequence, each stage dependent on the la
               by-source))))))
 
 (resupply-plan-by-source '(201 202 203 204 205))
-;; => ((\"LabA\" 202 204) (\"LabB\" 201 203 205)) grouped by source lab
+;; -> ((\"LabA\" 204) (\"LabB\" 201))
+;; Only two of the five channels read below the resupply threshold of 5:
+;; 201 and 204 both report 3, while 202, 203 and 205 report 14, 9 and 15.
+;; Stage 2 is a filter, so the later stages only ever see those two.
 ;; Four stages: read, filter-transform, read again, aggregate by key.
 ```
 
@@ -880,7 +906,9 @@ This program walks a command tree where each node specifies a reader to call and
                      (\"on-failure\" \"escalate-to-human\")))))
 
 (execute-command-tree command-tree '())
-;; => \"proceed-to-resupply\" or \"alert-low-occupancy\" or \"escalate-to-human\".
+;; -> \"proceed-to-resupply\"
+;; Channel 501 reads 3 — a real number, not 'nan — so the walk takes the
+;; on-success branch and the whole fallback subtree is never executed.
 ```
 
 **What's hard here:** The tree specifies reads to call dynamically, so the program has to parse the action and dispatch to the right reader; the recursion depends on the result; and the tree can go several levels deep. This is a command interpreter—hard to write, powerful to use.
@@ -917,8 +945,15 @@ This program maps over a list of trials, and for each trial it folds over a list
        trial-ids))
 
 (trial-metric-summaries '(601 602 603) '(\"open_rate\" \"click_rate\" \"unsub_rate\"))
-;; => ((id . ((metric . value) ...)) ...)
+;; => ((601 (\"unsub_rate\" . 0.01) (\"click_rate\" . 0.03) (\"open_rate\" . 0.07))
+;;     (602 (\"unsub_rate\" . 0.02) (\"click_rate\" . 0.06) (\"open_rate\" . 0.14))
+;;     (603 (\"unsub_rate\" . 0.03) (\"click_rate\" . 0.09) (\"open_rate\" . 0.21)))
 ;; Map reads a record, fold extracts metrics, result is (id . summary).
+;; Read the shape carefully. `(cons id summary)` where summary is a LIST prints
+;; as (601 ...) with no dot — consing onto a list gives a longer list, and only
+;; the inner (metric . value) pairs keep their dots. The metrics also come back
+;; REVERSED: fold conses each name onto the front, so the last name asked for
+;; ends up first.
 ```
 
 **What's hard here:** Map reads an instrument; inside it, fold iterates over metric names and builds an alist; the fold is a closure inside the map's lambda; and every read is guarded. This is nested higher-order + read + closure—hard to follow, clean once you see it.
@@ -958,7 +993,10 @@ This program wraps a multi-stage pipeline in a recursive retry: if any stage fai
                         (list \"throughput_30d\" (cadr (assoc \"throughput_30d\" stats)))))))))))))
 
 (read-and-aggregate-with-retry 88888 0 3)
-;; => ((\"total_occupancy\" . n) (\"throughput_30d\" . m))
+;; -> ((\"total_occupancy\" 36) (\"throughput_30d\" 416))
+;; Every read succeeds on the first try, so no retry ever fires. The retry
+;; path is still the interesting part of the code — but a test that never
+;; takes it has not tested it.
 ;; Retries up to 3 times if any read fails, then escalates.
 ```
 
@@ -993,9 +1031,19 @@ This program folds over a list of run IDs, but the accumulator is a record (an a
 (define high-energy? (lambda (run)
                        (> (string->number (cadr (assoc \"energy\" run))) 100)))
 
-(conditional-run-aggregate '(701 702 703 704) high-energy?)
-;; => ((\"total\" . sum) (\"count\" . n))
+;; Runs 701 and 702 report 5 and 10; runs 721 and 730 report 105 and 150.
+;; Two clear the bar, two do not — which is what you want from a test.
+(conditional-run-aggregate '(701 721 702 730) high-energy?)
+;; -> ((\"total\" 255) (\"count\" 2))
 ;; Fold with record accumulator, read per step, conditional update.
+
+;; Watch what happens when NOTHING passes. The accumulator comes back exactly
+;; as it started, and \"total 0, count 0\" is a perfectly honest answer that is
+;; also indistinguishable from \"the reads all failed\". If the two cases need
+;; different handling, the accumulator has to carry a third field for how many
+;; runs were seen at all.
+(conditional-run-aggregate '(701 702 703 704) high-energy?)
+;; -> ((\"total\" 0) (\"count\" 0))
 ```
 
 **What's hard here:** The accumulator is an alist representing a record; the reducer extracts fields, reads a run, checks a condition via a passed-in lambda, then updates the record by rebuilding the alist. This is stateful fold + higher-order + read + conditional—four techniques in one.
@@ -1014,16 +1062,18 @@ This program recursively walks a nested alist (a specimen catalog with categorie
     ((null? catalog) '())
     ((not (pair? catalog)) catalog)
     ((and (pair? (car catalog)) (string? (caar catalog)))
+     ;; Entries are list-built — (\"category\" \"Outdoor\") — so `value` is the
+     ;; one-element list (\"Outdoor\"); the leaf itself is its car.
      (let ((key (caar catalog))
            (value (cdar catalog)))
        (cond
          ((equal? key \"category\")
-          (let ((note (bench-recall context value)))
+          (let ((note (bench-recall context (car value))))
             (cons (car catalog)
                   (cons (list \"category_note\" (if (eq? note 'nan) \"\" note))
                         (enrich-catalog (cdr catalog) context)))))
          ((equal? key \"specimen_id\")
-          (let ((detail (specimen-detail value)))
+          (let ((detail (specimen-detail (car value))))
             (cons (car catalog)
                   (cons (list \"specimen_detail\" (if (or (eq? detail 'nan)
                                                         (and (pair? detail) (eq? (car detail) 'escalate)))
@@ -1164,8 +1214,12 @@ This program runs a three-stage pipeline where if the second stage fails, it att
               (list stage1-result (list \"occupancy\" occupancy))))))))))
 
 (read-with-fallback 999)
-;; => ((\"specimen\" . <data>) (\"occupancy\" . n))
-;; or ((\"specimen\" . <data>) (\"occupancy\" . fallback-failed))
+;; -> ((\"specimen\" ((\"source\" \"LabB\") (\"stock\" 18) (\"price\" 1))) (\"occupancy\" 27))
+;; Channel 999 answers, so the fallback never runs. Ask for a DARK channel
+;; and you can watch the fallback do its job — 105 has no sensor, so the
+;; occupancy comes from the specimen record's own stock field instead:
+(read-with-fallback 105)
+;; -> ((\"specimen\" ((\"source\" \"LabB\") (\"stock\" 10) (\"price\" 7))) (\"occupancy\" 10))
 ;; Stage 1 always succeeds or escalates; stage 2 tries fallback if primary is dark; result preserved either way.
 ```
 
@@ -1205,8 +1259,12 @@ This program folds over a list of events, but the reducer needs to look at the *
     ((\"id\" 5) (\"phase\" \"settled\"))))
 
 (detect-transitions test-events)
-;; => ((\"transition\" . event) ...) for transient→settled boundaries
+;; => ((\"transition\" ((\"id\" 1) (\"phase\" \"transient\")))
+;;     (\"transition\" ((\"id\" 4) (\"phase\" \"transient\"))))
 ;; Named-let walks the list, looks ahead to the next element, accumulates matches.
+;; Two boundaries: event 1 is followed by a settled event, and so is event 4.
+;; Each hit is `(list \"transition\" current)` — a two-element list, no dot — and
+;; it records the TRANSIENT event, the one on the near side of the boundary.
 ```
 
 **What's hard here:** We're not using `fold`—we're using named-let recursion to walk the list, because we need to access both `car` and `cadr`; the reducer checks current and next; and the result is accumulated in reverse, then reversed at the end. This is manual fold + lookahead—hard to structure, useful for state-machine patterns.
@@ -1245,8 +1303,17 @@ This program recursively reads data via an instrument, but caches results in an 
 
 (define sample-tree '(101 (102 101) 103))
 
-(read-tree-with-cache sample-tree '())
-;; => (<results>, <final-cache>)
+;; The procedure returns TWO values, so catch them both and look at each one.
+;; The tree mentions 101 twice but the cache only ever gains one entry for it —
+;; that is the whole point of threading the cache through the recursion.
+(let-values (((results cache) (read-tree-with-cache sample-tree '())))
+  (list (list \"distinct-ids-cached\" (length cache))
+        (list \"cached-ids\" (map car cache))))
+;; -> ((\"distinct-ids-cached\" 3) (\"cached-ids\" (103 102 101)))
+
+(let-values (((results cache) (read-tree-with-cache sample-tree '())))
+  results)
+;; -> (((\"source\" \"LabB\") (\"stock\" 2) (\"price\" 3)) (((\"source\" \"LabA\") (\"stock\" 4) (\"price\" 4)) ((\"source\" \"LabB\") (\"stock\" 2) (\"price\" 3))) ((\"source\" \"LabB\") (\"stock\" 6) (\"price\" 5)))
 ;; Recursion threads cache, reads only once per ID, returns both results and updated cache.
 ```
 

@@ -111,7 +111,7 @@ The simplest abstraction: take two functions, return a new function that calls t
 
 (define square-then-add-ten (compose add-ten square))
 
-(square-then-add-ten 5)  ; => (square 5) = 25, then (add-ten 25) = 35
+(square-then-add-ten 5)  ; => 35   ((square 5) is 25, then (add-ten 25) is 35)
 ```
 
 Right-to-left feels backwards at first, but it matches mathematical notation and makes certain pipelines easier to read. We'll build left-to-right (`pipe`) next.
@@ -137,10 +137,16 @@ Right-to-left feels backwards at first, but it matches mathematical notation and
   (compose upcase
            (compose slugify trim-spaces)))
 
+;; Watch the value change one stage at a time. Note that `trim-spaces` is
+;; `text/normalize`, which downcases as well as collapsing whitespace.
+(trim-spaces \"  Hello   World!  \")
+;; -> \"hello world!\"
+
+(slugify (trim-spaces \"  Hello   World!  \"))
+;; -> \"hello-world\"
+
 (process-title \"  Hello   World!  \")
-;; => first trim -> \"Hello World!\"
-;; => then slug -> \"hello-world\"
-;; => then upcase -> \"HELLO-WORLD\"
+;; -> \"HELLO-WORLD\"
 ```
 
 That works, but nesting `compose` calls is awkward. We can do better.
@@ -170,12 +176,26 @@ A `compose` that takes any number of functions and chains them right-to-left. We
 (define process
   (compose-n upcase slugify trim-spaces remove-punct))
 
-(process \"  Café—2024!  \")
-;; => remove-punct: \"Café  \"
-;; => trim-spaces: \"Café\"
-;; => slugify: \"cafe\"
-;; => upcase: \"CAFE\"
+;; Each stage, one at a time. `remove-punct` keeps only letters and
+;; whitespace, so the comma and the exclamation mark are dropped outright.
+(remove-punct \"  Hello, World!  \")
+;; -> \"  Hello World  \"
+
+(trim-spaces (remove-punct \"  Hello, World!  \"))
+;; -> \"hello world\"
+
+(slugify (trim-spaces (remove-punct \"  Hello, World!  \")))
+;; -> \"hello-world\"
+
+(process \"  Hello, World!  \")
+;; -> \"HELLO-WORLD\"
 ```
+
+Be careful what you throw away. `remove-punct` keeps letters and whitespace and
+nothing else, so digits vanish too: `\"Order 2024\"` becomes `\"Order \"`. A
+filter that deletes a character class is not the same as a filter that
+*replaces* it — `slugify` replaces non-alphanumerics with hyphens, which is why
+`\"hello world\"` becomes `\"hello-world\"` instead of `\"helloworld\"`.
 
 Much cleaner. But reading right-to-left is still a stumble. Let's build `pipe`.
 
@@ -200,8 +220,8 @@ Pipe is just compose with the functions reversed. Data flows left to right, matc
         slugify
         upcase))
 
-(process-ltr \"  Hello—World! 2024  \")
-;; => \"HELLO-WORLD\"
+(process-ltr \"  Hello, World!  \")
+;; -> \"HELLO-WORLD\"
 ```
 
 Now the order on the page matches the order of execution. This is FORWARD in code: each stage advances the value toward the final shape.
@@ -249,8 +269,8 @@ Now generalize to any number of arguments.
 (define (multiply a b c) (* a b c))
 (define times-2-3 (partial-n multiply 2 3))
 
-(times-2-3 4)  ; => 2 * 3 * 4 = 24
-(times-2-3 10) ; => 2 * 3 * 10 = 60
+(times-2-3 4)  ; => 24   (that is 2 * 3 * 4)
+(times-2-3 10) ; => 60   (that is 2 * 3 * 10)
 ```
 
 This is the foundation of point-free style: building new functions by partially applying old ones, no explicit lambda needed.
@@ -262,16 +282,19 @@ This is the foundation of point-free style: building new functions by partially 
 Now we're ready to compose wired verbs. Real work: fetch data, transform it, route it onward. Every stage might fail, so we'll handle `'nan` and `escalate` honestly.
 
 ```scheme
-;; Fetch today's date, format it as ISO8601, then extract just the year
+;; Fetch today's date, then extract just the year.
+;; `pipe` builds a ONE-ARGUMENT function: every stage receives the previous
+;; stage's value. So the fetch is not a stage — it produces the value we
+;; feed in. (Putting `system/date-today` inside the pipe would call it with
+;; an argument it does not take.)
 (define extract-year
-  (pipe system/date-today
-        (lambda (date)
+  (pipe (lambda (date)
           (if (eq? date 'nan)
               'nan
-              (substring (symbol->string date) 0 4)))))
+              (substring date 0 4)))))
 
-(extract-year)
-;; If system/date-today returns \"2024-05-17\", result is \"2024\"
+(extract-year (system/date-today))
+;; => \"2024\"   (system/date-today returns \"2024-01-01\" here)
 ;; If it returns 'nan, we propagate 'nan
 ```
 
@@ -303,8 +326,11 @@ A pipeline that stops as soon as any stage returns `'nan` or an escalation.
       (text/normalize sku)
       'nan))
 
+;; The key is the NORMALIZED sku. `text/normalize` downcases as well as
+;; trimming, so a lookup table sitting downstream of it must be keyed in
+;; lowercase — matching on \"WIDGET-42\" here would never fire.
 (define (lookup-stock sku)
-  (if (equal? sku \"WIDGET-42\")
+  (if (equal? sku \"widget-42\")
       100
       'nan))
 
@@ -312,11 +338,13 @@ A pipeline that stops as soon as any stage returns `'nan` or an escalation.
   (maybe-pipe normalize-sku lookup-stock))
 
 (stock-pipeline \"  WIDGET-42  \")  ; => 100
-(stock-pipeline \"UNKNOWN\")         ; => 'nan (lookup fails)
-(stock-pipeline 12345)             ; => 'nan (normalize fails on non-string)
+(stock-pipeline \"UNKNOWN\")         ; => nan  (lookup fails)
+(stock-pipeline 12345)             ; => nan  (normalize fails on non-string)
 ```
 
 Now failure propagates automatically. This is ESCAPE built into the pipeline itself.
+
+The lookup key is worth dwelling on. Every stage in a pipeline inherits the output shape of the stage before it, and `normalize-sku` does not just trim — it downcases. A table keyed on `\"WIDGET-42\"` would sit there silently returning `'nan` for input that was, in fact, perfectly good. That failure looks exactly like a real miss, which is what makes it nasty: the pipeline still short-circuits politely and tells you nothing is wrong.
 
 ---
 
@@ -433,9 +461,15 @@ We'll fetch an Etsy listing, extract its title, normalize and slug it, check if 
   (lambda (x)
     (fold maybe-apply x fns)))
 
-;; Stage 1: Fetch listing by ID
+;; Stage 1: Fetch listing by ID. A tiny stand-in catalogue keeps the demo
+;; self-contained — swap in a real fetch and nothing downstream changes.
 (define (fetch-listing listing-id)
-  (etsy/listing listing-id))
+  (cond
+    ((equal? listing-id 123456789)
+     (list (cons 'title \"Vintage Teapot\") (cons 'price 25)))
+    ((equal? listing-id 987654321)
+     (list (cons 'title \"Handmade Candle\") (cons 'price 12)))
+    (else 'nan)))
 
 ;; Stage 2: Extract title from listing JSON
 (define (extract-title listing)
@@ -470,9 +504,12 @@ We'll fetch an Etsy listing, extract its title, normalize and slug it, check if 
 
 ;; Run it
 (listing-pipeline 123456789)
-;; If listing exists and title is \"Vintage Teapot\", result:
-;; => (sku \"vintage-teapot\" stock 5)
-;; If any stage fails, result is 'nan or escalate
+;; -> (sku \"vintage-teapot\" stock 5)
+
+;; An id the catalogue doesn't know: stage 1 hands back 'nan and every later
+;; stage steps aside, so the whole pipeline reports 'nan instead of crashing.
+(listing-pipeline 111)
+;; -> nan
 ```
 
 That's a four-verb, four-transform pipeline with honest failure handling, built entirely from combinators. FORWARD: each stage advances the data. ESCAPE: failure propagates cleanly. BACK: no extra machinery, just composition.
@@ -488,30 +525,38 @@ Sometimes a function's arguments are in the wrong order for partial application.
   (lambda (a b)
     (f b a)))
 
-;; Example: cons builds (a . b), but we want to freeze b and vary a
+;; Example: cons builds (a . b), but we want to freeze b and vary a.
+;; By hand you would write this:
 (define (cons-flipped b a) (cons a b))
 
-(define attach-metadata (flip cons '(meta approved)))
+;; `flip` gives you the same thing without writing a new procedure.
+;; Note that `flip` takes ONE argument — the procedure. It does not freeze
+;; anything. Flip first, then apply the flipped procedure to the frozen value.
+(define flipped-cons (flip cons))
+
+(define (attach-metadata item)
+  (flipped-cons '(meta approved) item))
 
 (attach-metadata \"Widget\")
-;; => (\"Widget\" meta approved)
+;; -> (\"Widget\" meta approved)
 
 (attach-metadata \"Gadget\")
-;; => (\"Gadget\" meta approved)
+;; -> (\"Gadget\" meta approved)
 ```
 
 More useful: adapting a filter predicate.
 
 ```scheme
-;; We have (> a b), but filter expects (lambda (x) (> x threshold))
-;; Flip lets us freeze the threshold on the right
-(define (less-than a b) (< a b))
-(define greater-than (flip less-than))
+;; We have (> a b), but filter expects (lambda (x) (> x threshold)).
+;; `partial-n` freezes arguments from the LEFT, and the threshold sits on the
+;; right — so flip the procedure first, then freeze.
+(define (greater-than a b) (> a b))
+(define greater-than-flipped (flip greater-than))  ; (a b) -> (> b a)
 
-(define above-50 (partial-n greater-than 50))
+(define above-50 (partial-n greater-than-flipped 50))  ; x -> (> x 50)
 
 (filter above-50 '(20 60 45 80 55))
-;; => (60 80 55)
+;; -> (60 80 55)
 ```
 
 ---
@@ -545,9 +590,11 @@ More powerful: use it in a pipeline to \"inject\" a value at each stage.
           'reviews (getter (lambda (id) 'nan)))))  ; mock: no review verb for ID
 
 (build-report 999)
-;; => (listing <result-of-etsy/listing-999>
-;;     inventory <result-of-stock/on-hand-\"SKU-999\">
-;;     reviews nan)
+;; -> (listing ((title . \"A Sample Listing\") (shop_id . \"shop-1\") (tags \"handmade\" \"ceramic\") (price . 25) (description . \"A handmade ceramic item.\")) inventory 0 reviews nan)
+
+;; The listing and inventory values come from this chapter's stand-in fetchers,
+;; so they are the same every run. What matters here is the SHAPE: one id was
+;; handed to three different procedures without being written down three times.
 ```
 
 ---
@@ -654,7 +701,9 @@ Another pattern: `try-each` that tries a list of functions until one doesn't ret
                        extract-from-description)))
 
 (get-some-label '((name . \"Widget\") (description . \"A fine widget indeed\")))
-;; => \"Widget\" (from name, since title is missing)
+;; -> \"Widget\"
+;; It came from the `name` field: `title` is missing, so `extract-from-title`
+;; returned 'nan and `try-each` fell through to the next getter.
 ```
 
 This is FORWARD—trying each fallback until one advances the computation—and ESCAPE—cleanly handling failure at each step.
@@ -702,7 +751,12 @@ Now compose `deep-map` with a pipeline:
         flatten))
 
 (process-nested '(\"  Hello  \" (\"  World  \" \"  \") \"Test\"))
-;; => (\"Hello\" \"World\" \"Test\")
+;; -> (\"hello\" \"world\" \"\" \"test\")
+
+;; Two things to notice. `text/normalize` downcases as well as trimming, so
+;; \"Test\" comes back as \"test\". And the all-whitespace string does not
+;; disappear — it normalizes to the empty string and `flatten` keeps it, because
+;; flatten removes STRUCTURE, not values. If you want it gone, filter for it.
 ```
 
 ---
@@ -730,7 +784,9 @@ A higher-order function that retries a computation up to N times if it returns `
       \"Success!\"))
 
 (retry 5 flaky-fetch)
-;; => \"Success!\" (after 3 attempts)
+;; -> \"Success!\"
+;; The first two calls returned 'nan; the third succeeded, so `retry` stopped
+;; there with two of its five attempts unused.
 ```
 
 Now compose retry with a verb call:
@@ -824,14 +880,15 @@ Real data is often JSON (represented as alists in Scheme). Let's build combinato
     (let ((pair (assoc key alist)))
       (if pair (cdr pair) 'nan))))
 
-;; map-field: apply f to a field's value
+;; map-field: apply f to a field's value, leaving every other entry — and the
+;; order of the whole record — exactly as it was.
 (define (map-field key f)
   (lambda (alist)
-    (let ((pair (assoc key alist)))
-      (if pair
-          (cons (cons key (f (cdr pair)))
-                (filter (lambda (p) (not (eq? (car p) key))) alist))
-          alist))))
+    (map (lambda (p)
+           (if (eq? (car p) key)
+               (cons key (f (cdr p)))
+               p))
+         alist)))
 
 ;; Example: extract title, normalize it, put it back
 (define listing '((listing_id . 123)
@@ -842,7 +899,11 @@ Real data is often JSON (represented as alists in Scheme). Let's build combinato
   ((map-field 'title text/normalize) listing))
 
 normalized
-;; => ((listing_id . 123) (title . \"Vintage Teapot\") (price . 25.00))
+;; -> ((listing_id . 123) (title . \"vintage teapot\") (price . 25))
+
+;; Two details worth pinning down. `text/normalize` downcases, so the title
+;; comes back lowercase — normalizing is not the same as tidying. And Motoi has
+;; one number type, so `25.00` and `25` are the same number and print as `25`.
 ```
 
 Compose multiple field transformations:
@@ -857,7 +918,7 @@ Compose multiple field transformations:
         (map-field 'price format-price)))
 
 (transform-listing listing)
-;; => ((listing_id . 123) (title . \"Vintage Teapot\") (price . \"$25.0\"))
+;; -> ((listing_id . 123) (title . \"vintage teapot\") (price . \"$25\"))
 ```
 
 ---
@@ -920,7 +981,12 @@ Compose lenses to navigate nested structures:
 ;; => \"OldShop\"
 
 ((lens-set shop-name-lens) data \"NewShop\")
-;; => ((shop . ((name . \"NewShop\") (id . 42))))
+;; -> ((shop (name . \"NewShop\") (id . 42)))
+
+;; That printed form is the same object we wrote as
+;; `((shop . ((name . ...) (id . 42))))`. When the cdr of a pair is itself a
+;; list, the printer splices instead of printing a dot — `(a . (b c))` and
+;; `(a b c)` are two spellings of one structure.
 ```
 
 This is macro-like behavior: we've built a composable abstraction for nested access and mutation, entirely from lambdas.
@@ -1013,9 +1079,13 @@ A transducer is a transformation that doesn't know about the container—it just
   (compose-transducers (mapping square) (filtering even?)))
 
 (transduce xf cons '() '(1 2 3 4 5))
-;; => (4 16) in reverse order (cons builds backwards)
-;; Reverse to correct: (reverse (transduce xf cons '() '(1 2 3 4 5)))
-;; => (4 16)
+;; -> (16 4)
+;; The elements arrive in order but `cons` pushes each one onto the front, so
+;; the accumulated list comes out back to front.
+
+;; Reverse at the end to get reading order back:
+(reverse (transduce xf cons '() '(1 2 3 4 5)))
+;; -> (4 16)
 ```
 
 Transducers avoid allocating intermediate lists: the transformation is applied during the single fold.
@@ -1053,10 +1123,14 @@ Monads are just a pattern for chaining computations that might fail. We'll build
                                             c)))))))
 
 (compute 8)
-;; => 8/2 = 4, sqrt(4) = 2, log(2) ≈ 0.693
+;; 8/2 = 4, sqrt(4) = 2, log(2) = ...
+;; -> 0.6931471805599453
 
 (compute -8)
-;; => 'nan (safe-div succeeds, but safe-sqrt fails on negative)
+;; safe-div succeeds (-8/2 = -4), then safe-sqrt refuses the negative and the
+;; rest of the chain is skipped. The result is the SYMBOL nan, which is what
+;; `'nan` evaluates to — that is why it prints without the quote mark.
+;; -> nan
 ```
 
 That's deeply nested. We can build a macro-like `do` notation with syntax, but by hand, we'll build a chaining helper.
@@ -1073,10 +1147,10 @@ That's deeply nested. We can build a macro-like `do` notation with syntax, but b
                      safe-log)))
 
 (compute-chain 8)
-;; => ≈ 0.693
+;; -> 0.6931471805599453
 
 (compute-chain -8)
-;; => 'nan
+;; -> nan
 ```
 
 Much cleaner. This is FORWARD (each function advances the computation) and ESCAPE (failure short-circuits).
@@ -1147,10 +1221,15 @@ Let's combine everything: fetch data from multiple verbs, transform it, handle f
                                                                                    (list 'shop name 'reviews count)))))))))))))))))
 
 (build-shop-report 123456)
-;; If all stages succeed:
-;; => (shop \"Vintage Finds\" reviews 42)
-;; If any stage fails:
-;; => 'nan
+;; -> (shop \"sample shop\" reviews 2)
+;; The name and the count come from this chapter's stand-in fetchers, and
+;; `get-shop-name` normalizes, which is why \"Sample Shop\" arrives lowercase.
+
+;; When a stage cannot go on it hands back nan and the chain stops. Here the
+;; listing has no shop_id, so there is nothing to fetch a shop with:
+(maybe-chain '((title . \"No Shop Here\"))
+             (list get-shop-id))
+;; -> nan
 ```
 
 That works, but it's deeply nested. Let's refactor with better combinators.
@@ -1188,7 +1267,9 @@ Build a routing table that matches an input against patterns and dispatches to h
     (if (null? rs)
         (default input)
         (let ((pattern (caar rs))
-              (handler (cadr (car rs))))
+              ;; the routes are dotted pairs (pattern . handler),
+              ;; so the handler is the CDR, not the second element
+              (handler (cdar rs)))
           (if (pattern input)
               (handler input)
               (loop (cdr rs)))))))
@@ -1224,7 +1305,7 @@ Use this to dispatch verb calls based on data shape.
 (define (process-data data)
   (route data data-routes (lambda (x) 'nan)))
 
-(process-data \"  Hello  \")  ; => \"Hello\"
+(process-data \"  Hello  \")  ; => \"hello\"  (text/normalize downcases too)
 (process-data 42)           ; => \"42\"
 (process-data '(1 2 3))     ; => 'nan
 ```
@@ -1383,10 +1464,14 @@ The hardest worked example: fetch a listing, extract tags, search for related li
                                             (recommend price avg)))))))))))
 
 (price-recommendation 123456)
-;; If all stages succeed:
-;; => (recommendation \"Price is competitive\")
-;; If any stage fails:
-;; => 'nan or (escalate ...)
+;; -> (recommendation \"Price is average\")
+;; The stand-in search returns one listing priced the same as ours, so the
+;; average equals our price and we land in the middle band.
+
+;; Any stage that cannot continue returns nan, and `maybe-bind` carries it
+;; straight to the end rather than calling the next step:
+(maybe-bind 'nan (lambda (listing) (get-tags listing)))
+;; -> nan
 ```
 
 Six verbs, five transformations, full failure handling, monadic chaining. This is mastery: orchestrating real work with honest control flow, built from lambdas and folds.

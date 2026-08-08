@@ -129,22 +129,30 @@ The runtime recalls a fact, or admits she doesn't have it.
 
 ```scheme
 ;; Recall the capital of a country, or 'nan if not stored.
-;; *[needs: cortex/recall with miss semantics]*
+;; Cortex is a flat key/value store, so the \"topic\" and the \"field\" live
+;; in the KEY. One argument, built by hand, is the whole interface.
+(define (capital-key country)
+  (string-append \"geography/capital/\" (symbol->string country)))
+
+(cortex/write (capital-key 'france) \"Paris\")
+
 (define (capital-of country)
-  (let ((fact (cortex/recall :topic 'geography
-                             :key country
-                             :field 'capital)))
+  (let ((fact (cortex/read (capital-key country))))
     (if fact
         fact
         'nan)))
 
-(capital-of 'france)    ; => \"Paris\" (if stored)
-(capital-of 'atlantis)  ; => 'nan
+(capital-of 'france)    ; => \"Paris\"
+(capital-of 'atlantis)  ; => nan
 ```
 
-<!-- BUILD: cortex/recall should return #f on miss, so this guard works. -->
+One form closes the read, checks for presence, returns the fact or `'nan`. No hallucination, no \"I think it's…\" when the cortex is empty.
 
-One form closes the recall, checks for presence, returns the fact or `'nan`. No hallucination, no \"I think it's…\" when the cortex is empty.
+Two details are worth stopping on, because getting either wrong turns this honest shot into a dishonest one.
+
+`cortex/read` takes **one** key and returns the bare value, or `#f` when the key is unknown. Its sibling `cortex/recall` takes one key too, but hands back the whole record as an alist — `(:kind :id :key :text :salience …)`. They are not interchangeable. If you want the capital, you want `read`.
+
+And the miss value is `#f`, not `'()`. `(null? #f)` is `#f`, so guarding a miss with `(null? v)` silently takes the *found* branch and hands you the empty list as though it were an answer. Guard with `(if v …)` or `(not v)`, as above.
 
 ---
 
@@ -332,7 +340,8 @@ Parse an ISO date string, or `'nan` if malformed.
 ;; Parse \"YYYY-MM-DD\" into a Julian day number, or 'nan if malformed.
 ;; *[needs: date parsing or a simple validator]*
 (define (parse-iso-date str)
-  (let ((parts (string-split str #\\-)))
+  ;; string-split's separator is a STRING, not a character.
+  (let ((parts (string-split str \"-\")))
     (if (and (= (length parts) 3)
              (string->number (car parts))
              (string->number (cadr parts))
@@ -341,13 +350,15 @@ Parse an ISO date string, or `'nan` if malformed.
         (string->number (car parts))
         'nan)))
 
-(parse-iso-date \"2025-01-15\")  ; => 2025 (simplified)
-(parse-iso-date \"not-a-date\")  ; => 'nan
+(parse-iso-date \"2025-01-15\")  ; => 2025   (the year, simplified)
+(parse-iso-date \"not-a-date\")  ; => nan
 ```
 
 <!-- BUILD: Real date parsing would call (clock/parse :iso str) or similar. -->
 
 The guard checks structure (three hyphen-separated parts, all numeric). If malformed, `'nan`. One form, honest failure.
+
+A separator worth noticing: `string-split` wants a **string**. Hand it the character `#\\-` and it finds no match at all, so you get back a one-element list holding the whole input — the length test then fails and every well-formed date reports itself malformed. An honest-null shot that answers `'nan` for correct input is the dishonest kind.
 
 ---
 
@@ -460,17 +471,20 @@ Recall a fact, or use a fallback if absent—still one form.
 
 ```scheme
 ;; Recall the user's theme preference, or \"light\" if unset.
-;; *[needs: cortex/recall]*
+;; Same flat store as the capital lookup: topic and field go in the key.
+(define (theme-key user-id)
+  (string-append \"preferences/theme/\" (symbol->string user-id)))
+
+(cortex/write (theme-key 'alice) \"dark\")
+
 (define (theme-for user-id)
-  (let ((pref (cortex/recall :topic 'preferences
-                             :key user-id
-                             :field 'theme)))
+  (let ((pref (cortex/read (theme-key user-id))))
     (if pref
         pref
         \"light\")))
 
-(theme-for 'alice)  ; => \"dark\" (if stored)
-(theme-for 'bob)    ; => \"light\" (if no preference stored)
+(theme-for 'alice)  ; => \"dark\"
+(theme-for 'bob)    ; => \"light\"   (nothing stored for bob)
 ```
 
 The fallback is an honest default, not a fake recall result. The form closes the recall and the decision.
@@ -525,7 +539,7 @@ Calculate the median of a list, or `'nan` if empty.
                2)
             (list-ref sorted mid)))))
 
-(median-of '(3 1 4 1 5 9 2 6))  ; => 3.5
+(median-of '(3 1 4 1 5 9 2 6))  ; => 7/2
 (median-of '())                 ; => 'nan
 ```
 
@@ -684,7 +698,7 @@ Convert a unit, or `'nan` if the conversion is unknown.
           'nan))))
 
 (convert 0 'celsius 'fahrenheit)   ; => 32
-(convert 100 'celsius 'kelvin)     ; => 'nan (conversion not in table)
+(convert 100 'celsius 'kelvin)     ; => nan   (conversion not in table)
 ```
 
 The conversion table is local. If the `(from to)` pair is in the table, apply the lambda. If not, `'nan`.
@@ -836,11 +850,13 @@ Look up a nested path in a JSON-like structure, or `'nan` if any key is missing.
                 (cdr pair)  ;; Leaf value
                 'nan)))))
 
-(nested-lookup '((user ((name . \"Alice\") (age . 30)))) '(user name))  ; => \"Alice\"
-(nested-lookup '((user ((name . \"Alice\") (age . 30)))) '(user city))  ; => 'nan
+(nested-lookup '((user (name . \"Alice\") (age . 30))) '(user name))  ; => \"Alice\"
+(nested-lookup '((user (name . \"Alice\") (age . 30))) '(user city))  ; => nan
 ```
 
 Recursive descent with guards at each step. If a key is missing or the structure doesn't match, `'nan`.
+
+Count the parentheses in the data before you trust the answer. An alist entry is `(key . value)`, so nesting one alist inside another is `(user (name . \"Alice\") (age . 30))` — the inner pairs are the entry's *tail*, not a single element wrapped in one more list. Wrap them one layer too deep and every descent past the first level misses, and the form answers `'nan` for a key that is right there. Honest about the miss, wrong about there being one.
 
 ---
 
@@ -1054,11 +1070,19 @@ Calculate a weighted average, or `'nan` if weights sum to zero.
         'nan
         (/ (fold + 0 (map * values weights)) total-weight))))
 
-(weighted-average '(10 20 30) '(1 2 3))  ; => 23.333...
-(weighted-average '(10 20 30) '(0 0 0))  ; => 'nan
+(weighted-average '(10 20 30) '(1 2 3))  ; => 70/3
+(weighted-average '(10 20 30) '(0 0 0))  ; => nan
 ```
 
 The guard checks total weight. If zero, `'nan` (can't divide). Otherwise, the weighted sum divided by total weight.
+
+The first answer is `70/3`, not `23.333…`. Every input here is an exact integer, and `/` on exacts stays exact — Motoi keeps the ratio rather than rounding it, so nothing is lost. Ask for the decimal when you want the decimal:
+
+```scheme
+(exact->inexact (weighted-average '(10 20 30) '(1 2 3)))  ; => 23.333333333333332
+```
+
+That trailing `2` is the honest one. `70/3` has no finite binary expansion, so the nearest double is a hair under 23⅓, and printing it truthfully shows where the exactness went.
 
 ---
 

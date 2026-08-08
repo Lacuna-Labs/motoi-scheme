@@ -18,6 +18,7 @@ import { makeExtendedBaseEnv } from '../src/lib-loader.js'
 import { resetMediaState, getMediaState } from '../lib/media/media.js'
 import { clearTweens } from '../lib/graphics/animation.js'
 import { Sym } from '../src/reader.js'
+import { plain } from './_cells.mjs'
 
 function fresh() {
   resetMediaState()
@@ -343,7 +344,7 @@ test('physics — entity/apply-force! adds impulse to entity velocity', () => {
   // the target is addressed and the return contract did.
   const hero = entityMake(new Sym('hero'), 0, 0)
   assert.equal(applyForce(hero, 3, -2), true, 'reference locks a boolean return')
-  const s = state(hero)
+  const s = plain(state(hero))
   // (id x y vx vy w h)
   assert.equal(s[3], 3, 'vx += 3')
   assert.equal(s[4], -2, 'vy += -2')

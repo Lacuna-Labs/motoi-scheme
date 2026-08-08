@@ -72,6 +72,7 @@ import { installLLM }                  from '../lib/ai/llm.js'
 import { installBookReader }           from '../lib/book/reader.js'
 import { installBookOfCodeTutor }      from '../lib/book/tutor.js'
 import { installAlg }                  from '../lib/base/alg.js'
+import { installAlist }                from '../lib/base/alist.js'
 import { installAssert }               from '../lib/base/assert.js'
 import { installCalc }                 from '../lib/math/calc.js'
 import { installNumberTheory }         from '../lib/math/nt.js'
@@ -83,6 +84,7 @@ import { installLinalg }               from '../lib/math/linalg.js'
 
 export const MANIFEST = [
   // EAGER — loads at boot
+  { name: 'base/alist',        install: (env, ctx) => installAlist(env, ctx.fuel),       mode: 'eager' },
   { name: 'math/basic',        install: (env, ctx) => installMathBasic(env, ctx.fuel),   mode: 'eager' },
   { name: 'math/pedagogy',     install: installMathPedagogy,                              mode: 'eager' },
   { name: 'math/const',        install: installConst,                                     mode: 'eager' },

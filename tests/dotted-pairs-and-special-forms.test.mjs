@@ -24,6 +24,7 @@ import { makeCoreEnv } from '../core/index.js'
 import { evaluate } from '../src/interp.js'
 import { parse } from '../src/reader.js'
 
+import { plain } from './_cells.mjs'
 function run(src) {
   const fuel = { n: 1_000_000 }
   const env = makeCoreEnv({ fuel })
@@ -47,7 +48,7 @@ test('cons of a non-list cdr builds an improper pair, not a 2-element list', () 
 })
 
 test('cons onto a list still yields a proper list (the cart fast path)', () => {
-  assert.deepEqual(run('(cons 1 (list 2 3))'), [1, 2, 3])
+  assert.deepEqual(plain(run('(cons 1 (list 2 3))')), [1, 2, 3])
   assert.equal(run('(list? (cons 1 (list 2 3)))'), true)
   assert.equal(run('(length (cons 1 (list 2 3)))'), 3)
 })
@@ -79,7 +80,7 @@ test('a dotted tail collapses the way Scheme writes it', () => {
   assert.equal(run("(cdr (cdr '(1 2 . 3)))"), 3)
   // `(1 . (2 3))` denotes the same object as `(1 2 3)`.
   assert.equal(run("(list? '(1 . (2 3)))"), true)
-  assert.deepEqual(run("'(1 . (2 3))"), [1, 2, 3])
+  assert.deepEqual(plain(run("'(1 . (2 3))")), [1, 2, 3])
 })
 
 test('equal? compares pairs structurally', () => {
@@ -100,11 +101,11 @@ test('write and display render a dotted pair with the dot', () => {
 // ── (4) dotted syntax is also how variadic params are written ────────
 
 test('variadic parameter lists survive the reader change', () => {
-  assert.deepEqual(run('(define (f a . rest) rest) (f 1 2 3)'), [2, 3])
-  assert.deepEqual(run('(define (g . xs) xs) (g 1 2)'), [1, 2])
-  assert.deepEqual(run('((lambda (a . r) r) 1 2 3)'), [2, 3])
-  assert.deepEqual(run('((lambda args args) 1 2)'), [1, 2])
-  assert.deepEqual(run('(define (k a . r) r) (k 1)'), [])
+  assert.deepEqual(plain(run('(define (f a . rest) rest) (f 1 2 3)')), [2, 3])
+  assert.deepEqual(plain(run('(define (g . xs) xs) (g 1 2)')), [1, 2])
+  assert.deepEqual(plain(run('((lambda (a . r) r) 1 2 3)')), [2, 3])
+  assert.deepEqual(plain(run('((lambda args args) 1 2)')), [1, 2])
+  assert.deepEqual(plain(run('(define (k a . r) r) (k 1)')), [])
   assert.equal(run('(define (h a b) (+ a b)) (h 1 2)'), 3)
 })
 
@@ -141,7 +142,7 @@ test('delay-force forces through the inner promise', () => {
 })
 
 test('parameterize rebinds for the dynamic extent and restores after', () => {
-  assert.deepEqual(run('(define p (make-parameter 1)) (list (p) (parameterize ((p 2)) (p)) (p))'), [1, 2, 1])
+  assert.deepEqual(plain(run('(define p (make-parameter 1)) (list (p) (parameterize ((p 2)) (p)) (p))')), [1, 2, 1])
   assert.equal(run('(define p (make-parameter 1)) (parameterize ((p 2)) (parameterize ((p 3)) (p)))'), 3)
 })
 
@@ -150,7 +151,7 @@ test('parameterize restores even when the body raises', () => {
 })
 
 test('make-parameter runs its converter through the interpreter', () => {
-  assert.deepEqual(run('(define q (make-parameter 1 (lambda (x) (* x 10)))) (list (q) (parameterize ((q 2)) (q)))'), [10, 20])
+  assert.deepEqual(plain(run('(define q (make-parameter 1 (lambda (x) (* x 10)))) (list (q) (parameterize ((q 2)) (q)))')), [10, 20])
 })
 
 test('cond-expand selects on feature requirements', () => {

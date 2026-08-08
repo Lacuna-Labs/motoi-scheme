@@ -26,8 +26,8 @@ This chapter shows all three, when to use which, and how they compose.
 
 ```scheme
 (describe 'map)
-;; map [base] — arity 2 or more
-;; Apply a procedure to each element of one or more lists, returning a new list of results.
+;; map [higher-order] — arity 2
+;; Apply fn to every element, collect the results.
 ```
 
 Two lines. Enough to know what the verb is, how it is called, and what it does. If you need more, use `help` and get the whole record. If you just want to remember what the verb does, `describe` is faster.
@@ -57,7 +57,12 @@ Before we go further, a small setup block. This chapter demonstrates several pro
         ((symbol? v) 'symbol)
         ((vector? v) 'vector)
         ((procedure? v) 'procedure)
-        ((pair? v) 'list)
+        ;; §3.13 turns on this pair/list split, so it has to be made HERE.
+        ;; A single (pair? v) -> 'list clause answers 'list for (cons 1 2),
+        ;; which is a cons cell and not a list at all. list? is the nil-
+        ;; terminated-chain test; pair? alone is any cons cell.
+        ((and (pair? v) (list? v)) 'list)
+        ((pair? v) 'pair)
         (else 'unknown)))
 
 ;; contract-of / examples-of are projections over the metadata record.
@@ -205,29 +210,31 @@ To be explicit:
 
 ```scheme
 (runtime-shape 'map)      ;; => symbol   (the value is a symbol)
-(contract-of 'map)     ;; => \"(procedure list ...) -> list\"
 ```
 
 The two verbs answer different questions. Use the one that matches your question.
 
-## 3.4 contract-of — the signature of a verb
+## 3.4 contract-of — the signature of a verb (designed, not yet emitted)
 
-`contract-of` is the value-return version of the REPL's `,type` meta-command. It takes a verb name and returns the contract string from the metadata record.
+`contract-of` is the value-return version of the REPL's `,type` meta-command. It takes a verb *name* and reaches for the contract string in that verb's metadata record.
+
+The contract field is designed. It is not yet emitted. Every verb in today's registry has no `:contract`, so `contract-of` comes back empty for every name you can hand it — the documented ones and the undocumented ones alike.
 
 ```scheme
-(contract-of 'car)         ;; => \"(pair) -> any\"
-(contract-of 'map)         ;; => \"(procedure list ...) -> list\"
-(contract-of 'cortex/query) ;; => \"(:subject? :predicate? :object? :at? :source? :order-by?) -> list\"
+(contract-of 'car)
+;; => ()
 ```
-
-If a verb has no contract in its metadata, `contract-of` returns nil.
 
 ```scheme
 (contract-of 'some-undocumented-verb)
-;; => nil
+;; => ()
 ```
 
-Use `contract-of` when you want the signature as data, not as printed output. For example, if you are generating documentation programmatically, or auditing a cart, or wiring a runtime contract-checker.
+That is worth saying out loud rather than hiding, because it is the difference between a book that teaches the language and a book that teaches a wish. The shape of the answer — a name goes in, a signature string comes out — is settled. The data behind it is not there yet. When the registry starts emitting `:contract`, this section becomes true without a single line of it changing.
+
+Until then, if you want a verb's signature, `arity-of` gives you the argument count and `(doc-of name)` usually spells the call shape out in its first few words. That pair is the working substitute.
+
+Keep `contract-of` in mind for the day the field lands. It is the piece you want when you are generating documentation programmatically, auditing a cart, or wiring a runtime contract-checker.
 
 ## 3.5 arity-of — how many arguments
 
@@ -236,11 +243,23 @@ Use `contract-of` when you want the signature as data, not as printed output. Fo
 ```scheme
 (arity-of 'car)         ;; => 1
 (arity-of 'substring)   ;; => (2 3)
-(arity-of 'list)        ;; => variadic
-(arity-of 'newline)     ;; => 0
+(arity-of 'list)        ;; => (0 +inf.0)
+(arity-of 'max)         ;; => (1 +inf.0)
+(arity-of 'newline)     ;; => ()
 ```
 
-For fixed-arity verbs it returns an integer. For verbs with optional arguments it returns a pair `(min max)`. For variadic verbs it returns the symbol `variadic`.
+For fixed-arity verbs it returns an integer. For every verb that accepts a *range* of argument counts it returns a `(min max)` pair — and that covers the variadic ones too, with `+inf.0` as the max. There is no separate `variadic` symbol: `list` takes zero or more, so it reads `(0 +inf.0)`, and `max` takes one or more, so it reads `(1 +inf.0)`. Testing for \"is this variadic?\" therefore means testing the max:
+
+```scheme
+(define (variadic? name)
+  (let ((a (arity-of name)))
+    (and (pair? a) (= (cadr a) +inf.0))))
+
+(list (variadic? 'list) (variadic? 'substring) (variadic? 'car))
+;; => (#t #f #f)
+```
+
+The fourth answer is the one to remember. `(arity-of 'newline)` is `()`, not `0` — `newline` carries no arity in its metadata record, and a missing field comes back as the empty list. That is the documented third return shape (`integer-or-pair-or-null`), and it means \"nobody wrote this down\", not \"takes no arguments\". Guard for it before you do arithmetic on the result.
 
 Use `arity-of` when you need to programmatically check argument counts, generate call sites, or validate against expected arities.
 
@@ -250,7 +269,7 @@ Use `arity-of` when you need to programmatically check argument counts, generate
 
 ```scheme
 (doc-of 'map)
-;; => \"Apply a procedure to each element of one or more lists, returning a new list of results.\"
+;; => \"Apply fn to every element, collect the results.\"
 ```
 
 Chapter 4 walks `doc-of`, `source-of`, and `examples-of` in more depth. This chapter mentions them for completeness.
@@ -342,15 +361,22 @@ This is not a downgrade from a stepping debugger. For pure computation it is oft
 
 These three are the workhorses of shape introspection.
 
-**length**: the number of elements in a list or characters in a string.
+**length**: the number of elements in a proper list.
 
 ```scheme
 (length '(1 2 3))       ;; => 3
-(length \"hello\")       ;; => 5
 (length '())            ;; => 0
 ```
 
-For strings this is character count, not byte count. Motoi strings are Unicode; `(length \"日本語\")` returns 3, not 9.
+`length` is a list verb and nothing else. R7RS-small 6.4 defines it only on proper lists, and Motoi enforces that: `(length \"hello\")` raises, and so does `(length 5)` and `(length (cons 1 2))`. That refusal is doing you a favour — a length that guesses at a non-list returns a meaningless number, and a meaningless count travels a long way before anyone notices.
+
+Characters in a string are `string-length`'s job:
+
+```scheme
+(string-length \"hello\")   ;; => 5
+```
+
+That is a character count, not a byte count. Motoi strings are Unicode; `(string-length \"日本語\")` returns 3, not 9.
 
 **keys**: the keys of a hash, as a list.
 
@@ -992,12 +1018,14 @@ You may have noticed that record field names have a leading colon: `:name`, `:ag
 
 A keyword is a self-evaluating symbol used as a field or parameter name. `:name` evaluates to itself; it does not need to be quoted. This makes keyword-plists (like `:subject 'user :predicate 'preferred-color`) easy to write — no quoting overhead.
 
-`type-of` on a keyword returns `symbol`:
+A keyword really is a symbol, so the value-side `runtime-shape` says so:
 
 ```scheme
-(type-of :name)
+(runtime-shape :name)
 ;; => symbol
 ```
+
+Note that this is `runtime-shape`, not `type-of`. `type-of` is name-side — it takes a verb name and looks it up in the registry — so `(type-of :name)` asks \"what is the contract of the verb called `:name`?\", and the answer is empty. The keyword is a value, so ask a value-side question about it.
 
 The colon is part of the name. `:name` and `name` are different symbols. Keywords are the convention for kwargs and record fields; regular symbols are the convention for values and identifiers.
 

@@ -486,3 +486,249 @@
                      :meta "This is the same family as a highlight-and-fade UI pattern, or a control-voltage envelope in a modular synth driving multiple parameters at once. Cross-reference book-of-composition ch 9 (single-envelope multi-parameter). Familiar analog: a single MIDI expression pedal wired to multiple synth CCs.")
                     (:eng "One primitive drives multiple channels together; the shape is coherent by construction." :math "Pointwise applications of the same 1D function to multiple codomains." :cs "O(k) per frame for k channels; the triangle is computed once and reused.")))
 
+
+;; ═══ 4 animation-loop clock verbs (added 2026-08-02) ═══
+
+(verb
+  :name "frame-rate" :std "Motoi"
+  :library "tick"
+  :kind "read"
+  :signature "(frame-rate) -> integer"
+  :summary "Return the animation loop's target frames-per-second, which starts at 60."
+  :explanation "Every Motoi process carries one animation loop, and that loop has a target frame rate. frame-rate reads it. A fresh process reports 60. The value only ever changes because set-frame-rate changed it, so frame-rate is a pure read with no side effect and no clock involved: it does not measure how fast frames are ACTUALLY being produced, it reports the number the loop is aiming at. Timing code that needs seconds-per-frame divides one by this number."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(frame-rate)" :note "60 — a fresh process targets sixty frames per second.")
+    (:dialect "motoi" :tier "intermediate" :code "(begin (set-frame-rate 24) (frame-rate))" :note "24 — frame-rate reads back whatever set-frame-rate accepted.")
+    (:dialect "motoi" :tier "expert" :code "(* 2 (frame-rate))" :note "120 — two seconds' worth of frames at the default rate.")
+  )
+  :caveats ("This is the TARGET rate, not a measurement. It never reflects dropped frames or a slow host." "It is process-global. There is one loop and one rate; a library that calls set-frame-rate changes it for the whole program." "The value is always an integer in 1..120, because set-frame-rate clamps and truncates before storing." "frame-rate does not govern the audio clock. audio-tick! runs at a fixed 60 fps regardless of this value." "Reading the rate does not advance anything. Only tick-frame moves the frame counter.")
+  :drawbacks ("No way to ask what rate is actually being achieved, so a cart cannot adapt to a slow machine." "No per-scene or per-entity rate; the single global is all there is." "Reports a target that nothing in a headless script enforces, which can read as a promise the runtime does not keep.")
+  :usecases ("Converting frame counts to seconds, and back, inside animation math." "Deciding how many frames a one-second effect should last." "Asserting in a test that a cart did not quietly change the global rate.")
+  :related ("set-frame-rate" "tick-frame" "sync" "time/now" "audio-tick!")
+  :learn (:concept "A target rate is a shared constant that turns frame counts into durations; read it rather than hard-coding 60." :prerequisites ("set-frame-rate" "tick-frame") :progression "Learn frame-rate first, then set-frame-rate to change it, then tick-frame to actually advance the loop it describes.")
+  :provenance "Motoi-own; lib/media/media.js line 565, reading loop.fps. Authored 2026-08-02 from the implementation."
+  :row-2-audit ((:problem "An effect is specified as lasting two seconds, but the animation loop counts frames. The operator needs the frame count without hard-coding a rate that someone may later change."
+                 :program "(define (seconds->frames s) (* s (frame-rate)))\n(seconds->frames 2)"
+                 :explanation "seconds->frames multiplies a duration by the loop's own target rate, so the helper stays correct after a set-frame-rate call that the author never sees. Hard-coding 60 would silently double every duration on a cart that switched to 30."
+                 :meta "Reaching for time/now instead would measure wall clock, which is not what a frame-counted loop advances on. frame-rate is the honest verb because the loop's own constant is the one the loop obeys."
+                 :eng-program "(define (seconds->frames s) (* s (frame-rate)))\n(list (seconds->frames 2) (seconds->frames 1/2))"
+                 :math-program "(define (frames->seconds f) (/ f (frame-rate)))\n(frames->seconds 90)"
+                 :cs-program "(define (rate-independent? s) (= (* s (frame-rate)) (* s (frame-rate))))\n(rate-independent? 3)")
+                (:eng "Read the rate from the loop so a later change propagates for free."
+                 :math "Duration equals count divided by rate; the rate must be a live value."
+                 :cs "Single source of truth for a shared constant."))
+  :row-3-dimension ((:setup "Reading a shared target constant instead of hard-coding it is a shape that repeats across every clocked subsystem."
+                     :rungs (
+                             (:domain "tick" :code "(frame-rate)")
+                             (:domain "audio" :code "(begin (audio-tick! 60) (audio-time))")
+                             (:domain "wall clock" :code "(number? (time/now))")
+                            )
+                     :explanation "The animation loop exposes its rate as a verb; the audio clock hides its rate but exposes the derived time; the wall clock exposes only an instant. Each rung answers 'how do I turn counts into seconds' with a different amount of help from the runtime."
+                     :meta "The dimension is how much of the timebase the subsystem is willing to tell you.")
+                    (:eng "Ask the subsystem for its rate; never assume you know it."
+                     :math "Each clock is a map from a count to a duration; only some expose the scale factor."
+                     :cs "Configuration read at use-site beats configuration copied at write-site."))
+  :row-4-proof ((:claim "frame-rate is a pure read: calling it any number of times returns the same value and changes nothing."
+                 :program "(list (frame-rate) (frame-rate) (frame-rate))"
+                 :invariant "For all n, n consecutive calls to (frame-rate) with no intervening set-frame-rate return the same integer, and the frame counter is unchanged."
+                 :meta "The proof pairs repetition with a counter check, because the failure a reader fears is that reading the rate somehow advances the loop."
+                 :eng-program "(list (frame-rate) (frame-rate) (frame-rate))"
+                 :math-program "(= (frame-rate) (frame-rate))"
+                 :cs-program "(begin (frame-rate) (frame-rate) (sync))")
+                (:eng "Reads must be free of effects, or nobody can call them in a log line."
+                 :math "Idempotence of the projection onto the rate field."
+                 :cs "Referential transparency is what makes a getter safe."))
+  :row-5-emergence ((:base "frame-rate alone is a constant. Chained with tick-frame it converts a frame count into elapsed time."
+                     :composition "(define (elapsed-seconds) (/ (sync) (frame-rate)))\n(tick-frame)\n(tick-frame)\n(tick-frame)\n(elapsed-seconds)"
+                     :emergent "A logical clock: the frame counter divided by the target rate gives a time that advances only when the program advances it, which is exactly what a deterministic replay needs."
+                     :meta "Emergence is determinism — a clock built from a counter and a constant has no wall-clock jitter at all."
+                     :eng-composition "(define (elapsed-seconds) (/ (sync) (frame-rate)))\n(tick-frame)\n(tick-frame)\n(tick-frame)\n(elapsed-seconds)"
+                     :math-composition "(begin (set-frame-rate 30) (tick-frame) (tick-frame) (tick-frame) (/ (sync) (frame-rate)))"
+                     :cs-composition "(begin (tick-frame) (list (sync) (frame-rate) (/ (sync) (frame-rate))))")
+                    (:eng "A frame counter plus a rate is all the clock a deterministic cart needs."
+                     :math "Time is the counter scaled by the reciprocal of the rate; the division is inexact, so compare with a tolerance."
+                     :cs "Logical clocks beat wall clocks whenever reproducibility matters.")))
+
+(verb
+  :name "set-frame-rate" :std "Motoi"
+  :library "tick"
+  :kind "state-change"
+  :signature "(set-frame-rate n) -> integer"
+  :summary "Set the animation loop's target frames-per-second, clamped to 1..120 and truncated to an integer, returning the value actually stored."
+  :explanation "set-frame-rate writes the one global target rate that frame-rate reads. The argument is truncated toward zero and then clamped into the closed range 1 to 120, and the CLAMPED value is what the verb returns — so the return value is the honest report of what the loop now holds, not an echo of what you asked for. Asking for 0 or a negative number gives 1; asking for anything above 120 gives 120. Always read the return value, or read back with frame-rate, rather than assuming the request was honoured."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(set-frame-rate 30)" :note "30 — an in-range request is stored exactly and returned.")
+    (:dialect "motoi" :tier "intermediate" :code "(set-frame-rate 500)" :note "120 — the request is clamped to the maximum, and the CLAMPED value comes back.")
+    (:dialect "motoi" :tier "expert" :code "(set-frame-rate 45.9)" :note "45 — fractional rates truncate toward zero before clamping; there is no 45.9 fps.")
+  )
+  :caveats ("The rate is clamped to 1..120. (set-frame-rate 0) stores 1 and (set-frame-rate -3) stores 1 — there is no way to pause the loop this way." "Fractions truncate, so (set-frame-rate 29.97) stores 29. Broadcast rates are not expressible." "The return value is the CLAMPED result, not the request. Comparing it to your argument is the only way to detect that you were clamped." "The rate is process-global. Any library that calls this changes timing for the whole program with no scoping." "Changing the rate does not change the frame counter, and does not retime anything already scheduled." "This does not affect the audio frame clock, which is fixed at 60 fps.")
+  :drawbacks ("Silent clamping means a nonsense request looks like a success unless the caller inspects the result." "No save-and-restore, so a temporary rate change has to be bracketed by hand." "No fractional rates rules out the 23.976 and 29.97 rates that video work needs.")
+  :usecases ("Slowing a cart to 30 fps to halve the per-frame budget on a weak host." "Running a demo at 1 fps to step through frames visibly." "Restoring a known rate at the start of a test so timing assertions are stable.")
+  :related ("frame-rate" "tick-frame" "sync" "audio-tick!" "time/now")
+  :learn (:concept "A setter that clamps must return what it stored, and a caller that ignores that return value is guessing." :prerequisites ("frame-rate") :progression "Learn set-frame-rate immediately after frame-rate, then practise the set-then-read-back habit that its clamping makes necessary.")
+  :provenance "Motoi-own; lib/media/media.js line 568, Math.max(1, Math.min(120, n|0)). Authored 2026-08-02 from the implementation."
+  :row-2-audit ((:problem "A cart must run at half speed on a slow host, and the operator needs to know whether the requested rate was actually accepted."
+                 :program "(define (try-rate n) (list 'asked n 'got (set-frame-rate n)))\n(try-rate 30)\n(try-rate 500)"
+                 :explanation "try-rate reports the request beside the result. At 30 the two agree; at 500 they do not, and the pair makes the clamp visible instead of leaving the caller to believe a 500 fps loop exists."
+                 :meta "Reaching for frame-rate alone would only tell you the state afterwards, not that your request was altered. Pairing ask and got is the honest verb use because the clamp is silent."
+                 :eng-program "(define (try-rate n) (list 'asked n 'got (set-frame-rate n)))\n(list (try-rate 30) (try-rate 500))"
+                 :math-program "(define (clamped? n) (not (= n (set-frame-rate n))))\n(list (clamped? 30) (clamped? 500) (clamped? 0))"
+                 :cs-program "(define (safe-rate n) (let ((got (set-frame-rate n))) (if (= got n) 'exact 'clamped)))\n(list (safe-rate 60) (safe-rate 1000))")
+                (:eng "Compare the ask with the got, every time, because the clamp will not tell you."
+                 :math "The setter is a projection; equality with the argument is the test for membership in the range."
+                 :cs "A silently normalizing API must be probed, not trusted."))
+  :row-3-dimension ((:setup "A setter that silently normalizes its argument, and reports the normalized value back, recurs across the runtime."
+                     :rungs (
+                             (:domain "tick" :code "(set-frame-rate 500)")
+                             (:domain "audio" :code "(audio-tick! 0)")
+                             (:domain "composer" :code "(slat-key (song/config :voices 40) 'voices)")
+                            )
+                     :explanation "Each rung takes an out-of-range request and returns the in-range value it actually used: the frame rate clamps to 120, the audio step clamps up to 1, the voice count clamps to 16. None of them raise, and all three tell you the truth in the return value."
+                     :meta "The dimension is which resource is bounded, but the reporting discipline is identical.")
+                    (:eng "A bounded setter must return what it stored, or the bound is a lie."
+                     :math "Each is a projection onto a closed interval — idempotent, so setting twice changes nothing."
+                     :cs "Saturating arithmetic at an API boundary, reported rather than raised."))
+  :row-4-proof ((:claim "The return value is the clamped, truncated value actually stored, and setting again with that value is a fixed point."
+                 :program "(let ((got (set-frame-rate 500))) (list got (set-frame-rate got) (frame-rate)))"
+                 :invariant "For all n, (set-frame-rate n) returns some r in 1..120, and (set-frame-rate r) returns r — the clamp is idempotent."
+                 :meta "The proof shows the fixed point rather than just the clamp, because idempotence is what lets a caller safely re-apply a saved rate."
+                 :eng-program "(let ((got (set-frame-rate 500))) (list got (set-frame-rate got) (frame-rate)))"
+                 :math-program "(list (set-frame-rate 0) (set-frame-rate -3) (set-frame-rate 45.9))"
+                 :cs-program "(begin (set-frame-rate 500) (= (frame-rate) 120))")
+                (:eng "Idempotence lets you replay a saved setting without drift."
+                 :math "The clamp is a retraction onto its image, so applying it twice equals applying it once."
+                 :cs "Fixed-point behaviour is what makes save-and-restore correct."))
+  :row-5-emergence ((:base "set-frame-rate alone writes a global. Chained with frame-rate it becomes a scoped rate change."
+                     :composition "(define saved (frame-rate))\n(set-frame-rate 10)\n(define slow (frame-rate))\n(set-frame-rate saved)\n(list slow (frame-rate))"
+                     :emergent "The bracketed rate: save, set, run, restore. Because there is no dynamic-wind for this global, the bracket is the only thing standing between a temporary change and a permanent one."
+                     :meta "Emergence is a discipline the runtime does not supply — the caller builds the scope by hand."
+                     :eng-composition "(define saved (frame-rate))\n(set-frame-rate 10)\n(define slow (frame-rate))\n(set-frame-rate saved)\n(list slow (frame-rate))"
+                     :math-composition "(define saved (frame-rate))\n(define rates (map set-frame-rate (list 24 30 60)))\n(set-frame-rate saved)\n(list rates (frame-rate))"
+                     :cs-composition "(define saved (frame-rate))\n(set-frame-rate 1)\n(define one (/ 1 (frame-rate)))\n(set-frame-rate saved)\n(list one (frame-rate))")
+                    (:eng "Restore what you changed; a global has no end of scope."
+                     :math "Conjugating a change by save and restore makes it locally invisible."
+                     :cs "Manual bracketing stands in for the dynamic extent the runtime lacks.")))
+
+(verb
+  :name "tick-frame" :std "Motoi"
+  :library "tick"
+  :kind "state-change"
+  :status "needs-alfred"
+  :status-note "DIVERGENCE: tick-frame advances the loop and dispatches the loop's frame handlers, but `on-frame` — the verb that would register such a handler — is defined THREE times (lib/media/media.js:469, lib/game/game.js:685, lib/game/world.js:832) and the world.js binding wins. That binding stores the procedure in W.onFrame, a field the loop never reads, so (on-frame f) followed by (tick-frame) never calls f. The world.js binding also accepts a non-procedure without complaint, where the media.js one would raise. Verified: (define n 0) (on-frame (lambda () (set! n (+ n 1)))) (tick-frame) (tick-frame) leaves n at 0. Documented here as it actually behaves; the shadowing needs Alfred's ruling."
+  :signature "(tick-frame) -> integer"
+  :summary "Advance the animation loop by exactly one frame and return the new frame number."
+  :explanation "tick-frame is the manual pump for the animation loop. A fresh process sits at frame 0, so the first call returns 1, the second returns 2, and so on — the return value is the new ABSOLUTE frame number, not a count of frames stepped. It takes no argument, so stepping ten frames means calling it ten times. This is what makes a headless script deterministic: nothing advances unless the program says so, and the same sequence of calls always produces the same sequence of frame numbers."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(tick-frame)" :note "1 — a fresh process starts at frame 0, so one pump lands on frame 1.")
+    (:dialect "motoi" :tier "intermediate" :code "(list (tick-frame) (tick-frame) (tick-frame))" :note "(1 2 3) — each call advances exactly one frame and reports the new absolute number.")
+    (:dialect "motoi" :tier "expert" :code "(begin (tick-frame) (tick-frame) (sync))" :note "2 — sync reads the same counter tick-frame writes, without advancing it.")
+  )
+  :caveats ("Registering a handler with on-frame does NOT get it called by tick-frame. The winning on-frame binding writes to a field the loop never reads. See :status-note." "There is no argument. (tick-frame 10) still advances one frame." "There is no reset and no rewind. A test that needs frame 0 must start a fresh process." "The return value is the new absolute frame, not the step size. Calls accumulate." "Advancing the animation frame does not advance the audio frame clock; that is audio-tick!." "Nothing is drawn and no wall-clock time passes. tick-frame moves a counter, not a display.")
+  :drawbacks ("No batch form, so stepping a hundred frames costs a hundred calls or an explicit loop." "The frame-handler path is currently unreachable because of the on-frame shadowing, so the verb does strictly less than its name promises." "Monotone for the life of the process, which makes per-test isolation a matter of process boundaries.")
+  :usecases ("Stepping an animation forward a known number of frames inside a headless test." "Driving a deterministic replay where wall-clock time must not matter." "Advancing to a specific frame before sampling state, so assertions are exact.")
+  :related ("sync" "frame-rate" "set-frame-rate" "audio-tick!" "on-frame")
+  :learn (:concept "When there is no host loop, the program is the clock: it advances time itself, which is what makes the run reproducible." :prerequisites ("sync" "frame-rate") :progression "Learn tick-frame with sync beside it — one writes the counter, one reads it — then add frame-rate to convert frames into seconds.")
+  :provenance "Motoi-own; lib/media/media.js line 583 calling loop.tick() in lib/graphics/animation.js. Authored 2026-08-02 from the implementation, including the on-frame shadowing divergence."
+  :row-2-audit ((:problem "A test must assert what an animation looks like at frame 30, and it cannot wait half a second or depend on the host's scheduler."
+                 :program "(define (advance n) (if (> n 0) (begin (tick-frame) (advance (- n 1))) (sync)))\n(advance 30)"
+                 :explanation "advance pumps the loop n times and then reads the counter, so the test lands on frame 30 exactly, in microseconds, on every machine. There is no sleep and no scheduler in the path."
+                 :meta "Reaching for sleep instead would burn wall-clock time and still not guarantee a frame count. tick-frame is the honest verb because the thing being asserted is a frame number, not a duration."
+                 :eng-program "(define (advance n) (if (> n 0) (begin (tick-frame) (advance (- n 1))) (sync)))\n(advance 30)"
+                 :math-program "(define (advance n) (if (> n 0) (begin (tick-frame) (advance (- n 1))) (sync)))\n(list (advance 10) (advance 10) (advance 10))"
+                 :cs-program "(define (advance n) (if (> n 0) (begin (tick-frame) (advance (- n 1))) (sync)))\n(= (advance 30) 30)")
+                (:eng "Step the loop yourself and the assertion becomes exact."
+                 :math "The frame index is the free variable; pumping instantiates it."
+                 :cs "Deterministic stepping removes the scheduler from the test."))
+  :row-3-dimension ((:setup "Manually pumping a clock that a host would normally drive appears once per timebase in this runtime."
+                     :rungs (
+                             (:domain "animation" :code "(begin (tick-frame) (tick-frame) (sync))")
+                             (:domain "audio" :code "(begin (audio-tick! 2) (audio-time))")
+                             (:domain "wall clock" :code "(number? (time/now))")
+                            )
+                     :explanation "The animation loop and the audio clock both have manual pumps, so both are reproducible headlessly. The wall clock has none — it cannot be pumped, only read, which is precisely why it must stay out of assertions."
+                     :meta "The dimension is controllability. Two of these three clocks belong to the program; one does not.")
+                    (:eng "Prefer clocks you can pump over clocks you can only read."
+                     :math "A pumped clock is a free monoid on one generator; the wall clock is not."
+                     :cs "Controllable time is the difference between a test and a hope."))
+  :row-4-proof ((:claim "Each call advances exactly one frame, and sync observes the counter without advancing it."
+                 :program "(list (tick-frame) (sync) (tick-frame) (sync))"
+                 :invariant "For all n, after n calls to tick-frame from a fresh process, (sync) returns n, and inserting any number of sync calls does not change that."
+                 :meta "The proof interleaves the writer and the reader so a reader with a hidden side effect would show up immediately as a skipped number."
+                 :eng-program "(list (tick-frame) (sync) (tick-frame) (sync))"
+                 :math-program "(begin (sync) (sync) (sync) (tick-frame))"
+                 :cs-program "(begin (tick-frame) (tick-frame) (tick-frame) (= (sync) 3))")
+                (:eng "Separate the thing that advances from the thing that observes."
+                 :math "One generator, one projection; the projection is a homomorphism to the integers."
+                 :cs "Command-query separation, verified by interleaving."))
+  :row-5-emergence ((:base "tick-frame alone moves a counter. Chained with frame-rate it becomes a deterministic seconds clock."
+                     :composition "(define (run-frames n) (if (> n 0) (begin (tick-frame) (run-frames (- n 1))) (/ (sync) (frame-rate))))\n(run-frames 60)"
+                     :emergent "A logical second: sixty pumps at the default rate is exactly one second of animation time, with no wall clock anywhere in the derivation."
+                     :meta "Emergence is reproducibility — the same program yields the same time on every machine, forever."
+                     :eng-composition "(define (run-frames n) (if (> n 0) (begin (tick-frame) (run-frames (- n 1))) (/ (sync) (frame-rate))))\n(run-frames 60)"
+                     :math-composition "(define (run-frames n) (if (> n 0) (begin (tick-frame) (run-frames (- n 1))) (/ (sync) (frame-rate))))\n(begin (set-frame-rate 30) (run-frames 30))"
+                     :cs-composition "(define (run-frames n) (if (> n 0) (begin (tick-frame) (run-frames (- n 1))) (sync)))\n(list (run-frames 5) (frame-rate) (/ (sync) (frame-rate)))")
+                    (:eng "Count frames, divide by the rate, and you have time you can trust."
+                     :math "The counter and the rate generate a timeline that is reproducible run to run, though the division itself is inexact."
+                     :cs "Logical clocks make replays bit-identical.")))
+
+(verb
+  :name "sync" :std "Motoi"
+  :library "tick"
+  :kind "read"
+  :status "needs-alfred"
+  :status-note "DIVERGENCE: the source comment above this verb calls it an \"explicit yield — in Node it's a microtask; in the browser it's a raf\", and the name reads that way too. The body does no such thing: the interpreter is synchronous and the whole implementation is `return getMediaState().fb.frame`. sync yields nothing, waits for nothing and schedules nothing; it is a read of the animation frame counter, identical in effect to observing what tick-frame last returned. Documented here as it actually behaves; whether the yield should be implemented or the name changed needs Alfred's ruling."
+  :signature "(sync) -> integer"
+  :summary "Return the animation loop's current frame number. Despite the name it does NOT yield, wait or schedule anything."
+  :explanation "sync reads the frame counter that tick-frame advances. A fresh process reports 0, and after n calls to tick-frame it reports n. It is a pure read: calling it any number of times changes nothing, and it never blocks. The name is a historical artefact of an intended cooperative yield that the synchronous interpreter never needed; treat sync as the getter that pairs with tick-frame's setter, and reach for it whenever you want to observe the frame without moving it."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(sync)" :note "0 — a fresh process has not advanced any frame yet.")
+    (:dialect "motoi" :tier "intermediate" :code "(begin (tick-frame) (tick-frame) (sync))" :note "2 — sync reports the counter that tick-frame advanced, and does not advance it further.")
+    (:dialect "motoi" :tier "expert" :code "(begin (sync) (sync) (sync) (tick-frame))" :note "1 — three reads left the counter at 0, so the first pump still lands on frame 1.")
+  )
+  :caveats ("sync does NOT yield to a scheduler, sleep, or wait for a frame boundary. It returns immediately. See :status-note." "It never blocks, so a loop calling sync will spin as fast as the interpreter allows and never advance a frame." "It reads the animation frame, not the audio frame. audio-time is the audio-side equivalent." "A fresh process reports 0, not 1. The first tick-frame is what produces frame 1." "The counter is process-global and monotone; there is no reset.")
+  :drawbacks ("The name actively misleads: code written expecting a yield will busy-spin instead." "There is no way to wait for the next frame, so a cooperative loop cannot be written with the verbs in this chapter alone." "It duplicates what tick-frame already returns, which makes it easy to over-read a value you were just handed.")
+  :usecases ("Reading the current frame number without advancing it, inside an assertion or a log line." "Computing elapsed logical time as (/ (sync) (frame-rate))." "Checking in a test that a stretch of code did not advance the loop.")
+  :related ("tick-frame" "frame-rate" "set-frame-rate" "audio-time" "sleep")
+  :learn (:concept "A getter and a setter on the same counter must be told apart by what they do, not by what they are called." :prerequisites ("tick-frame") :progression "Learn sync as the read half of tick-frame, then use it with frame-rate to turn the counter into seconds.")
+  :provenance "Motoi-own; lib/media/media.js line 512, returning fb.frame. Authored 2026-08-02 from the implementation, including the name/behaviour divergence."
+  :row-2-audit ((:problem "A test must prove that a stretch of setup code did not accidentally advance the animation loop."
+                 :program "(define before (sync))\n(define x (+ 1 2))\n(define after (sync))\n(list before after (= before after))"
+                 :explanation "Reading the counter on both sides of the setup turns 'I think nothing advanced' into a checked fact. Because sync has no side effect of its own, the two reads bracket the code honestly."
+                 :meta "Reaching for tick-frame here would be self-defeating: it would advance the very counter under test. sync is the honest verb precisely because it is the read-only half of the pair."
+                 :eng-program "(define before (sync))\n(define x (+ 1 2))\n(define after (sync))\n(list before after (= before after))"
+                 :math-program "(define before (sync))\n(tick-frame)\n(define after (sync))\n(- after before)"
+                 :cs-program "(begin (sync) (sync) (= (sync) 0))")
+                (:eng "Prove the absence of an effect by measuring on both sides of it."
+                 :math "A before-and-after pair on an owned counter is a real assertion."
+                 :cs "Read-only probes are the only safe brackets."))
+  :row-3-dimension ((:setup "Observing a clock without disturbing it is a shape each timebase implements differently."
+                     :rungs (
+                             (:domain "animation" :code "(sync)")
+                             (:domain "audio" :code "(audio-time)")
+                             (:domain "wall clock" :code "(number? (time/now))")
+                            )
+                     :explanation "All three are reads, but only the first two observe a counter the program controls. The wall clock changes underneath you between reads, which is why it can bracket a duration but never bracket a proof."
+                     :meta "The dimension is whether the observed clock is owned by the program or by the world.")
+                    (:eng "Bracket code with a clock you own, not one the world owns."
+                     :math "Two of these are projections of program state; one is an external oracle."
+                     :cs "Observation must not perturb the observed value, or the bracket is meaningless."))
+  :row-4-proof ((:claim "sync is a pure read: repeated calls return the same value and leave the counter untouched."
+                 :program "(list (sync) (sync) (sync) (tick-frame))"
+                 :invariant "For all n, n consecutive calls to sync return the same frame number, and the next tick-frame returns that number plus one."
+                 :meta "The proof ends with a tick-frame so an accidental advance inside sync would show as a jumped number, not merely a repeated one."
+                 :eng-program "(list (sync) (sync) (sync) (tick-frame))"
+                 :math-program "(= (sync) (sync))"
+                 :cs-program "(begin (tick-frame) (list (sync) (sync) (sync)))")
+                (:eng "A getter that moved the value would ruin every log line that used it."
+                 :math "Idempotence of the projection, checked against the successor."
+                 :cs "Command-query separation, again, verified from the query side."))
+  :row-5-emergence ((:base "sync alone reports a number. Chained with frame-rate it reports a time."
+                     :composition "(define (logical-seconds) (/ (sync) (frame-rate)))\n(tick-frame)\n(tick-frame)\n(logical-seconds)"
+                     :emergent "A read-only logical clock: a value you can print, assert on and compare across runs, because nothing in its derivation touches the wall clock."
+                     :meta "Emergence is trust — a time built only from owned values is a time a test can depend on."
+                     :eng-composition "(define (logical-seconds) (/ (sync) (frame-rate)))\n(tick-frame)\n(tick-frame)\n(logical-seconds)"
+                     :math-composition "(begin (set-frame-rate 30) (tick-frame) (tick-frame) (tick-frame) (/ (sync) (frame-rate)))"
+                     :cs-composition "(begin (tick-frame) (list (sync) (frame-rate) (* (sync) (/ 1 (frame-rate)))))")
+                    (:eng "A clock you can print in a failure message is worth more than one you cannot."
+                     :math "Counter over rate is an inexact quotient, but a deterministic one — the same inputs always give the same bits."
+                     :cs "Deterministic observation is what makes a replay comparable.")))

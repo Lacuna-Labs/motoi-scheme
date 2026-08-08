@@ -41,11 +41,16 @@ for (const name of ['exp', 'log', 'log2', 'log10', 'exp2']) {
   })
 }
 
+// REBASELINED 2026-08-03. R7RS §6.2.6 makes the transcendental functions
+// inexact, so (exp 0) is 1.0 and not the exact 1 — chibi-scheme answers the
+// same. These assertions read the VALUE through Number(); the inexactness tag
+// itself is covered by the exact?/inexact? tests.
+
 // ── happy path ────────────────────────────────────────────────────────
 
 test('exp(0) === 1', () => {
   const env = fresh()
-  assert.equal(env.vars.get('exp')(0), 1)
+  assert.equal(Number(env.vars.get('exp')(0)), 1)
 })
 
 test('exp(1) === e', () => {
@@ -55,7 +60,7 @@ test('exp(1) === e', () => {
 
 test('log(1) === 0', () => {
   const env = fresh()
-  assert.equal(env.vars.get('log')(1), 0)
+  assert.equal(Number(env.vars.get('log')(1)), 0)
 })
 
 test('log(e) === 1', () => {
@@ -65,7 +70,7 @@ test('log(e) === 1', () => {
 
 test('log2(8) === 3', () => {
   const env = fresh()
-  assert.equal(env.vars.get('log2')(8), 3)
+  assert.equal(Number(env.vars.get('log2')(8)), 3)
 })
 
 test('log10(1000) === 3', () => {
@@ -75,12 +80,12 @@ test('log10(1000) === 3', () => {
 
 test('exp2(10) === 1024', () => {
   const env = fresh()
-  assert.equal(env.vars.get('exp2')(10), 1024)
+  assert.equal(Number(env.vars.get('exp2')(10)), 1024)
 })
 
 test('exp2(0) === 1', () => {
   const env = fresh()
-  assert.equal(env.vars.get('exp2')(0), 1)
+  assert.equal(Number(env.vars.get('exp2')(0)), 1)
 })
 
 // ── round-trip ────────────────────────────────────────────────────────
@@ -110,7 +115,12 @@ test('log(0) === -Infinity', () => {
   assert.equal(env.vars.get('log')(0), -Infinity)
 })
 
-test('log(-1) is NaN', () => {
+// §6.2.6: `log` is closed over the tower, so a negative argument has a COMPLEX
+// logarithm. This asserted NaN until 2026-08-03, which was Motoi answering a
+// number-shaped non-number and letting it flow onward.
+test('log(-1) is i*pi', () => {
   const env = fresh()
-  assert.ok(Number.isNaN(env.vars.get('log')(-1)))
+  const z = env.vars.get('log')(-1)
+  assert.equal(Number(z.re), 0)
+  assert.equal(Number(z.im), Math.PI)
 })

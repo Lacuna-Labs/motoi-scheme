@@ -46,7 +46,9 @@ import { setStackRecording } from '../lib/system/stack.js'
 import { expandProgram } from './macro.js'
 import { snapshotRegistry } from './verbRegistry.js'
 import { getMediaState } from '../lib/media/media.js'
+import { isFlo, numToString } from '../lib/math/tower.js'
 
+import { NIL, arrayToList, isList, isListish, isNull, isPair, listLength, listToArray, seqVerb, toJS, toScheme } from '../lib/base/list.js'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const IDE_DIR = join(__dirname, '..', 'site', 'ide-assets')
 
@@ -63,7 +65,8 @@ function format(v) {
     return v.name
   }
   if (v instanceof Pair) return pairToString(v, format)
-  if (Array.isArray(v)) return '(' + v.map(format).join(' ') + ')'
+  if (isNull(v)) return '()'
+    if (isList(v) || v instanceof Pair) return pairToString(v, format)
   return String(v)
 }
 
@@ -100,9 +103,12 @@ function _displayFormat(v) {
   if (v === true) return '#t'
   if (v === false) return '#f'
   if (typeof v === 'string') return v   // display prints strings UNQUOTED
+  // Same tower printer as src/base.js and src/cli.js — three printers, one answer.
+  if (typeof v === 'number' || typeof v === 'bigint' || isFlo(v)) return numToString(v)
   if (v && typeof v === 'object' && 'name' in v && typeof v.name === 'string') return v.name
   if (v instanceof Pair) return pairToString(v, _displayFormat)
-  if (Array.isArray(v)) return '(' + v.map(_displayFormat).join(' ') + ')'
+  if (isNull(v)) return '()'
+    if (isList(v) || v instanceof Pair) return pairToString(v, _displayFormat)
   return String(v)
 }
 
@@ -197,9 +203,16 @@ function _sym(name) {
 }
 
 // Alist ((:key val) (:key val)) → JS object { key: val }. Recursive.
-function alistToObject(v) {
-  if (Array.isArray(v) && v.length > 0
-      && Array.isArray(v[0]) && v[0].length === 2
+//
+// This is a JSON serializer, so it wants arrays all the way down. `isList` and
+// `isPair` answer #t for a cons chain as well as an array — which is right for
+// a guard, and wrong for the `v[0]` / `.map` / `for...of` that followed. The
+// endpoints caught the TypeError and returned HTTP 200 `{ok:false}`, so the
+// IDE panels went blank without anything reporting a fault.
+function alistToObject(v0) {
+  const v = toJS(v0)
+  if (isPair(v)
+      && isList(v[0]) && v[0].length === 2
       && v[0][0] && typeof v[0][0] === 'object' && 'name' in v[0][0]
       && String(v[0][0].name).startsWith(':')) {
     const obj = {}
@@ -209,7 +222,7 @@ function alistToObject(v) {
     }
     return obj
   }
-  if (Array.isArray(v)) return v.map(alistToObject)
+  if (isList(v)) return v.map(alistToObject)
   if (v && typeof v === 'object' && 'name' in v && typeof v.name === 'string') return v.name
   return v
 }
@@ -394,7 +407,8 @@ export function startIdeServer({ port = 3737, host = '127.0.0.1', fuel = 200000,
           const depthFn = session.env.get('motoi/stack-depth')
           const framesAlist = fn()
           const depth = depthFn()
-          const frames = (Array.isArray(framesAlist) ? framesAlist : []).map(alistToObject)
+          const framesArr = toJS(framesAlist)
+          const frames = (Array.isArray(framesArr) ? framesArr : []).map(alistToObject)
           return sendJson(200, {
             ok: true,
             which,

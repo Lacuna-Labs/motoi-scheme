@@ -9,6 +9,7 @@
 //   lib/std/srfi-13.js                — SRFI-13 string library          lazy
 //   lib/std/srfi-125.js               — SRFI-125 hash tables            lazy
 //   lib/std/srfi-27.js                — SRFI-27 random                  lazy
+//   lib/std/srfi-133.js               — SRFI-133 vector library          lazy
 //   lib/std/_shared.js                — shared runtime helpers (records,
 //                                        hash table, ports, errors, write).
 //
@@ -33,6 +34,8 @@ import { installSRFI1 } from '../lib/std/srfi-1.js'
 import { installSRFI13 } from '../lib/std/srfi-13.js'
 import { installSRFI125 } from '../lib/std/srfi-125.js'
 import { installSRFI27 } from '../lib/std/srfi-27.js'
+import { installSRFI48 } from '../lib/std/srfi-48.js'
+import { installSRFI133 } from '../lib/std/srfi-133.js'
 
 // Re-export shared helpers for any legacy importer of this module.
 export {
@@ -49,6 +52,13 @@ export function installR7RSCompletions (env, fuelBox) {
   installSRFI13(env, fuelBox)
   installSRFI125(env, fuelBox)
   installSRFI27(env, fuelBox)
+  // SRFI-48 binds `format`, a name R7RS-small does not define, so it shadows
+  // nothing. Its directives render by calling `display`/`write` at CALL time,
+  // so install order does not constrain it.
+  installSRFI48(env, fuelBox)
+  // SRFI-133 installs LAST so it can never shadow an R7RS-small vector verb;
+  // it binds only names R7RS-small does not have.
+  installSRFI133(env, fuelBox)
   return env
 }
 

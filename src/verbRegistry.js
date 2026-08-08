@@ -1,3 +1,4 @@
+import { isList } from '../lib/base/list.js'
 // verbRegistry.js — the dispatcher's source of truth for every verb.
 //
 // Item 8 of the substrate-security burn-down (2026-06-07, HelloSurfaceFix).
@@ -208,7 +209,7 @@ export function registerVerbMeta(name, meta) {
     doc: typeof meta.doc === 'string' ? meta.doc : null,
     contract: typeof meta.contract === 'string' ? meta.contract : null,
     arity: meta.arity ?? null,
-    examples: Array.isArray(meta.examples) ? meta.examples : [],
+    examples: isList(meta.examples) ? meta.examples : [],
     atom: typeof meta.atom === 'string' ? meta.atom : null,
     tier: typeof meta.tier === 'string' ? meta.tier : null,
     source: typeof meta.source === 'string' ? meta.source : null,

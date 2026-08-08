@@ -34,6 +34,7 @@ import {
 } from '../lib/graphics/animation.js'
 import { Sym } from '../src/reader.js'
 
+import { plain } from './_cells.mjs'
 // Reset media between tests so tween & overlay state doesn't leak.
 function fresh() {
   resetMediaState()
@@ -66,7 +67,7 @@ test('text — fb/text with emoji records to overlay', () => {
   const draw = env.vars.get('fb/text')
   draw('🎉', 10, 20, 'red', 'default')
   draw('hi', 30, 40, 'blue')
-  const overlay = env.vars.get('text/overlay')()
+  const overlay = plain(env.vars.get('text/overlay')())
   assert.equal(overlay.length, 2)
   assert.equal(overlay[0].str, '🎉')
   assert.equal(overlay[0].x, 10)
@@ -172,7 +173,7 @@ test('bounce — one-call, one-emoji, spring by default', () => {
   const st = getMediaState()
   st.fb.frame = Math.round(tw.durationFrames / 2)   // peak of sin arc
   tick()
-  const overlay = env.vars.get('text/overlay')()
+  const overlay = plain(env.vars.get('text/overlay')())
   assert.ok(overlay.length > 0, 'bounce painted the emoji')
   assert.equal(overlay[overlay.length - 1].str, '🎉')
   // At the peak the y should be well above the base y (60).
@@ -291,7 +292,7 @@ test('physics — force and gravity on entities via the live world/* path', () =
 
   // Impulse — what physics/apply-force used to spell.
   setVel(hero, 5, -3)
-  const s1 = state(hero)
+  const s1 = plain(state(hero))
   // (kind x y vx vy w h)
   assert.equal(s1[3], 5, 'vx = 5')
   assert.equal(s1[4], -3, 'vy = -3')
@@ -299,7 +300,7 @@ test('physics — force and gravity on entities via the live world/* path', () =
   // Gravity — one fixed-timestep frame of the world integrator.
   env.vars.get('world/gravity!')(0, 2)
   env.vars.get('world/step')()
-  const s2 = state(hero)
+  const s2 = plain(state(hero))
   assert.equal(s2[4], -1, 'gravity added 2 to vy (from -3 to -1)')
 })
 
@@ -317,15 +318,15 @@ test('adapters — renderText/measureText/wrapText overridable via setAdapters',
   try {
     const env = makeExtendedBaseEnv()
     env.vars.get('fb/text')('hi', 5, 6, 'blue', 'mono')
-    assert.deepEqual(seen, { s: 'hi', x: 5, y: 6, c: 'blue', f: 'mono' },
+    assert.deepEqual(plain(seen), { s: 'hi', x: 5, y: 6, c: 'blue', f: 'mono' },
       'renderText override called with the right args')
 
-    const [w, h] = env.vars.get('text/measure')('four')
+    const [w, h] = plain(env.vars.get('text/measure')('four'))
     assert.equal(w, 40, 'measureText override: 4 chars × 10px')
     assert.equal(h, 12)
 
     const lines = env.vars.get('text/wrap')('any string', 80)
-    assert.deepEqual(lines, ['any string', 'wrapped'])
+    assert.deepEqual(plain(lines), ['any string', 'wrapped'])
   } finally {
     // Restore defaults so we don't pollute later tests.
     setAdapters({
@@ -358,7 +359,7 @@ test('composition — kid one-liner and adult low-level share verbs', () => {
   assert.ok(adultTween)
 
   // Both tweens live in the same registry — animation/tick advances both.
-  const all = env.vars.get('animation/tweens')()
+  const all = plain(env.vars.get('animation/tweens')())
   assert.equal(all.length, 2, 'both tweens registered')
 
   // The 60-year-old builds up a physics sim by composing primitives:
@@ -376,9 +377,9 @@ test('composition — kid one-liner and adult low-level share verbs', () => {
   const hero = env.vars.get('entity/make')(new Sym('player'), 0, 0)
   env.vars.get('entity/set-vel!')(hero, 5, 5)
   env.vars.get('world/step')()
-  const [x, y] = env.vars.get('entity/pos')(hero)
+  const [x, y] = plain(env.vars.get('entity/pos')(hero))
   assert.ok(x > 0 && y > 0, 'low-level physics still integrates on the shared runtime')
 
   // ...and the kid-level tweens are untouched by the entity world.
-  assert.equal(env.vars.get('animation/tweens')().length, 2, 'both tweens still registered')
+  assert.equal(plain(env.vars.get('animation/tweens')()).length, 2, 'both tweens still registered')
 })

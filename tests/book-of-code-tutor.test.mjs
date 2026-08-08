@@ -18,6 +18,7 @@ import { makeCoreEnv } from '../core/index.js'
 import { evaluate } from '../src/interp.js'
 import { parse, Sym } from '../src/reader.js'
 
+import { plain } from './_cells.mjs'
 function evalSrc(src, envOpt) {
   const fuel = { n: 1_000_000 }
   const env = envOpt || makeCoreEnv({ fuel })
@@ -28,8 +29,9 @@ function evalSrc(src, envOpt) {
 }
 
 function alistGet(alist, key) {
-  if (!Array.isArray(alist)) return undefined
-  for (const pair of alist) {
+  const rows = plain(alist)
+  if (!Array.isArray(rows)) return undefined
+  for (const pair of rows) {
     if (Array.isArray(pair) && pair.length === 2 && pair[0] instanceof Sym) {
       if (pair[0].name === key) return pair[1]
     }
@@ -41,9 +43,10 @@ function alistGet(alist, key) {
 
 test('book-of-code/table-of-contents — returns chapter records', () => {
   const { out } = evalSrc('(book-of-code/table-of-contents)')
-  assert.ok(Array.isArray(out), 'toc is a list')
-  assert.ok(out.length >= 2, 'at least the two authored chapters land')
-  const first = out[0]
+  const toc = plain(out)
+  assert.ok(Array.isArray(toc), 'toc is a list')
+  assert.ok(toc.length >= 2, 'at least the two authored chapters land')
+  const first = toc[0]
   const title = alistGet(first, ':title')
   const num = alistGet(first, ':chapter')
   assert.equal(typeof title, 'string')
@@ -55,9 +58,9 @@ test('book-of-code/table-of-contents — returns chapter records', () => {
 
 test('book-of-code/chapter 1 — returns structured record', () => {
   const { out } = evalSrc('(book-of-code/chapter 1)')
-  assert.ok(Array.isArray(out), 'chapter returns an alist')
+  assert.ok(Array.isArray(plain(out)), 'chapter returns an alist')
   const title = alistGet(out, ':title')
-  const sections = alistGet(out, ':sections')
+  const sections = plain(alistGet(out, ':sections'))
   assert.ok(String(title).includes('tallies'), 'title mentions tallies')
   assert.ok(Array.isArray(sections))
   assert.ok(sections.length > 0, 'chapter 1 has sections')

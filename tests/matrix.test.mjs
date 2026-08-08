@@ -10,6 +10,7 @@ import { makeCoreEnv } from '../core/index.js'
 import { evaluate } from '../src/interp.js'
 import { parse } from '../src/reader.js'
 
+import { plain } from './_cells.mjs'
 function evalSrc(src) {
   const fuel = { n: 1_000_000 }
   const env = makeCoreEnv({ fuel })
@@ -21,12 +22,12 @@ function evalSrc(src) {
 
 test('matrix/make — list-of-rows validates and coerces', () => {
   const { out } = evalSrc('(matrix/make (list (list 1 2 3) (list 4 5 6)))')
-  assert.deepEqual(out, [[1, 2, 3], [4, 5, 6]])
+  assert.deepEqual(plain(out), [[1, 2, 3], [4, 5, 6]])
 })
 
 test('matrix/make — (rows cols) creates a zero matrix', () => {
   const { out } = evalSrc('(matrix/make 2 3)')
-  assert.deepEqual(out, [[0, 0, 0], [0, 0, 0]])
+  assert.deepEqual(plain(out), [[0, 0, 0], [0, 0, 0]])
 })
 
 // 2026-08-01: this asserted ragged input THROWS. It does not, by design.
@@ -59,35 +60,35 @@ test('matrix/rows + matrix/cols — shape reflection', () => {
 
 test('matrix/ref matrix/row matrix/col — element + slice access', () => {
   assert.equal(evalSrc('(matrix/ref (list (list 1 2) (list 3 4)) 1 0)').out, 3)
-  assert.deepEqual(evalSrc('(matrix/row (list (list 1 2) (list 3 4)) 0)').out, [1, 2])
-  assert.deepEqual(evalSrc('(matrix/col (list (list 1 2) (list 3 4)) 1)').out, [2, 4])
+  assert.deepEqual(plain(evalSrc('(matrix/row (list (list 1 2) (list 3 4)) 0)').out), [1, 2])
+  assert.deepEqual(plain(evalSrc('(matrix/col (list (list 1 2) (list 3 4)) 1)').out), [2, 4])
 })
 
 test('matrix/transpose — 2×3 becomes 3×2', () => {
   const { out } = evalSrc('(matrix/transpose (list (list 1 2 3) (list 4 5 6)))')
-  assert.deepEqual(out, [[1, 4], [2, 5], [3, 6]])
+  assert.deepEqual(plain(out), [[1, 4], [2, 5], [3, 6]])
 })
 
 test('matrix/identity — I3 is right', () => {
   const { out } = evalSrc('(matrix/identity 3)')
-  assert.deepEqual(out, [[1, 0, 0], [0, 1, 0], [0, 0, 1]])
+  assert.deepEqual(plain(out), [[1, 0, 0], [0, 1, 0], [0, 0, 1]])
 })
 
 test('matrix/zero — rows × cols filled with 0', () => {
   const { out } = evalSrc('(matrix/zero 2 4)')
-  assert.deepEqual(out, [[0, 0, 0, 0], [0, 0, 0, 0]])
+  assert.deepEqual(plain(out), [[0, 0, 0, 0], [0, 0, 0, 0]])
 })
 
 test('matrix/scale — every element × k', () => {
   const { out } = evalSrc('(matrix/scale (list (list 1 2) (list 3 4)) 10)')
-  assert.deepEqual(out, [[10, 20], [30, 40]])
+  assert.deepEqual(plain(out), [[10, 20], [30, 40]])
 })
 
 test('matrix/add + matrix/sub — element-wise', () => {
   const add = evalSrc('(matrix/add (list (list 1 2) (list 3 4)) (list (list 10 20) (list 30 40)))').out
   const sub = evalSrc('(matrix/sub (list (list 10 20) (list 30 40)) (list (list 1 2) (list 3 4)))').out
-  assert.deepEqual(add, [[11, 22], [33, 44]])
-  assert.deepEqual(sub, [[9, 18], [27, 36]])
+  assert.deepEqual(plain(add), [[11, 22], [33, 44]])
+  assert.deepEqual(plain(sub), [[9, 18], [27, 36]])
 })
 
 test('matrix/multiply — I × M = M', () => {
@@ -97,7 +98,7 @@ test('matrix/multiply — I × M = M', () => {
     (matrix/multiply I M)
   `
   const { out } = evalSrc(src)
-  assert.deepEqual(out, [[1, 2], [3, 4]])
+  assert.deepEqual(plain(out), [[1, 2], [3, 4]])
 })
 
 test('matrix/multiply — 2×3 * 3×2 = 2×2', () => {
@@ -107,7 +108,7 @@ test('matrix/multiply — 2×3 * 3×2 = 2×2', () => {
     (matrix/multiply A B)
   `
   const { out } = evalSrc(src)
-  assert.deepEqual(out, [[58, 64], [139, 154]])
+  assert.deepEqual(plain(out), [[58, 64], [139, 154]])
 })
 
 test('matrix/matvec — matrix-vector product', () => {
@@ -117,7 +118,7 @@ test('matrix/matvec — matrix-vector product', () => {
     (matrix/matvec M v)
   `
   const { out } = evalSrc(src)
-  assert.deepEqual(out, [140, 320])
+  assert.deepEqual(plain(out), [140, 320])
 })
 
 test('matrix/multiply — shape mismatch throws', () => {

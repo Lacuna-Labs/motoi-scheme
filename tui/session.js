@@ -18,6 +18,7 @@ import { expandProgram } from '../src/macro.js'
 import { snapshotRegistry } from '../src/verbRegistry.js'
 import { getMediaState } from '../lib/media/media.js'
 import { setStackRecording } from '../lib/system/stack.js'
+import { toJS } from '../lib/base/list.js'
 
 // ── formatting ─────────────────────────────────────────────────────
 
@@ -45,7 +46,11 @@ function displayFormat(v) {
 
 // ── alist → JS object (for book/* replies) ──────────────────────────
 
-export function alistToObject(v) {
+// A Scheme list is a chain of cons cells now, so the spelling is converted
+// once at the top. Without it every branch below fell through and the raw
+// chain came back AS the object — `pairState().mode` was silently `undefined`.
+export function alistToObject(v0) {
+  const v = toJS(v0)
   if (Array.isArray(v) && v.length > 0
       && Array.isArray(v[0]) && v[0].length === 2
       && v[0][0] && typeof v[0][0] === 'object' && 'name' in v[0][0]
@@ -132,14 +137,14 @@ export class Session {
   bookList() {
     try {
       const fn = this.env.get('book/list')
-      return fn() || []
+      return toJS(fn()) || []
     } catch { return [] }
   }
 
   bookToc(slug = 'code') {
     try {
       const fn = this.env.get('book/toc')
-      return fn(symFor(':book'), symFor(slug)) || []
+      return toJS(fn(symFor(':book'), symFor(slug))) || []
     } catch { return [] }
   }
 
@@ -196,7 +201,7 @@ export class Session {
     // The eval returns the formatted-string; instead just call directly.
     try {
       const fn = this.env.get('motoi/ambient-complete')
-      const result = fn(prefix)
+      const result = toJS(fn(prefix))
       if (!Array.isArray(result)) return []
       return result.map((rec) => alistToObject(rec)).map((o) => ({
         name: o.name,

@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import { makeCoreEnv } from '../core/index.js'
 import { Sym } from '../src/reader.js'
 
+import { plain } from './_cells.mjs'
 function fresh() { return makeCoreEnv() }
 
 // ── const/ ─────────────────────────────────────────────────────────
@@ -103,17 +104,17 @@ test('math/pow', () => {
 
 test('math/area-model 3x4 tagged with product', () => {
   const env = fresh()
-  const r = env.vars.get('math/area-model')(3, 4)
+  const r = plain(env.vars.get('math/area-model')(3, 4))
   assert.ok(Array.isArray(r))
   assert.equal(r[3], 12)
 })
 test('math/count-on from 5, 4 steps', () => {
   const env = fresh()
-  assert.deepEqual(env.vars.get('math/count-on')(5, 4), [5, 6, 7, 8])
+  assert.deepEqual(plain(env.vars.get('math/count-on')(5, 4)), [5, 6, 7, 8])
 })
 test('math/expanded-form 132', () => {
   const env = fresh()
-  assert.deepEqual(env.vars.get('math/expanded-form')(132), [100, 30, 2])
+  assert.deepEqual(plain(env.vars.get('math/expanded-form')(132)), [100, 30, 2])
 })
 // math/place-value is UNARY and returns an a-list of (digit place) pairs,
 // per the ratified signature "(math/place-value n) -> a-list | 'nan"
@@ -123,7 +124,7 @@ test('math/expanded-form 132', () => {
 // The old 2-arg "= 200" assertion matched no ratified verb. Updated 2026-08-01.
 test('math/place-value 1234 decomposes to (digit place) pairs', () => {
   const env = fresh()
-  assert.deepEqual(env.vars.get('math/place-value')(1234), [[1, 3], [2, 2], [3, 1], [4, 0]])
+  assert.deepEqual(plain(env.vars.get('math/place-value')(1234)), [[1, 3], [2, 2], [3, 1], [4, 0]])
 })
 test('math/digit-at 1234, 2 = 2', () => {
   const env = fresh()
@@ -131,14 +132,14 @@ test('math/digit-at 1234, 2 = 2', () => {
 })
 test('math/skip-count 0 by 3, 5 times', () => {
   const env = fresh()
-  assert.deepEqual(env.vars.get('math/skip-count')(0, 3, 5), [0, 3, 6, 9, 12])
+  assert.deepEqual(plain(env.vars.get('math/skip-count')(0, 3, 5)), [0, 3, 6, 9, 12])
 })
 
 // ── geom/ ───────────────────────────────────────────────────────────
 
 test('geom/point x y', () => {
   const env = fresh()
-  assert.deepEqual(env.vars.get('geom/point')(3, 4), [3, 4])
+  assert.deepEqual(plain(env.vars.get('geom/point')(3, 4)), [3, 4])
 })
 test('geom/distance 0,0 to 3,4 = 5', () => {
   const env = fresh()
@@ -146,7 +147,7 @@ test('geom/distance 0,0 to 3,4 = 5', () => {
 })
 test('geom/midpoint', () => {
   const env = fresh()
-  assert.deepEqual(env.vars.get('geom/midpoint')([0, 0], [4, 6]), [2, 3])
+  assert.deepEqual(plain(env.vars.get('geom/midpoint')([0, 0], [4, 6])), [2, 3])
 })
 test('geom/circle-area 5 ≈ π·25', () => {
   const env = fresh()
@@ -165,7 +166,7 @@ test('geom/triangle-area 4x3 right = 6', () => {
 
 test('vec/add', () => {
   const env = fresh()
-  assert.deepEqual(env.vars.get('vec/add')([1, 2], [3, 4]), [4, 6])
+  assert.deepEqual(plain(env.vars.get('vec/add')([1, 2], [3, 4])), [4, 6])
 })
 test('vec/dot', () => {
   const env = fresh()
@@ -177,17 +178,17 @@ test('vec/norm 3,4 = 5', () => {
 })
 test('vec/normalize', () => {
   const env = fresh()
-  const r = env.vars.get('vec/normalize')([3, 4])
+  const r = plain(env.vars.get('vec/normalize')([3, 4]))
   assert.ok(Math.abs(r[0] - 0.6) < 1e-12)
   assert.ok(Math.abs(r[1] - 0.8) < 1e-12)
 })
 test('vec/lerp 0..10 at 0.5', () => {
   const env = fresh()
-  assert.deepEqual(env.vars.get('vec/lerp')([0, 0], [10, 10], 0.5), [5, 5])
+  assert.deepEqual(plain(env.vars.get('vec/lerp')([0, 0], [10, 10], 0.5)), [5, 5])
 })
 test('vec/zero 3 = (0 0 0)', () => {
   const env = fresh()
-  assert.deepEqual(env.vars.get('vec/zero')(3), [0, 0, 0])
+  assert.deepEqual(plain(env.vars.get('vec/zero')(3)), [0, 0, 0])
 })
 
 // ── tick/ ───────────────────────────────────────────────────────────
@@ -230,7 +231,22 @@ test('time/iso returns ISO string', () => {
   assert.ok(typeof s === 'string')
   assert.ok(s.includes('T'))
 })
-test('time/to-ms 1 minute = 60000', () => {
+// time/to-ms and time/from-ms are a DATE-STRING pair, not a unit converter.
+// Reference 66-time.slat pins :signature "(time/to-ms s) -> integer | #f",
+// :arity "1", "Delegates to `new Date(s)`. Inverse of time/from-ms." This test
+// previously asserted the unit-converter wiring ((to-ms 1 'm) -> 60000), which
+// is the contract the reference does not document; the engine was conformed to
+// the reference on 2026-08-02 and this test follows it.
+test('time/to-ms parses an ISO string, and round-trips with time/from-ms', () => {
   const env = fresh()
-  assert.equal(env.vars.get('time/to-ms')(1, new Sym('m')), 60000)
+  const toMs = env.vars.get('time/to-ms')
+  const fromMs = env.vars.get('time/from-ms')
+  const ms = Date.UTC(2026, 0, 2, 3, 4, 5)
+  const iso = fromMs(ms)
+  assert.equal(iso, '2026-01-02T03:04:05.000Z')
+  assert.equal(toMs(iso), ms)
+})
+test('time/to-ms signals parse failure as #f', () => {
+  const env = fresh()
+  assert.equal(env.vars.get('time/to-ms')('not-a-date'), false)
 })

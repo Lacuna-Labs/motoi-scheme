@@ -15,6 +15,7 @@ import { makeCoreEnv } from '../core/index.js'
 import { evaluate } from '../src/interp.js'
 import { parse } from '../src/reader.js'
 
+import { plain } from './_cells.mjs'
 function evalSrc(src, envOpt) {
   const fuel = { n: 1_000_000 }
   const env = envOpt || makeCoreEnv({ fuel })
@@ -28,51 +29,51 @@ function evalSrc(src, envOpt) {
 
 test('vec/make — variadic form still builds vector', () => {
   const { out } = evalSrc('(vec/make 1 2 3)')
-  assert.deepEqual(out, [1, 2, 3])
+  assert.deepEqual(plain(out), [1, 2, 3])
 })
 
 test('vec/make — list arg builds vector (Patch 1)', () => {
   const { out } = evalSrc('(vec/make (list 1 2 3))')
-  assert.deepEqual(out, [1, 2, 3])
+  assert.deepEqual(plain(out), [1, 2, 3])
 })
 
 test('vec/make — nested arithmetic list works', () => {
   const { out } = evalSrc('(vec/make (map (lambda (x) (* x x)) (list 1 2 3)))')
-  assert.deepEqual(out, [1, 4, 9])
+  assert.deepEqual(plain(out), [1, 4, 9])
 })
 
 test('vec/make — empty list arg → empty vector', () => {
   const { out } = evalSrc('(vec/make (list))')
-  assert.deepEqual(out, [])
+  assert.deepEqual(plain(out), [])
 })
 
 test('vec/make — coerces non-numbers via + coercion', () => {
   // Backwards-compat behaviour: any non-number input coerces via +x.
   // A single scalar number arg stays a length-1 vector.
   const { out } = evalSrc('(vec/make 3.14)')
-  assert.deepEqual(out, [3.14])
+  assert.deepEqual(plain(out), [3.14])
 })
 
 // ── Patch 2: map with multiple lists ─────────────────────────────────
 
 test('map — single list form unchanged', () => {
   const { out } = evalSrc('(map (lambda (x) (* x x)) (list 1 2 3))')
-  assert.deepEqual(out, [1, 4, 9])
+  assert.deepEqual(plain(out), [1, 4, 9])
 })
 
 test('map — two lists, pairwise + (Patch 2)', () => {
   const { out } = evalSrc('(map + (list 1 2 3) (list 10 20 30))')
-  assert.deepEqual(out, [11, 22, 33])
+  assert.deepEqual(plain(out), [11, 22, 33])
 })
 
 test('map — three lists, ternary lambda', () => {
   const { out } = evalSrc('(map (lambda (a b c) (+ a b c)) (list 1 2 3) (list 10 20 30) (list 100 200 300))')
-  assert.deepEqual(out, [111, 222, 333])
+  assert.deepEqual(plain(out), [111, 222, 333])
 })
 
 test('map — shortest list determines length (R7RS)', () => {
   const { out } = evalSrc('(map + (list 1 2 3 4 5) (list 10 20 30))')
-  assert.deepEqual(out, [11, 22, 33])
+  assert.deepEqual(plain(out), [11, 22, 33])
 })
 
 test('for-each — multiple lists execute pairwise', () => {
@@ -85,7 +86,7 @@ test('for-each — multiple lists execute pairwise', () => {
   `
   const { out } = evalSrc(src)
   // cons pushes to the front, so we see 33, 22, 11.
-  assert.deepEqual(out, [33, 22, 11])
+  assert.deepEqual(plain(out), [33, 22, 11])
 })
 
 // ── Patch 3: math/* trig aliases ─────────────────────────────────────
@@ -125,9 +126,12 @@ test('reader × evaluator — 1e-5 evaluates as 0.00001', () => {
   assert.equal(out, 1e-5)
 })
 
-test('reader × evaluator — (+ 1e5 1) = 100001', () => {
+// REBASELINED 2026-08-03: `1e5` is inexact (R7RS §6.2.5), so the sum is the
+// inexact 100001.0 — chibi-scheme answers the same. The value is unchanged.
+test('reader × evaluator — (+ 1e5 1) = 100001.0', () => {
   const { out } = evalSrc('(+ 1e5 1)')
-  assert.equal(out, 100001)
+  assert.equal(Number(out), 100001)
+  assert.equal(evalSrc('(exact? (+ 1e5 1))').out, false)
 })
 
 // ── Book-of-ML capstone shape: verify a mini-neuron works ────────────

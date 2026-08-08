@@ -26,6 +26,7 @@ import { makeCoreEnv } from '../core/index.js'
 import { evaluate } from '../src/interp.js'
 import { parse } from '../src/reader.js'
 
+import { plain } from './_cells.mjs'
 const BOOK_DIR = new URL('../scheme-books/book-of-ml/', import.meta.url).pathname
 
 function evalSrc(src, envOpt) {
@@ -55,7 +56,7 @@ test('ML capstone shape — element-wise vec add via multi-arg map (Patch 2)', (
     (vec-add (list 1 2 3) (list 10 20 30))
   `
   const { out } = evalSrc(src)
-  assert.deepEqual(out, [11, 22, 33])
+  assert.deepEqual(plain(out), [11, 22, 33])
 })
 
 test('ML capstone shape — sigmoid uses math/exp + scalar arith', () => {
@@ -84,7 +85,7 @@ test('ML capstone shape — matvec via map + vec/dot', () => {
     (map (lambda (row) (vec/dot row v)) M)
   `
   const { out } = evalSrc(src)
-  assert.deepEqual(out, [3, 7, 11])
+  assert.deepEqual(plain(out), [3, 7, 11])
 })
 
 test('ML capstone shape — MSE loss via multi-arg map + reduce', () => {

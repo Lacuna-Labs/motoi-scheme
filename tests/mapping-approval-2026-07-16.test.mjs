@@ -20,6 +20,7 @@ import { resetMediaState } from '../lib/media/media.js'
 import { Sym, sym } from '../src/reader.js'
 import { ErrorObject } from '../lib/base/r7rs-types.js'
 
+import { plain } from './_cells.mjs'
 function fresh() {
   resetMediaState()
   return makeExtendedBaseEnv()
@@ -42,7 +43,7 @@ test('escalate — raises a named condition with correct type + irritants', () =
   } catch (e) {
     assert.ok(e instanceof ErrorObject, 'raises an ErrorObject')
     assert.equal(e._errorType, 'timeout', 'type is the condition name')
-    assert.deepEqual(e._errorIrritants, ['req-42', 5000],
+    assert.deepEqual(plain(e._errorIrritants), ['req-42', 5000],
       'irritants preserved verbatim')
     assert.ok(String(e.message).includes('timeout'),
       'message includes the condition name')
@@ -55,11 +56,17 @@ test('escalate — catchable by with-exception-handler; type surfaces via error-
   const withHandler = env.vars.get('with-exception-handler')
   const errType = env.vars.get('error-object-type')
 
-  const result = withHandler(
-    (e) => ['caught', errType(e).name],
+  // R7RS §6.11: a condition raised non-continuably reaches the handler, but
+  // the handler's RETURN does not become the value of with-exception-handler —
+  // a secondary exception is raised instead. So the assertion is that the
+  // handler SAW the condition with its name intact, not that its value came
+  // back. Use `guard` when you want an answer.
+  let seen = null
+  assert.throws(() => withHandler(
+    (e) => { seen = ['caught', errType(e).name] },
     () => { escalate(sym('retry-exhausted'), 3) },
-  )
-  assert.deepEqual(result, ['caught', 'retry-exhausted'])
+  ))
+  assert.deepEqual(plain(seen), ['caught', 'retry-exhausted'])
 })
 
 test('escalate — bare string name works too (degraded but not crash)', () => {
@@ -82,7 +89,7 @@ test('text/rasterize — registers as a CORE verb', () => {
 
 test('text/rasterize — empty string returns zero-sized raster', () => {
   const env = fresh()
-  const raster = env.vars.get('text/rasterize')('', null, null)
+  const raster = plain(env.vars.get('text/rasterize')('', null, null))
   // raster is an alist: ((Sym('width') 0) (Sym('height') 0) ... (Sym('cells') []))
   assert.ok(Array.isArray(raster))
   const findKey = (k) => {
@@ -98,7 +105,7 @@ test('text/rasterize — empty string returns zero-sized raster', () => {
 
 test('text/rasterize — non-empty string produces sized raster with cells', () => {
   const env = fresh()
-  const raster = env.vars.get('text/rasterize')('hi', sym('default'), sym('red'))
+  const raster = plain(env.vars.get('text/rasterize')('hi', sym('default'), sym('red')))
   const findKey = (k) => {
     for (const entry of raster) {
       if (entry[0] instanceof Sym && entry[0].name === k) return entry[1]
@@ -123,7 +130,7 @@ test('text/rasterize — record shape has :font and :color', () => {
   // Use 'yellow' which is in NAMED_COLORS so it round-trips as a name;
   // unknown color names degrade to a "#<index>" fallback (that path is
   // exercised in the earlier :cells test which passes sym('red')).
-  const raster = env.vars.get('text/rasterize')('X', sym('mono'), sym('yellow'))
+  const raster = plain(env.vars.get('text/rasterize')('X', sym('mono'), sym('yellow')))
   const findKey = (k) => {
     for (const entry of raster) {
       if (entry[0] instanceof Sym && entry[0].name === k) return entry[1]
@@ -163,7 +170,7 @@ test('assert/check-with — fail raises assertion-failed with the value', () => 
   } catch (e) {
     assert.ok(e instanceof ErrorObject)
     assert.equal(e._errorType, 'assertion-failed')
-    assert.deepEqual(e._errorIrritants, [-1])
+    assert.deepEqual(plain(e._errorIrritants), [-1])
     assert.ok(String(e.message).includes('must be positive'))
   }
 })
@@ -253,7 +260,7 @@ test('assert/audit-verify — leaf mismatch raises audit-failed with path', () =
     assert.equal(e._errorType, 'audit-failed')
     assert.equal(e._errorIrritants.length, 1)
     const [path, expected, got] = e._errorIrritants[0]
-    assert.deepEqual(path, [], 'root-level failure has empty path')
+    assert.deepEqual(plain(path), [], 'root-level failure has empty path')
     assert.equal(expected, 'number')
     assert.equal(got, 'string')
   }
@@ -276,7 +283,7 @@ test('assert/audit-verify — (list-of number) fails on mixed list, reports inde
   } catch (e) {
     assert.equal(e._errorType, 'audit-failed')
     const [path, expected, got] = e._errorIrritants[0]
-    assert.deepEqual(path, [1], 'failure at index 1')
+    assert.deepEqual(plain(path), [1], 'failure at index 1')
     assert.equal(expected, 'number')
     assert.equal(got, 'string')
   }
@@ -305,7 +312,7 @@ test('assert/audit-verify — alist spec verifies record shape', () => {
   } catch (e) {
     assert.equal(e._errorType, 'audit-failed')
     const [path, expected, got] = e._errorIrritants[0]
-    assert.deepEqual(path, ['age'])
+    assert.deepEqual(plain(path), ['age'])
     assert.equal(expected, 'integer')
     assert.equal(got, 'string')
   }

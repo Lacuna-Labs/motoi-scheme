@@ -40,33 +40,46 @@ At boot Motoi reads its manifest — the list of every library file the runtime 
 
 ```scheme
 (available-libs)
-;; => (ai/ai ai/steering audio/tick base/alg base/assert
-;;     book/reader book/tutor game/entity game/game
-;;     ... 55 or so libs ...)
+;; => (ai/ai ai/completions ai/llm ai/steering audio/synth audio/tick
+;;     base/alg base/alist base/assert base/topo book/reader book/tutor
+;;     ... 62 libs in all, ending ...
+;;     system/system system/time system/verb-stats)
 ```
 
 This is your map of the language. Every symbol in the list is a library that Motoi's manifest promises to load — either it already has, or it will as soon as you touch one of its verbs.
 
 ## 17.3 loaded-libs — what has actually loaded
 
-`loaded-libs` reports a subset — only the libraries that have actually run their install function this session.
+`loaded-libs` reports the libraries that have actually run their install function this session — the ones installed eagerly at boot, plus anything a later `require` pulled in.
 
 ```scheme
-(loaded-libs)
-;; => ()   ; a fresh session hasn't triggered any lazy libs yet
+(length (loaded-libs))
+;; => 77   ; a fresh session already has most of the language installed
 ```
 
-Now touch a lazy verb:
+That number is the point of the verb. Booting Motoi is not a blank slate: seventy-seven parts install before you type anything, which is why `car` and `sin` and `fb/rect` all answer immediately.
+
+Now ask for a library on purpose:
 
 ```scheme
-(assert/check-with positive? 5 \"must be positive\")   ; installs base/assert on first call
-(loaded-libs)
-;; => (base/assert)
+(require 'matrix)
+(length (loaded-libs))
+;; => 77
 ```
 
-The library was in `available-libs` from boot. The first call to `assert/check-with` triggered its install. Now it's in `loaded-libs` too.
+Unchanged — because `math/matrix` is one of the eager parts and was already installed. The `require` found it in the ledger and answered `ok` without doing any work. **A stable length across a `require` does not mean the require failed.** It usually means the part was already there.
 
-Eager libraries — the ones that install at boot regardless — don't appear in `loaded-libs`. They're just always there; `loaded-libs` is specifically the lazy audit trail.
+Note also what the ledger records. Calling a verb does not add an entry:
+
+```scheme
+(assert/check-with positive? 5 \"must be positive\")
+```
+
+`assert/check-with` answers — it returns `5` — but nothing new appears. Verbs already bound in the base image do not go through the lazy loader, so there is no install event to record. `loaded-libs` is the audit trail of the *loader*, not a call log. If you want to know whether a name is callable, ask `(all-verbs)`; if you want to know whether a library file was installed, ask `loaded-libs`.
+
+One asymmetry worth carrying: `loaded-libs` is **not** a subset of `available-libs`. The catalogue lists 62 requirable parts; boot installs 77. Fifteen of them — `media/media`, `net/http-serve`, the composer parts — are live and callable but cannot be named at a `require` at all. Two indexes over one population, each complete for a different question.
+
+Until August 2026 this verb reported `()` at boot, recording only require-driven installs. It said nothing was loaded while the whole eager surface was running. If you find an older transcript showing an empty list here, that is what you are looking at.
 
 ## 17.4 require — install a library on purpose
 
@@ -82,7 +95,9 @@ Sometimes you don't want to wait for the first-call surprise. You know your game
 Return values:
 
 - `'ok` — the library was in the manifest and its installer ran (or it was already installed and this call was a no-op).
-- `'unknown` — no library in the manifest matched that name.
+- `#f` — no library in the manifest matched that name.
+
+The miss used to be the symbol `'unknown`, and every symbol is true in Scheme, so `(if (require 'typo) ...)` took the true branch: a `require` that matched nothing was indistinguishable from one that installed a library. `#f` is the only value that makes the test read correctly.
 
 `require` matches by name — `'assert` finds `base/assert`, `'matrix` finds `math/matrix`, `'game-theory` finds `game/game-theory`. If two libraries share a trailing name (shouldn't happen in a healthy manifest), the first match wins.
 
@@ -127,22 +142,27 @@ See `docs/EAGER-VS-LAZY.md` (or the engineering doctrine chapter) for the full f
 
 ## 17.8 A loader-introspection pattern
 
-Here's a small script that reports what your session has loaded so far and how much of the manifest is still cold:
+Here's a small script that reports what your session has installed and how much of the manifest is still cold:
 
 ```scheme
 (define (loader-report)
   (let* ((all (available-libs))
          (loaded (loaded-libs))
-         (loaded-count (length loaded))
-         (all-count (length all)))
-    (list
-      :available all-count
-      :loaded loaded-count
-      :cold (- all-count loaded-count))))
+         (cold (let loop ((xs all) (n 0))
+                 (cond ((null? xs) n)
+                       ((memq (car xs) loaded) (loop (cdr xs) n))
+                       (else (loop (cdr xs) (+ n 1)))))))
+    (list ':available (length all) ':installed (length loaded) ':cold cold)))
 
 (loader-report)
-;; => (:available 55 :loaded 3 :cold 52)
+;; => (:available 62 :installed 77 :cold 7)
 ```
+
+Read those three numbers carefully, because the obvious arithmetic is wrong. `installed` is *larger* than `available` — 77 parts are live but only 62 can be named at a `require`. So `cold` cannot be `(- all-count loaded-count)`; that would give you −15. It has to be counted by walking the catalogue and asking of each entry whether it is in the ledger, which is what the loop above does. Seven catalogue entries really are still cold.
+
+This is the general shape: whenever two counts come from different populations, subtracting them produces a number that looks like an answer and is not one.
+
+Sixty-one libraries in the manifest; one of them installed, because we asked for it by name; sixty still cold. Run `loader-report` at the very top of a fresh session and `:loaded` is `0` — nothing lazy has been touched yet.
 
 Useful in a debug HUD, a REPL diagnostic verb, or the tail of a test run to prove the test only touched what it claimed to touch.
 
@@ -164,12 +184,12 @@ A sister dialect is a variant of Motoi. It inherits the loader and these three v
 
   :verbs (
     (:name "require"
-     :signature "(require lib-name) -> ok | unknown"
+     :signature "(require lib-name) -> ok | #f"
      :example "(require 'matrix)")
     (:name "loaded-libs"
      :signature "(loaded-libs) -> list"
-     :example "(loaded-libs) ; => (base/assert)")
+     :example "(length (loaded-libs)) ; => 76")
     (:name "available-libs"
      :signature "(available-libs) -> list"
-     :example "(available-libs) ; => (ai/ai audio/tick ...)"))
+     :example "(available-libs) ; => (ai/ai ai/completions ... system/verb-stats)"))
   :epilogue null)
