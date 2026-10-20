@@ -1,0 +1,16 @@
+(display (math/mixed-number (list 7 3)))  (newline)  ; (2 1 3)
+(display (math/mixed-number '(11 4)))     (newline)  ; (2 3 4)
+(display (math/mixed-number '(8 4)))      (newline)  ; (2 0 1)
+(display (math/mixed-number '(15 4)))     (newline)  ; (3 3 4)
+(display (math/mixed-number '(22 5)))     (newline)  ; (4 2 5)
+(display (math/mixed-number '(9 0)))      (newline)  ; nan
+(display (equal? (math/mixed-number '(9 0)) 'nan)) (newline) ; #t
+(display (math/mixed-number '(-7 3)))     (newline)  ; (-2 -1 3)
+(display (math/mixed-number '(7 -3)))     (newline)  ; (-2 -1 3)
+(display (list (= (/ 7 3) (+ -0 0))))     (newline)
+(define (roundtrip? nd)
+  (let ((m (math/mixed-number nd)))
+    (= (/ (car nd) (cadr nd))
+       (+ (list-ref m 0) (/ (list-ref m 1) (list-ref m 2))))))
+(display (list (roundtrip? '(7 3)) (roundtrip? '(15 4)) (roundtrip? '(-7 3)) (roundtrip? '(8 4))))
+(newline)

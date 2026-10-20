@@ -1,0 +1,5 @@
+(display (number? '8)) (newline)
+(display (symbol? 'q)) (newline)
+(display (list 'q '8 '16)) (newline)
+(display (motion/cadence 120 'q)) (newline)
+(display (motion/pocket 16 3)) (newline)

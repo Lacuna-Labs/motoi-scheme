@@ -1,0 +1,7 @@
+(define p (cons 1 2))
+(define t (list 8 9))
+(set-cdr! p t)
+(display (list 'p p 'shared (eq? (cdr p) t)))(newline)
+(set-car! t 'X)
+(display (list 'after p))(newline)
+(display (list 'is-pair-cons (pair? (cons 1 (list 8 9))) 'cons-onto-list (cons 1 (list 8 9)) 'cons-onto-atom (cons 1 2)))(newline)

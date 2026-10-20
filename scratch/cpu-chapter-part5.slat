@@ -1,0 +1,232 @@
+(verb
+  :name "cpu/assemble" :std "Motoi"
+  :library "cpu"
+  :kind "pure"
+  :signature "(cpu/assemble program) -> byte-list"
+  :summary "Turn a list of symbolic instructions (or raw bytes) into a flat list of opcode bytes ready to load."
+  :explanation "cpu/assemble is the one-pass assembler. Feed it a list of instructions in symbolic form — ((LOAD 5) (MOV B) (ADD) (HALT)) — and it emits the flat byte list the machine executes: the opcode byte for each mnemonic followed by its operand byte where the instruction takes one. Register names (A, B) in MOV resolve to their codes. Raw numbers pass through as literal bytes, so you can mix hand-encoded bytes with symbolic instructions. It is pure: same program in, same bytes out, no machine state touched. It has no labels — the base assembler is deliberately label-free so a learner can walk the byte stream by hand and match the opcode table."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(display (cpu/assemble (list (list 'LOAD 7) (list 'HALT))))" :note "LOAD 7 is 02 07; HALT is FF. Result: (2 7 255).")
+    (:dialect "motoi" :tier "intermediate" :code "(display (cpu/assemble (list (list 'LOAD 5) (list 'MOV 'B) (list 'ADD))))" :note "MOV B resolves the register name to its code. Result: (2 5 5 1 6).")
+    (:dialect "motoi" :tier "expert" :code "(display (cpu/assemble (list (list 'NOP) 42 (list 'HALT))))" :note "A raw byte 42 passes through between two instructions. Result: (1 42 255).")
+  )
+  :caveats ("One-pass and label-free: symbolic jump targets are not supported — JMP takes a numeric address." "Each instruction must be a list whose head is a known mnemonic; an unknown mnemonic raises an error." "A two-byte instruction missing its operand raises an error." "Raw numbers are taken as literal bytes and masked to 0..255 — no encoding check is applied to them.")
+  :drawbacks ("No labels or symbolic addresses means you compute jump targets by counting bytes yourself." "No macros or pseudo-ops: what you write is what you get." "Pure byte output — it does not load; pair with cpu/load-program! (which will auto-assemble too).")
+  :usecases ("Author a program symbolically and inspect the exact bytes it produces." "Teach the opcode encoding by comparing source instructions to their byte output." "Pre-assemble a program to store or transmit as bytes." "Mix hand-encoded bytes with symbolic instructions for low-level experiments.")
+  :related ("cpu/disassemble" "cpu/load-program!" "cpu/opcodes" "cpu/read-mem")
+  :learn (:concept "Assembly: translating symbolic mnemonics into the numeric machine code the CPU executes." :prerequisites ("cpu/opcodes" "(core)/list" "(core)/quote") :progression "assemble a program to see its bytes, load-program! to run it, disassemble to read bytes back — the encode/decode round trip.")
+  :row-2-audit (
+    (:eng-program "(equal? (cpu/assemble (list (list 'LOAD 7) (list 'HALT))) (list 2 7 255))"
+     :math-program "(:honest-null \"assemble maps mnemonics to their opcode bytes via a fixed table; it is a translation, not an algebraic law. See :cs-program for the size witness.\")"
+     :cs-program "(= (length (cpu/assemble (list (list 'LOAD 5) (list 'MOV 'B) (list 'ADD) (list 'HALT)))) 6)"
+     :problem "You want a specific program but aren't sure your mnemonics encode to the bytes you intend. Loading the wrong bytes wastes a debug cycle."
+     :explanation "eng: LOAD 7; HALT assembles to exactly (2 7 255). math: honest-null — assembly is a table translation. cs: the byte count matches the sum of instruction sizes (2+2+1+1=6)."
+     :meta "assemble is the pre-flight check: inspect the bytes before you load them, so an encoding surprise is caught at author time instead of at run time.")
+    (:eng "Compare assembled bytes to the expected encoding before loading."
+     :math "assemble is a table-driven translation from mnemonics to bytes."
+     :cs "Byte count = sum of instruction sizes — a structural check."))
+  :row-3-dimension (
+    (:setup "Translation to machine form: map each symbolic unit to its encoded representation and concatenate, producing a flat stream a lower layer can consume."
+     :rungs ((:domain "cpu (mnemonics to bytes)" :code "(cpu/assemble (list (list 'LOAD 5) (list 'HALT)))")
+             (:domain "symbol list to codes" :code "(map (lambda (s) (if (eq? s 'a) 1 0)) (list 'a 'b 'a))")
+             (:domain "encoding a word to bytes" :code "(map char->integer (string->list \"Hi\"))"))
+     :explanation "In Motoi, cpu/assemble encodes mnemonics into opcode bytes. Mapping symbols to codes encodes a symbolic alphabet. Encoding a word to bytes maps characters to their integer codes. All three translate a symbolic sequence into its numeric encoding."
+     :meta "The shape transfers to any encoder that turns human-readable tokens into a machine-readable stream.")
+    (:eng "The assembled stream is the artefact the loader and the CPU trust."
+     :math "assemble is a homomorphism from instruction lists to byte lists."
+     :cs "Same slot as a compiler's code-gen or a serializer."))
+  :row-4-proof (
+    (:eng-program "(equal? (cpu/assemble (list (list 'LOAD 5) (list 'MOV 'B) (list 'LOAD 3) (list 'ADD) (list 'HALT))) (list 2 5 5 1 2 3 6 255))"
+     :math-program "(:honest-null \"That assemble then disassemble round-trips is a structural inverse relation, witnessed in :cs-program, not a closed-form algebraic identity.\")"
+     :cs-program "(define prog (list (list 'LOAD 7) (list 'HALT)))\n(define bytes (cpu/assemble prog))\n(define back (cpu/disassemble bytes))\n(and (string=? (symbol->string (cadr (assoc ':mnemonic (car back)))) \"LOAD\") (= (cadr (assoc ':operand (car back))) 7))"
+     :claim "cpu/assemble produces the exact opcode bytes of the instruction table, and cpu/disassemble recovers the mnemonics and operands from them."
+     :invariant "disassemble(assemble(p)) recovers the mnemonic+operand of every instruction in p"
+     :meta "Falsified if an assembled program's bytes differ from the table encoding, or a round trip loses a mnemonic or operand.")
+    (:eng "The full add program assembles to the exact known byte sequence."
+     :math "assemble and disassemble are structural inverses on well-formed programs."
+     :cs "Round-trip: disassemble recovers LOAD and its operand 7."))
+  :row-5-emergence (
+    (:eng-composition "(define (encode-then-decode prog)\n  (cpu/disassemble (cpu/assemble prog)))\n(encode-then-decode (list (list 'LOAD 5) (list 'HALT)))"
+     :math-composition "(:honest-null \"assemble→disassemble is an encode/decode round trip, an inverse-pair composition, not an algebraic law. See :cs-composition for the assemble-and-run pipeline.\")"
+     :cs-composition "(define (assemble-run prog)\n  (cpu/boot!)\n  (cpu/load-program! (cpu/assemble prog))\n  (cpu/run!)\n  (cadr (assoc ':A (cpu/state))))\n(assemble-run (list (list 'LOAD 6) (list 'MOV 'B) (list 'LOAD 4) (list 'ADD) (list 'HALT)))"
+     :base "cpu/assemble encodes mnemonics to bytes."
+     :emergent "assemble → load → run is the COMPILE-AND-EXECUTE family — the toolchain step where source becomes machine code that then runs, and assemble/disassemble form the encode/decode inverse pair."
+     :meta "Family: compile-and-execute — same slot as compile-to-bytecode then interpret, or assemble-to-hex then flash.")
+    (:eng "Chain assemble into load+run — source becomes a running program."
+     :math "assemble is the forward half of an encode/decode inverse pair."
+     :cs "Compile-and-execute — the assembler feeds the loader.")))
+
+(verb
+  :name "cpu/disassemble" :std "Motoi"
+  :library "cpu"
+  :kind "pure"
+  :signature "(cpu/disassemble bytes [start [length]]) -> list-of-records"
+  :summary "Decode a byte list into a list of ((:pc N) (:mnemonic M) [(:operand N)]) records; optional start and length window it."
+  :explanation "cpu/disassemble reads bytes back as instructions. Given a list of bytes, it walks them and returns one record per instruction: the program-counter offset (:pc), the mnemonic as a symbol (:mnemonic), and, for two-byte instructions, the operand (:operand). An unknown opcode decodes to the mnemonic ??? so a corrupt or mis-aligned stream still produces a readable result instead of an error. Optional start and length let you disassemble just a window of a larger buffer. It is pure — it reads the bytes you hand it and never touches machine memory."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(display (cpu/disassemble (list 2 7 255)))" :note "Decode LOAD 7; HALT. Two records: LOAD with operand 7 at pc 0, HALT at pc 2.")
+    (:dialect "motoi" :tier "intermediate" :code "(define d (cpu/disassemble (list 2 7 255)))\n(display (cadr (assoc ':mnemonic (car d))))" :note "Pull the first instruction's mnemonic out of the record: it prints as LOAD. To COMPARE it, use (symbol->string m) against a string — it is a Sym object, not eq?-comparable to 'LOAD.")
+    (:dialect "motoi" :tier "expert" :code "(display (cpu/disassemble (list 1 99 255) 1 1))" :note "Window from index 1, length 1: decodes just byte 99, which is not an opcode, so mnemonic ???.")
+  )
+  :caveats ("An unknown opcode byte decodes to the mnemonic ??? rather than raising — check for it when reading arbitrary bytes." "The :mnemonic value prints as a symbol but is a Sym object that is NOT eq?/equal? to a reader-quoted symbol — compare it via (symbol->string m) against a string like \"LOAD\"." "Disassembly is alignment-sensitive: starting mid-instruction produces garbage records, exactly as on real hardware." "The :operand field is present only for two-byte instructions; single-byte records omit it." "start and length window the byte list, not the machine's memory — it reads the list you pass.")
+  :drawbacks ("No symbol resolution: jump targets show as raw numbers, not labels (the assembler is label-free too)." "It cannot tell code bytes from data bytes — it decodes whatever it is given as instructions." "Records are alists you dereference by keyword; there is no pretty-printed listing (use cpu/display for a formatted view of live memory).")
+  :usecases ("Read back the bytes cpu/assemble produced to confirm the encoding." "Inspect a region of loaded memory as instructions during debugging." "Teach decoding by showing how a byte stream becomes mnemonics." "Detect misalignment: a wrong start offset produces visibly wrong records.")
+  :related ("cpu/assemble" "cpu/read-mem" "cpu/opcodes" "cpu/display")
+  :learn (:concept "Disassembly: decoding a byte stream back into the symbolic instructions it represents, respecting instruction boundaries." :prerequisites ("cpu/assemble" "(core)/assoc" "(core)/car") :progression "assemble a program, disassemble its bytes to recover the instructions, and compare — the encode/decode loop.")
+  :row-2-audit (
+    (:eng-program "(define d (cpu/disassemble (list 2 7 255)))\n(and (string=? (symbol->string (cadr (assoc ':mnemonic (car d)))) \"LOAD\") (= (cadr (assoc ':operand (car d))) 7))"
+     :math-program "(:honest-null \"disassemble walks bytes by instruction size and looks up mnemonics; it is a decode, not an algebraic law. See :cs-program for the unknown-opcode witness.\")"
+     :cs-program "(define d (cpu/disassemble (list 99)))\n(string=? (symbol->string (cadr (assoc ':mnemonic (car d)))) \"???\")"
+     :problem "A region of memory produces wrong behaviour. Is it code you can read, or garbage bytes? Reading raw hex won't tell you where instructions begin."
+     :explanation "eng: (2 7 255) decodes to LOAD 7 then HALT — the mnemonic and operand recover. math: honest-null — decoding is a table walk. cs: an unknown byte decodes to ??? rather than crashing."
+     :meta "disassemble is the read-back audit for code: it recovers the mnemonics from bytes so you can confirm memory holds the program you meant, and flags unknown bytes as ??? instead of hiding them.")
+    (:eng "Decode bytes back to mnemonics to confirm memory holds the intended code."
+     :math "disassemble is a size-aware decode over the byte stream."
+     :cs "Unknown opcodes surface as ??? — no silent failure."))
+  :row-3-dimension (
+    (:setup "Structured decode of a stream: walk a flat sequence, group it into variable-length units by a size rule, and label each unit — turning bytes into meaning."
+     :rungs ((:domain "cpu (bytes to instructions)" :code "(cpu/disassemble (list 2 7 255))")
+             (:domain "tokenizing a number list" :code "(define (pairs xs) (if (or (null? xs) (null? (cdr xs))) '() (cons (list (car xs) (cadr xs)) (pairs (cddr xs)))))\n(pairs (list 1 2 3 4))")
+             (:domain "parsing a tagged record stream" :code "(define (tag-len xs) (length xs))\n(tag-len (list 'op 7))"))
+     :explanation "In Motoi, cpu/disassemble groups bytes into instructions by opcode size. Tokenizing a number list groups a flat list into fixed-size chunks. Parsing a tagged stream reads length-prefixed records. All three impose structure on a flat sequence by a size rule."
+     :meta "The shape transfers to any decoder that segments a flat stream into meaningful, variable-length records.")
+    (:eng "The decoded records are what a memory viewer or debugger presents."
+     :math "disassemble is the left inverse of assemble on aligned streams."
+     :cs "Same slot as a wire-format parser reading length-prefixed frames."))
+  :row-4-proof (
+    (:eng-program "(define prog (list (list 'LOAD 5) (list 'MOV 'B) (list 'HALT)))\n(define back (cpu/disassemble (cpu/assemble prog)))\n(and (= (length back) 3) (string=? (symbol->string (cadr (assoc ':mnemonic (car back)))) \"LOAD\"))"
+     :math-program "(:honest-null \"disassemble(assemble(p)) recovering p is a left-inverse relation, witnessed in :eng-program, not a closed-form algebraic identity.\")"
+     :cs-program "(define d (cpu/disassemble (list 2 9 255)))\n(and (= (cadr (assoc ':pc (car d))) 0) (= (cadr (assoc ':pc (cadr d))) 2))"
+     :claim "cpu/disassemble segments bytes by opcode size, one record per instruction, with :pc offsets that advance by each instruction's size."
+     :invariant "disassemble(assemble(p)) has one record per instruction of p, pc[i+1] = pc[i] + size(instr[i])"
+     :meta "Falsified if the record count differs from the instruction count, or a :pc offset skips or overlaps.")
+    (:eng "A 3-instruction program disassembles to 3 records — one per instruction."
+     :math "disassemble is a left inverse of assemble on aligned byte streams."
+     :cs "pc offsets advance by instruction size: 0 then 2 for LOAD then HALT."))
+  :row-5-emergence (
+    (:eng-composition "(define (listing bytes)\n  (map (lambda (r) (cadr (assoc ':mnemonic r))) (cpu/disassemble bytes)))\n(listing (cpu/assemble (list (list 'LOAD 5) (list 'ADD) (list 'HALT))))"
+     :math-composition "(:honest-null \"Projecting mnemonics from a disassembly is a map over decoded records, not an algebraic composition. See :cs-composition for the read-live-memory pipeline.\")"
+     :cs-composition "(define (peek-code len)\n  (let loop ((i 0) (acc '()))\n    (if (>= i len) (cpu/disassemble (reverse acc))\n        (loop (+ i 1) (cons (cpu/read-mem i) acc)))))\n(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(peek-code 3)"
+     :base "cpu/disassemble decodes bytes into instruction records."
+     :emergent "read-mem region → disassemble → project is the DISASSEMBLER-VIEW family — the pipeline a debugger runs to show live memory as a source listing."
+     :meta "Family: disassembler view — same slot as objdump -d or a debugger's code pane over live memory.")
+    (:eng "Read memory, disassemble it, project mnemonics — a live code listing."
+     :math "disassemble composed with read-mem yields a source view of memory."
+     :cs "Disassembler view — the debugger's memory-as-code pane.")))
+
+(verb
+  :name "cpu/opcodes" :std "Motoi"
+  :library "cpu"
+  :kind "rd"
+  :signature "(cpu/opcodes) -> list-of-records"
+  :summary "Return the entire instruction set as data: one ((:code N) (:mnemonic M) (:size N)) record per opcode."
+  :explanation "cpu/opcodes hands you the machine's instruction set as a list of records — for every opcode, its numeric code, its mnemonic symbol, and its size in bytes (1 or 2). This is the single source of truth: the same table the assembler, disassembler, and CPU loop all consult. Because it is data, you can search it, count it, or drive your own tooling from it. It is read-only and constant across the session — the instruction set does not change while the machine runs. This is how the reference stays honest: if a mnemonic is not in this list, it does not exist."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(display (length (cpu/opcodes)))" :note "How many instructions does the machine know? The table length: 19.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (find-op name)\n  (let loop ((ops (cpu/opcodes)))\n    (cond ((null? ops) #f)\n          ((string=? (symbol->string (cadr (assoc ':mnemonic (car ops)))) name) (car ops))\n          (else (loop (cdr ops))))))\n(display (cadr (assoc ':size (find-op \"LOAD\"))))" :note "Look up LOAD in the table and read its size: 2 bytes (opcode + operand). NOTE: compare the mnemonic via symbol->string — the table's mnemonics are Sym objects, not eq?-comparable to reader-quoted symbols.")
+    (:dialect "motoi" :tier "expert" :code "(define (two-byte-ops)\n  (let loop ((ops (cpu/opcodes)) (acc 0))\n    (if (null? ops) acc\n        (loop (cdr ops) (if (= (cadr (assoc ':size (car ops))) 2) (+ acc 1) acc)))))\n(display (two-byte-ops))" :note "Count how many instructions take an operand: the two-byte opcodes.")
+  )
+  :caveats ("Read-only and constant: the table does not change during a session." "Each record has exactly :code, :mnemonic, and :size — no execution semantics are in the table (those live in the CPU loop)." "The mnemonic prints as a symbol but is a Sym object that is NOT eq?/equal? to a reader-quoted symbol — compare it via (symbol->string m) against a string like \"LOAD\"." "Order of records follows the internal table order, not numeric or alphabetical — sort it yourself if you need an order.")
+  :drawbacks ("It lists what each opcode IS (code/mnemonic/size), not what it DOES — the effect is documented in prose, not this table." "No operand-type info: it tells you an instruction is two bytes, not whether the operand is an address, immediate, or register." "You build any lookup index (by mnemonic, by code) yourself from the list.")
+  :usecases ("Count or enumerate the instruction set for a help panel or lesson." "Build a mnemonic-to-code or code-to-mnemonic lookup for your own tooling." "Validate that a mnemonic exists before assembling." "Drive an IDE opcode-reference display from the live table.")
+  :related ("cpu/assemble" "cpu/disassemble" "cpu/display")
+  :learn (:concept "Instruction-set introspection: reading the machine's opcode table as data to drive tooling and validation." :prerequisites ("(core)/assoc" "(core)/eq?" "(core)/length") :progression "List cpu/opcodes to see the set, build a lookup from it, then use cpu/assemble knowing exactly which mnemonics are legal.")
+  :row-2-audit (
+    (:eng-program "(= (length (cpu/opcodes)) 19)"
+     :math-program "(:honest-null \"cpu/opcodes returns the instruction table as records; its length is a count of the fixed set, not an algebraic law. See :cs-program for the schema witness.\")"
+     :cs-program "(define op (car (cpu/opcodes)))\n(and (assoc ':code op) (assoc ':mnemonic op) (assoc ':size op) #t)"
+     :problem "You are about to assemble a program with a mnemonic you're unsure of. Guessing wastes a cycle; you want to know the legal instruction set for certain."
+     :explanation "eng: the table has 19 opcodes. math: honest-null — a table length is a count. cs: every record carries :code, :mnemonic, and :size."
+     :meta "cpu/opcodes is the authority you audit against: check a mnemonic is in the table before assembling, so an illegal instruction is caught by a lookup rather than an assembler error.")
+    (:eng "Validate a mnemonic against the live table before assembling."
+     :math "The table is a finite set; its length counts the instruction set."
+     :cs "Every record follows the :code/:mnemonic/:size schema."))
+  :row-3-dimension (
+    (:setup "Self-describing catalog: expose the fixed set of things a system understands as inspectable data, so callers can enumerate, count, and validate against it."
+     :rungs ((:domain "cpu (opcode table)" :code "(cpu/opcodes)")
+             (:domain "an association list of options" :code "(define opts (list (cons 'a 1) (cons 'b 2)))\n(length opts)")
+             (:domain "an enum's member list" :code "(define colors (list 'red 'green 'blue))\n(memq 'green colors)"))
+     :explanation "In Motoi, cpu/opcodes is the catalog of legal instructions. An options alist is the catalog of legal settings. An enum's member list is the catalog of legal values. All three publish a fixed vocabulary as data you can check membership in."
+     :meta "The shape transfers to any system that exposes its own capabilities as an inspectable list.")
+    (:eng "The catalog is what a help panel and a validator both read from."
+     :math "The opcode table is a finite indexed family of records."
+     :cs "Same slot as reflection over an enum or a command registry."))
+  :row-4-proof (
+    (:eng-program "(define codes (map (lambda (op) (cadr (assoc ':code op))) (cpu/opcodes)))\n(define (all-distinct? xs) (let loop ((xs xs) (seen '())) (cond ((null? xs) #t) ((memv (car xs) seen) #f) (else (loop (cdr xs) (cons (car xs) seen))))))\n(all-distinct? codes)"
+     :math-program "(:honest-null \"That every opcode code is unique is a table-integrity constraint, witnessed by the distinctness check in :eng-program, not an algebraic identity.\")"
+     :cs-program "(define sizes (map (lambda (op) (cadr (assoc ':size op))) (cpu/opcodes)))\n(let loop ((xs sizes)) (cond ((null? xs) #t) ((or (= (car xs) 1) (= (car xs) 2)) (loop (cdr xs))) (else #f)))"
+     :claim "cpu/opcodes returns records with distinct :code values, each :size is 1 or 2, and it is the same table the assembler and disassembler use."
+     :invariant "codes pairwise distinct ∧ ∀ op: size(op) ∈ {1,2} ∧ table = assembler's table"
+     :meta "Falsified by two records sharing a :code, or a :size outside {1,2}.")
+    (:eng "Every opcode code is distinct — no two mnemonics collide."
+     :math "The table is an injective map from codes to mnemonics."
+     :cs "Every :size is 1 or 2 — the variable-length encoding is honored."))
+  :row-5-emergence (
+    (:eng-composition "(define (mnemonic-index)\n  (map (lambda (op) (cons (symbol->string (cadr (assoc ':mnemonic op))) (cadr (assoc ':code op)))) (cpu/opcodes)))\n(cdr (assoc \"HALT\" (mnemonic-index)))"
+     :math-composition "(:honest-null \"Building a mnemonic→code index is a map-then-assoc over the table, a projection, not an algebraic composition. See :cs-composition for the validate-and-assemble pipeline.\")"
+     :cs-composition "(define (legal? name)\n  (let loop ((ops (cpu/opcodes)))\n    (cond ((null? ops) #f)\n          ((string=? (symbol->string (cadr (assoc ':mnemonic (car ops)))) name) #t)\n          (else (loop (cdr ops))))))\n(if (legal? \"ADD\") (cpu/assemble (list (list 'ADD))) 'illegal)"
+     :base "cpu/opcodes publishes the instruction table as data."
+     :emergent "opcodes → build-index → validate → assemble is the REFLECTION-DRIVEN-TOOLING family — building a lookup or validator from a system's own self-description, exactly how a linter reads a schema."
+     :meta "Family: reflection-driven tooling — same slot as generating a parser or validator from a published grammar.")
+    (:eng "Build a mnemonic index and a legality check from the live table."
+     :math "The table drives an injective index used to validate input."
+     :cs "Reflection-driven tooling — validator built from self-description.")))
+
+(verb
+  :name "cpu/display" :std "Motoi"
+  :library "cpu"
+  :kind "rd"
+  :signature "(cpu/display) -> string"
+  :summary "Return the fixed-width ASCII dump of the machine: registers, a 16x16 memory grid, and the next instruction."
+  :explanation "cpu/display draws the machine in one glance, Speak & Spell style. It returns a plain string with three regions: a register line (A, B, PC, SP, FLAGS decoded as Z/N/C/H, plus the instruction count); a 16-by-16 hex grid of all 256 memory bytes with PC marked '>' and SP marked '<'; and a NEXT line showing the disassembled instruction about to execute (or HALTED). It is read-only — it renders the current state without changing it. The IDE reuses this exact string in its terminal panel; from the console you can display it to watch the whole machine as you step."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(cpu/boot!)\n(display (cpu/display))" :note "The fresh machine, rendered: all registers zero (SP FF), memory all 00, NEXT is the byte at PC 0.")
+    (:dialect "motoi" :tier "intermediate" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(display (string? (cpu/display)))" :note "cpu/display returns a string you can print, log, or embed: #t.")
+    (:dialect "motoi" :tier "expert" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'HALT)))\n(cpu/run!)\n(define txt (cpu/display))\n(define (has-substr? s sub) (let ((n (string-length s)) (m (string-length sub))) (let loop ((i 0)) (cond ((> (+ i m) n) #f) ((string=? (substring s i (+ i m)) sub) #t) (else (loop (+ i 1)))))))\n(display (has-substr? txt \"HALTED\"))" :note "After running a HALT program, the NEXT region reads HALTED — the dump reports the stop.")
+  )
+  :caveats ("Read-only: rendering never changes the machine." "It shows all 256 bytes as a fixed grid, unlike cpu/state whose :mem window defaults to 16." "FLAGS is shown decoded as Z/N/C/H characters, not as the raw integer (cpu/state gives the integer)." "Colour is not baked in — the string is plain text; the terminal look is applied by CSS in the IDE.")
+  :drawbacks ("For programmatic use you want cpu/state's alist, not this human-facing string." "The layout is fixed at 16x16; you cannot re-window it or show a sub-region." "Parsing values back out of the string is fragile — read them from cpu/state instead.")
+  :usecases ("Watch the whole machine while single-stepping in the console." "Embed the live dump in a REPL or IDE terminal panel." "Teach with a Speak & Spell-style at-a-glance view of registers and memory." "Log a formatted snapshot for a bug report a human will read.")
+  :related ("cpu/state" "cpu/step!" "cpu/disassemble" "cpu/opcodes")
+  :learn (:concept "Rendering state: turning a machine's registers and memory into a fixed-width human-readable view for at-a-glance inspection." :prerequisites ("cpu/state" "(core)/display" "cpu/step!") :progression "Boot, display to see the machine, step! and display again to watch it change; drop to cpu/state when you need the values as data.")
+  :row-2-audit (
+    (:eng-program "(cpu/boot!)\n(string? (cpu/display))"
+     :math-program "(:honest-null \"cpu/display renders state to a formatted string; it is a projection to text, not an algebraic law. See :cs-program for the HALTED-marker witness.\")"
+     :cs-program "(cpu/boot!)\n(cpu/load-program! (list (list 'HALT)))\n(cpu/run!)\n(define txt (cpu/display))\n(define (has? s sub) (let ((n (string-length s)) (m (string-length sub))) (let loop ((i 0)) (cond ((> (+ i m) n) #f) ((string=? (substring s i (+ i m)) sub) #t) (else (loop (+ i 1)))))))\n(has? txt \"HALTED\")"
+     :problem "Stepping through a program, you need to see every register and the next instruction at once — reading them one assoc at a time from cpu/state is slow and easy to misread."
+     :explanation "eng: cpu/display returns a string. math: honest-null — rendering is projection to text. cs: after a HALT the dump contains the marker HALTED."
+     :meta "cpu/display is the at-a-glance audit: one string shows registers, all of memory, and the next instruction, so a human can spot a wrong value or a halted machine without querying fields individually.")
+    (:eng "One rendered string surfaces every register and the next instruction."
+     :math "display is a projection of state onto a text layout."
+     :cs "The HALTED marker in the dump reports the stop — a visible status."))
+  :row-3-dimension (
+    (:setup "Human-readable rendering: turn an internal state into a fixed layout of text so a person can absorb the whole thing in one look."
+     :rungs ((:domain "cpu (register + memory dump)" :code "(cpu/boot!)\n(string? (cpu/display))")
+             (:domain "formatting a record to a string" :code "(define (show p) (string-append \"x=\" (number->string (car p))))\n(show (list 5 6))")
+             (:domain "pretty-printing a value" :code "(number->string 255 16)"))
+     :explanation "In Motoi, cpu/display renders the machine as a fixed-width dump. Formatting a record builds a readable string from its fields. Pretty-printing a value turns it into human form (here, hex). All three project internal state into text a person reads."
+     :meta "The shape transfers to any view layer that renders state for human eyes rather than machine consumption."
+     )
+    (:eng "The rendered dump is the artefact a human scans during debugging."
+     :math "display is a projection into a text presentation of the state."
+     :cs "Same slot as a __repr__ or a to-string for a debugger view."))
+  :row-4-proof (
+    (:eng-program "(cpu/boot!)\n(let ((s (cpu/display))) (and (string? s) (> (string-length s) 0)))"
+     :math-program "(:honest-null \"That the dump is a non-empty formatted string reflecting live state is a rendering property, witnessed in :eng-program, not an algebraic identity.\")"
+     :cs-program "(cpu/boot!)\n(cpu/load-program! (list (list 'HALT)))\n(cpu/run!)\n(define txt (cpu/display))\n(define (has? s sub) (let ((n (string-length s)) (m (string-length sub))) (let loop ((i 0)) (cond ((> (+ i m) n) #f) ((string=? (substring s i (+ i m)) sub) #t) (else (loop (+ i 1)))))))\n(has? txt \"HALTED\")"
+     :claim "cpu/display returns a non-empty string that reflects the current machine, including a HALTED marker once the machine has halted."
+     :invariant "display() is a non-empty string ∧ halted ⇒ 'HALTED' appears in it"
+     :meta "Falsified by an empty string, or a halted machine whose dump lacks the HALTED marker.")
+    (:eng "The dump is a non-empty string on any machine state."
+     :math "display is a total projection of state into text."
+     :cs "A halted machine's dump contains HALTED — the render tracks state."))
+  :row-5-emergence (
+    (:eng-composition "(define (step-and-show)\n  (cpu/step!)\n  (cpu/display))\n(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(string? (step-and-show))"
+     :math-composition "(:honest-null \"step-then-render interleaves a transition and a projection; the emergent shape is an animation loop, not an algebraic law. See :cs-composition.\")"
+     :cs-composition "(define (frames n)\n  (cpu/boot!)\n  (cpu/load-program! (list (list 'LOAD 5) (list 'MOV 'B) (list 'HALT)))\n  (let loop ((i 0) (acc '()))\n    (if (>= i n) (reverse acc)\n        (begin (cpu/step!) (loop (+ i 1) (cons (string? (cpu/display)) acc))))))\n(frames 2)"
+     :base "cpu/display renders the current machine as text."
+     :emergent "step! → display in a loop is the DEBUGGER-ANIMATION family — the step-and-redraw cycle a single-step debugger or a teaching visualizer runs frame by frame."
+     :meta "Family: step-and-redraw — same slot as a debugger UI refreshing its panels after each instruction.")
+    (:eng "Loop step!+display to animate the machine one instruction per frame."
+     :math "display composes with step! as the view half of a stepped loop."
+     :cs "Step-and-redraw — the single-step debugger's render cycle.")))

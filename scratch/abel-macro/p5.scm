@@ -1,0 +1,8 @@
+(write (let ((f (lambda (x) (+ x 1))))
+  (let-syntax ((f (syntax-rules () ((f x) x)))
+               (g (syntax-rules () ((g x) (f x)))))
+    (list (f 1) (g 1))))) (newline)
+(write (let ((f (lambda (x) (+ x 1))))
+  (letrec-syntax ((f (syntax-rules () ((f x) x)))
+                  (g (syntax-rules () ((g x) (f x)))))
+    (list (f 1) (g 1))))) (newline)

@@ -1,0 +1,245 @@
+;;; sakura-port-2026-07-16.slat
+;;;
+;;; Motoi → Sakura 17-verb sync report — 2026-07-16
+;;; Executed by The Engineer (Opus 4.7).
+;;;
+;;; Mandate: port Motoi's 17 new verbs (text + emoji, easing, animation,
+;;; physics) into Sakura's runtime so the sakura-scheme repo can drive
+;;; the same fantasy-console verb surface Motoi ships. Pass-2 SemVer
+;;; wiring (Sakura pins motoi-scheme via package.json) has NOT happened
+;;; yet — that's a bigger later lane. This port unblocks Sakura NOW.
+
+(port-report
+  :n           "sakura-port-2026-07-16"
+  :author      "The Engineer (Opus 4.7)"
+  :date        "2026-07-16"
+  :status      :complete
+  :audience    :engineering
+  :dialect     :both  ;; motoi-authored, sakura-consumed
+  :provenance  (:source-repo "motoi-scheme"
+                :target-repo "sakura-scheme"
+                :source-modules
+                  ("motoi-scheme/lib/graphics/text.js"
+                   "motoi-scheme/lib/graphics/easing.js"
+                   "motoi-scheme/lib/graphics/animation.js"
+                   "motoi-scheme/lib/game/game.js §target-aware-physics"
+                   "motoi-scheme/adapters/base.js §text-seams")))
+
+;; ─────────────────────────────────────────────────────────────────────────
+;; DECISION — import-vs-copy
+;; ─────────────────────────────────────────────────────────────────────────
+
+(import-vs-copy-decision
+  :chosen :copy
+  :reason
+    "Motoi's lib modules do `import { Sym } from '../../src/reader.js'`.
+     If imported cross-repo (from sakura-scheme/src/), that path still
+     resolves relative to the lib module's OWN location — landing on
+     motoi-scheme/src/reader.js. Sakura user code parses via
+     sakura-scheme/src/reader.js. Verified empirically (see
+     /tmp/test-cross-import.mjs during the port): the two Sym classes
+     are DISTINCT identities, so `x instanceof Sym` in Motoi's lib code
+     silently FAILS for Sakura-parsed Syms. The nm helper falls through
+     and String() saves the day for the common case, but the guarantee
+     is fragile — one direct .name access anywhere in the module chain
+     breaks the port.
+
+     Copying + rewriting imports to sakura-scheme's own reader/interp
+     yields ONE Sym identity within Sakura's runtime. This is the
+     'fallback if imports don't wire' path the port prompt sanctioned.
+     Each copied file carries a `:provenance :copied-from-motoi` header
+     with the source path, port date, and a note directing future
+     engineers to delete the copy when Pass-2 SemVer wiring lands."
+
+  :files-copied
+    (("sakura-scheme/src/adapters/base.js"
+      :source "motoi-scheme/adapters/base.js"
+      :note   "Text seams only — omitted the 14 legacy Curator-specific seams
+               (emit/logEvent/etc.) since Sakura's dispatch layer doesn't need
+               them. When those seams get ported (separate lane), reconcile.")
+     ("sakura-scheme/src/lib/graphics/text.js"
+      :source "motoi-scheme/lib/graphics/text.js"
+      :note   "Full copy; imports rewritten to ../../reader.js + local shim.")
+     ("sakura-scheme/src/lib/graphics/easing.js"
+      :source "motoi-scheme/lib/graphics/easing.js"
+      :note   "Full copy; single import rewritten (reader).")
+     ("sakura-scheme/src/lib/graphics/animation.js"
+      :source "motoi-scheme/lib/graphics/animation.js"
+      :note   "Copied minus the setInterval-driven AnimationLoop class (Sakura
+               has no live loop yet). Includes reconciliation additions:
+               slide, fade, motion/on-settle, motion/move-to. Text-tween
+               overlay records now carry a numeric `alpha` field.")
+     ("sakura-scheme/src/lib/game/physics.js"
+      :source "motoi-scheme/lib/game/game.js §target-aware-physics"
+      :note   "EXTRACTED — the full 500-LOC game kit was too much for a
+               3-verb port. Ships just physics/apply-force/gravity/impulse +
+               a minimal entity/make + gravity accessors. When Sakura grows
+               a real game kit, merge don't throw — the shape matches
+               Motoi's game state.")
+     ("sakura-scheme/src/lib/media/media-shim.js"
+      :source :sakura-authored
+      :note   "Minimal replacement for motoi/lib/media/media.js.
+               Provides only {fb:{frame,version,textOverlay,color}, loop:{fps}}
+               — the fields text.js and animation.js actually READ.
+               Framebuffer + audio + real animation loop stubbed out.")
+     ("sakura-scheme/src/lib/graphics/named-colors.js"
+      :source "motoi-scheme/lib/graphics/framebuffer.js (NAMED_COLORS export only)"
+      :note   "Just the 16-color name→index table. Avoids importing 340 LOC
+               of raster math to look up a color name.")
+     ("sakura-scheme/src/lib-loader.js"
+      :source :sakura-authored
+      :note   "Mirror of motoi-scheme/src/lib-loader.js in shape; wires the
+               four ported modules only.")))
+
+;; ─────────────────────────────────────────────────────────────────────────
+;; VERBS PORTED — 34 total (17 mandated + 6 easing constants +
+;;                          4 reconciliation extras + 3 supporting)
+;; ─────────────────────────────────────────────────────────────────────────
+
+(verbs-ported
+  :text (:count 9
+         :verbs ("fb/text" "text/measure" "text/wrap" "text/overlay"
+                 "text/overlay-clear" "font/default" "font/mono"
+                 "font/big" "font/tiny"))
+  :easing (:count 14
+           :verbs ("bezier-ease" "named-ease" "spring-ease" "easing/apply"
+                   "easing/emphasized" "easing/standard" "easing/decelerated"
+                   "easing/accelerated" "easing/linear" "easing/ease"
+                   "easing/ease-in" "easing/ease-out" "easing/ease-in-out"
+                   "easing/spring"))
+  :animation (:count 9
+              :verbs ("motion" "bounce" "animation/tick" "animation/tweens"
+                      "animation/clear!"
+                      ;; reconciliation extras (in-scope since they landed
+                      ;; in Motoi's animation.js before the port ran)
+                      "slide" "fade" "motion/on-settle" "motion/move-to"))
+  :physics (:count 6
+            :verbs ("physics/apply-force" "physics/apply-gravity"
+                    "physics/apply-impulse"
+                    ;; supporting: needed so the physics verbs have entities
+                    ;; to act on
+                    "physics/gravity!" "physics/gravity" "entity/make")))
+
+;; ─────────────────────────────────────────────────────────────────────────
+;; ADAPTER SEAMS — 3 wired
+;; ─────────────────────────────────────────────────────────────────────────
+
+(adapter-seams
+  :renderText
+    (:default :noop
+     :real-impl-target "Canvas fillText in the AppStore build;
+                        cursor-positioned UTF-8 writes in the CLI mode."
+     :status :seam-only  ;; concrete host impl is not part of this port
+     :override-via "sakura-scheme's setAdapters({ renderText: … })"
+     :headless-fallback "text/overlay records still populated so tests
+                        + snapshotting work with no host attached.")
+
+  :measureText
+    (:default "6px per JS code unit × 8px tall — floor estimate for
+              headless layout"
+     :status :seam-only
+     :override-via "setAdapters({ measureText: (str, font) => {…} })"
+     :verified-test "text/measure 'hello' returns (30 8) — 5×6=30 wide, 8 tall")
+
+  :wrapText
+    (:default "greedy word-wrap keyed off the 6px measurement above"
+     :status :seam-only
+     :override-via "setAdapters({ wrapText: (str, maxW, font) => [...] })"
+     :verified-test "text/wrap 'hello world' 24 → (\"hello\" \"world\")"))
+
+;; ─────────────────────────────────────────────────────────────────────────
+;; TESTS — sakura-scheme/tests/motoi-port-2026-07-16.test.js
+;; ─────────────────────────────────────────────────────────────────────────
+
+(tests
+  :file "sakura-scheme/tests/motoi-port-2026-07-16.test.js"
+  :count 26
+  :passing 26
+  :failing 0
+  :suite-total-after-port 272  ;; up from 246 pre-port; no regressions
+  :suite-total-before-port 246
+  :run-command "npx vitest run"
+
+  :test-shape
+    "Each test drives the port through the same public entry-point real
+     consumers use: parse → expandProgram → evaluate against an env
+     built by makeExtendedBaseEnv(). Keyword-arg calls (motion :from …)
+     use `apply` on a quoted list because Sakura's reader treats `:foo`
+     as ordinary identifiers subject to env lookup. This matches the
+     workaround Motoi's own reconciliation-locked-calls.test.mjs uses
+     (constructs Sym instances by hand and calls the verb function
+     directly). Long-term fix is reader keyword-support — separate lane."
+
+  :groups
+    ((:name "text — 7 verbs"                :tests 6 :passing 6)
+     (:name "easing — 13 verbs"             :tests 5 :passing 5)
+     (:name "animation — 5 core verbs"      :tests 5 :passing 5)
+     (:name "animation — reconciliation"    :tests 4 :passing 4)
+     (:name "physics — 3 apply-* verbs"     :tests 5 :passing 5)
+     (:name "wiring smoke test"             :tests 1 :passing 1)))
+
+;; ─────────────────────────────────────────────────────────────────────────
+;; PENDING — reconciliation-engineer additions not yet landed in Motoi
+;; ─────────────────────────────────────────────────────────────────────────
+
+(pending
+  :on-collision      :not-landed-in-motoi
+  :entity/apply-force! :not-landed-in-motoi
+  :note "The port prompt flagged these as 'if they land in time'. As of
+         the port run they are absent from motoi-scheme/lib/game/game.js
+         and motoi-scheme/lib/graphics/animation.js. When they land,
+         re-run this port with the same shape — copy the new defs into
+         sakura-scheme/src/lib/game/physics.js (or a sibling), extend
+         the test file, bump the tests-passing count.")
+
+;; ─────────────────────────────────────────────────────────────────────────
+;; INDEX EXPORTS — sakura-scheme/src/index.js
+;; ─────────────────────────────────────────────────────────────────────────
+
+(index-exports-added
+  ("makeExtendedBaseEnv"  :from "./lib-loader.js")
+  ("installLibs"          :from "./lib-loader.js")
+  ("getMediaState"        :from "./lib-loader.js")
+  ("resetMediaState"      :from "./lib-loader.js")
+  ("setAdapters"          :from "./adapters/base.js")
+  ("getAdapters"          :from "./adapters/base.js"))
+
+;; ─────────────────────────────────────────────────────────────────────────
+;; DOCTRINE PRESERVATION
+;; ─────────────────────────────────────────────────────────────────────────
+
+(doctrine-preserved
+  :curator-untouched            #t   ;; No writes to curator/. Alfred's off-limits rule honored.
+  :sakura-stub-protocol         #t   ;; artifactHeadlessStub pattern in base.js untouched.
+  :blossom-default              #t   ;; game.js's sprite default 'blossom' — physics.js doesn't touch sprites at all.
+  :no-corporate-names           #t   ;; Reference commentary uses generic labels only.
+  :slat-tagging                 #t   ;; Every new record carries :provenance / :status / :dialect.
+  :reference-only-motoi-verbs   #t   ;; No new verb names invented; port only landed what Motoi already documented.
+  :anti-fabrication             #t   ;; No cross-references to Curator required; port stopped at Sakura's boundary.
+  :no-deletes                   #t   ;; Zero files removed; existing tests preserved.
+
+  :publishable-prose            :engineering-tier
+    "Header comments on every ported file explain the port context,
+     Sym-identity concern, and the delete-me-later condition. Tests
+     document the keyword-arg workaround so a future engineer sees the
+     WHY not just the WHAT.")
+
+;; ─────────────────────────────────────────────────────────────────────────
+;; NEXT — Pass-2 SemVer wiring
+;; ─────────────────────────────────────────────────────────────────────────
+
+(next-pass
+  :name "Pass-2 SemVer wiring — sakura consumes motoi via package.json"
+  :when :later
+  :on-completion
+    "Delete sakura-scheme/src/lib/, sakura-scheme/src/adapters/,
+     sakura-scheme/src/lib-loader.js. Replace with a re-export shim
+     that pulls from the motoi-scheme npm package. Sakura's index.js
+     already exports the right symbol names, so consumers won't
+     notice the swap. Test file continues to drive verbs via
+     makeExtendedBaseEnv — that stays as the single entry point."
+
+  :blocker
+    "Motoi needs a published version + Sakura needs to add it as a
+     dependency in its package.json. Both are one-line changes but
+     require Alfred's go-ahead to touch package boundaries.")

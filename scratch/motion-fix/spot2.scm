@@ -1,0 +1,7 @@
+(define (dart t)(let* ((angle 0.785398)(speed 150)(vx (* speed (cos angle)))(vy (* speed (sin angle))))(vec/make (+ 100 (* t vx)) (+ 100 (* t vy)))))
+(display (dart 1.0))(newline)
+(define (climb t)(let* ((angle 1.308997)(speed 120)(vx (* speed (cos angle)))(vy (* speed (sin angle))))(vec/make (+ 240 (* t vx)) (+ 400 (* t (- vy))))))
+(display (climb 1.0))(newline)
+(display (list (vec/make 240 400) (vec/make 240 280)))(newline)
+(display (list (vec/make (* 0.5 40) 200) (vec/make (* 0.5 240) 200)))(newline)
+(display (list (vec/make 100 100)(vec/make 260 220)))(newline)

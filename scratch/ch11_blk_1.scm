@@ -1,0 +1,6 @@
+(require 'game/world)
+(world/gravity! 0 0)
+(define hero (world/spawn 'hero 10 10))
+(define coin (world/spawn 'coin 90 90))
+(display (entity/overlaps? hero coin))
+(newline)

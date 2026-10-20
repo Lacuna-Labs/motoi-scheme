@@ -1,0 +1,2 @@
+(display (input/buttons))
+(newline)

@@ -1,0 +1,8 @@
+(require 'game/world)
+(world/gravity! 0 0)
+(define ball (world/spawn 'ball 10 20))
+(entity/set-vel! ball 3 0)
+(world/step)
+(world/step)
+(display (entity/x ball))
+(newline)

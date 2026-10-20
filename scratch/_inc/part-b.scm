@@ -1,0 +1,1 @@
+(DEFINE (SHOUTED-B X) (* X 2))

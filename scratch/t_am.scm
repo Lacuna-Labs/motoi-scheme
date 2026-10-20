@@ -1,0 +1,6 @@
+(define (apply-move state mv)
+  (let loop ((i 0) (ps state))
+    (if (null? ps) '()
+        (cons (if (= i (car mv)) (cdr mv) (car ps))
+              (loop (+ i 1) (cdr ps))))))
+(display (apply-move '(3 5 6) (cons 0 2)))

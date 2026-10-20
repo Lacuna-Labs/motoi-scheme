@@ -1,0 +1,31 @@
+;; Two bodies. Each pulls on the other with F = G m1 m2 / r^2.
+;; State per body: (x y vx vy mass). Semi-implicit Euler, G-effective = 1.
+(define (grav-accel me other G)
+  (let* ((dx (- (car other) (car me)))
+         (dy (- (cadr other) (cadr me)))
+         (r2 (+ (* dx dx) (* dy dy) 1e-6))
+         (r  (sqrt r2))
+         (m  (list-ref other 4))
+         (f  (/ (* G m) r2)))          ;; accel = G*m_other / r^2
+    (cons (* f (/ dx r)) (* f (/ dy r)))))
+
+(define (step2 a b G dt)
+  (let* ((aa (grav-accel a b G))
+         (ab (grav-accel b a G))
+         (avx (+ (list-ref a 2) (* (car aa) dt)))
+         (avy (+ (list-ref a 3) (* (cdr aa) dt)))
+         (bvx (+ (list-ref b 2) (* (car ab) dt)))
+         (bvy (+ (list-ref b 3) (* (cdr ab) dt)))
+         (a* (list (+ (car a) (* avx dt)) (+ (cadr a) (* avy dt)) avx avy (list-ref a 4)))
+         (b* (list (+ (car b) (* bvx dt)) (+ (cadr b) (* bvy dt)) bvx bvy (list-ref b 4))))
+    (cons a* b*)))
+
+(define (two-body-attract)
+  (let loop ((n 400)
+             (a (list 80.0 120.0 0.0 -1.2 5000))
+             (b (list 240.0 120.0 0.0 1.2 5000)))
+    (if (<= n 0)
+        (list (cons (car a) (cadr a)) (cons (car b) (cadr b)))
+        (let ((nx (step2 a b 1.0 1.0)))
+          (loop (- n 1) (car nx) (cdr nx))))))
+(display (two-body-attract))

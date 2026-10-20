@@ -1,0 +1,10 @@
+;; Spawn five coins in a horizontal line using a loop.
+(world/reset!)
+(let loop ((i 0))
+  (when (< i 5)
+    (let* ((x (+ 100 (* i 150)))
+           (y 300)
+           (name (string->symbol (string-append "coin-" (number->string i)))))
+      (world/spawn name `((x . ,x) (y . ,y) (sprite . "coin"))))
+    (loop (+ i 1))))
+(world/step)

@@ -1,0 +1,6 @@
+(define blip (audio/play 'blip))
+(display (audio/playing?))
+(newline)
+(audio/halt blip)
+(display (audio/playing?))
+(newline)

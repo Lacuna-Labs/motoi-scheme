@@ -1,0 +1,6 @@
+(let ((input "Hello, how are you?")
+      (string-prefix? (lambda (s prefix)
+                        (and (>= (string-length s) (string-length prefix))
+                             (equal? (substring s 0 (string-length prefix)) prefix)))))
+  (when (string-prefix? input "Hello")
+    (string-append "Greetings received: " input)))

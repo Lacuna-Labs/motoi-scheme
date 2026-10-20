@@ -1,0 +1,402 @@
+
+(verb
+  :name "ai/classify" :std "Motoi"
+  :library "ai"
+  :kind "io"
+  :signature "(ai/classify text labels) -> label  (raises requires-python-ml-sidecar offline)"
+  :summary "Assign one of a fixed label set to a text via a zero-shot classifier; RAISES 'requires-python-ml-sidecar' on the bare console — there is no local fallback."
+  :explanation "Ai/classify sends the text and candidate labels to a Python ML sidecar (a zero-shot classifier) and returns the best label. There is deliberately NO local fallback: a made-up label would be arbitrary and misleading, so offline it RAISES 'requires-python-ml-sidecar'. This is the honest-error tier of Motoi AI: the raise is the contract, not a bug. Catch it with with-exception-handler / call/cc to keep a program total, or gate on a caught flag."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(define (safe-classify text labels)\n  (call-with-current-continuation (lambda (k)\n    (with-exception-handler (lambda (e) (k 'no-sidecar))\n      (lambda () (ai/classify text labels))))))\n(display (safe-classify \"I love this\" (list \"pos\" \"neg\")))" :note "Catch the sidecar raise; 'no-sidecar prints on the bare console. Runs green.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (classify-or text labels d)\n  (call-with-current-continuation (lambda (k)\n    (with-exception-handler (lambda (e) (k d))\n      (lambda () (ai/classify text labels))))))\n(display (classify-or \"hi\" (list \"a\" \"b\") 'unknown))" :note "Turn the raise into a default label.")
+    (:dialect "motoi" :tier "expert" :code "(define (guard t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t))))\n(define (label-all texts labels)\n  (map (lambda (tx) (guard (lambda () (ai/classify tx labels)) 'unknown)) texts))\n(display (label-all (list \"a\" \"b\") (list \"x\" \"y\")))" :note "Guard each classification; offline every result is the 'unknown default.")
+  )
+  :caveats ("RAISES 'requires-python-ml-sidecar' offline — no local fallback (a guessed label would be arbitrary). Catch it." "labels is the candidate set; the returned value is one of them (when wired)." "This is an ML sidecar, distinct from the llm/* text provider.")
+  :drawbacks ("Uncaught, it aborts offline." "Needs a running Python sidecar, not just an LLM key." "Zero-shot accuracy depends entirely on the sidecar model.")
+  :usecases ("Route text into buckets (sentiment, intent, topic) when the sidecar is up." "Tag content with a controlled vocabulary." "Guarded classification pipelines offline.")
+  :related ("ai/rank" "ai/rerank" "ai/summarize" "llm/config")
+  :learn (:concept "Some AI has no honest local answer, so it raises rather than fabricates; the elimination form is with-exception-handler." :prerequisites ("call-with-current-continuation" "with-exception-handler" "map") :progression "Contrast with llm/ask (#f-degrade); pair with ai/rank for retrieval.")
+  :row-2-audit (
+    (:eng-program "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (display (g (lambda () (ai/classify \"hi\" (list \"a\" \"b\"))) 'na))"
+     :math-program "(define (total f d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) f)))) (display (total (lambda () (ai/classify \"x\" (list \"a\"))) 'd))"
+     :cs-program "(define caught #f) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (set! caught #t) (k 'na)) (lambda () (ai/classify \"z\" (list \"a\")))))) (display caught)"
+     :problem "A moderation pipeline crashed on a box with no ML sidecar; the stack named ai/classify and 'requires-python-ml-sidecar'. The fix guards each call so unclassifiable-offline items fall to a safe 'review-manually bucket rather than aborting the batch."
+     :explanation "eng: the guard turns the raise into a safe default label. math: 'total' extends the partial classifier to all inputs. cs: the handler provably fires — caught is #t offline."
+     :meta "Wrong sibling: llm/ask returns #f (freeform, not a label) — useless for a controlled vocabulary. ai/classify is right for closed-set labelling; its raise forces you to decide the offline bucket deliberately.")
+    (:eng "Symptom 'pipeline crashed, no sidecar'. Fix: guard to a safe default bucket."
+     :math "Totalization of a partial function by a default."
+     :cs "Exception-to-value via delimited escape."))
+  :row-3-dimension (
+    (:setup "assign-or-defer: place an item in one of fixed categories, or defer when the classifier is unavailable"
+     :rungs (
+       (:domain "motoi ML sidecar" :code "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (display (g (lambda () (ai/classify \"hi\" (list \"a\" \"b\"))) 'defer))")
+       (:domain "a rule-based bucketer" :code "(define (bucket n) (cond ((< n 0) 'neg) ((= n 0) 'zero) (else 'pos))) (display (bucket 5))")
+       (:domain "a lookup table" :code "(define t (list (cons 'a 1) (cons 'b 2))) (define (classify k) (let ((h (assq k t))) (if h (cdr h) 'unknown))) (display (classify 'c))"))
+     :explanation "Each maps an input to a category, with a deferral/unknown for the unhandled case. The shape is categorize-with-default."
+     :meta "Portable shape: classification with a total 'unknown branch. Offline ai/classify is the deferral case.")
+    (:eng "Every classifier needs an explicit 'don't know / defer outcome."
+     :math "A partial map into a finite label set, made total by an 'unknown element."
+     :cs "Dispatch table with a default arm."))
+  :row-4-proof (
+    (:claim "Offline, a guarded ai/classify always yields the supplied default."
+     :program "(define (g d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/classify \"p\" (list \"a\"))))))) (display (and (eq? (g 'x) 'x) (eq? (g 'y) 'y)))"
+     :invariant "∀ text labels d. no-sidecar ⇒ ai/classify raises ⇒ guard = d"
+     :meta "Guarded raise = chosen default. Falsified if classify returned a label offline. See book-of-code ch12 (delimited control)."
+     :eng-program "(define (g d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/classify \"p\" (list \"a\"))))))) (display (eq? (g 'z) 'z))"
+     :math-program "(define (gc d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/classify \"a\" (list \"x\"))))))) (display (eq? (gc 7) 7))"
+     :cs-program "(define f #f) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (set! f #t) (k #f)) (lambda () (ai/classify \"q\" (list \"a\")))))) (display f)")
+    (:eng "Offline result is the default, provably — safe in a loop."
+     :math "Handler defines a constant on the raising domain."
+     :cs "Total, deterministic recovery."))
+  :row-5-emergence (
+    (:base "ai/classify labels one text."
+     :eng-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (route texts labels) (map (lambda (tx) (cons tx (g (lambda () (ai/classify tx labels)) 'defer))) texts))\n(display (route (list \"a\" \"b\") (list \"x\" \"y\")))"
+     :emergent "a router: classify + map + cons = a text→label table, defer-safe offline."
+     :meta "Same family as a dispatch/routing table. See book-of-composition ch10 (routers).")
+    (:base "ai/classify feeds a tally."
+     :math-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (count-defer texts labels) (length (filter (lambda (tx) (eq? (g (lambda () (ai/classify tx labels)) 'defer) 'defer)) texts)))\n(display (count-defer (list \"a\" \"b\") (list \"x\")))"
+     :emergent "a coverage meter: how many items the classifier could NOT label (all of them offline)."
+     :meta "Counting over a guarded classifier. See book-of-ml ch02 (counting).")
+    (:base "ai/classify behind a keyword fallback."
+     :cs-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (kw tx) (if (> (string-length tx) 3) 'long 'short)) (define (classify* tx labels) (g (lambda () (ai/classify tx labels)) (kw tx)))\n(display (classify* \"hello\" (list \"a\")))"
+     :emergent "a degradation ladder: ML classifier online, a cheap heuristic offline."
+     :meta "Degradation tiers. See book-of-composition ch10.")
+    (:eng "Router, coverage meter, and heuristic ladder are the classification toolkit."
+     :math "Map / filter / fold over a guarded label map."
+     :cs "Dispatch table / coverage counting / degradation ladder."))
+)
+
+(verb
+  :name "ai/summarize" :std "Motoi"
+  :library "ai"
+  :kind "io"
+  :signature "(ai/summarize text . opts) -> string  (raises requires-python-ml-sidecar offline)"
+  :summary "Condense a long text to a short summary via an LLM sidecar; RAISES 'requires-python-ml-sidecar' on the bare console — no local fallback."
+  :explanation "Ai/summarize hands text to an LLM sidecar and returns a shorter version. There is no local summarizer, and a truncation would misrepresent the content, so offline it RAISES 'requires-python-ml-sidecar'. Catch the raise to stay total; a naive offline fallback (e.g. first sentence) is your own choice and must be labeled as a truncation, not a summary."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(define (safe-summary text)\n  (call-with-current-continuation (lambda (k)\n    (with-exception-handler (lambda (e) (k 'no-sidecar))\n      (lambda () (ai/summarize text))))))\n(display (safe-summary \"a very long document ...\"))" :note "Catch the sidecar raise; 'no-sidecar prints offline. Runs green.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (summary-or text d)\n  (call-with-current-continuation (lambda (k)\n    (with-exception-handler (lambda (e) (k d))\n      (lambda () (ai/summarize text))))))\n(display (summary-or \"long\" \"(offline) no summary\"))" :note "Turn the raise into a fallback message.")
+    (:dialect "motoi" :tier "expert" :code "(define (guard t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t))))\n(define (head text) (substring text 0 (min 10 (string-length text))))\n(define (summarize* text) (guard (lambda () (ai/summarize text)) (string-append (head text) \"… (truncated, not summarized)\")))\n(display (summarize* \"the quick brown fox jumps\"))" :note "Fall back to a clearly-labeled truncation offline — never pass it off as a real summary.")
+  )
+  :caveats ("RAISES 'requires-python-ml-sidecar' offline — no local summarizer. Catch it." "Any offline fallback is a TRUNCATION, not a summary — label it as such." "opts is a keyword plist (:max-length etc.).")
+  :drawbacks ("Uncaught, it aborts offline." "Needs an LLM sidecar." "Summary quality and faithfulness are the sidecar's, not guaranteed.")
+  :usecases ("Shorten documents/logs when the sidecar is up." "Generate previews or digests." "Guarded summarization with a labeled offline truncation.")
+  :related ("ai/translate" "ai/classify" "llm/ask" "llm/config")
+  :learn (:concept "Summarization has no honest local answer, so it raises; a truncation is not a summary and must be labeled." :prerequisites ("call-with-current-continuation" "with-exception-handler" "substring") :progression "Contrast with llm/ask (#f); pair with ai/translate for a text-processing chain.")
+  :row-2-audit (
+    (:eng-program "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (display (g (lambda () (ai/summarize \"long\")) 'na))"
+     :math-program "(define (total f d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) f)))) (display (total (lambda () (ai/summarize \"x\")) 'd))"
+     :cs-program "(define caught #f) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (set! caught #t) (k 'na)) (lambda () (ai/summarize \"z\"))))) (display caught)"
+     :problem "A digest job emitted empty strings for every article on a sidecar-less box because it swallowed the raise into \"\". The fix guards to a labeled truncation so readers see '(truncated)' text rather than a blank, and the audit trail keeps the honest raise."
+     :explanation "eng: guard to a labeled truncation, not a blank. math: 'total' extends the partial summarizer. cs: prove the handler fires offline."
+     :meta "Wrong sibling: llm/ask returns #f (no shortening semantics). ai/summarize is right for length reduction; its raise stops a silent blank from masquerading as a summary.")
+    (:eng "Symptom 'empty digests'. Fix: labeled truncation, never a blank."
+     :math "Totalization by a default."
+     :cs "Exception-to-value; the fallback must be honestly labeled."))
+  :row-3-dimension (
+    (:setup "reduce-or-truncate: shrink content faithfully when possible, or crop with a label otherwise"
+     :rungs (
+       (:domain "motoi LLM sidecar" :code "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (display (g (lambda () (ai/summarize \"long\")) 'cropped))")
+       (:domain "a list truncation" :code "(define (take-n xs n) (if (or (= n 0) (null? xs)) (list) (cons (car xs) (take-n (cdr xs) (- n 1))))) (display (take-n (list 1 2 3 4) 2))")
+       (:domain "a numeric rounding" :code "(display (round 3.7))"))
+     :explanation "Each reduces information: a faithful summary, a prefix, a rounded value. The shape is lossy reduction with a fidelity signal."
+     :meta "Portable shape: information reduction. Offline ai/summarize degrades from faithful reduction to a labeled crop.")
+    (:eng "Every reduction must declare its fidelity so downstream trusts it correctly."
+     :math "A contraction; truncation is a coarser contraction."
+     :cs "Prefix/rounding as a fallback for a learned reducer."))
+  :row-4-proof (
+    (:claim "Offline, a guarded ai/summarize always yields the supplied default."
+     :program "(define (g d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/summarize \"p\")))))) (display (and (eq? (g 'x) 'x) (eq? (g 'y) 'y)))"
+     :invariant "∀ text d. no-sidecar ⇒ ai/summarize raises ⇒ guard = d"
+     :meta "Guarded raise = chosen default. See book-of-code ch12 (delimited control)."
+     :eng-program "(define (g d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/summarize \"p\")))))) (display (eq? (g 'z) 'z))"
+     :math-program "(define (gc d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/summarize \"a\")))))) (display (eq? (gc 7) 7))"
+     :cs-program "(define f #f) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (set! f #t) (k #f)) (lambda () (ai/summarize \"q\"))))) (display f)")
+    (:eng "Offline result is the default, provably."
+     :math "Handler defines a constant on the raising domain."
+     :cs "Total, deterministic recovery."))
+  :row-5-emergence (
+    (:base "ai/summarize shortens one text."
+     :eng-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (digest texts) (map (lambda (tx) (g (lambda () (ai/summarize tx)) 'skipped)) texts))\n(display (digest (list \"a\" \"b\")))"
+     :emergent "a digest builder: summarize + map = a list of summaries, skip-safe offline."
+     :meta "Same family as a batch transform. See book-of-composition ch10.")
+    (:base "ai/summarize with a length check."
+     :math-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (shorter? text) (let ((s (g (lambda () (ai/summarize text)) text))) (<= (string-length s) (string-length text))))\n(display (shorter? \"the quick brown fox\"))"
+     :emergent "a contraction check: the output is never longer than the input (offline the identity fallback keeps it true)."
+     :meta "Length monotonicity as a postcondition. See book-of-math ch03.")
+    (:base "ai/summarize behind a cache."
+     :cs-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define cache (list)) (define (sum* text) (let ((h (assoc text cache))) (if h (cdr h) (let ((s (g (lambda () (ai/summarize text)) 'skipped))) (set! cache (cons (cons text s) cache)) s))))\n(display (sum* \"x\"))"
+     :emergent "memoized summaries: each document summarized at most once."
+     :meta "Memoization. See book-of-composition ch08.")
+    (:eng "Digest builder, contraction check, and memo cache shape a summarization surface."
+     :math "Map / postcondition / fixpoint over a guarded reducer."
+     :cs "Batch transform / invariant check / memoization."))
+)
+
+(verb
+  :name "ai/translate" :std "Motoi"
+  :library "ai"
+  :kind "io"
+  :signature "(ai/translate text target-lang . opts) -> string  (raises requires-python-ml-sidecar offline)"
+  :summary "Translate text into a target language via an LLM sidecar; RAISES 'requires-python-ml-sidecar' on the bare console — no local fallback."
+  :explanation "Ai/translate sends text and a target-language code to an LLM sidecar and returns the translation. There is no local translator; a passthrough of the original would be wrong-language output, so offline it RAISES 'requires-python-ml-sidecar'. Catch the raise to stay total; any offline fallback (e.g. return the source unchanged) must be labeled as untranslated."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(define (safe-translate text lang)\n  (call-with-current-continuation (lambda (k)\n    (with-exception-handler (lambda (e) (k 'no-sidecar))\n      (lambda () (ai/translate text lang))))))\n(display (safe-translate \"hello\" \"es\"))" :note "Catch the sidecar raise; 'no-sidecar prints offline. Runs green.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (translate-or text lang)\n  (call-with-current-continuation (lambda (k)\n    (with-exception-handler (lambda (e) (k (string-append text \" [untranslated]\")))\n      (lambda () (ai/translate text lang))))))\n(display (translate-or \"hello\" \"es\"))" :note "Fall back to the source text clearly marked untranslated.")
+    (:dialect "motoi" :tier "expert" :code "(define (guard t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t))))\n(define (translate-all texts lang)\n  (map (lambda (tx) (guard (lambda () (ai/translate tx lang)) (string-append tx \" [untranslated]\"))) texts))\n(display (translate-all (list \"hi\" \"bye\") \"fr\"))" :note "Guard each translation; offline every item is the labeled passthrough.")
+  )
+  :caveats ("RAISES 'requires-python-ml-sidecar' offline — no local translator. Catch it." "target-lang is a language code/name the sidecar understands." "Any offline passthrough is UNTRANSLATED — label it, never claim it is translated.")
+  :drawbacks ("Uncaught, it aborts offline." "Needs an LLM sidecar." "Translation quality is the sidecar's.")
+  :usecases ("Localize strings/messages when the sidecar is up." "Translate user content on demand." "Guarded translation with a labeled offline passthrough.")
+  :related ("ai/summarize" "ai/classify" "llm/ask" "llm/config")
+  :learn (:concept "Translation has no honest local answer, so it raises; a passthrough is not a translation and must be labeled." :prerequisites ("call-with-current-continuation" "with-exception-handler" "string-append") :progression "Contrast with llm/ask (#f); chain with ai/summarize for a text pipeline.")
+  :row-2-audit (
+    (:eng-program "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (display (g (lambda () (ai/translate \"hi\" \"es\")) 'na))"
+     :math-program "(define (total f d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) f)))) (display (total (lambda () (ai/translate \"x\" \"es\")) 'd))"
+     :cs-program "(define caught #f) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (set! caught #t) (k 'na)) (lambda () (ai/translate \"z\" \"es\"))))) (display caught)"
+     :problem "A localized UI shipped English strings to Spanish users on a sidecar-less build because it swallowed the raise and returned the source. The fix guards to a '[untranslated]'-tagged passthrough so QA sees which strings never translated, and the raise stays in the audit trail."
+     :explanation "eng: guard to a labeled passthrough so the gap is visible. math: 'total' extends the partial translator. cs: prove the handler fires offline."
+     :meta "Wrong sibling: llm/ask returns #f (no target-language semantics). ai/translate is right for language conversion; its raise stops a silent wrong-language passthrough.")
+    (:eng "Symptom 'untranslated strings shipped silently'. Fix: tag the passthrough."
+     :math "Totalization by a default."
+     :cs "Exception-to-value; the fallback must be labeled untranslated."))
+  :row-3-dimension (
+    (:setup "convert-or-passthrough: transform into another representation, or pass through labeled when conversion is unavailable"
+     :rungs (
+       (:domain "motoi LLM sidecar" :code "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (display (g (lambda () (ai/translate \"hi\" \"es\")) 'passthrough))")
+       (:domain "a units converter" :code "(define (c->f c) (+ (* c 9/5) 32)) (display (c->f 100))")
+       (:domain "a symbol table lookup" :code "(define t (list (cons 'red \"rojo\"))) (define (tr k) (let ((h (assq k t))) (if h (cdr h) (symbol->string k)))) (display (tr 'blue))"))
+     :explanation "Each converts a value from one system to another, passing through (labeled) when it cannot. The shape is transform-or-identity."
+     :meta "Portable shape: representation conversion with an identity fallback. Offline ai/translate is the identity (passthrough) case.")
+    (:eng "Every converter needs a labeled identity path for the unconvertible case."
+     :math "A map between representations; the fallback is the identity map."
+     :cs "Dictionary translation with a passthrough default."))
+  :row-4-proof (
+    (:claim "Offline, a guarded ai/translate always yields the supplied default."
+     :program "(define (g d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/translate \"p\" \"es\")))))) (display (and (eq? (g 'x) 'x) (eq? (g 'y) 'y)))"
+     :invariant "∀ text lang d. no-sidecar ⇒ ai/translate raises ⇒ guard = d"
+     :meta "Guarded raise = chosen default. See book-of-code ch12 (delimited control)."
+     :eng-program "(define (g d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/translate \"p\" \"es\")))))) (display (eq? (g 'z) 'z))"
+     :math-program "(define (gc d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/translate \"a\" \"es\")))))) (display (eq? (gc 7) 7))"
+     :cs-program "(define f #f) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (set! f #t) (k #f)) (lambda () (ai/translate \"q\" \"es\"))))) (display f)")
+    (:eng "Offline result is the default, provably."
+     :math "Handler defines a constant on the raising domain."
+     :cs "Total, deterministic recovery."))
+  :row-5-emergence (
+    (:base "ai/translate converts one string."
+     :eng-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (localize strings lang) (map (lambda (s) (g (lambda () (ai/translate s lang)) s)) strings))\n(display (localize (list \"hi\" \"bye\") \"es\"))"
+     :emergent "a localizer: translate + map = a translated string table, passthrough-safe offline."
+     :meta "Same family as a batch transform. See book-of-composition ch10.")
+    (:base "ai/translate round-tripped."
+     :math-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (round-trip s) (let* ((a (g (lambda () (ai/translate s \"es\")) s)) (b (g (lambda () (ai/translate a \"en\")) a))) (string? b)))\n(display (round-trip \"hello\"))"
+     :emergent "a round-trip check: translate there and back stays a string (offline both are the identity)."
+     :meta "Round-trip property. See book-of-code ch09 (invertibility).")
+    (:base "ai/translate behind a cache."
+     :cs-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define cache (list)) (define (tr* s lang) (let* ((key (cons s lang)) (h (assoc key cache))) (if h (cdr h) (let ((r (g (lambda () (ai/translate s lang)) s))) (set! cache (cons (cons key r) cache)) r))))\n(display (tr* \"x\" \"es\"))"
+     :emergent "a translation memory: each (string, lang) pair translated once."
+     :meta "Memoization keyed on a pair. See book-of-composition ch08.")
+    (:eng "Localizer, round-trip check, and translation memory shape a translation surface."
+     :math "Map / round-trip property / fixpoint over a guarded converter."
+     :cs "Batch transform / invertibility test / memoization."))
+)
+
+(verb
+  :name "ai/rank" :std "Motoi"
+  :library "ai"
+  :kind "io"
+  :signature "(ai/rank query candidates) -> list  (raises requires-python-ml-sidecar offline)"
+  :summary "Order candidates by semantic relevance to a query via an embedding sidecar; RAISES 'requires-python-ml-sidecar' on the bare console — no local fallback (any order would be arbitrary)."
+  :explanation "Ai/rank embeds the query and each candidate and orders them by similarity. There is no local fallback because ANY offline ordering would be arbitrary and misleading, so it RAISES 'requires-python-ml-sidecar'. If you need an offline ordering, choose an explicit, honest one yourself (e.g. leave input order, or sort by a stated heuristic) and label it as non-semantic."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(define (safe-rank q cs)\n  (call-with-current-continuation (lambda (k)\n    (with-exception-handler (lambda (e) (k cs))\n      (lambda () (ai/rank q cs))))))\n(display (safe-rank \"cat\" (list \"dog\" \"kitten\")))" :note "Catch the raise; offline falls back to INPUT ORDER (explicitly non-semantic). Runs green.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (rank-or q cs)\n  (call-with-current-continuation (lambda (k)\n    (with-exception-handler (lambda (e) (k (list 'input-order cs)))\n      (lambda () (ai/rank q cs))))))\n(display (rank-or \"cat\" (list \"a\" \"b\")))" :note "Tag the fallback so callers know the order is not semantic.")
+    (:dialect "motoi" :tier "expert" :code "(define (guard t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t))))\n(define (rank-len q cs) (guard (lambda () (ai/rank q cs))\n  (sort cs (lambda (a b) (< (string-length a) (string-length b))))))\n(display (rank-len \"cat\" (list \"kitten\" \"a\" \"dog\")))" :note "Offline, fall back to a STATED heuristic (by length) — honest and deterministic, not pretend-semantic.")
+  )
+  :caveats ("RAISES 'requires-python-ml-sidecar' offline — no local ranker (order would be arbitrary). Catch it." "candidates come back reordered (when wired); the original list is not mutated." "Any offline order is a stated heuristic, NOT semantic relevance.")
+  :drawbacks ("Uncaught, it aborts offline." "Needs an embedding sidecar." "Ranking quality is the sidecar's.")
+  :usecases ("Order search results/suggestions by relevance when the sidecar is up." "Prioritize candidates for a downstream step." "Guarded ranking with a stated offline heuristic.")
+  :related ("ai/rerank" "ai/vector-search" "ai/classify" "llm/config")
+  :learn (:concept "When no honest ordering exists offline the verb raises; you must choose and LABEL any fallback order rather than pretend it is semantic." :prerequisites ("call-with-current-continuation" "with-exception-handler" "sort") :progression "Compare with ai/rerank (cross-encoder, more precise); pair with ai/vector-search.")
+  :row-2-audit (
+    (:eng-program "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (display (g (lambda () (ai/rank \"q\" (list \"a\" \"b\"))) (list \"a\" \"b\")))"
+     :math-program "(define (total f d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) f)))) (display (length (total (lambda () (ai/rank \"q\" (list \"a\" \"b\"))) (list \"a\" \"b\"))))"
+     :cs-program "(define caught #f) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (set! caught #t) (k (list))) (lambda () (ai/rank \"q\" (list \"a\")))))) (display caught)"
+     :problem "A 'best match' widget showed results in a meaningless order on a sidecar-less box because it swallowed the raise and returned whatever came back. The fix guards to INPUT ORDER with a visible 'not ranked' badge, so nobody mistakes arbitrary order for relevance."
+     :explanation "eng: guard to input order, badged non-semantic. math: the fallback preserves the candidate count. cs: prove the handler fires offline."
+     :meta "Wrong sibling: ai/classify returns a single label, not an ordering. ai/rank is right for ordering-by-relevance; its raise forbids a silent arbitrary order.")
+    (:eng "Symptom 'results in random-looking order'. Fix: input order, badged non-semantic."
+     :math "Totalization preserving list length."
+     :cs "Exception-to-value; the fallback order must be stated."))
+  :row-3-dimension (
+    (:setup "order-or-preserve: rank by a criterion, or keep a stated order when the criterion is unavailable"
+     :rungs (
+       (:domain "motoi embedding sidecar" :code "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (display (g (lambda () (ai/rank \"q\" (list \"a\" \"b\"))) (list \"a\" \"b\")))")
+       (:domain "sort by a key" :code "(display (sort (list 3 1 2) <))")
+       (:domain "stable identity order" :code "(define (as-is xs) xs) (display (as-is (list 'a 'b 'c)))"))
+     :explanation "Each yields an ordering: by similarity, by a numeric key, or the identity. The shape is order-by-criterion with an identity fallback."
+     :meta "Portable shape: sorting with a chosen comparator. Offline ai/rank falls back to the identity comparator (input order).")
+    (:eng "Every ranker needs a defined tie-break / no-criterion order."
+     :math "A total order induced by a key; identity is the trivial order."
+     :cs "Comparator-driven sort with an identity default."))
+  :row-4-proof (
+    (:claim "Offline, guarded ai/rank preserves the candidate multiset (returns the same items)."
+     :program "(define (g d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/rank \"q\" d)))))) (display (= (length (g (list \"a\" \"b\" \"c\"))) 3))"
+     :invariant "∀ q cs. no-sidecar ⇒ ai/rank raises ⇒ guard = cs (same length, same elements)"
+     :meta "The fallback is a permutation (here identity) of the input — no items gained or lost. See book-of-math ch06 (permutations)."
+     :eng-program "(define (g d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/rank \"q\" d)))))) (display (= (length (g (list \"a\" \"b\"))) 2))"
+     :math-program "(define (g d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/rank \"q\" d)))))) (display (equal? (g (list \"a\" \"b\")) (list \"a\" \"b\")))"
+     :cs-program "(define f #f) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (set! f #t) (k (list))) (lambda () (ai/rank \"q\" (list \"a\")))))) (display f)")
+    (:eng "The fallback never loses candidates."
+     :math "A ranking is a permutation; identity preserves the multiset."
+     :cs "Length- and element-preserving recovery."))
+  :row-5-emergence (
+    (:base "ai/rank orders candidates."
+     :eng-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (top-1 q cs) (car (g (lambda () (ai/rank q cs)) cs)))\n(display (top-1 \"cat\" (list \"dog\" \"kitten\")))"
+     :emergent "a best-match picker: rank + car = the top candidate (offline, the first input)."
+     :meta "Same family as argmax over a scored list. See book-of-ml ch04 (selection).")
+    (:base "ai/rank feeding a top-k."
+     :math-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (take-n xs n) (if (or (= n 0) (null? xs)) (list) (cons (car xs) (take-n (cdr xs) (- n 1))))) (define (top-k q cs k) (take-n (g (lambda () (ai/rank q cs)) cs) k))\n(display (top-k \"cat\" (list \"a\" \"b\" \"c\") 2))"
+     :emergent "a top-k retriever: rank then take the first k."
+     :meta "Top-k selection. See book-of-ml ch04.")
+    (:base "ai/rank behind a heuristic fallback."
+     :cs-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (rank* q cs) (g (lambda () (ai/rank q cs)) (sort cs (lambda (a b) (< (string-length a) (string-length b))))))\n(display (rank* \"cat\" (list \"kitten\" \"a\")))"
+     :emergent "a degradation ladder: semantic rank online, a stated heuristic offline."
+     :meta "Degradation tiers. See book-of-composition ch10.")
+    (:eng "Best-match, top-k, and heuristic ladder shape a ranking surface."
+     :math "Argmax / top-k / permutation over a scored list."
+     :cs "Selection / top-k / degradation ladder."))
+)
+
+(verb
+  :name "ai/rerank" :std "Motoi"
+  :library "ai"
+  :kind "io"
+  :signature "(ai/rerank query candidates) -> list  (raises requires-python-ml-sidecar offline)"
+  :summary "Re-order an already-retrieved candidate list with a cross-encoder for higher precision; RAISES 'requires-python-ml-sidecar' on the bare console — no local fallback."
+  :explanation "Ai/rerank takes a query and a shortlist (usually the output of ai/rank or ai/vector-search) and re-orders it with a cross-encoder that scores each (query, candidate) pair jointly — more precise than bi-encoder ranking, but heavier. There is no local fallback (a cross-encoder cannot be faked), so offline it RAISES 'requires-python-ml-sidecar'. Catch it and keep the prior order (or a stated heuristic) as the offline fallback."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(define (safe-rerank q cs)\n  (call-with-current-continuation (lambda (k)\n    (with-exception-handler (lambda (e) (k cs))\n      (lambda () (ai/rerank q cs))))))\n(display (safe-rerank \"cat\" (list \"kitten\" \"dog\")))" :note "Catch the raise; offline keeps the incoming order. Runs green.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (rerank-or q cs)\n  (call-with-current-continuation (lambda (k)\n    (with-exception-handler (lambda (e) (k cs))\n      (lambda () (ai/rerank q cs))))))\n(display (length (rerank-or \"cat\" (list \"a\" \"b\" \"c\"))))" :note "Preserve the shortlist offline; the count is unchanged.")
+    (:dialect "motoi" :tier "expert" :code "(define (guard t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t))))\n(define (pipeline q cs)\n  (let ((coarse (guard (lambda () (ai/rank q cs)) cs)))\n    (guard (lambda () (ai/rerank q coarse)) coarse)))\n(display (pipeline \"cat\" (list \"dog\" \"kitten\" \"lion\")))" :note "Two-stage retrieval: rank then rerank, each guarded — offline the whole pipeline degrades to input order.")
+  )
+  :caveats ("RAISES 'requires-python-ml-sidecar' offline — no local cross-encoder. Catch it." "Meant to refine an ALREADY-retrieved shortlist, not to search from scratch." "Any offline order is the incoming order or a stated heuristic, not cross-encoder precision.")
+  :drawbacks ("Uncaught, it aborts offline." "Cross-encoders are slower than bi-encoder ranking; use on a shortlist." "Reranking quality is the sidecar's.")
+  :usecases ("Refine the top-N from ai/rank / ai/vector-search when the sidecar is up." "Two-stage retrieval (retrieve then rerank)." "Guarded reranking that degrades to the prior order.")
+  :related ("ai/rank" "ai/vector-search" "ai/classify" "llm/config")
+  :learn (:concept "A cross-encoder refines a shortlist and cannot be faked, so it raises; the offline fallback is the prior order." :prerequisites ("call-with-current-continuation" "with-exception-handler") :progression "Follow ai/rank / ai/vector-search with ai/rerank; gate with llm/config.")
+  :row-2-audit (
+    (:eng-program "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (display (g (lambda () (ai/rerank \"q\" (list \"a\" \"b\"))) (list \"a\" \"b\")))"
+     :math-program "(define (total f d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) f)))) (display (length (total (lambda () (ai/rerank \"q\" (list \"a\" \"b\"))) (list \"a\" \"b\"))))"
+     :cs-program "(define caught #f) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (set! caught #t) (k (list))) (lambda () (ai/rerank \"q\" (list \"a\")))))) (display caught)"
+     :problem "A two-stage retriever crashed at the rerank stage on a sidecar-less box, discarding a good coarse ranking. The fix guards rerank so, offline, the pipeline keeps the ai/rank (or input) order instead of failing — a graceful step-down, not a crash."
+     :explanation "eng: guard rerank to the prior order. math: the fallback preserves the shortlist length. cs: prove the handler fires offline."
+     :meta "Wrong sibling: ai/rank does the coarse pass; ai/rerank refines it. Using rerank alone on a huge list is wasteful — it is the precision stage, not the retrieval stage.")
+    (:eng "Symptom 'rerank stage crashed'. Fix: guard to the coarse order."
+     :math "Totalization preserving list length."
+     :cs "Exception-to-value; fall back to the prior stage's order."))
+  :row-3-dimension (
+    (:setup "refine-or-keep: sharpen an existing order, or keep it when refinement is unavailable"
+     :rungs (
+       (:domain "motoi cross-encoder sidecar" :code "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (display (g (lambda () (ai/rerank \"q\" (list \"a\" \"b\"))) (list \"a\" \"b\")))")
+       (:domain "a second sort pass" :code "(display (sort (sort (list 3 1 2) <) <))")
+       (:domain "identity on an ordered list" :code "(define (keep xs) xs) (display (keep (list 1 2 3)))"))
+     :explanation "Each takes an ordering and either sharpens it or leaves it. The shape is refine-or-identity on an already-ordered input."
+     :meta "Portable shape: a refinement stage that degrades to identity. Offline ai/rerank is the identity.")
+    (:eng "A refinement stage must be safe to skip, degrading to its input."
+     :math "Idempotent-at-the-limit refinement; identity is the safe skip."
+     :cs "Optional pipeline stage with a passthrough."))
+  :row-4-proof (
+    (:claim "Offline, guarded ai/rerank preserves the shortlist (same items)."
+     :program "(define (g d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/rerank \"q\" d)))))) (display (equal? (g (list \"a\" \"b\")) (list \"a\" \"b\")))"
+     :invariant "∀ q cs. no-sidecar ⇒ ai/rerank raises ⇒ guard = cs"
+     :meta "The refinement degrades to identity — the shortlist is unchanged. See book-of-math ch06 (permutations)."
+     :eng-program "(define (g d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/rerank \"q\" d)))))) (display (= (length (g (list \"a\" \"b\" \"c\"))) 3))"
+     :math-program "(define (g d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/rerank \"q\" d)))))) (display (equal? (g (list \"x\")) (list \"x\")))"
+     :cs-program "(define f #f) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (set! f #t) (k (list))) (lambda () (ai/rerank \"q\" (list \"a\")))))) (display f)")
+    (:eng "The fallback never loses candidates."
+     :math "Identity is the neutral refinement."
+     :cs "Element-preserving recovery."))
+  :row-5-emergence (
+    (:base "ai/rerank refines a shortlist."
+     :eng-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (retrieve q cs) (g (lambda () (ai/rerank q (g (lambda () (ai/rank q cs)) cs))) cs))\n(display (retrieve \"cat\" (list \"dog\" \"kitten\")))"
+     :emergent "a two-stage retriever: rank then rerank, both guarded — the classic retrieve-and-refine shape."
+     :meta "Same family as coarse-to-fine search. See book-of-ml ch05 (two-stage retrieval).")
+    (:base "ai/rerank picking the winner."
+     :math-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (best q cs) (car (g (lambda () (ai/rerank q cs)) cs)))\n(display (best \"cat\" (list \"kitten\" \"dog\")))"
+     :emergent "a precision picker: rerank then take the head = the most precise top result."
+     :meta "Argmax after refinement. See book-of-ml ch04.")
+    (:base "ai/rerank as an optional stage."
+     :cs-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (maybe-rerank q cs on?) (if on? (g (lambda () (ai/rerank q cs)) cs) cs))\n(display (maybe-rerank \"cat\" (list \"a\" \"b\") #f))"
+     :emergent "a toggleable refinement stage: skip it entirely and keep the coarse order."
+     :meta "Feature toggle over a pipeline stage. See book-of-composition ch11 (toggles).")
+    (:eng "Two-stage retriever, precision picker, and toggleable stage shape a rerank surface."
+     :math "Coarse-to-fine / argmax / conditional refinement."
+     :cs "Two-stage retrieval / selection / feature toggle."))
+)
+
+(verb
+  :name "ai/vector-search" :std "Motoi"
+  :library "ai"
+  :kind "io"
+  :signature "(ai/vector-search query store) -> list  (raises requires-python-ml-sidecar offline)"
+  :summary "Find the nearest items to a query in an indexed embedding store; RAISES 'requires-python-ml-sidecar' on the bare console — no local index."
+  :explanation "Ai/vector-search embeds the query and returns the nearest neighbours from an indexed embedding store. It needs both an embedding sidecar and a built index, so offline it RAISES 'requires-python-ml-sidecar'. For an offline stand-in, ai/embed gives deterministic (low-fidelity) vectors you can compare by hand — but that is not the same as a real indexed search, and you must label it as such."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(define (safe-search q store)\n  (call-with-current-continuation (lambda (k)\n    (with-exception-handler (lambda (e) (k (list)))\n      (lambda () (ai/vector-search q store))))))\n(display (safe-search \"cat\" (list \"kitten\" \"dog\")))" :note "Catch the raise; offline returns an empty result list. Runs green.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (search-or q store)\n  (call-with-current-continuation (lambda (k)\n    (with-exception-handler (lambda (e) (k 'no-index))\n      (lambda () (ai/vector-search q store))))))\n(display (search-or \"cat\" (list \"a\" \"b\")))" :note "Signal 'no-index offline so callers know search was unavailable, not just empty.")
+    (:dialect "motoi" :tier "expert" :code "(define (guard t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t))))\n(define (dot a b) (apply + (map * a b)))\n(define (offline-search q store)\n  (let ((qv (ai/embed q)))\n    (sort store (lambda (a b) (> (dot qv (ai/embed a)) (dot qv (ai/embed b)))))))\n(display (guard (lambda () (ai/vector-search q store)) (offline-search \"cat\" (list \"kitten\" \"dog\"))))" :note "Offline fallback: a brute-force ai/embed similarity sort — labeled low-fidelity, NOT a real indexed search.")
+  )
+  :caveats ("RAISES 'requires-python-ml-sidecar' offline — needs an embedding sidecar AND a built index. Catch it." "The ai/embed offline fallback is brute-force and low-fidelity — not an indexed search; label it." "Returns nearest items (when wired); shape depends on the store.")
+  :drawbacks ("Uncaught, it aborts offline." "Needs both a sidecar and a prebuilt index." "The offline ai/embed fallback is O(n) and hash-based, not semantic.")
+  :usecases ("Semantic retrieval over a document store when the sidecar is up." "Nearest-neighbour lookups for RAG." "Guarded search with a labeled brute-force offline fallback.")
+  :related ("ai/embed" "llm/embed" "ai/rank" "ai/rerank")
+  :learn (:concept "Real vector search needs an index and an embedder, so it raises offline; a brute-force ai/embed sort is a labeled stand-in, not the real thing." :prerequisites ("call-with-current-continuation" "with-exception-handler" "sort" "map") :progression "Feed results into ai/rerank; contrast the offline ai/embed brute-force with a true index.")
+  :row-2-audit (
+    (:eng-program "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (display (g (lambda () (ai/vector-search \"q\" (list \"a\"))) (list)))"
+     :math-program "(define (total f d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) f)))) (display (list? (total (lambda () (ai/vector-search \"q\" (list \"a\"))) (list))))"
+     :cs-program "(define caught #f) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (set! caught #t) (k (list))) (lambda () (ai/vector-search \"q\" (list \"a\")))))) (display caught)"
+     :problem "A RAG helper returned zero sources with no explanation on a box lacking the index, so the answer silently lost its grounding. The fix guards to a tagged 'no-index result so the UI can say 'search unavailable' rather than 'no matches found'."
+     :explanation "eng: guard to a distinguishable 'no-index, not a bare empty list. math: the fallback is still a list (or a clear sentinel). cs: prove the handler fires offline."
+     :meta "Wrong sibling: ai/rank orders a list you already have; ai/vector-search FINDS items from a store. Use vector-search to retrieve, rank/rerank to order.")
+    (:eng "Symptom 'no sources, no reason'. Fix: distinguish 'no-index from 'no-matches."
+     :math "Totalization into a list-or-sentinel."
+     :cs "Exception-to-value; distinguish unavailable from empty."))
+  :row-3-dimension (
+    (:setup "retrieve-or-report-unavailable: fetch nearest matches, or report the index is down"
+     :rungs (
+       (:domain "motoi embedding index" :code "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (display (g (lambda () (ai/vector-search \"q\" (list \"a\"))) 'no-index))")
+       (:domain "an assoc lookup" :code "(define store (list (cons 'cat \"meow\"))) (define (lookup k) (let ((h (assq k store))) (if h (cdr h) 'not-found))) (display (lookup 'dog))")
+       (:domain "a filter by predicate" :code "(display (filter even? (list 1 2 3 4)))"))
+     :explanation "Each retrieves matching items from a collection, reporting absence explicitly. The shape is query-a-collection with an unavailable/empty signal."
+     :meta "Portable shape: retrieval with a distinguishable miss. Offline ai/vector-search reports 'unavailable', not merely 'empty'.")
+    (:eng "Retrieval must distinguish 'nothing matched from 'search was down."
+     :math "A partial retrieval function; the miss is a named element."
+     :cs "Query with a not-found sentinel."))
+  :row-4-proof (
+    (:claim "Offline, guarded ai/vector-search returns the supplied default unchanged."
+     :program "(define (g d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/vector-search \"q\" (list \"a\"))))))) (display (and (eq? (g 'x) 'x) (eq? (g 'y) 'y)))"
+     :invariant "∀ q store d. no-sidecar ⇒ ai/vector-search raises ⇒ guard = d"
+     :meta "Guarded raise = chosen default (an empty list or a sentinel). See book-of-code ch12 (delimited control)."
+     :eng-program "(define (g d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/vector-search \"q\" (list \"a\"))))))) (display (eq? (g 'z) 'z))"
+     :math-program "(define (g d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (ai/vector-search \"q\" (list \"a\"))))))) (display (null? (g (list))))"
+     :cs-program "(define f #f) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (set! f #t) (k (list))) (lambda () (ai/vector-search \"q\" (list \"a\")))))) (display f)")
+    (:eng "Offline result is the default, provably."
+     :math "Handler defines a constant on the raising domain."
+     :cs "Total, deterministic recovery."))
+  :row-5-emergence (
+    (:base "ai/vector-search retrieves neighbours."
+     :eng-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (retrieve-then-rerank q store) (let ((hits (g (lambda () (ai/vector-search q store)) store))) (g (lambda () (ai/rerank q hits)) hits)))\n(display (retrieve-then-rerank \"cat\" (list \"kitten\" \"dog\")))"
+     :emergent "a RAG retriever core: vector-search then rerank, both guarded — retrieve-and-refine."
+     :meta "Same family as a RAG pipeline front-end. See book-of-ml ch05 (retrieval).")
+    (:base "ai/vector-search feeding a count."
+     :math-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (hit-count q store) (length (g (lambda () (ai/vector-search q store)) (list))))\n(display (hit-count \"cat\" (list \"a\" \"b\")))"
+     :emergent "a recall meter: how many matches were found (offline, zero)."
+     :meta "Counting hits. See book-of-ml ch02.")
+    (:base "ai/vector-search with a brute-force fallback."
+     :cs-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (dot a b) (apply + (map * a b))) (define (brute q store) (let ((qv (ai/embed q))) (sort store (lambda (a b) (> (dot qv (ai/embed a)) (dot qv (ai/embed b))))))) (define (search* q store) (g (lambda () (ai/vector-search q store)) (brute q store)))\n(display (search* \"cat\" (list \"kitten\" \"dog\")))"
+     :emergent "a degradation ladder: indexed search online, brute-force ai/embed sort offline (labeled low-fidelity)."
+     :meta "Degradation tiers. See book-of-composition ch10.")
+    (:eng "RAG retriever, recall meter, and brute-force ladder shape a search surface."
+     :math "Retrieve-and-refine / counting / brute-force nearest-neighbour."
+     :cs "RAG front-end / recall counting / degradation ladder."))
+)

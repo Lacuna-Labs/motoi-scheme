@@ -1,0 +1,6 @@
+(display (with-exception-handler (lambda (e) (list 'handler-saw (error-object-message e)))
+  (lambda () (dynamic-wind (lambda () (display "[before]")) (lambda () (error "kaboom")) (lambda () (display "[after]")))))) (newline)
+(display (call-with-current-continuation (lambda (k) (for-each (lambda (x) (if (> x 2) (k x))) (list 1 2 3 4)) 'none))) (newline)
+(display (call-with-current-continuation (lambda (k) (k 1 2)))) (newline)
+(display (call-with-current-continuation (lambda (k) (k)))) (newline)
+(display (list 'nested (call/cc (lambda (a) (+ 1 (call/cc (lambda (b) (b 10)))))))) (newline)

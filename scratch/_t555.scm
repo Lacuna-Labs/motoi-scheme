@@ -1,0 +1,6 @@
+(let ((input "I love apples and oranges")
+      (keyword "apples")
+      (string-contains? (lambda (s sub)
+                          (not (equal? (string-contains s sub) #f)))))
+  (when (string-contains? input keyword)
+    (string-append "Found keyword: " keyword)))

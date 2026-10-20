@@ -1,0 +1,17 @@
+(cortex/write 'k1 'red)
+(display (cortex/read 'k1)) (newline)
+(display (eq? (cortex/read 'k1) 'red)) (newline)
+(display (equal? (cortex/read 'k1) 'red)) (newline)
+(display (symbol? (cortex/read 'k1))) (newline)
+(display (string? (cortex/read 'k1))) (newline)
+
+(cortex/write 'lst (list 'garden 'kitchen))
+(display (cortex/read 'lst)) (newline)
+(define back (cortex/read 'lst))
+(display (map symbol? back)) (newline)
+(display (member 'kitchen back)) (newline)
+(display (member "kitchen" back)) (newline)
+
+(cortex/write 'flag #t)
+(display (cortex/read 'flag)) (newline)
+(display (eq? #t (cortex/read 'flag))) (newline)

@@ -1,0 +1,15 @@
+(define (frame t)
+  (world
+    (background 'black)
+    (entity 'circle (at 200 150) (radius 4) (fill 'white))
+    (entity 'circle (at 210 150) (radius 4) (fill 'white))
+    (entity 'circle (at 215 160) (radius 4) (fill 'white))
+    (entity 'circle (at 210 170) (radius 4) (fill 'white))
+    (entity 'circle (at 195 175) (radius 4) (fill 'white))
+    (entity 'circle (at 180 170) (radius 4) (fill 'white))
+    (entity 'circle (at 170 155) (radius 4) (fill 'white))
+    (entity 'circle (at 175 140) (radius 4) (fill 'white))
+    (entity 'circle (at 190 130) (radius 4) (fill 'white))
+    (entity 'circle (at 210 130) (radius 4) (fill 'white))))
+
+(render-at 0.0)

@@ -1,0 +1,7 @@
+(define p (cons 1 2))
+(display (list 'pair? (pair? p) 'car (car p) 'cdr (cdr p)))
+(newline)
+(grid/flower-spawn! 'rose 'red 3 4)
+(define q (grid/flower-pos 'rose))
+(display (list 'q q 'car (car q) 'cdr (cdr q)))
+(newline)

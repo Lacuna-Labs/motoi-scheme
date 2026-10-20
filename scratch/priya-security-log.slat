@@ -1,0 +1,126 @@
+;; priya-security-log.slat
+;; Priya (Security) — Motoi hermetic audit
+;; author: Priya
+;; date: 2026-07-17
+;; scope: HF-model / memory-safety / hermetic-isolation / sandbox / FS-boundary / network
+
+(:check hf-model-hash
+  :status pass
+  :method "shasum -a 256 on every file in scratch/models/qwen2.5-coder-1.5b-instruct/"
+  :model-safetensors-sha256 "c1b9b30e907950516ba3c646bdf570d8084c25a6410a0cdca80cf04b11bc13a8"
+  :hf-published-lfs-oid    "c1b9b30e907950516ba3c646bdf570d8084c25a6410a0cdca80cf04b11bc13a8"
+  :match yes
+  :tokenizer-json-sha256   "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539"
+  :tokenizer-config-sha256 "959e7f1d9a1b7641a6d6ce05ca97b75c7894fcb66cbe5a040406458fb1128ee4"
+  :vocab-json-sha256       "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+  :merges-txt-sha256       "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+  :config-json-sha256      "88f9a17863c05fb313515d2ff74b1098e0c35579f99068e32beda00618508ae0"
+  :generation-config-sha256 "1a628a5775bc69cde01c6749a531150ca4d3189652c618a174f7077923acf3b1"
+  :pickle-files-present no
+  :bin-files-present no
+  :only-safe-formats "safetensors + JSON (no arbitrary code execution)"
+  :commit-sha "2e1fd397ee46e1388853d2af2c993145b0f1098a"
+  :hf-repo "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+  :note "task spec said 7B; folder holds 1.5B — audited what is present.")
+
+(:check hermetic-isolation-imports
+  :status pass
+  :method "grep -rn 'from sakura|import.*sakura|/curator/|/sakura-scheme/' in src/ lib/ core/ bindings/"
+  :hits 2
+  :hit-1 "lib/audio/audio-driver.js:5 — comment only ('prefix neutralized from sakura-tone- to motoi-tone-')"
+  :hit-2 "lib/media/media.js:5 — comment only ('header string changed from sakura scheme cart snapshot to motoi scheme cart snapshot')"
+  :active-imports-of-sakura 0
+  :active-imports-of-curator 0)
+
+(:check sandbox-shell-out
+  :status pass-with-note
+  :method "grep -rn 'child_process|exec|spawn|eval|os.system' in src/ lib/ core/ bindings/"
+  :hits 1
+  :hit-1 "lib/audio/audio-driver.js — spawn() for system audio player (afplay/aplay/paplay/powershell)"
+  :audit "The spawn call passes a fixed-vocabulary player cmd and a temp .wav path built from process.pid + Date.now() under tmpdir(). No user-controlled args reach spawn. Safe."
+  :eval-count 0
+  :python-exec-count 0)
+
+(:check filesystem-boundary
+  :status pass-after-fix
+  :method "grep -rn 'writeFile|mkdir' in src/ lib/ core/ bindings/"
+  :writers-audited (
+    (lib/system/artifact.js  :writes-under (~/.motoi/artifacts/) :sanitized yes :perm artifact-write)
+    (lib/ai/cortex-io.js     :writes-under (~/.motoi/cortex.slat) :perm paint)
+    (lib/audio/audio-driver.js :writes-under (tmpdir()/motoi-tone-<pid>-<ts>.wav) :safe yes :cleanup unlinkSync)
+    (lib/media/media.js       :writes-under (~/.motoi/carts/) :sanitized yes :perm paint :changed-by-priya)
+    (src/docs-emitter.js      :writes-under (opts.outDir, default docs/reference/) :caller-supplied :note "engine-internal — invoked by `motoi docs regen` CLI only, not from Scheme"))
+  :issues-found 1
+  :issue-1 (
+    :severity high
+    :verb save-cart / load-cart
+    :file lib/media/media.js
+    :before "def('save-cart', ...) with default perm='read' + arbitrary caller-supplied path — any tier including untrusted/sakura could write to /etc/passwd, ~/.ssh/authorized_keys, ~/.zshrc, etc."
+    :fix "1) sandboxed path to ~/.motoi/carts/ via _safeCartPath() helper; rejects any input containing / \\ leading-dot or with non [A-Za-z0-9._-] chars. 2) raised perm from 'read' to 'paint' so untrusted/external tiers are refused by dispatch.js. 3) added _ensureCartDir helper. 4) added _osHomedir/_pathJoin imports (browser build strips like existing _nodeFs)."
+    :verified "smoke test — 7 attack paths ('/etc/passwd', '../../../etc/passwd', '.zshrc', 'a/b', 'a\\b', '', '.') all rejected with 'invalid cart name' error; legit 'test-cart-priya.sks' lands at /Users/alfred/.motoi/carts/test-cart-priya.sks. perms confirmed = 'paint'."))
+
+(:check env-var-exfil
+  :status pass-after-fix
+  :method "grep -rn 'process.env' in src/ lib/ core/ bindings/"
+  :hits 4
+  :hit-1 "lib/audio/sound.js:158 — reads MOTOI_SOUND / SAKURA_SOUND at engine init; no reflection to caller"
+  :hit-2-through-4 "lib/base/r7rs-small.js:786-794 — get-environment-variable / get-environment-variables"
+  :issues-found 2
+  :issue-2 (
+    :severity high
+    :verb get-environment-variable / get-environment-variables
+    :file lib/base/r7rs-small.js
+    :before "default perm='read' meant untrusted/external/sakura tiers could read any env var — including AWS_SECRET_ACCESS_KEY, OPENAI_API_KEY, HF_TOKEN, GITHUB_TOKEN, etc."
+    :fix "1) raised perm to 'personal-data' — TIER_PERMS in src/dispatch.js does NOT grant this to sakura/external/untrusted/animation tiers, so those callers are refused at dispatch. 2) added denylist regex /(TOKEN|SECRET|KEY|PASSWORD|PASSWD|CREDENTIAL|COOKIE|SESSION|API|AUTH|BEARER|PRIVATE|SALT)/i with allowlist for common non-secret names (PATH/MANPATH/INFOPATH/KRB5CCNAME) so even operator-invoked reads scrub obvious credentials — belt AND suspenders."
+    :verified "smoke test — OPENAI_API_KEY / HF_TOKEN / AWS_SECRET_ACCESS_KEY / MY_SECRET_PASSWORD all return #f; SAFE_VAR returns 'hello'; PATH returns string; get-environment-variables list contains zero /TOKEN|SECRET|KEY|PASSWORD/i entries.")
+  :issue-3 (
+    :severity medium
+    :verb emergency-exit
+    :file lib/base/r7rs-small.js
+    :before "default perm='read' — any tier could call (emergency-exit 1) and terminate the host process."
+    :fix "raised perm to 'destructive' — TIER_PERMS grants this only to system / operator-gesture / operator-voice. sakura/external/untrusted refused at dispatch."
+    :verified "def perm confirmed via env._verbs['emergency-exit'].meta.perm === 'destructive'."))
+
+(:check network-isolation
+  :status pass
+  :method "grep -rn 'fetch|http|https|axios|node-fetch|net.create|dns' in src/ lib/ core/ bindings/"
+  :outbound-http-calls 0
+  :sockets 0
+  :dns-lookups 0
+  :note "Motoi runtime makes ZERO network calls. HF model download (transformers.AutoModelForCausalLM.from_pretrained) happens in training/train.py — separate process, separate concern. The model files are then loaded from local disk with safetensors format.")
+
+(:check memory-safety
+  :status pass
+  :method "grep -rn 'Buffer.allocUnsafe|new Buffer(|while(true)|for(;;)' in src/ lib/ core/"
+  :unsafe-buffer-count 0
+  :new-buffer-count 0
+  :while-true-count 3
+  :while-true-1 (:file src/reader.js:152 :bounded-by "throw on missing ) or match on ) token")
+  :while-true-2 (:file lib/system/ops.js:588 :bounded-by "BFS augmenting-path loop, terminates when no augmenting path found (Ford-Fulkerson)")
+  :while-true-3 (:file lib/graphics/framebuffer.js:129 :bounded-by "Bresenham line — breaks when both endpoints reached")
+  :dispatch-has-fuel-cell yes
+  :macro-expansion-budget "yes — dispatch.js §244 uses a macro expansion budget capped as DoS defence"
+  :rate-limit-per-verb yes)
+
+(:check npm-dep-attack-surface
+  :status pass
+  :method "read package.json dependencies + devDependencies"
+  :dependencies {}
+  :devDependencies {}
+  :note "Motoi runtime declares ZERO npm dependencies. Uses only node: builtins (fs, os, path, child_process). node_modules on disk are stale from a prior vitest install; not required to run. Perfect supply-chain isolation.")
+
+(:check python-bindings-safety
+  :status pass
+  :method "grep -rn 'os.system|subprocess|eval|exec|pickle|__import__|compile' in bindings/python/"
+  :hits 0
+  :contents "SLAT reader/writer only (reader.py, writer.py, jsonl.py). Pure Python, stdlib only.")
+
+(:overall
+  :verdict hermetic
+  :fixes-applied 3
+  :follow-up-checks-all-pass yes
+  :test-suite-status "372/372 passing after fixes"
+  :remaining-risks (
+    "docs-emitter.js writes to a caller-supplied outDir — currently invoked only by CLI (`motoi docs regen`) with a fixed default. If ever exposed as a Scheme verb, would need the same sandboxing treatment as save-cart."
+    "cortex-io.js and artifact.js write to fixed paths but ALL writers under ~/.motoi/ — if an attacker gains ability to write there via another vector, they could seed a poisoned cortex.slat. Cortex reads use JSON.parse per line, so payload is data not code — safe."
+    "The audio spawn temp file uses tmpdir() + pid + timestamp — a TOCTOU race is theoretically possible on a shared tmpdir. Would need attacker with write access to /tmp; low real-world risk given desktop use case."))

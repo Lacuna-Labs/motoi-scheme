@@ -1,0 +1,12 @@
+(define a (make-random-source))
+(define b (make-random-source))
+(display (list 'eq (eq? a b) 'eqv (eqv? a b) 'equal (equal? a b))) (newline)
+(display (list 'dd-2arg (length (delete-duplicates (list a b) eq?)))) (newline)
+(display (list 'dd-1arg (length (delete-duplicates (list a b))))) (newline)
+(display (list 'member (memq b (list a)))) (newline)
+(display (list 'assq (assq b (list (cons a 1))))) (newline)
+;; control: distinct pairs
+(define p (cons 1 2)) (define q (cons 1 2))
+(display (list 'pairs-eq (eq? p q) 'dd-pairs (length (delete-duplicates (list p q) eq?)))) (newline)
+(define v1 (vector 1)) (define v2 (vector 1))
+(display (list 'vec-eq (eq? v1 v2) 'dd-vec (length (delete-duplicates (list v1 v2) eq?)))) (newline)

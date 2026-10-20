@@ -1,0 +1,40 @@
+;; --- motion mini-runtime (real primitives) ---
+(define PI (* 4 (atan 1)))
+(define (dsqrt x) (sqrt x))
+(define (dcos x) (cos x))
+(define (dsin x) (sin x))
+(define (datan2 y x) (atan y x))
+(define *ents* '())
+(define (world/reset!) (set! *ents* '()))
+(define (world/spawn tag x y)
+  (let ((e (vector tag x y 0 0)))   ; tag px py vx vy
+    (set! *ents* (cons e *ents*)) e))
+(define (entity/set-vel! e vx vy) (vector-set! e 3 vx) (vector-set! e 4 vy))
+(define (entity/set-pos! e x y)  (vector-set! e 1 x) (vector-set! e 2 y))
+(define (entity/vel e) (list (vector-ref e 3) (vector-ref e 4)))
+(define (entity/pos e) (list (vector-ref e 1) (vector-ref e 2)))
+(define (world/step dt)
+  (for-each (lambda (e)
+    (vector-set! e 1 (+ (vector-ref e 1) (* (vector-ref e 3) dt)))
+    (vector-set! e 2 (+ (vector-ref e 2) (* (vector-ref e 4) dt))))
+    *ents*))
+(define (world/count) (length *ents*))
+;; --- end runtime ---
+
+;; block: ten steps, vel 2
+(world/reset!)
+(define hero (world/spawn 'hero 0 0))
+(entity/set-vel! hero 2 0)
+(let loop ((n 10)) (when (> n 0) (world/step 0.016) (loop (- n 1))))
+(display (entity/pos hero))(newline)
+
+;; orbit block
+(world/reset!)
+(define moon (world/spawn 'moon 3 0))
+(let loop ((n 120))
+  (when (> n 0)
+    (let* ((pos (entity/pos moon)) (x (car pos)) (y (cadr pos))
+           (angle (datan2 y x)) (speed 2))
+      (entity/set-vel! moon (* speed (- (dsin angle))) (* speed (dcos angle)))
+      (world/step 0.016) (loop (- n 1)))))
+(display (entity/pos moon))(newline)

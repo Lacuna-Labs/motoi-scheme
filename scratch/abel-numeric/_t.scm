@@ -1,0 +1,1 @@
+(guard (e (#t (error-object-message e))) (rng-uniform 10))

@@ -1,0 +1,116 @@
+(verb
+  :name "cpu/load-program!" :std "Motoi"
+  :library "cpu"
+  :kind "state-change"
+  :signature "(cpu/load-program! program) -> byte-count"
+  :summary "Write a program into memory starting at address 0, reset PC and FLAGS, and return the number of bytes loaded."
+  :explanation "cpu/load-program! puts code into the machine. It accepts three shapes: a symbolic instruction list like ((LOAD 5) (ADD) (HALT)), which it auto-assembles; a flat list of raw opcode bytes; or a mix. It writes the bytes from address 0 up, sets PC back to 0 so the program will run from the start, clears FLAGS, and returns how many bytes it wrote. Anything past the program stays zero (which decodes as NOP-adjacent territory). A program over 256 bytes is rejected — the whole machine is only 256 bytes."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(cpu/boot!)\n(display (cpu/load-program! (list (list 'LOAD 5) (list 'HALT))))" :note "Load 'LOAD 5; HALT'. Returns 3: two bytes for LOAD 5, one for HALT.")
+    (:dialect "motoi" :tier "intermediate" :code "(cpu/boot!)\n(cpu/load-program! (list 2 7 255))\n(display (cpu/read-mem 1))" :note "Load raw bytes 02 07 FF (LOAD 7; HALT). Byte at address 1 is the operand 7.")
+    (:dialect "motoi" :tier "expert" :code "(cpu/boot!)\n(define add-prog (list (list 'LOAD 5) (list 'MOV 'B) (list 'LOAD 3) (list 'ADD) (list 'HALT)))\n(display (cpu/load-program! add-prog))" :note "A full add program: 5 into A, copy to B, 3 into A, ADD. Returns 8 bytes.")
+  )
+  :caveats ("PC is reset to 0 and FLAGS to 0, but registers A/B/SP are NOT touched — boot first for a truly clean slate." "Nested lists trigger auto-assembly; a flat number list is taken as literal bytes — don't mix intent by accident." "A program longer than 256 bytes raises an error; the machine cannot hold it." "Bytes past the program are left as-is (zero after a boot), which the CPU may execute if PC ever reaches them.")
+  :drawbacks ("Always loads at address 0; you cannot load a routine at an arbitrary offset with this verb." "No relocation or linking: symbolic labels are not resolved here (the base assembler is label-free)." "Silently overwrites whatever was at addresses 0..n-1 without warning.")
+  :usecases ("Load a freshly-authored program before running it." "Poke raw bytes to study how the assembler encodes an instruction." "Reload a corrected program during a debug loop without rebooting registers." "Set up a fixed byte pattern in low memory for a step-through lesson.")
+  :related ("cpu/assemble" "cpu/boot!" "cpu/run!" "cpu/step!" "cpu/read-mem" "cpu/disassemble")
+  :learn (:concept "Loading: placing executable bytes into memory and pointing the program counter at the entry point." :prerequisites ("cpu/boot!" "cpu/assemble" "(core)/list") :progression "Boot, load-program!, then run! or step! to execute; disassemble to read back what you loaded.")
+  :row-2-audit (
+    (:eng-program "(cpu/boot!)\n(= (cpu/load-program! (list (list 'LOAD 5) (list 'HALT))) 3)"
+     :math-program "(:honest-null \"Load is a memory write plus a PC/FLAGS reset; the byte count is |assemble(program)|, a length, not an algebraic law. See :cs-program for the round-trip witness.\")"
+     :cs-program "(cpu/boot!)\n(cpu/load-program! (list 2 7 255))\n(and (= (cpu/read-mem 0) 2) (= (cpu/read-mem 1) 7) (= (cpu/read-mem 2) 255))"
+     :problem "A program ran with the wrong result. Was the bug in the code, or did the wrong bytes get loaded? Without inspecting memory you can't tell."
+     :explanation "eng: assert the returned byte count matches the expected size. math: honest-null — a load is a write, not algebra. cs: read the loaded bytes back and confirm they match the source."
+     :meta "The byte count and a read-back are your two audit hooks: they tell you the load did exactly what you asked.")
+    (:eng "Check the byte count against the expected program size before running."
+     :math "The count is the length of the assembled byte stream."
+     :cs "Load is a write; verify by reading the bytes back — a round-trip check."))
+  :row-3-dimension (
+    (:setup "Loading: copy a sequence of bytes into a store at a known offset and set the read head to the start, ready to consume them."
+     :rungs ((:domain "cpu (program into memory)" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))")
+             (:domain "buffer filled from a list" :code "(define (fill xs) (list->vector xs))\n(fill (list 2 5 255))")
+             (:domain "prefix written to a tape" :code "(define (write-prefix xs) (length xs))\n(write-prefix (list 2 5 255))"))
+     :explanation "In Motoi, load-program! writes bytes into memory and rewinds PC. Filling a vector from a list writes elements into a store. Writing a prefix onto a tape places symbols and leaves the head at the start. All three place a sequence and position a reader at its head."
+     :meta "The shape transfers wherever you stage data and then point something at its beginning.")
+    (:eng "The load offset and reset head define where execution will begin."
+     :math "Load embeds a finite byte sequence into the memory array at offset 0."
+     :cs "Same slot as memcpy-into-buffer plus a seek-to-start."))
+  :row-4-proof (
+    (:eng-program "(cpu/boot!)\n(define n (cpu/load-program! (list (list 'LOAD 5) (list 'MOV 'B) (list 'LOAD 3) (list 'ADD) (list 'HALT))))\n(= n 8)"
+     :math-program "(:honest-null \"That the loaded bytes equal assemble(program) is a round-trip identity on byte sequences; it is verified by comparison, shown in :cs-program, not by an algebraic law.\")"
+     :cs-program "(cpu/boot!)\n(define prog (list (list 'LOAD 5) (list 'HALT)))\n(cpu/load-program! prog)\n(equal? (list (cpu/read-mem 0) (cpu/read-mem 1) (cpu/read-mem 2)) (cpu/assemble prog))"
+     :claim "cpu/load-program! writes exactly (cpu/assemble program) into memory from address 0 and returns its length."
+     :invariant "∀ program p: mem[0..n) = assemble(p) ∧ return = n ∧ PC = 0"
+     :meta "Falsified if a loaded byte differs from the assembled byte, or the count differs from the assembled length.")
+    (:eng "Assert the byte count equals the known program size."
+     :math "Load is an injection of assemble(p) into the memory array."
+     :cs "Round-trip: read-mem of the loaded region equals assemble(program)."))
+  :row-5-emergence (
+    (:eng-composition "(define (assemble-and-load prog)\n  (cpu/boot!)\n  (cpu/load-program! prog)\n  (cpu/disassemble (cpu/assemble prog)))\n(assemble-and-load (list (list 'LOAD 5) (list 'HALT)))"
+     :math-composition "(:honest-null \"assemble→load→disassemble is a build/deploy/inspect pipeline over byte sequences, not an algebraic composition. See :cs-composition for the run pipeline.\")"
+     :cs-composition "(define (build-run prog)\n  (cpu/boot!)\n  (cpu/load-program! prog)\n  (cpu/run!)\n  (cadr (assoc ':A (cpu/state))))\n(build-run (list (list 'LOAD 5) (list 'MOV 'B) (list 'LOAD 3) (list 'ADD) (list 'HALT)))"
+     :base "cpu/load-program! stages code into memory."
+     :emergent "assemble → load → run → read is the BUILD-DEPLOY-RUN family — the compile/flash/execute cycle of every embedded toolchain."
+     :meta "Family: build-deploy-run — same slot as gcc → objcopy → flash → reset on a microcontroller.")
+    (:eng "Chain assemble/load/run/read as the console's flash-and-go cycle."
+     :math "Load is the deploy step between build (assemble) and execute (run)."
+     :cs "Compile-flash-execute — the embedded developer's inner loop."))
+)
+
+(verb
+  :name "cpu/run!" :std "Motoi"
+  :library "cpu"
+  :kind "state-change"
+  :signature "(cpu/run! [max-instructions]) -> instructions-executed"
+  :summary "Run the fetch-decode-execute loop until HALT or the instruction cap; return how many instructions ran."
+  :explanation "cpu/run! IS the loop. It fetches the byte at PC, decodes it, executes it, advances PC, and repeats until the machine hits HALT or the cap is reached. It returns the number of instructions executed. The default cap is 10,000 so a program that forgets to HALT (say, a bare JMP back to itself) can't hang the console forever — it stops and you can inspect why. Pass a smaller cap to run just a few steps in bulk. run! is deterministic: the same loaded program always runs the same number of instructions."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(display (cpu/run!))" :note "Run to HALT. Returns 2: LOAD executed, then HALT.")
+    (:dialect "motoi" :tier "intermediate" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'JMP 0)))\n(display (cpu/run! 50))" :note "An infinite JMP loop. Cap it at 50: run! returns 50 and stops, no hang.")
+    (:dialect "motoi" :tier "expert" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'MOV 'B) (list 'LOAD 3) (list 'ADD) (list 'HALT)))\n(cpu/run!)\n(display (cadr (assoc ':A (cpu/state))))" :note "Run an add program, then read A: 5 + 3 = 8.")
+  )
+  :caveats ("The default 10,000-instruction cap means a non-halting program returns 10000, not an error — check cpu/halted? to tell 'finished' from 'capped'." "run! does not boot first; it runs from the current PC, so a prior partial run continues where it left off." "The cap counts instructions, not cycles or bytes." "Once HALTed, further run! calls execute zero instructions and return 0.")
+  :drawbacks ("No breakpoints: run! goes to HALT or the cap with no way to stop at a specific address (use cpu/step! for that)." "No per-instruction trace from run! itself; if you need the trace, drive cpu/step! in a loop." "The cap is a blunt safety net, not a time budget — a tight loop still burns the full count.")
+  :usecases ("Execute a finished program and read the result." "Bulk-advance past a known-good preamble before stepping the interesting part." "Bound a possibly-non-terminating program with an explicit cap for safety." "Measure a program's instruction count as a rough cost signal.")
+  :related ("cpu/step!" "cpu/halted?" "cpu/load-program!" "cpu/state" "cpu/boot!")
+  :learn (:concept "The execution loop: repeatedly fetch, decode, and execute until a stop condition, bounded to guarantee termination." :prerequisites ("cpu/load-program!" "cpu/halted?" "cpu/state") :progression "Load a program, run! it, check cpu/halted?, then read cpu/state — or drop to cpu/step! when you need to watch each step.")
+  :row-2-audit (
+    (:eng-program "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(= (cpu/run!) 2)"
+     :math-program "(:honest-null \"Instruction count is the length of the executed trace up to HALT or the cap; it is a count, not an algebraic law. See :cs-program for the termination witness.\")"
+     :cs-program "(cpu/boot!)\n(cpu/load-program! (list (list 'JMP 0)))\n(<= (cpu/run! 20) 20)"
+     :problem "A program is running. Did it finish, or is it stuck in a loop? A bare instruction count doesn't say which — and a runaway loop could freeze the console."
+     :explanation "eng: assert the exact count for a known program. math: honest-null — a trace length is a count, not algebra. cs: a capped run of an infinite loop returns at-most-cap — termination is guaranteed."
+     :meta "The cap is the audit: it converts 'might hang forever' into 'runs at most N and reports back'. Pair the count with cpu/halted? to know why it stopped.")
+    (:eng "Assert the instruction count for a known program; the cap is your hang guard."
+     :math "The count is the length of the execution trace to the stop condition."
+     :cs "Bounded execution — the cap guarantees the loop terminates."))
+  :row-3-dimension (
+    (:setup "A bounded run loop: repeat a step until a stop flag is set or a maximum iteration count is reached, then report how many steps ran."
+     :rungs ((:domain "cpu (fetch-decode-execute)" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 1) (list 'HALT)))\n(cpu/run!)")
+             (:domain "capped named-let loop" :code "(let loop ((n 0)) (if (>= n 5) n (loop (+ n 1))))")
+             (:domain "bounded fixed-point iteration" :code "(let loop ((x 0) (k 0)) (if (or (= x 1) (>= k 10)) k (loop 1 (+ k 1))))"))
+     :explanation "In Motoi, cpu/run! iterates the machine until HALT or the cap. A capped named-let loops until its counter hits the bound. A bounded fixed-point iteration runs until it converges or hits a max. All three are 'iterate until a condition, but never more than N times.'"
+     :meta "The shape transfers to any loop that must make progress but is guarded against never stopping.")
+    (:eng "The cap is the operational safety bound every real control loop carries."
+     :math "run! computes a bounded orbit of the machine's transition function."
+     :cs "Same slot as a while-loop with a max-iterations guard."))
+  :row-4-proof (
+    (:eng-program "(cpu/boot!)\n(cpu/load-program! (list (list 'JMP 0)))\n(<= (cpu/run! 100) 100)"
+     :math-program "(:honest-null \"That run! executes at most the cap is a termination bound on an iteration count, checked by comparison (see :eng-program), not an algebraic identity.\")"
+     :cs-program "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(cpu/run!)\n(cpu/halted?)"
+     :claim "cpu/run! executes at most max-instructions (default 10,000) and stops at HALT if reached; it never runs unbounded."
+     :invariant "∀ program, cap c: run!(c) ≤ c ∧ (halted? ⇒ trace ended at HALT)"
+     :meta "Falsified if run! returns more than the cap, or a program that reaches HALT is not marked halted.")
+    (:eng "Assert the return is capped for a non-halting program."
+     :math "run! computes a bounded orbit — length ≤ cap by construction."
+     :cs "A halting program leaves cpu/halted? true — the stop witness."))
+  :row-5-emergence (
+    (:eng-composition "(define (run-and-report prog)\n  (cpu/boot!)\n  (cpu/load-program! prog)\n  (list (cons 'instrs (cpu/run!)) (cons 'halted (cpu/halted?))))\n(run-and-report (list (list 'LOAD 5) (list 'HALT)))"
+     :math-composition "(:honest-null \"run-then-check is sequence-then-observe, a control-flow composition, not an algebraic one. See :cs-composition for the full driver.\")"
+     :cs-composition "(define (add-two a b)\n  (cpu/boot!)\n  (cpu/load-program! (list (list 'LOAD a) (list 'MOV 'B) (list 'LOAD b) (list 'ADD) (list 'HALT)))\n  (cpu/run!)\n  (cadr (assoc ':A (cpu/state))))\n(add-two 5 3)"
+     :base "cpu/run! drives the loop to completion."
+     :emergent "load → run → check-halted → read-state is the EXECUTE-AND-OBSERVE family — the run/assert cycle of every interpreter test and CI job."
+     :meta "Family: execute-and-observe — same slot as 'run the binary, check the exit code, read stdout'.")
+    (:eng "Wrap run+halted+state so a run always reports both outcome and result."
+     :math "run! is the iterate step; the observers project the final state."
+     :cs "Execute-and-observe — run, check status, read output.")))

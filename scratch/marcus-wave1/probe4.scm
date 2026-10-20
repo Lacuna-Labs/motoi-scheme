@@ -1,0 +1,5 @@
+(define ip (open-input-string "(+ 1 2) hello 42"))
+(display (list 'first (read ip))) (newline)
+(display (list 'second (read ip))) (newline)
+(display (list 'third (read ip))) (newline)
+(display (eof-object? (read ip))) (newline)

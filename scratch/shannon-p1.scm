@@ -1,0 +1,8 @@
+(define D3 (alg/dihedral 3))
+(display D3) (newline)
+(define e (alg/identity D3))
+(display (list 'identity e)) (newline)
+(define s 3)
+(display (list 'op-s-s (alg/op D3 s s))) (newline)
+(display (list 'inv-1 (alg/inverse D3 1))) (newline)
+(display (list 'elements (alg/elements D3))) (newline)

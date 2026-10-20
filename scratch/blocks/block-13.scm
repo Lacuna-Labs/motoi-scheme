@@ -1,0 +1,12 @@
+;; Spawn coins at random positions (deterministic via index-seeded scatter).
+(world/reset!)
+(let loop ((i 0))
+  (when (< i 20)
+    (let* ((seed-x (+ 1000 (* i 73)))
+           (seed-y (+ 2000 (* i 137)))
+           (x (+ 100 (* 600 (- (dsin seed-x) -1) 0.5)))
+           (y (+ 100 (* 400 (- (dsin seed-y) -1) 0.5)))
+           (name (string->symbol (string-append "coin-" (number->string i)))))
+      (world/spawn name `((x . ,x) (y . ,y) (sprite . "coin"))))
+    (loop (+ i 1))))
+(world/step)

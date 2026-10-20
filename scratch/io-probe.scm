@@ -1,0 +1,6 @@
+(display "hello") (newline)
+(for-each (lambda (x) (display x) (newline)) '(a b c))
+(define (say . xs) (for-each display xs) (newline))
+(say "x=" 1 " y=" 2)
+(write-string "ws\n")
+(display (string-append "[A] " "north")) (newline)

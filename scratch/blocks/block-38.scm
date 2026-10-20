@@ -1,0 +1,12 @@
+;; Spawn coins tracing a winding path.
+(world/reset!)
+(let ((waypoints '((100 . 300) (200 . 200) (350 . 250) (500 . 150) (650 . 200) (750 . 300))))
+  (let loop ((points waypoints) (i 0))
+    (when (not (null? points))
+      (let* ((pt (car points))
+             (x (car pt))
+             (y (cdr pt))
+             (name (string->symbol (string-append "coin-" (number->string i)))))
+        (world/spawn name `((x . ,x) (y . ,y) (sprite . "coin"))))
+      (loop (cdr points) (+ i 1)))))
+(world/step)

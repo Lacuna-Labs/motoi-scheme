@@ -1,0 +1,6 @@
+(define q (phys/quantity 5.0 '((length . 1))))
+(display q) (newline)
+(display (phys/quantity->tag q)) (newline)
+(display (phys/dimension q)) (newline)
+(display (list ':value 5.0)) (newline)
+(display (assq ':value (list (list ':value 5.0) (list ':dimension '((length . 1)))))) (newline)

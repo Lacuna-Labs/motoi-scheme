@@ -1,0 +1,10 @@
+(let* ((g '(1 0 2))
+       (p '(1 2 0))
+       (conj (alg/perm-conjugate g p))
+       (cyc-p (alg/perm->cycles p))
+       (cyc-conj (alg/perm->cycles conj)))
+  (display (list 'conj conj 'cyc-p cyc-p 'cyc-conj cyc-conj
+                 'same-len (= (length (car cyc-p)) (length (car cyc-conj)))))
+  (newline))
+(display (alg/perm->cycles '(0 1 2))) (newline)
+(display (map alg/perm->cycles (list (alg/perm-conjugate '(1 2 0) '(1 2 0))))) (newline)

@@ -1,0 +1,5 @@
+(display (nt/continued-fraction 355/113)) (newline)
+(display (nt/continued-fraction 22/7)) (newline)
+(display (nt/continued-fraction 1/2)) (newline)
+(display (nt/continued-fraction -7/3)) (newline)
+(display (nt/continued-fraction 3.14159 5)) (newline)

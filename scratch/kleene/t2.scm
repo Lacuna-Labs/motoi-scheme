@@ -1,0 +1,1 @@
+(display (char? #\a))(newline)

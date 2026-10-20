@@ -1,0 +1,17 @@
+;; Spawn three clusters of coins, each cluster a different "type".
+(world/reset!)
+(define (spawn-cluster cx cy count type-name)
+  (let loop ((i 0))
+    (when (< i count)
+      (let* ((offset-x (* 40 (- (dsin (+ 3000 (* i 71))) 0)))
+             (offset-y (* 40 (- (dsin (+ 4000 (* i 103))) 0)))
+             (x (+ cx offset-x))
+             (y (+ cy offset-y))
+             (name (string->symbol (string-append (symbol->string type-name) "-" (number->string i)))))
+        (world/spawn name `((x . ,x) (y . ,y) (sprite . "coin") (type . ,type-name))))
+      (loop (+ i 1)))))
+
+(spawn-cluster 200 200 8 'bronze)
+(spawn-cluster 400 300 8 'silver)
+(spawn-cluster 600 400 8 'gold)
+(world/step)

@@ -1,0 +1,6 @@
+(define tri (topo/complex (list (list 0 1) (list 1 2) (list 2 0) (list 0 1 2))))
+(display (list 'filled-tri-homology (topo/homology-gf2 tri))) (newline)
+(display (list 'filled-tri-betti (topo/betti tri))) (newline)
+(define hollow (topo/complex (list (list 0 1) (list 1 2) (list 2 0))))
+(display (list 'hollow-tri-betti (topo/betti hollow))) (newline)
+(display (list 'sphere2-betti (topo/betti (topo/sphere 2)))) (newline)

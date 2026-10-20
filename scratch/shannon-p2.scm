@@ -1,0 +1,8 @@
+(define D3 (alg/dihedral 3))
+(define r 1)
+(define s 3)
+(define srs (alg/op D3 s (alg/op D3 r s)))
+(define r-inv (alg/inverse D3 r))
+(display (list 'srs srs 'r-inv r-inv 'eq (equal? srs r-inv))) (newline)
+(define e (alg/identity D3))
+(display (list 'ss (alg/op D3 s s) 'e e 'eq (equal? (alg/op D3 s s) e))) (newline)

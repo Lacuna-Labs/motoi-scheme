@@ -1,0 +1,11 @@
+;; Spawn coins only at even indices.
+(world/reset!)
+(let loop ((i 0))
+  (when (< i 10)
+    (when (= (modulo i 2) 0)
+      (let ((x (+ 100 (* i 70)))
+            (y 300)
+            (name (string->symbol (string-append "coin-" (number->string i)))))
+        (world/spawn name `((x . ,x) (y . ,y) (sprite . "coin")))))
+    (loop (+ i 1))))
+(world/step)

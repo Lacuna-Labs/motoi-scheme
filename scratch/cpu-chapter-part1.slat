@@ -1,0 +1,129 @@
+;;; 18b-cpu.slat — Motoi Scheme Reference · Chapter 18b · library cpu
+;;;
+;;; 12 verbs in this library. Read chapter 00-intro.slat first.
+;;;
+;;; cpu is the small, honest 8-bit teaching machine that makes the Book of
+;;; Code's CPU chapter real: 256 bytes of memory, registers A/B/PC/SP/FLAGS,
+;;; and 19 opcodes that fit on one page. The reference IS the machine — if the
+;;; opcode table does not encode a mnemonic, the mnemonic does not exist. State
+;;; is process-local: every new console session boots a fresh CPU.
+;;;
+;;; ─── THE ROW RULES (summary — full doctrine in 00-intro.slat) ───
+;;;
+;;; Every verb has 5 rows; each row does ONE job. Stay in lane.
+;;;   Row 1 (HOW · Composition) · Row 2 (WHEN · Audit) · Row 3 (WHERE ELSE · Dim)
+;;;   Row 4 (WHY · Proof) · Row 5 (WITH WHAT ELSE · Emergence)
+;;; Every row carries :eng · :math · :cs. Every code block RUNS through ./bin/motoi.
+
+(dialect :applies ("motoi") :note "Library cpu — 12 verbs. The 8-bit teaching machine.")
+
+(chapter :number "18b" :library "cpu" :verb-count 12 :training-eligible #t
+  :read-order-hint "read after 18-const.slat, before 19-cortex.slat"
+  :prose
+"# cpu — the small honest 8-bit machine
+
+Motoi ships a real CPU you can poke from the console. It is deliberately tiny:
+256 bytes of memory, two general registers (A and B), a program counter (PC), a
+stack pointer (SP) that starts at 255 and grows down, a FLAGS bitfield (Z zero,
+N negative, C carry, H halt), and nineteen opcodes. The whole instruction set
+fits on one printed page, and every opcode the Book of Code names can be run
+here for real.
+
+The design frame is Speak & Spell: small, tangible, deterministic. 256 bytes is
+a number an eleven-year-old can hold in their head; 8-bit words match the adder
+chapters that come before; the fetch-decode-execute loop IS `cpu/run!`, not
+scaffolding around it.
+
+## The loop
+
+A CPU does one thing forever: fetch the byte at PC, decode it into an opcode,
+execute it, advance PC (unless the instruction jumped), repeat until HALT. You
+can drive that loop one instruction at a time with `cpu/step!`, or let it run to
+completion with `cpu/run!` (capped at 10,000 instructions so a program with no
+HALT can't hang the console).
+
+## State is yours to hold
+
+Every console session gets its own CPU. `cpu/boot!` wipes it to zero.
+`cpu/state` hands you an alist of every register plus the first bytes of memory,
+so you can save it and reason about it. There is no hidden global — the machine
+is process-local, and persistence is your job (save the alist, restore it later).
+
+## The opcode table is the whole truth
+
+`cpu/opcodes` returns the entire instruction set as data. That is not
+documentation of behaviour; it is the behaviour. Assemble programs with
+`cpu/assemble` (symbolic `(LOAD 5)` form), load them with `cpu/load-program!`,
+and read them back with `cpu/disassemble`. `cpu/display` draws the fixed-width
+register-and-memory dump the IDE shows.
+
+## The short version
+
+- `cpu/boot!` resets; `cpu/load-program!` loads bytes; `cpu/run!` / `cpu/step!`
+  drive the loop; `cpu/halted?` asks if it stopped.
+- `cpu/state` / `cpu/read-mem` / `cpu/write-mem!` inspect and poke.
+- `cpu/assemble` / `cpu/disassemble` / `cpu/opcodes` / `cpu/display` are the
+  authoring and viewing tools.
+- Everything is deterministic and process-local. Boot fresh, and it always
+  starts the same way.")
+
+;; ═══ 12 verbs in library cpu ═══
+
+(verb
+  :name "cpu/boot!" :std "Motoi"
+  :library "cpu"
+  :kind "state-change"
+  :signature "(cpu/boot!) -> state-alist"
+  :summary "Reset every register and all 256 bytes of memory to zero; return the fresh state as an alist."
+  :explanation "cpu/boot! is power-on reset. It replaces the session's CPU with a brand-new machine: A=0, B=0, PC=0, SP=255, FLAGS=0, and 256 zeroed bytes of memory. It returns the fresh state as an alist so you can confirm the reset in one call. Because state is process-local, booting affects only your session's machine. Call it before loading a new program so no stale bytes or flags linger from the last run."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(display (cpu/boot!))" :note "Power on. Every register reads zero, SP reads 255, memory is all zeros.")
+    (:dialect "motoi" :tier "intermediate" :code "(cpu/write-mem! 10 99)\n(cpu/boot!)\n(display (cpu/read-mem 10))" :note "Poke a byte, then boot: the byte is gone. Boot is a full wipe, not a soft reset.")
+    (:dialect "motoi" :tier "expert" :code "(define (fresh-a) (cadr (assoc ':A (cpu/boot!))))\n(display (fresh-a))" :note "Read a register straight out of the boot alist; A is always 0 on a fresh machine.")
+  )
+  :caveats ("Boot discards the current program AND its output — save cpu/state first if you need it." "SP resets to 255 (0xFF), not 0: the stack grows downward from the top of memory." "FLAGS resets to 0, so any halt/zero/carry state from a prior run is cleared." "State is process-local; booting your machine does not touch another session's machine.")
+  :drawbacks ("There is no partial reset: you cannot zero memory but keep registers, or vice versa." "No undo: once booted, the previous state is gone unless you saved the alist." "Returns a 16-byte memory window in the alist, not all 256 bytes — use cpu/state with a larger N to see more.")
+  :usecases ("Start-of-program hygiene: boot before every cpu/load-program! so no stale bytes leak in." "Test isolation: boot between test cases so each starts from a known machine." "Teaching reset: give a learner a clean slate after a confusing run." "Confirm a known-good starting state before stepping through a trace by hand.")
+  :related ("cpu/load-program!" "cpu/state" "cpu/run!" "cpu/step!" "cpu/halted?")
+  :learn (:concept "Power-on reset: returning a stateful machine to a known, deterministic starting configuration." :prerequisites ("(core)/assoc" "(core)/cdr" "cpu/state") :progression "Boot the machine, then cpu/load-program! a program, then cpu/run! it, then cpu/state to read the result.")
+  :row-2-audit (
+    (:eng-program "(define s (cpu/boot!))\n(and (= (cadr (assoc ':A s)) 0) (= (cadr (assoc ':SP s)) 255))"
+     :math-program "(:honest-null \"cpu/boot! is a reset to a fixed constant state; there is no algebraic law beyond idempotence-of-constant. See :cs-program for the determinism witness.\")"
+     :cs-program "(define a (cpu/boot!))\n(define b (cpu/boot!))\n(equal? a b)"
+     :problem "A program ran and left FLAGS.H set and stray bytes in memory. The next load inherits the mess and behaves differently than a clean run."
+     :explanation "eng: assert the known reset values (A=0, SP=255). math: honest-null — reset to a constant is not algebra. cs: two boots return identical state — determinism."
+     :meta "Boot is the guarantee that 'clean start' means the same thing every time. Skip it and old state contaminates the next run.")
+    (:eng "Assert reset invariants before trusting a run; boot is the audit checkpoint."
+     :math "Reset maps any state to one fixed point — the zero machine."
+     :cs "Idempotent power-on reset — same slot as a factory reset or fresh VM."))
+  :row-3-dimension (
+    (:setup "A power-on reset: force a stateful machine back to one fixed, known starting configuration, discarding whatever came before."
+     :rungs ((:domain "cpu (register machine)" :code "(cpu/boot!)")
+             (:domain "counter reset to zero" :code "(define (reset) 0)\n(reset)")
+             (:domain "identity of a monoid" :code "(define zero-state 0)\nzero-state"))
+     :explanation "In Motoi, cpu/boot! forces the machine to its zero state. A counter's reset forces it to 0. A monoid's identity is the element that behaves like the fresh start. All three name the one configuration from which everything begins."
+     :meta "The shape transfers wherever a stateful thing has a canonical 'from scratch' point.")
+    (:eng "The reset value is the reference every later state is measured against."
+     :math "Boot picks out the fixed point of the reset map."
+     :cs "Canonical initial state — the identity element of the run."))
+  :row-4-proof (
+    (:eng-program "(define s (cpu/boot!))\n(and (= (cadr (assoc ':A s)) 0) (= (cadr (assoc ':B s)) 0) (= (cadr (assoc ':PC s)) 0) (= (cadr (assoc ':SP s)) 255) (= (cadr (assoc ':FLAGS s)) 0))"
+     :math-program "(:honest-null \"The boot state is a constant tuple; its correctness is a schema equality, not an algebraic identity. See :eng-program for the field-by-field witness.\")"
+     :cs-program "(begin (cpu/write-mem! 5 200) (cpu/boot!) (= (cpu/read-mem 5) 0))"
+     :claim "cpu/boot! yields exactly A=0, B=0, PC=0, SP=255, FLAGS=0, and every memory byte 0."
+     :invariant "∀ prior state s: boot!() = ⟨A0 B0 PC0 SP255 FLAGS0 mem0…⟩"
+     :meta "Falsified by any non-zero register (except SP=255) or any non-zero byte after boot.")
+    (:eng "Field-by-field assertion on the returned alist."
+     :math "Boot is a constant function into a single tuple."
+     :cs "Memory-clear witness: a poked byte reads zero after boot."))
+  :row-5-emergence (
+    (:eng-composition "(define (clean-load prog)\n  (cpu/boot!)\n  (cpu/load-program! prog))\n(clean-load (list (list 'LOAD 5) (list 'HALT)))"
+     :math-composition "(:honest-null \"boot-then-load is sequential state assignment, not algebraic composition; the emergent shape is a lifecycle, not a law. See :cs-composition for the run harness.\")"
+     :cs-composition "(define (run-fresh prog)\n  (cpu/boot!)\n  (cpu/load-program! prog)\n  (cpu/run!)\n  (cpu/state))\n(run-fresh (list (list 'LOAD 5) (list 'MOV 'B) (list 'LOAD 3) (list 'ADD) (list 'HALT)))"
+     :base "cpu/boot! resets to the zero machine."
+     :emergent "boot → load → run → read forms the RUN-HARNESS family — the setup/exercise/teardown loop every test runner and REPL-eval uses."
+     :meta "Family: run harness — same slot as a test fixture's setUp or a container's fresh boot before each job.")
+    (:eng "Wrap boot+load+run+read as one harness so every run starts clean."
+     :math "Reset composes as the left identity of the run sequence."
+     :cs "Setup phase of a fixture — deterministic start before exercise."))
+)

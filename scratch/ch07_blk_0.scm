@@ -1,0 +1,6 @@
+(require 'game/world)
+(world/gravity! 0 0)
+(define p (world/spawn 'p 10 10))
+(entity/move! p 5 3)
+(display (list (entity/x p) (entity/y p)))
+(newline)

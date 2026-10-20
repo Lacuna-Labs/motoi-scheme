@@ -1,0 +1,12 @@
+(define S (list 1 3 4))
+(define (game/mex xs)
+  (let loop ((k 0))
+    (if (member k xs) (loop (+ k 1)) k)))
+(define (comb/range start end)
+  (if (>= start end) '() (cons start (comb/range (+ start 1) end))))
+(define (grundy-subtraction n allowed)
+  (if (<= n 0) 0
+      (let ((succs (filter (lambda (m) (>= m 0))
+                           (map (lambda (s) (- n s)) allowed))))
+        (game/mex (map (lambda (m) (grundy-subtraction m allowed)) succs)))))
+(display (map (lambda (n) (grundy-subtraction n S)) (comb/range 0 40)))

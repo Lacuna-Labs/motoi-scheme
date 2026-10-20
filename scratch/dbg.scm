@@ -1,0 +1,7 @@
+(define s "C4")
+(define n (string-length s))
+(display (list 'n n))(newline)
+(display (list 'oct (substring s (- n 1) n)))(newline)
+(display (list 'octnum (string->number (substring s (- n 1) n))))(newline)
+(display (list 'pc (substring s 0 (- n 1))))(newline)
+(display (list 'assoc (assoc (substring s 0 (- n 1)) '(("C" . 0)("D" . 2)))))(newline)

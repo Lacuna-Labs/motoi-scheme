@@ -1,0 +1,115 @@
+(verb
+  :name "cpu/step!" :std "Motoi"
+  :library "cpu"
+  :kind "state-change"
+  :signature "(cpu/step!) -> mnemonic-symbol | #f"
+  :summary "Execute exactly one instruction at PC; return the mnemonic run as a symbol, or #f if the machine is halted."
+  :explanation "cpu/step! is single-step debugging. It fetches the one byte at PC, decodes it, executes it, advances PC (unless the instruction jumped), and returns the mnemonic that ran as a Scheme symbol — so (eq? m 'ADD) reads naturally. If the machine is already halted it does nothing and returns #f, so you can step past HALT safely. Drive it in a loop and you have written cpu/run! by hand, but with the chance to inspect every register between instructions. This is how you watch the loop, not just its result."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(display (cpu/step!))" :note "Step once. The first instruction is LOAD, so it returns the symbol LOAD.")
+    (:dialect "motoi" :tier "intermediate" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'HALT)))\n(cpu/step!)\n(display (cpu/step!))" :note "Step past HALT: the second step returns #f — stepping a halted machine is a safe no-op.")
+    (:dialect "motoi" :tier "expert" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'MOV 'B) (list 'HALT)))\n(cpu/step!)\n(cpu/step!)\n(display (cadr (assoc ':B (cpu/state))))" :note "Step twice (LOAD then MOV) and read B: A's 5 has been copied into B.")
+  )
+  :caveats ("A halted machine returns #f and does nothing — always check for #f before assuming an instruction ran." "step! advances PC by the instruction size UNLESS the instruction jumped (JMP/JZ/JNZ/CALL/RET), which is exactly how the real loop behaves." "It returns a symbol, not a string: compare with eq? and a quoted mnemonic." "step! does not boot; it runs from wherever PC currently points.")
+  :drawbacks ("One instruction per call is slow for long programs — use cpu/run! when you don't need the intermediate states." "No reverse step: you cannot undo an instruction; re-run from a boot to get back." "The returned mnemonic tells you what ran, not its operand — read memory or state for the full picture.")
+  :usecases ("Watch registers change one instruction at a time while teaching fetch-decode-execute." "Debug a program by stepping to the instruction just before a suspected fault." "Build a custom trace by collecting each step's mnemonic in a loop." "Verify a jump landed where you expected by stepping across it and reading PC.")
+  :related ("cpu/run!" "cpu/halted?" "cpu/state" "cpu/display" "cpu/load-program!")
+  :learn (:concept "Single-stepping: advancing a machine by exactly one transition so every intermediate state is observable." :prerequisites ("cpu/load-program!" "cpu/state" "(core)/eq?") :progression "Step! one instruction, read cpu/state, repeat; graduate to cpu/run! once you trust the program.")
+  :row-2-audit (
+    (:eng-program "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(eq? (cpu/step!) 'LOAD)"
+     :math-program "(:honest-null \"step! applies the transition function once; which mnemonic it returns is a decode lookup, not an algebraic law. See :cs-program for the halt-guard witness.\")"
+     :cs-program "(cpu/boot!)\n(cpu/load-program! (list (list 'HALT)))\n(cpu/step!)\n(eq? (cpu/step!) #f)"
+     :problem "A program produced a wrong register value. run! only shows the end state — you can't see which instruction corrupted it."
+     :explanation "eng: assert the first stepped mnemonic is LOAD. math: honest-null — a decode is a lookup, not algebra. cs: stepping a halted machine returns #f — the halt guard holds."
+     :meta "step! turns an opaque run into an inspectable trace: check the mnemonic AND the state after each step to pinpoint the exact instruction that misbehaved.")
+    (:eng "Assert each stepped mnemonic against the expected instruction stream."
+     :math "step! is one application of the machine's transition function."
+     :cs "Single-step with a halt guard — the debugger's basic move."))
+  :row-3-dimension (
+    (:setup "One transition: advance a state machine by exactly one move and hand back a label for the move that was made, so a caller can trace the path."
+     :rungs ((:domain "cpu (one instruction)" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'NOP) (list 'HALT)))\n(cpu/step!)")
+             (:domain "one fold step" :code "(define (step-sum acc x) (+ acc x))\n(step-sum 0 5)")
+             (:domain "one transition of an automaton" :code "(define (delta state input) (if (eq? state 'q0) 'q1 'q0))\n(delta 'q0 1)"))
+     :explanation "In Motoi, cpu/step! runs one instruction and names it. One fold step consumes one element and returns the new accumulator. One automaton transition consumes one input and returns the next state. All three advance a state by exactly one move."
+     :meta "The shape transfers to any incremental process you want to observe move-by-move.")
+    (:eng "Each step is an auditable unit — the finest grain of a run's log."
+     :math "step! is a single application of the state-transition function δ."
+     :cs "Same slot as a debugger's 'step over one instruction'."))
+  :row-4-proof (
+    (:eng-program "(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'HALT)))\n(cpu/step!)\n(= (cadr (assoc ':PC (cpu/state))) 2)"
+     :math-program "(:honest-null \"That PC advances by the instruction size is a decode-and-advance rule, shown by reading PC in :eng-program, not an algebraic identity.\")"
+     :cs-program "(cpu/boot!)\n(cpu/load-program! (list (list 'HALT)))\n(cpu/step!)\n(eq? (cpu/step!) #f)"
+     :claim "cpu/step! executes one instruction and advances PC by its size (unless it jumped); a halted machine steps to #f with no state change."
+     :invariant "not-halted ⇒ PC' = PC + size(instr) ∨ instr jumped;  halted ⇒ step!() = #f"
+     :meta "Falsified if a non-jump instruction leaves PC unchanged, or a halted step alters state.")
+    (:eng "After LOAD (2 bytes) PC reads 2 — the advance is exact."
+     :math "step! advances PC by instruction size or by the jump target."
+     :cs "The halt guard: a second step of a HALTed machine returns #f."))
+  :row-5-emergence (
+    (:eng-composition "(define (trace-run)\n  (let loop ((acc '()))\n    (let ((m (cpu/step!)))\n      (if m (loop (cons m acc)) (reverse acc)))))\n(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 5) (list 'MOV 'B) (list 'HALT)))\n(trace-run)"
+     :math-composition "(:honest-null \"Stepping to a fixpoint (halt) and collecting labels is an unfold over the transition function; the emergent trace is a list, not an algebraic law. See :cs-composition.\")"
+     :cs-composition "(define (count-steps)\n  (let loop ((n 0))\n    (if (cpu/step!) (loop (+ n 1)) n)))\n(cpu/boot!)\n(cpu/load-program! (list (list 'NOP) (list 'NOP) (list 'HALT)))\n(count-steps)"
+     :base "cpu/step! advances one instruction and names it."
+     :emergent "step! in a loop-until-#f is the TRACE family — building the full execution log run! hides, exactly how a single-step debugger records history."
+     :meta "Family: trace collection — same slot as a step-recorder or an instruction-level profiler.")
+    (:eng "Loop step! to build the trace run! omits — the audit log of a run."
+     :math "Iterating step! to halt is an unfold producing the run's trace."
+     :cs "Step-loop = the debugger's record-every-instruction mode.")))
+
+(verb
+  :name "cpu/halted?" :std "Motoi"
+  :library "cpu"
+  :kind "rd"
+  :signature "(cpu/halted?) -> boolean"
+  :summary "Return #t if the machine has hit HALT (FLAGS.H set), #f otherwise."
+  :explanation "cpu/halted? asks one question: has the CPU stopped? It reads the H bit of FLAGS, which HALT sets and which nothing else touches. It is the difference between 'the program finished' and 'the program is still runnable' — and, paired with cpu/run!'s instruction count, the difference between 'ran to completion' and 'hit the cap while still looping'. It is read-only: asking never changes the machine. A fresh boot is not halted; only executing HALT sets the flag."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(cpu/boot!)\n(display (cpu/halted?))" :note "A freshly booted machine has not run anything, so it is not halted: #f.")
+    (:dialect "motoi" :tier "intermediate" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'HALT)))\n(cpu/run!)\n(display (cpu/halted?))" :note "Run a program whose only instruction is HALT: now it's halted, #t.")
+    (:dialect "motoi" :tier "expert" :code "(cpu/boot!)\n(cpu/load-program! (list (list 'JMP 0)))\n(cpu/run! 10)\n(display (cpu/halted?))" :note "A capped run of an infinite loop: it stopped at the cap, not at HALT, so halted? is #f.")
+  )
+  :caveats ("Read-only: cpu/halted? never advances or changes the machine." "It reflects only the H flag — a program stopped by the run! cap (no HALT executed) reads #f." "A fresh boot is not halted; the flag is set exclusively by executing HALT." "It says nothing about WHERE the machine halted; read cpu/state's PC for that.")
+  :drawbacks ("Boolean only: it can't tell you at which address the HALT was, or how many instructions preceded it." "It cannot distinguish a clean HALT from a program that will never reach HALT until you also inspect the run! count." "No history: it reports the current flag, not whether the machine was ever halted and re-booted.")
+  :usecases ("Decide whether a run finished cleanly or hit the instruction cap." "Guard a cpu/step! loop: keep stepping while (not (cpu/halted?))." "Assert in a test that a program actually terminated." "Branch console output on whether the machine stopped on purpose.")
+  :related ("cpu/run!" "cpu/step!" "cpu/state" "cpu/boot!")
+  :learn (:concept "Termination sensing: reading a single flag that distinguishes a stopped machine from a runnable one." :prerequisites ("cpu/run!" "cpu/boot!" "(core)/not") :progression "Run or step a program, ask cpu/halted?, and branch on the answer — the basis of a safe step-until-done loop.")
+  :row-2-audit (
+    (:eng-program "(cpu/boot!)\n(cpu/load-program! (list (list 'HALT)))\n(cpu/run!)\n(eq? (cpu/halted?) #t)"
+     :math-program "(:honest-null \"halted? reads one flag bit; it is a projection of state, not an algebraic law. See :cs-program for the fresh-boot witness.\")"
+     :cs-program "(cpu/boot!)\n(eq? (cpu/halted?) #f)"
+     :problem "A run! returned exactly 10,000. Did the program finish on instruction 10,000, or is it an infinite loop that just hit the cap? The count alone is ambiguous."
+     :explanation "eng: after running a HALT program, halted? is #t. math: honest-null — a flag read is a projection, not algebra. cs: a fresh boot is not halted."
+     :meta "halted? disambiguates the count: run!=cap AND halted?=#f means the program is still looping. That distinction is the whole reason the flag is separate from the counter.")
+    (:eng "Pair halted? with the run! count to separate 'finished' from 'capped'."
+     :math "halted? projects the H bit — a decidable predicate on state."
+     :cs "Termination sense — the exit-status of the machine."))
+  :row-3-dimension (
+    (:setup "A done-flag: a single boolean read that says whether a process has reached its terminal state, so a loop knows to stop and a caller knows the result is final."
+     :rungs ((:domain "cpu (H flag)" :code "(cpu/boot!)\n(cpu/halted?)")
+             (:domain "loop guard predicate" :code "(define (done? n) (>= n 3))\n(done? 3)")
+             (:domain "terminal state of an automaton" :code "(define (accepting? state) (eq? state 'q-final))\n(accepting? 'q-final)"))
+     :explanation "In Motoi, cpu/halted? tests the terminal flag. A loop guard tests whether the counter reached its bound. An automaton's accepting test asks if the current state is terminal. All three answer 'are we done?' with one boolean."
+     :meta "The shape transfers to any process with a distinguished 'finished' condition.")
+    (:eng "The done-flag gates whether downstream code trusts the result as final."
+     :math "halted? is the characteristic function of the terminal-state set."
+     :cs "Same slot as thread.isAlive() negated or a future's isDone()."))
+  :row-4-proof (
+    (:eng-program "(cpu/boot!)\n(define before (cpu/halted?))\n(cpu/load-program! (list (list 'HALT)))\n(cpu/run!)\n(and (eq? before #f) (eq? (cpu/halted?) #t))"
+     :math-program "(:honest-null \"That halted? flips only after HALT executes is a state-flag semantics, checked by before/after reads in :eng-program, not an algebraic identity.\")"
+     :cs-program "(cpu/boot!)\n(cpu/load-program! (list (list 'JMP 0)))\n(cpu/run! 5)\n(eq? (cpu/halted?) #f)"
+     :claim "cpu/halted? is #f on a fresh boot and after a capped non-HALT run, and #t exactly when HALT has executed."
+     :invariant "halted?() = #t ⟺ FLAGS.H set ⟺ a HALT instruction has run since the last boot"
+     :meta "Falsified if a fresh boot reads #t, or a program that reached HALT reads #f, or a capped loop reads #t.")
+    (:eng "Before HALT #f, after HALT #t — the flag flips exactly once."
+     :math "halted? is the characteristic function of {states : H set}."
+     :cs "A capped infinite loop stays #f — no false 'done'."))
+  :row-5-emergence (
+    (:eng-composition "(define (step-until-done)\n  (if (cpu/halted?) 'done (begin (cpu/step!) (step-until-done))))\n(cpu/boot!)\n(cpu/load-program! (list (list 'NOP) (list 'HALT)))\n(step-until-done)"
+     :math-composition "(:honest-null \"step-until-halted is an unfold guarded by a terminal predicate; the emergent shape is a bounded loop, not an algebraic law. See :cs-composition.\")"
+     :cs-composition "(define (outcome)\n  (cpu/run!)\n  (if (cpu/halted?) 'halted 'capped))\n(cpu/boot!)\n(cpu/load-program! (list (list 'LOAD 1) (list 'HALT)))\n(outcome)"
+     :base "cpu/halted? senses the terminal flag."
+     :emergent "halted? as a loop guard is the RUN-UNTIL-DONE family — the poll-a-condition-then-act loop of schedulers, event loops, and retry drivers."
+     :meta "Family: run-until-done — same slot as while(!done) poll() or a completion-latch await.")
+    (:eng "Use halted? as the guard of a step loop — the safe run-to-completion."
+     :math "halted? is the terminal predicate of the run's unfold."
+     :cs "Run-until-done — poll the done-flag, act, repeat.")))

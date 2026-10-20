@@ -1,0 +1,5 @@
+(display (symbol->string 'C4))(newline)
+(display (string->number "440"))(newline)
+(display (assoc "C" '(("C" . 0)("D" . 2))))(newline)
+(display (substring "C4" 0 1))(newline)
+(display (string-length "C#4"))(newline)

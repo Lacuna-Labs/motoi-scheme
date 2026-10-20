@@ -1,0 +1,335 @@
+
+(verb
+  :name "llm/complete" :std "Motoi"
+  :library "ai"
+  :kind "io"
+  :signature "(llm/complete partial . opts) -> string | #f"
+  :summary "Continue a partial text or code prompt via the LLM; returns #f on the bare console with no model."
+  :explanation "Llm/complete is llm/ask with a completion convention: it prefixes a mild 'continue directly, no preamble' instruction so most backends return a raw continuation rather than chatty framing. Same wire protocol, same soft degrade: with no model wired it returns #f, never a fabricated continuation. Use (or (llm/complete ...) fallback) to keep programs total offline."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(display (or (llm/complete \"(define (square x) \") \"offline: no completion\"))" :note "#f offline, so the fallback prints. Runs green.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (complete-or partial d) (or (llm/complete partial) d))\n(display (complete-or \"1 2 3 \" \"(offline) 4 5 6\"))" :note "Wrap with a deterministic offline default.")
+    (:dialect "motoi" :tier "expert" :code "(define (complete-all partials d) (map (lambda (p) (or (llm/complete p) d)) partials))\n(display (complete-all (list \"a\" \"b\") \"offline\"))" :note "Batch completion with a per-item fallback; offline every slot is the fallback.")
+  )
+  :caveats ("Returns #f offline — test with (or ...); it is a boolean, not a string." "Opts is a keyword plist (:temperature :max-tokens), not positional." "It prefixes a continuation instruction; the backend still decides format." "No local fallback text — #f means 'no model'.")
+  :drawbacks ("Synchronous; a real call blocks." "No retry/timeout built in." "Format of the continuation is the backend's, not guaranteed.")
+  :usecases ("Autocomplete-style continuation when a model is present." "Draft-with-fallback for code or prose." "Gate optional completion behind (or ...).")
+  :related ("llm/ask" "llm/stream" "copilot/complete" "llm/config")
+  :learn (:concept "Completion vs chat is a prompt convention, not a different capability; both #f-degrade." :prerequisites ("or" "map") :progression "Use llm/config to gate; compare with copilot/complete which is registry-aware.")
+  :row-2-audit (
+    (:eng-program "(display (or (llm/complete \"x = \") \"offline\"))"
+     :math-program "(define (defined? v) (if v 1 0)) (display (defined? (llm/complete \"y = \")))"
+     :cs-program "(display (boolean? (llm/complete \"z = \")))"
+     :problem "An editor's inline-complete printed #f as literal text on a model-less box. The fix is (or (llm/complete ...) \"\") so the offline case is an empty completion, not the token #f."
+     :explanation "eng: fallback makes offline visible-and-clean. math: 0/1 indicator for a completion-rate metric. cs: the offline return is a boolean, confirmed by boolean?."
+     :meta "Wrong sibling: ai/generate would RAISE instead of returning #f, aborting the editor. llm/complete is right for the soft #f-degrade an inline completer wants.")
+    (:eng "Symptom 'literal #f in the buffer' = unhandled sentinel; the fix is an empty-string default."
+     :math "Completion-present is a Bernoulli indicator; offline it is 0."
+     :cs "Sentinel-return degradation, eliminated by or."))
+  :row-3-dimension (
+    (:setup "continue-or-default: extend a prefix, or supply a default when extension is unavailable"
+     :rungs (
+       (:domain "motoi model" :code "(display (or (llm/complete \"ab\") \"cd\"))")
+       (:domain "a generator's next value" :code "(define (next hit) (or hit 'done)) (display (next #f))")
+       (:domain "a series' next term" :code "(define (arith a d n) (+ a (* d n))) (display (arith 1 2 3))"))
+     :explanation "Each rung produces 'what comes next', with a fallback when the source cannot. The shape is continuation-with-default."
+     :meta "Portable shape: lookup-with-fallback applied to sequences. Offline llm/complete is the miss branch.")
+    (:eng "Every predictive source needs a default for the no-prediction case."
+     :math "Extending a partial successor function to total by a chosen value."
+     :cs "or-default over a sentinel."))
+  :row-4-proof (
+    (:claim "Offline, llm/complete is #f, so (or (llm/complete p) d) = d for all p."
+     :program "(define d 'x) (display (and (eq? (or (llm/complete \"a\") d) d) (eq? (or (llm/complete \"b\") d) d)))"
+     :invariant "∀ p. backend=none ⇒ llm/complete(p) = #f ⇒ (or (llm/complete p) d) = d"
+     :meta "Left-identity of or with #f. Falsified only by a truthy offline return. See book-of-code ch05 (or algebra)."
+     :eng-program "(display (eq? (or (llm/complete \"q\") 'd) 'd))"
+     :math-program "(define (left-id x) (eq? (or #f x) x)) (display (left-id 5))"
+     :cs-program "(display (boolean? (llm/complete \"r\")))")
+    (:eng "Offline determinism you can test."
+     :math "or is a monoid with #f as left identity."
+     :cs "Short-circuit or absorbs #f."))
+  :row-5-emergence (
+    (:base "llm/complete continues a prefix or #f."
+     :eng-composition "(define (complete-cached p cache) (let ((h (assoc p cache))) (if h (cdr h) (or (llm/complete p) 'offline))))\n(display (complete-cached \"hi\" (list)))"
+     :emergent "a completion cache: llm/complete + assoc = each prefix completed at most once."
+     :meta "Function memoization. See book-of-composition ch08.")
+    (:base "llm/complete in a fallback chain."
+     :math-composition "(define (first-of thunks) (cond ((null? thunks) 'none) (((car thunks)) => (lambda (r) r)) (else (first-of (cdr thunks)))))\n(display (first-of (list (lambda () (llm/complete \"x\")) (lambda () \"static\"))))"
+     :emergent "a responder chain for completions: model then static, first non-#f wins."
+     :meta "Chain of responsibility. See book-of-composition ch12.")
+    (:base "llm/complete with retry."
+     :cs-composition "(define (retry p n) (let loop ((k n)) (let ((r (llm/complete p))) (cond (r r) ((<= k 1) 'gave-up) (else (loop (- k 1)))))))\n(display (retry \"a\" 2))"
+     :emergent "bounded retry for a flaky completer."
+     :meta "Bounded retry. See book-of-composition ch10.")
+    (:eng "Cache, chain, and retry harden a predictive call."
+     :math "Each folds over attempts, absorbing #f."
+     :cs "Memoization / chain-of-responsibility / bounded retry."))
+)
+
+(verb
+  :name "llm/embed" :std "Motoi"
+  :library "ai"
+  :kind "io"
+  :signature "(llm/embed text . opts) -> vector | #f"
+  :summary "Get a semantic embedding vector for text from the model; returns #f on the bare console (use ai/embed for an offline hash-vector)."
+  :explanation "Llm/embed asks the wired model for a real semantic embedding of a string. Offline it returns #f — there is no local semantic embedder. If you need a stable OFFLINE vector for tests or demos, use ai/embed instead, which returns a 32-dim deterministic hash vector labeled low-fidelity. The two are different tools: llm/embed is semantic-when-wired-else-#f; ai/embed always returns a vector but only the wired path is semantic."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(display (or (llm/embed \"cat\") 'no-embedder))" :note "#f offline; fallback symbol prints.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (embed-or text) (or (llm/embed text) (ai/embed text)))\n(display (list? (embed-or \"cat\")))" :note "Fall back to ai/embed's offline hash-vector so a vector always comes back.")
+    (:dialect "motoi" :tier "expert" :code "(define (embed-batch texts) (map (lambda (t) (or (llm/embed t) (ai/embed t))) texts))\n(display (length (embed-batch (list \"a\" \"b\" \"c\"))))" :note "Batch-embed with the ai/embed fallback; offline every vector is the hash-vector.")
+  )
+  :caveats ("Returns #f offline — NOT a zero vector; test with (or ...)." "ai/embed is the offline fallback, but it is low-fidelity (a hash, not semantics) — do not mix semantic and hash vectors in one index." "Vector dimension is the model's when wired; ai/embed's is fixed at 32.")
+  :drawbacks ("No offline semantics at all — #f, by design." "Mixing llm/embed and ai/embed vectors gives incomparable spaces.")
+  :usecases ("Semantic search / clustering when a model is present." "Fall back to ai/embed for deterministic test vectors." "Feature extraction gated on a model.")
+  :related ("ai/embed" "ai/vector-search" "llm/config" "ai/rank")
+  :learn (:concept "Two embedders, two contracts: semantic-or-#f vs always-a-vector-but-low-fidelity; choose by whether you need semantics or determinism." :prerequisites ("or" "map" "list?") :progression "Pair llm/embed with ai/vector-search (both need the sidecar) for real search; use ai/embed for tests.")
+  :row-2-audit (
+    (:eng-program "(display (or (llm/embed \"x\") (ai/embed \"x\")))"
+     :math-program "(define (dim v) (if v (length v) 0)) (display (dim (or (llm/embed \"x\") (ai/embed \"x\"))))"
+     :cs-program "(display (list? (or (llm/embed \"x\") (ai/embed \"x\"))))"
+     :problem "A search index silently stored #f for every document on a model-less box, then crashed at query time. The fix is (or (llm/embed t) (ai/embed t)) so indexing always yields a vector — while logging that offline vectors are low-fidelity."
+     :explanation "eng: fallback to ai/embed keeps the index populated. math: dimension is 32 offline, the model's dim online. cs: confirm the stored value is a list, never #f."
+     :meta "Wrong sibling: ai/vector-search would RAISE, not return #f, at index time. llm/embed is the vector producer; ai/embed is the honest offline stand-in.")
+    (:eng "Symptom 'index full of #f'. Fix: always fall back to a real (if low-fidelity) vector."
+     :math "Embedding presence maps to dimension > 0."
+     :cs "Sentinel-return with a typed fallback."))
+  :row-3-dimension (
+    (:setup "represent-or-approximate: map an object to a vector, exactly if possible, approximately otherwise"
+     :rungs (
+       (:domain "motoi model" :code "(display (list? (or (llm/embed \"x\") (ai/embed \"x\"))))")
+       (:domain "a hash of a value" :code "(define (h s) (modulo (string-length s) 7)) (display (h \"hi\"))")
+       (:domain "a projection to coordinates" :code "(define (proj p) (car p)) (display (proj (list 3 4)))"))
+     :explanation "Each maps a thing to a numeric representation: a semantic vector, a hash bucket, a coordinate. Offline the semantic map degrades to the hash map."
+     :meta "Portable shape: representation function, exact or approximate. ai/embed is the approximation of llm/embed.")
+    (:eng "Approximate representations keep systems running when exact ones are unavailable."
+     :math "A map into a vector space; the fallback is a coarser map into the same shape."
+     :cs "Feature hashing as a fallback for learned embeddings."))
+  :row-4-proof (
+    (:claim "Offline, (or (llm/embed t) (ai/embed t)) is always a length-32 vector."
+     :program "(display (= 32 (length (or (llm/embed \"a\") (ai/embed \"a\")))))"
+     :invariant "∀ t. backend=none ⇒ llm/embed(t)=#f ⇒ result = ai/embed(t), |ai/embed(t)| = 32"
+     :meta "Composition of #f-degrade with a total fallback yields a total function. Falsified if ai/embed changed its dimension. See book-of-ml ch03 (fixed-dim features)."
+     :eng-program "(display (= 32 (length (or (llm/embed \"b\") (ai/embed \"b\")))))"
+     :math-program "(define (det t) (equal? (ai/embed t) (ai/embed t))) (display (det \"x\"))"
+     :cs-program "(display (list? (or (llm/embed \"c\") (ai/embed \"c\"))))")
+    (:eng "The fallback guarantees a usable vector every time."
+     :math "ai/embed is a deterministic total function; composition preserves totality."
+     :cs "Total fallback eliminates the #f branch."))
+  :row-5-emergence (
+    (:base "llm/embed makes vectors (or #f)."
+     :eng-composition "(define (index docs) (map (lambda (d) (cons d (or (llm/embed d) (ai/embed d)))) docs))\n(display (length (index (list \"a\" \"b\"))))"
+     :emergent "an embedding index: llm/embed + map + cons = a doc→vector table, populated even offline."
+     :meta "Same family as a vector store build. See book-of-ml ch08 (indexing).")
+    (:base "llm/embed feeds cosine similarity."
+     :math-composition "(define (dot a b) (apply + (map * a b)))\n(let ((u (ai/embed \"cat\")) (v (ai/embed \"cat\"))) (display (> (dot u v) 0)))"
+     :emergent "self-similarity check: identical text embeds to identical vectors, so their dot product is positive."
+     :meta "Inner-product similarity. See book-of-ml ch04 (similarity).")
+    (:base "llm/embed cached per string."
+     :cs-composition "(define cache (list)) (define (emb s) (let ((h (assoc s cache))) (if h (cdr h) (let ((v (or (llm/embed s) (ai/embed s)))) (set! cache (cons (cons s v) cache)) v))))\n(display (list? (emb \"x\")))"
+     :emergent "memoized embedding: each string embedded once."
+     :meta "Memoization. See book-of-composition ch08.")
+    (:eng "Index build, similarity, and memo cache are the embedding toolkit."
+     :math "Fold / inner-product / fixpoint over the vector map."
+     :cs "Vector store / cosine sim / memoization."))
+)
+
+(verb
+  :name "llm/stream" :std "Motoi"
+  :library "ai"
+  :kind "io"
+  :signature "(llm/stream prompt callback . opts) -> boolean"
+  :summary "Stream a model response to a callback; returns #f on the bare console with no model."
+  :explanation "Llm/stream sends a prompt and delivers the response to a callback, then calls the callback once more with #!eof. In this tier it calls back once with the whole response (true SSE streaming lands later; the callback shape is already correct so your code will not change). It returns #t on success, #f otherwise — and #f is exactly what you get on the bare console with no model. The callback may be a Scheme lambda or a host function."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(define ok (llm/stream \"hi\" (lambda (chunk) chunk)))\n(display (if ok \"streamed\" \"offline: no stream\"))" :note "#f offline; the offline branch prints.")
+    (:dialect "motoi" :tier "intermediate" :code "(define chunks (list))\n(define ok (llm/stream \"hi\" (lambda (c) (set! chunks (cons c chunks)))))\n(display (if ok (reverse chunks) 'offline))" :note "Accumulate chunks in the callback; offline nothing accumulates and we branch on the #f return.")
+    (:dialect "motoi" :tier "expert" :code "(define (stream-or prompt on-chunk fallback)\n  (if (llm/stream prompt on-chunk) 'done (begin (on-chunk fallback) 'offline)))\n(display (stream-or \"hi\" (lambda (c) c) \"(offline) no tokens\"))" :note "Feed a fallback chunk to the same callback when streaming is unavailable, so downstream code sees a uniform shape.")
+  )
+  :caveats ("Returns #f offline — branch on the boolean, do not rely on the callback firing." "The callback receives #!eof as its final call when a model is wired." "Current tier delivers the whole response in one callback, not token-by-token.")
+  :drawbacks ("No true incremental streaming yet — one chunk then eof." "Offline the callback never fires; handle that in the caller.")
+  :usecases ("Progressive UI output when a model is present." "Uniform callback shape now, real streaming later." "Gate streaming behind the #t/#f return.")
+  :related ("llm/ask" "llm/complete" "llm/config")
+  :learn (:concept "Callback-plus-boolean: the return signals success, the callback carries data; offline the boolean is #f and the callback stays silent." :prerequisites ("lambda" "set!" "if") :progression "Compare with llm/ask (value return); use llm/config to gate.")
+  :row-2-audit (
+    (:eng-program "(display (if (llm/stream \"x\" (lambda (c) c)) 'ok 'offline))"
+     :math-program "(define (b->n x) (if x 1 0)) (display (b->n (llm/stream \"x\" (lambda (c) c))))"
+     :cs-program "(define fired #f) (llm/stream \"x\" (lambda (c) (set! fired #t))) (display fired)"
+     :problem "A live-output panel hung waiting for a callback that never fired on a model-less box. The fix is to branch on llm/stream's boolean return: #f means 'no stream, show the offline notice' rather than waiting forever."
+     :explanation "eng: branch on the return, don't await the callback. math: reduce success to 0/1. cs: prove the callback did NOT fire offline (fired stays #f)."
+     :meta "Wrong sibling: llm/ask returns the whole answer at once — fine for non-streaming, but a streaming UI wants the callback shape. llm/stream is right when you want incremental delivery; you must still handle the #f return.")
+    (:eng "Symptom 'panel hangs'. Fix: never block on the callback; branch on the boolean."
+     :math "Success is a Bernoulli indicator; offline 0."
+     :cs "Return-code plus side-effecting callback; the code is the ground truth."))
+  :row-3-dimension (
+    (:setup "notify-or-signal-absence: push data to a sink, or report that no data will come"
+     :rungs (
+       (:domain "motoi model" :code "(display (if (llm/stream \"x\" (lambda (c) c)) 'streamed 'none))")
+       (:domain "a subscription callback" :code "(define (subscribe on?) (if on? 'subscribed 'no-source)) (display (subscribe #f))")
+       (:domain "an event with no listeners" :code "(define (emit listeners) (if (null? listeners) 'dropped 'delivered)) (display (emit (list)))"))
+     :explanation "Each pushes to a sink when possible and signals absence otherwise. The shape is push-or-report-empty."
+     :meta "Portable shape: publish/subscribe with an availability signal. Offline llm/stream reports empty via #f.")
+    (:eng "Every push channel needs an 'is anyone/anything there' signal."
+     :math "A partial delivery function; #f marks off-domain."
+     :cs "Observer pattern with a delivery acknowledgment."))
+  :row-4-proof (
+    (:claim "Offline, llm/stream returns #f and its callback never fires."
+     :program "(define fired #f) (define r (llm/stream \"p\" (lambda (c) (set! fired #t)))) (display (and (eq? r #f) (eq? fired #f)))"
+     :invariant "∀ p cb. backend=none ⇒ llm/stream(p,cb) = #f ∧ cb uncalled"
+     :meta "The offline contract is testable: no delivery, false return. Falsified if the callback fired with no model. See book-of-code ch12 (effects and returns)."
+     :eng-program "(define f #f) (llm/stream \"q\" (lambda (c) (set! f #t))) (display f)"
+     :math-program "(display (boolean? (llm/stream \"z\" (lambda (c) c))))"
+     :cs-program "(display (eq? #f (llm/stream \"w\" (lambda (c) c))))")
+    (:eng "The offline no-op is guaranteed — safe to call in a loop."
+     :math "Constant #f return offline."
+     :cs "No side effect on the callback when the return is #f."))
+  :row-5-emergence (
+    (:base "llm/stream pushes chunks."
+     :eng-composition "(define buf (list)) (define (collect p) (if (llm/stream p (lambda (c) (set! buf (cons c buf)))) (reverse buf) 'offline))\n(display (collect \"hi\"))"
+     :emergent "a sink: llm/stream + an accumulator = collect-to-buffer, offline-safe."
+     :meta "Same family as a stream collector. See book-of-composition ch10 (sinks).")
+    (:base "llm/stream drives a progress meter."
+     :math-composition "(define n 0) (llm/stream \"hi\" (lambda (c) (set! n (+ n 1)))) (display n)"
+     :emergent "a token counter: chunk count offline is 0, online it rises."
+     :meta "Counting observer. See book-of-ml ch02.")
+    (:base "llm/stream with a fallback emitter."
+     :cs-composition "(define (stream* p cb) (or (llm/stream p cb) (begin (cb \"offline\") #f)))\n(display (stream* \"hi\" (lambda (c) c)))"
+     :emergent "a uniform emitter: the callback always fires at least once, online or off."
+     :meta "Null-object / default emitter. See book-of-composition ch12.")
+    (:eng "Collector, counter, and default-emitter shape a streaming surface."
+     :math "Fold over chunks; count is the length."
+     :cs "Sink / observer / null-object."))
+)
+
+(verb
+  :name "llm/chat" :std "Motoi"
+  :library "ai"
+  :kind "io"
+  :signature "(llm/chat messages . opts) -> string  (raises needs-provider offline)"
+  :summary "Chat-shaped completion over a role-tagged message list; RAISES 'needs an LLM provider' on the bare console."
+  :explanation "Llm/chat takes a list of (role content) messages and returns the model's reply. Unlike llm/ask (which returns #f), llm/chat RAISES a catchable 'needs an LLM provider' error offline — so wrap it in with-exception-handler / call/cc to run without a model. It routes through the same provider as the rest of llm/*."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(define (safe-chat msgs)\n  (call-with-current-continuation (lambda (k)\n    (with-exception-handler (lambda (e) (k 'offline))\n      (lambda () (llm/chat msgs))))))\n(display (safe-chat (list (list 'user \"hi\"))))" :note "Catch the raise; 'offline prints on the bare console.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (chat-or msgs d)\n  (call-with-current-continuation (lambda (k)\n    (with-exception-handler (lambda (e) (k d))\n      (lambda () (llm/chat msgs))))))\n(display (chat-or (list (list 'user \"hi\")) \"(offline) hello\"))" :note "Turn the raise into a fallback value.")
+    (:dialect "motoi" :tier "expert" :code "(define (guard t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t))))\n(define (conversation turns)\n  (map (lambda (m) (guard (lambda () (llm/chat (list m))) 'offline)) turns))\n(display (conversation (list (list 'user \"a\") (list 'user \"b\"))))" :note "Guard each turn; offline every reply is 'offline, the shape is preserved.")
+  )
+  :caveats ("RAISES offline (needs-provider) — catch it, unlike llm/ask which returns #f." "Messages is a list of (role content) pairs; roles are symbols like 'user 'system." "Opts is a keyword plist.")
+  :drawbacks ("Uncaught, it aborts offline." "No conversation memory across calls — you pass the whole history each time.")
+  :usecases ("Multi-turn chat when a model is present." "Role-structured prompting (system + user)." "Guarded conversation loops offline.")
+  :related ("llm/ask" "llm/complete" "copilot/ask" "llm/config")
+  :learn (:concept "Chat is llm/ask with roles, but with a RAISE-degrade instead of #f — the elimination form is with-exception-handler." :prerequisites ("call-with-current-continuation" "with-exception-handler") :progression "Contrast with llm/ask (#f); gate with llm/config.")
+  :row-2-audit (
+    (:eng-program "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (display (g (lambda () (llm/chat (list (list 'user \"hi\")))) 'offline))"
+     :math-program "(define (total f x d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (f x)))))) (display (total (lambda (m) (llm/chat m)) (list (list 'user \"q\")) 'd))"
+     :cs-program "(define caught #f) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (set! caught #t) (k #f)) (lambda () (llm/chat (list (list 'user \"z\"))))))) (display caught)"
+     :problem "A chatbot cart crashed on a model-less demo machine. The stack named llm/chat and 'needs an LLM provider'. The fix wraps each chat call in a guard so the demo shows an offline notice instead of dying."
+     :explanation "eng: guard converts the raise to a default. math: 'total' extends the partial chat to all inputs. cs: prove the handler fires — caught is #t offline."
+     :meta "Wrong sibling: llm/ask returns #f, so a bare (or ...) would suffice — but chat's role structure and raise-degrade mean you must catch. llm/chat is right for role-tagged multi-turn; the raise forces deliberate offline handling.")
+    (:eng "Symptom 'chatbot crashed'. Audit trail: the needs-provider raise. Fix: guard."
+     :math "Totalization of a partial function by a default."
+     :cs "Exception-to-value via delimited escape."))
+  :row-3-dimension (
+    (:setup "structured-request-or-fail: a role-shaped request that raises when the service is absent"
+     :rungs (
+       (:domain "motoi model" :code "(display (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k 'ok)) (lambda () (llm/chat (list (list 'user \"x\"))))))))")
+       (:domain "an RPC that throws when down" :code "(define (rpc up?) (if up? 'reply (error \"service down\"))) (display (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k 'down)) (lambda () (rpc #f))))))")
+       (:domain "a partial function off-domain" :code "(define (log x) (if (> x 0) 'defined (error \"log of non-positive\"))) (display (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k 'undefined)) (lambda () (log -1))))))"))
+     :explanation "Each is a structured call that raises when it cannot honestly answer, recovered at a boundary. The shape is fail-loud-then-recover."
+     :meta "Portable shape: checked partiality (same as ai/generate's Row 3), here with role-structured input.")
+    (:eng "Structured RPC plus boundary recovery is the resilient-service shape."
+     :math "Partial function raising off-domain; handler defines the extension."
+     :cs "Exceptions as partiality signal; handler as elimination."))
+  :row-4-proof (
+    (:claim "Offline, a guarded llm/chat always yields the supplied default."
+     :program "(define (g d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (llm/chat (list (list 'user \"p\")))))))) (display (and (eq? (g 'x) 'x) (eq? (g 'y) 'y)))"
+     :invariant "∀ msgs d. backend=none ⇒ llm/chat raises ⇒ guard = d"
+     :meta "Guarded raise = chosen default. Falsified if chat returned a value offline. See book-of-code ch12 (delimited control)."
+     :eng-program "(define (g d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (llm/chat (list (list 'user \"p\")))))))) (display (eq? (g 'z) 'z))"
+     :math-program "(define (gc d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) (lambda () (llm/chat (list (list 'user \"a\")))))))) (display (eq? (gc 7) 7))"
+     :cs-program "(define f #f) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (set! f #t) (k #f)) (lambda () (llm/chat (list (list 'user \"q\"))))))) (display f)")
+    (:eng "Offline result is the default, provably."
+     :math "Handler defines a constant on the raising domain."
+     :cs "Total, deterministic recovery."))
+  :row-5-emergence (
+    (:base "llm/chat replies to a message list."
+     :eng-composition "(define history (list)) (define (say role text) (set! history (cons (list role text) history)) (reverse history))\n(display (say 'user \"hi\"))"
+     :emergent "a conversation buffer: accumulate (role content) turns to feed llm/chat next time."
+     :meta "Same family as a message log / event sourcing. See book-of-composition ch11 (accumulators).")
+    (:base "llm/chat guarded in a loop."
+     :math-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (turns ms) (map (lambda (m) (g (lambda () (llm/chat (list m))) 'offline)) ms))\n(display (turns (list (list 'user \"a\") (list 'user \"b\"))))"
+     :emergent "a fault-isolated dialogue: each turn guarded so one failure never aborts the rest."
+     :meta "Bulkhead. See book-of-composition ch12.")
+    (:base "llm/chat behind a fallback to llm/ask."
+     :cs-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (reply msgs) (g (lambda () (llm/chat msgs)) (or (llm/ask \"hi\") 'stub)))\n(display (reply (list (list 'user \"hi\"))))"
+     :emergent "a degradation ladder: chat → ask → stub."
+     :meta "Degradation tiers. See book-of-composition ch10.")
+    (:eng "Buffer, bulkhead, and ladder shape a chat surface."
+     :math "Fold over turns; guard absorbs the raise."
+     :cs "Event log / bulkhead / degradation ladder."))
+)
+
+(verb
+  :name "llm/tokens" :std "Motoi"
+  :library "ai"
+  :kind "io"
+  :signature "(llm/tokens text) -> integer  (raises needs-provider offline)"
+  :summary "Count tokens in a string using the model's tokenizer; RAISES 'needs an LLM provider' on the bare console."
+  :explanation "Llm/tokens returns how many tokens a string uses under the wired model's tokenizer. Token counts are model-specific, so there is no honest local answer — offline it RAISES 'needs an LLM provider'. Catch it if you must run without a model; a rough offline estimate (e.g. characters/4) is your own choice, clearly labeled as an estimate."
+  :examples (
+    (:dialect "motoi" :tier "novice" :code "(define (safe-tokens s)\n  (call-with-current-continuation (lambda (k)\n    (with-exception-handler (lambda (e) (k 'need-model))\n      (lambda () (llm/tokens s))))))\n(display (safe-tokens \"hello world\"))" :note "Catch the raise; 'need-model prints offline.")
+    (:dialect "motoi" :tier "intermediate" :code "(define (tokens-or s est)\n  (call-with-current-continuation (lambda (k)\n    (with-exception-handler (lambda (e) (k est))\n      (lambda () (llm/tokens s))))))\n(display (tokens-or \"hello world\" (quotient (string-length \"hello world\") 4)))" :note "Fall back to a chars/4 estimate offline, clearly an estimate.")
+    (:dialect "motoi" :tier "expert" :code "(define (guard t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t))))\n(define (est s) (quotient (string-length s) 4))\n(define (budget strings limit)\n  (let ((total (apply + (map (lambda (s) (guard (lambda () (llm/tokens s)) (est s))) strings))))\n    (<= total limit)))\n(display (budget (list \"aaaa\" \"bbbb\") 10))" :note "Sum guarded token counts against a budget; offline it uses estimates.")
+  )
+  :caveats ("RAISES offline — catch it, unlike llm/ask which returns #f." "Counts are model-specific; a value from one model does not transfer to another." "Any offline estimate is YOURS — label it as an estimate, not a true count.")
+  :drawbacks ("Uncaught, it aborts offline." "No canonical offline tokenizer.")
+  :usecases ("Budget a prompt against a context window when a model is present." "Estimate cost per request." "Guarded token accounting offline.")
+  :related ("llm/chat" "llm/ask" "llm/config")
+  :learn (:concept "A measurement that only the model can make honestly raises rather than guesses; you supply a labeled estimate if you need one." :prerequisites ("call-with-current-continuation" "quotient" "string-length") :progression "Pair with llm/chat budgeting; gate with llm/config.")
+  :row-2-audit (
+    (:eng-program "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (display (g (lambda () (llm/tokens \"hi\")) 0))"
+     :math-program "(define (est s) (quotient (string-length s) 4)) (display (est \"hello world\"))"
+     :cs-program "(define caught #f) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (set! caught #t) (k 0)) (lambda () (llm/tokens \"z\"))))) (display caught)"
+     :problem "A prompt-budgeter reported 0 tokens for everything and let oversized prompts through, on a box with no model. It had swallowed the raise into 0. The fix is to fall back to an explicit chars/4 ESTIMATE and mark the budget as approximate offline, so oversize prompts are still caught conservatively."
+     :explanation "eng: guard with a real estimate, not a silent 0. math: chars/4 is a crude token model. cs: prove the handler fires offline."
+     :meta "Wrong sibling: llm/ask returns #f (not a number) — useless for arithmetic. llm/tokens raises so you consciously choose an estimate; the raise prevents a silent 0 from corrupting a budget.")
+    (:eng "Symptom 'budget lets everything through'. Fix: estimate, don't zero."
+     :math "chars/4 approximates tokens for English."
+     :cs "Guard fires; the default is a chosen estimate."))
+  :row-3-dimension (
+    (:setup "measure-or-estimate: a precise measurement when the instrument is present, an estimate otherwise"
+     :rungs (
+       (:domain "motoi model" :code "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (display (g (lambda () (llm/tokens \"hi\")) 1))")
+       (:domain "a sensor with a fallback" :code "(define (temp sensor?) (if sensor? 21 'estimated-20)) (display (temp #f))")
+       (:domain "an approximation of a hard quantity" :code "(define (approx-pi) 22/7) (display approx-pi)"))
+     :explanation "Each yields an exact quantity when the instrument exists and a labeled approximation otherwise. The shape is measurement with graceful approximation."
+     :meta "Portable shape: precise-or-approximate. The estimate must be labeled so consumers know its fidelity.")
+    (:eng "Every measurement pipeline needs a documented fallback estimate."
+     :math "An exact value vs a rational approximation."
+     :cs "Sensor fusion / graceful sensor degradation."))
+  :row-4-proof (
+    (:claim "The offline estimate chars/4 is monotone: longer strings never estimate fewer tokens."
+     :program "(define (est s) (quotient (string-length s) 4)) (display (<= (est \"ab\") (est \"abcdef\")))"
+     :invariant "∀ s t. length(s) ≤ length(t) ⇒ est(s) ≤ est(t)"
+     :meta "Monotonicity makes the estimate safe for a conservative budget. Falsified by a shorter string estimating more. See book-of-math ch03 (monotone maps)."
+     :eng-program "(define (est s) (quotient (string-length s) 4)) (display (<= (est \"\") (est \"xxxx\")))"
+     :math-program "(define (est s) (quotient (string-length s) 4)) (display (and (<= (est \"a\") (est \"aa\")) (<= (est \"aa\") (est \"aaaa\"))))"
+     :cs-program "(define (est s) (quotient (string-length s) 4)) (display (integer? (est \"hello\")))")
+    (:eng "A monotone estimate never under-budgets a longer prompt relative to a shorter one."
+     :math "quotient by a constant is monotone nondecreasing in string length."
+     :cs "Integer floor division; total and monotone."))
+  :row-5-emergence (
+    (:base "llm/tokens measures prompt size."
+     :eng-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (est s) (quotient (string-length s) 4)) (define (fits? s limit) (<= (g (lambda () (llm/tokens s)) (est s)) limit))\n(display (fits? \"hello\" 100))"
+     :emergent "a budget gate: token count + a limit = admit-or-reject a prompt."
+     :meta "Same family as a rate/size limiter. See book-of-composition ch10 (gates).")
+    (:base "llm/tokens summed across a batch."
+     :math-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (est s) (quotient (string-length s) 4)) (display (apply + (map (lambda (s) (g (lambda () (llm/tokens s)) (est s))) (list \"aaaa\" \"bbbb\"))))"
+     :emergent "a cost meter: total tokens across a batch = an estimated bill."
+     :meta "Accumulation for cost accounting. See book-of-ml ch02 (summation).")
+    (:base "llm/tokens driving a chunker."
+     :cs-composition "(define (g t d) (call-with-current-continuation (lambda (k) (with-exception-handler (lambda (e) (k d)) t)))) (define (est s) (quotient (string-length s) 4)) (define (over? s limit) (> (g (lambda () (llm/tokens s)) (est s)) limit))\n(display (over? \"aaaaaaaa\" 1))"
+     :emergent "a split decision: if a chunk is over budget, split it — the base of a text chunker."
+     :meta "Sliding-window chunking. See book-of-composition ch13 (chunkers).")
+    (:eng "Budget gate, cost meter, and chunker are built on a size measurement."
+     :math "Sum / threshold over token counts."
+     :cs "Rate limiter / accumulator / chunker."))
+)

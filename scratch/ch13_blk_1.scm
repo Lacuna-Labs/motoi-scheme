@@ -1,0 +1,7 @@
+(require 'game/world)
+(world/gravity! 0 0)
+(define score 0)
+(define hero (world/spawn 'hero 0 10))
+(define coin (world/spawn 'coin 20 10))
+(display (list score (world/count 'coin)))
+(newline)

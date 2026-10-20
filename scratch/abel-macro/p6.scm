@@ -1,0 +1,8 @@
+(write (let ((x 13)) (define y 14)
+  (let-syntax ((def (syntax-rules () ((_ var val) (define var val)))))
+    (def x 56) (set! y (+ x y)))
+  (list x y))) (newline)
+(write (let ((x 13)) (define y 14)
+  (letrec-syntax ((def (syntax-rules () ((_ var val) (define var val)))))
+    (def x 56) (set! y (+ x y)))
+  (list x y))) (newline)

@@ -1,0 +1,6 @@
+(define s (plot/function (lambda (x) (/ 1 x)) '(-2 2)))
+(display (list-ref s 3)) (newline)
+(display (list-ref s 7)) (newline)
+(display (plot/render-svg s)) (newline)
+(display (plot/function (lambda (x) (* x x)) '(-2 2))) (newline)
+(display (let ((f (lambda (x) (if (= x 0) 'undefined (/ (sin x) x)))) (domain '(-3 3))) (list-ref (plot/function f domain) 7))) (newline)

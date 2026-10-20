@@ -1,0 +1,8 @@
+(require 'game/world)
+(world/gravity! 0 0)
+(define q (world/spawn 'q 0 0))
+(entity/accel! q 2 0)
+(world/step)
+(world/step)
+(display (list (entity/x q) (car (entity/vel q))))
+(newline)

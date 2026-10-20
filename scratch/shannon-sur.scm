@@ -1,0 +1,1 @@
+(display (game/surreal-eq? (game/surreal-mul (game/surreal-lit 2 3 4) (game/surreal-add (game/surreal-lit ) (game/surreal-lit ))) (game/surreal-add (game/surreal-mul (game/surreal-lit 2 3 4) (game/surreal-lit )) (game/surreal-mul (game/surreal-lit 2 3 4) (game/surreal-lit )))))

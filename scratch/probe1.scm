@@ -1,0 +1,7 @@
+(display (note 'C4 'quarter 64))(newline)
+(display (tone 440 0.5))(newline)
+(display (sfx 'kick))(newline)
+(display (transport/tempo 60))(newline)
+(display (synth/808 'kick))(newline)
+(display (synth/sp1200))(newline)
+(display (synth/orch))(newline)

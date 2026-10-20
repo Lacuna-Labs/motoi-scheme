@@ -1,0 +1,6 @@
+(require 'game/world)
+(world/spawn 'coin 10 10)
+(world/spawn 'coin 40 10)
+(define (won?) (= (world/count 'coin) 0))
+(display (won?))
+(newline)

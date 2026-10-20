@@ -1,0 +1,6 @@
+(require 'game/world)
+(world/step)
+(world/step)
+(world/step)
+(display (world/frame))
+(newline)

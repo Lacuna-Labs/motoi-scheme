@@ -1,0 +1,5 @@
+(display (nt/prime-factorization 12)) (newline)
+(display (nt/prime-factorization 60)) (newline)
+(define pf (nt/prime-factorization 60))
+(display (fold * 1 (map (lambda (p) (+ 1 (cdr p))) pf))) (newline)
+(display (nt/divisor-count 60)) (newline)

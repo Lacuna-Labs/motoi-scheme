@@ -1,0 +1,6 @@
+(define q (make-parameter 5 (lambda (x) (* x 2))))
+(display (list 'init (q))) (newline)
+(display (list 'inside (parameterize ((q 7)) (q)))) (newline)
+(display (list 'after (q))) (newline)
+(define r (make-parameter "hi" string-upcase))
+(display (list 'r-init (r) 'r-in (parameterize ((r "bye")) (r)))) (newline)

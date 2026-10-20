@@ -1,0 +1,5 @@
+(display "op C6: ") (display (alg/op (alg/cyclic 6))) (newline)
+(display "op D3: ") (display (alg/op (alg/dihedral 3))) (newline)
+(display "order C6: ") (display (alg/order (alg/cyclic 6))) (newline)
+(display "order D3: ") (display (alg/order (alg/dihedral 3))) (newline)
+(display "rand in op?: ") (display (if (member (alg/random-element (alg/cyclic 6)) (alg/op (alg/cyclic 6))) 'yes 'no)) (newline)

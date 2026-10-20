@@ -1,0 +1,47 @@
+;; --- motion mini-runtime (real primitives) ---
+(define PI (* 4 (atan 1)))
+(define (dsqrt x) (sqrt x))
+(define (dcos x) (cos x))
+(define (dsin x) (sin x))
+(define (datan2 y x) (atan y x))
+(define *ents* '())
+(define (world/reset!) (set! *ents* '()))
+(define (world/spawn tag x y)
+  (let ((e (vector tag x y 0 0)))   ; tag px py vx vy
+    (set! *ents* (cons e *ents*)) e))
+(define (entity/set-vel! e vx vy) (vector-set! e 3 vx) (vector-set! e 4 vy))
+(define (entity/set-pos! e x y)  (vector-set! e 1 x) (vector-set! e 2 y))
+(define (entity/vel e) (list (vector-ref e 3) (vector-ref e 4)))
+(define (entity/pos e) (list (vector-ref e 1) (vector-ref e 2)))
+(define (world/step dt)
+  (for-each (lambda (e)
+    (vector-set! e 1 (+ (vector-ref e 1) (* (vector-ref e 3) dt)))
+    (vector-set! e 2 (+ (vector-ref e 2) (* (vector-ref e 4) dt))))
+    *ents*))
+(define (world/count) (length *ents*))
+;; --- end runtime ---
+
+;; --- motion mini-runtime (real primitives) ---
+(define PI (* 4 (atan 1)))
+(define (dsqrt x) (sqrt x))
+(define (dcos x) (cos x))
+(define (dsin x) (sin x))
+(define (datan2 y x) (atan y x))
+(define *ents* '())
+(define (world/reset!) (set! *ents* '()))
+(define (world/spawn tag x y)
+  (let ((e (vector tag x y 0 0)))   ; tag px py vx vy
+    (set! *ents* (cons e *ents*)) e))
+(define (entity/set-vel! e vx vy) (vector-set! e 3 vx) (vector-set! e 4 vy))
+(define (entity/set-pos! e x y)  (vector-set! e 1 x) (vector-set! e 2 y))
+(define (entity/vel e) (list (vector-ref e 3) (vector-ref e 4)))
+(define (entity/pos e) (list (vector-ref e 1) (vector-ref e 2)))
+(define (world/step dt)
+  (for-each (lambda (e)
+    (vector-set! e 1 (+ (vector-ref e 1) (* (vector-ref e 3) dt)))
+    (vector-set! e 2 (+ (vector-ref e 2) (* (vector-ref e 4) dt))))
+    *ents*))
+(define (world/count) (length *ents*))
+;; --- end runtime ---
+
+(display "ok")

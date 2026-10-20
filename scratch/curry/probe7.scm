@@ -1,0 +1,8 @@
+(define (p l x) (display l) (display " => ") (write x) (newline))
+(define calls 0)
+(define (counted pred) (lambda (x) (set! calls (+ calls 1)) (pred x)))
+(define r (take-while (counted odd?) (list 1 3 4 5 7)))
+(p "take-while" r)
+(p "calls" calls)
+(p "let-values2" (let-values (((a b) (split-at (list 1 2 3 4) 2))) (list a b)))
+(p "define-values" (guard (e (#t 'no-define-values)) (begin (define-values (x y) (values 1 2)) (list x y))))

@@ -1,0 +1,10 @@
+(define (p label x) (display label) (display " => ") (write x) (newline))
+(define (spy tag) (lambda (a b) (display tag) (display " ") (write (list a b)) (newline) (equal? a b)))
+(p "adjoin-order" (lset-adjoin (spy "adj") (list 1 2) 9))
+(p "union-order" (lset-union (spy "uni") (list 1 2) (list 9)))
+(p "inter-order" (lset-intersection (spy "int") (list 1) (list 9)))
+(p "diff-order" (lset-difference (spy "dif") (list 1) (list 9)))
+(p "le-order" (lset<= (spy "le") (list 1) (list 9)))
+;; non-symmetric predicate: case-insensitive-ish via numeric <
+(p "adjoin-lt" (lset-adjoin < (list 5) 3 9))
+(p "union-lt" (lset-union < (list 5) (list 3 9)))

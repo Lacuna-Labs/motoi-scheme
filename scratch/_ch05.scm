@@ -1,0 +1,5 @@
+(display (let ((nums '(12 45 3 89 27)))
+  (string-append "Count: " (number->string (length nums))
+                 ", Sum: " (number->string (fold + 0 nums))
+                 ", Avg: " (number->string (/ (fold + 0 nums) (length nums)))
+                 ", Max: " (number->string (apply max nums)))))

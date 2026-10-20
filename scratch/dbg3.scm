@@ -1,0 +1,8 @@
+(define o (string->number "4"))
+(display (number? o))(newline)
+(display (+ o 1))(newline)
+(display (* 12 (+ o 1)))(newline)
+(define p (assoc "C" '(("C" . 0))))
+(display (cdr p))(newline)
+(display (number? (cdr p)))(newline)
+(display (+ (cdr p) (* 12 (+ o 1))))(newline)

@@ -1,0 +1,2 @@
+(display (audio/tempo))
+(newline)

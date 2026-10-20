@@ -1,0 +1,175 @@
+# Appendix I — Deductive Error Introspection
+
+This book opened with propositional logic (chapter 1) and predicate
+logic (chapter 2): a proposition is something that is true or false, and
+reasoning is the disciplined derivation of new true propositions from
+old ones. This appendix turns that lens on Motoi's own error surface.
+The claim is small and precise: an error is a proposition, the error
+census is a set of propositions with frequencies, and the two logics
+this book distinguishes — the deductive and the inductive — cut cleanly
+through what the census can and cannot prove.
+
+## I.1 An error-key is a proposition
+
+When a program stops with an escaped error, the runtime records a
+normalized ERROR-KEY. Read that key as an atomic proposition:
+
+    unbound-symbol  ≡  "a wrong of the unbound-symbol kind occurred"
+
+It is true or false in the ordinary logical sense. Either an
+unbound-symbol error escaped a run, or it did not. There is no third
+value. So the census is populated with atoms exactly as chapter 1's
+truth tables are — each key a variable that took the value *true* at
+least once.
+
+Crucially, a caught error is not a maybe. It is a fact. `guard` turns
+the event into a value you can assert on:
+
+```scheme
+(guard (e (#t (list 'errored? #t))) (nope))
+;; => (errored? #t)
+```
+
+The proposition `errored?` is `#t` here with the certainty of a truth
+assignment, not the confidence of a guess. `(nope)` referred to no
+binding; it *did* fail; the fact is closed. This is the deductive
+bedrock of the appendix: **a caught error IS a fact.**
+
+## I.2 The census is a set of propositions with frequencies
+
+Where a single caught error is one atom with a truth value, the census
+is the whole set of atoms, each tagged with how often it came true:
+
+```scheme
+(stats/error-counts 5)
+;; => ((:unbound-symbol 3 real) (:not-a-procedure 1 provisional))
+```
+
+Two propositions have been true at least once. `unbound-symbol` was true
+three times; `not-a-procedure` once. The frequency is not part of the
+proposition's *truth* — `not-a-procedure` is no less true for being rare.
+The frequency is *evidence about a population of runs*, which is a
+different logical animal entirely. Keeping those two apart is the whole
+point of the appendix.
+
+## I.3 Deduction over the propositions: certainty
+
+Some questions about the census are answerable by pure deduction — from
+facts, with certainty, no statistics involved. The cleanest is: *did a
+fix land?*
+
+Set up two predicates as propositions. First, "the symbol is bound
+now" — provable deductively by attempting to reference it under a guard:
+
+```scheme
+(define (bound? sym-thunk)
+  (guard (e (#t #f)) (begin (sym-thunk) #t)))
+(list (bound? (lambda () car))
+      (bound? (lambda () frobnicate)))
+;; => (#t #f)
+```
+
+`car` is bound (`#t`); `frobnicate` is not (`#f`). These are facts, not
+frequencies. Now the fix-landed inference. Let `had-error` be the fact
+that this key was once true in the census, and `bound-now` the fact just
+proved. The deduction is a plain conjunction:
+
+    fix-landed  ⟸  had-error ∧ bound-now
+
+```scheme
+(define (fix-landed? bound-now had-error)
+  (and had-error bound-now))
+(list (fix-landed? #t #t) (fix-landed? #f #t))
+;; => (#t #f)
+```
+
+If an unbound-symbol error was recorded AND the verb it named is bound
+now, then the fix landed — deductively, with certainty. No amount of
+frequency changes this. The conclusion follows from the two facts the
+way *modus ponens* follows from a rule and its antecedent (chapter 1).
+This is the deductive layer of error introspection: closed facts,
+combined by the connectives, yielding closed conclusions.
+
+## I.4 The census's own nature: inductive, statistical
+
+Now the contrast. Most of what people *want* from the census is not
+deductive at all. "Which wrong is worst?" "Is the system getting more
+reliable?" "Has this failure mode gone away?" These are questions about
+a population, answered by frequency — and frequency is *evidence*, not
+*proof*.
+
+A count is inductive in exactly Hume's sense. Consider:
+
+```scheme
+(stats/error-count-of "unbound-symbol")
+;; => 1
+```
+
+This says one unbound-symbol error escaped, over the runs on disk. It is
+a true fact about the past. It supports, but does not *prove*, the
+inductive generalization "unbound symbols are a common failure here."
+The generalization could be overturned by the very next thousand runs.
+The proposition *"an unbound-symbol error occurred"* is deductively
+certain; the proposition *"unbound-symbol errors are frequent"* is an
+inductive claim standing on a finite, growing sample.
+
+The status field is the census being honest about exactly this
+distinction. A key stays `provisional` until it has recurred past a
+threshold, at which point it is promoted to `real`:
+
+```scheme
+(stats/error-counts 3)
+;; => ((:unbound-symbol 3 real))
+```
+
+`provisional` is the logic of "one swallow does not make a summer" — a
+single occurrence is a fact but not yet a pattern. `real` is the census
+electing to treat accumulated evidence as a working generalization. That
+is induction with a stated evidence bar, not deduction. The promotion
+never makes the underlying frequency into a *proof*; it only marks the
+sample large enough to reason about inductively.
+
+## I.5 Two things a zero cannot deductively prove
+
+The sharpest place the deductive/inductive line matters is the *zero
+count*. A reserved key can read zero:
+
+```scheme
+(stats/error-count-of "division-by-zero")
+;; => 0
+```
+
+Deductively, this proposition is exactly: *no division-by-zero error has
+escaped, over the runs on disk*. That is all it entails. It does NOT
+entail *"Motoi cannot produce a division-by-zero error"* — that is a
+universal claim, and a universal cannot be discharged by any finite
+absence of instances. (In Motoi's case it is also flatly false: `(/ 1 0)`
+returns `+inf.0` silently, so the wrong happens without ever throwing —
+see the Book of Limits, Appendix B.) The valid deduction from a zero is
+narrow; the tempting induction from a zero — "therefore it never
+happens" — is a hasty generalization, the classic inductive fallacy.
+
+So the discipline is: **read a nonzero count as a deductive fact about
+the past, and any generalization from counts — including from a zero —
+as an inductive claim that the next run can refute.** The census gives
+you certain facts about what *did* happen and uncertain evidence about
+what *tends to* happen. Confusing the two is how a metric lies while
+telling the literal truth.
+
+## I.6 The pattern
+
+The error census sits at the seam this whole book has been mapping —
+between deductive logic (chapters 1-3, 7-8) and inductive/probabilistic
+logic (chapter 14). Each escaped error is a closed fact; deduction over
+those facts (bound-now, had-error, fix-landed) yields certain
+conclusions. But the *counts* are a sample, and reasoning from counts is
+induction: strong evidence when the sample is large and the status is
+`real`, weak or fallacious when the sample is thin or the conclusion is
+universal.
+
+A logician reading the census keeps a firm hand on which mode is in
+play. "This error occurred" — deductive, certain. "This error is
+common" — inductive, evidential. "This error cannot occur" — not
+supported by any count, zero or otherwise. Holding that line is what
+lets you diagnose failures at the level they actually occur, and never
+mistake the frequency of a wrong for a proof about the language.

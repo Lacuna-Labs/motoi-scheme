@@ -1,0 +1,10 @@
+;; A dot at (160, 40) falls under gravity, lands on a floor at 240.
+(define (drop-one-dot)
+  (let ((g 0.5) (floor-y 240) (dt 1.0))
+    (let loop ((n 60) (y 40.0) (vy 0.0))
+      (if (<= n 0)
+          (cons 160.0 (min y floor-y))
+          (let* ((vy* (+ vy (* g dt)))
+                 (y*  (min floor-y (+ y (* vy* dt)))))
+            (loop (- n 1) y* vy*))))))
+(display (drop-one-dot))
