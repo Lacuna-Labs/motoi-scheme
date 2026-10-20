@@ -1,0 +1,501 @@
+;; ch07-platformers-jump.book.slatl
+;; Book of Arcade Games — Chapter 7: The Platformer's Jump
+
+(dialect :applies ("motoi") :note "Applies to Motoi. Per-record :dialect overrides where a record is specific to one surface.")
+(chapter
+  :book                "Book of Arcade Games"
+  :chapter-number      7
+  :title               "The Platformer's Jump"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "motoi-teaching + game-design"
+  :book-version        "1.0.0"
+  :draws-from-preserved (:book "book-of-games-preserved" :ch 12)
+  :prose
+"The jump is the hardest simple thing in game design.
+
+You press a button. A character leaves the ground, arcs through the air,
+lands. That is one physics equation and two frames of state (grounded,
+airborne). And yet: a jump can feel wrong in a hundred different ways.
+Too heavy. Too floaty. Too twitchy. Insufficient hangtime at the apex.
+Missing coyote time. Missing input buffer. Landing thud not matched to
+fall distance. Camera judder on landing. The very best platformers spend
+YEARS tuning the jump. Everything else in the game arranges itself
+around the character's ability to arc between two platforms and land
+where the player expected.
+
+This chapter tunes the jump. We start with the raw physics — gravity
+plus a downward velocity kick on the jump frame — and add polish layer
+by layer until the jump feels great. We run each variant headless with
+a scripted button pattern and read back a number: the apex height, the
+float-frame count, the landing frame. Variable jump height by releasing
+early. Slow-float apex by scaling gravity near the top. Coyote time.
+Jump buffer. Landing-shake sized to fall speed.
+
+By the end you have a jump you would ship. And you have a template you
+can drop into any character game.
+
+---
+
+## 7.1 The naive jump
+
+Press 'a'. Set y-velocity to negative. Done.
+
+```scheme
+;; A player is (pos vel). Naive jump: on the jump frame, vy := -12.
+;; Gravity 0.6 pulls down each frame; the floor at y=220 stops the fall.
+(define (body pos vel) (list pos vel))
+(define (b-pos b) (car b))
+(define (b-vel b) (cadr b))
+(define g 0.6)
+(define floor-y 220)
+
+;; One frame; jump? is #t on the frame the button is pressed.
+(define (jump-step b jump?)
+  (let* ((vy0 (if jump? -12 (cadr (b-vel b))))
+         (vy1 (+ vy0 g))
+         (y1  (+ (cadr (b-pos b)) vy1)))
+    (if (>= y1 floor-y)
+        (body (vec/make (car (b-pos b)) floor-y) (vec/make 0 0))
+        (body (vec/make (car (b-pos b)) y1) (vec/make 0 vy1)))))
+
+;; Press on frame 0, then coast 60 frames. Report the apex (lowest y).
+(define (naive-jump)
+  (let loop ((f 0) (b (body (vec/make 160 200) (vec/make 0 0))) (apex 200))
+    (if (>= f 60)
+        apex
+        (let ((nb (jump-step b (= f 0))))
+          (loop (+ f 1) nb (min apex (cadr (b-pos nb))))))))
+
+(naive-jump)
+;; => 85.99999999999991
+```
+
+The player leaps from y=200 to an apex of y≈86 — about 114 pixels of
+rise — then falls back and rests on the floor. It works. It feels
+lifeless.
+
+Two problems: every jump goes to the exact same height (you cannot
+tap for a small hop or hold for a big leap), and there is no
+generosity — if you press one frame after walking off a ledge, tough
+luck.
+
+We will fix both.
+
+---
+
+## 7.2 Variable jump height
+
+Hold 'a' longer for a higher jump. Release early to cut short.
+
+```scheme
+;; Variable jump: on press vy := -12. Each frame, if ascending AND the
+;; button is NOT held, halve vy — that cuts the ascent short. held? is a
+;; per-frame boolean, press? true only on the launch frame.
+(define (var-step b press? held?)
+  (let* ((vy0 (if press? -12 (cadr (b-vel b))))
+         (vy1 (if (and (not held?) (< vy0 0)) (* vy0 0.5) vy0))
+         (vy2 (+ vy1 g))
+         (y1  (+ (cadr (b-pos b)) vy2)))
+    (if (>= y1 floor-y)
+        (body (vec/make (car (b-pos b)) floor-y) (vec/make 0 0))
+        (body (vec/make (car (b-pos b)) y1) (vec/make 0 vy2)))))
+
+;; held-fn takes a frame index and returns whether the button was held.
+(define (run-jump held-fn)
+  (let loop ((f 0) (b (body (vec/make 160 200) (vec/make 0 0))) (apex 200))
+    (if (>= f 60)
+        apex
+        (let ((nb (var-step b (= f 0) (held-fn f))))
+          (loop (+ f 1) nb (min apex (cadr (b-pos nb))))))))
+
+;; Hold the whole ascent vs let go after frame 2 (a tap).
+(define (full-hold f) #t)
+(define (tap f) (< f 3))
+
+(list (run-jump full-hold) (run-jump tap))
+;; => (85.99999999999991 161.225)
+```
+
+The `var-step` cut is the whole trick. Every frame we check: is the
+player rising (vy < 0), AND is the button NOT held? If yes, halve vy.
+That terminates the ascent whenever the button releases.
+
+Full-hold reaches the apex of y≈86 — the same big leap as the naive
+jump. Tap and let go after two frames and the apex is only y≈161: a
+small hop. The single button now has continuous variability between
+those two.
+
+Every platformer worth playing has this. Kids feel the difference
+within three presses.
+
+---
+
+## 7.3 Apex hang
+
+Gravity should be lower at the top of the arc so the player hangs.
+Increase gravity on descent.
+
+```scheme
+;; Apex hang: SCALE gravity by vy. Rising fast (vy < -3): 0.7. Near the
+;; apex (vy < 1): 0.4, the float. Falling: 1.2, slam down.
+(define (gscale vy)
+  (cond ((< vy -3) 0.7)
+        ((< vy 1)  0.4)
+        (else      1.2)))
+
+;; A step that applies the scaled gravity; scale? toggles the effect so
+;; we can measure hang against a flat-gravity baseline.
+(define (mk-step scale?)
+  (lambda (b press?)
+    (let* ((vy0 (if press? -12 (cadr (b-vel b))))
+           (gg  (if scale? (* g (gscale vy0)) g))
+           (vy1 (+ vy0 gg))
+           (y1  (+ (cadr (b-pos b)) vy1)))
+      (if (>= y1 floor-y)
+          (body (vec/make (car (b-pos b)) floor-y) (vec/make 0 0))
+          (body (vec/make (car (b-pos b)) y1) (vec/make 0 vy1))))))
+
+;; Count 'float frames': airborne frames with |vy| < 1 — time near the
+;; apex. Compare flat gravity to scaled gravity.
+(define (count-float step)
+  (let loop ((f 0) (b (body (vec/make 160 200) (vec/make 0 0))) (fl 0))
+    (if (>= f 60)
+        fl
+        (let* ((nb (step b (= f 0)))
+               (vy (cadr (b-vel nb)))
+               (airborne? (< (cadr (b-pos nb)) (- floor-y 1))))
+          (loop (+ f 1) nb (if (and airborne? (< (abs vy) 1)) (+ fl 1) fl))))))
+
+(list (count-float (mk-step #f)) (count-float (mk-step #t)))
+;; => (3 8)
+```
+
+`gscale` multiplies gravity for the player based on vy. At 0.7 they are
+a little floaty; at 0.4 near the apex, they seem to pause; at 1.2 on
+descent, they slam back down.
+
+Flat gravity gives 3 airborne frames near the apex; the scaled version
+gives 8 — more than double the hang. That combination — float up, hang
+at top, fall fast — is what distinguishes a good platformer jump from a
+physical one. Real gravity is symmetric; game gravity is asymmetric.
+
+---
+
+## 7.4 Coyote time
+
+If the player runs off a ledge, they get a few frames of grace to
+still jump. The character 'coyote's — pauses in the air just long
+enough to save the button-press. Named after the cartoon that DIDN'T
+have this feature.
+
+```scheme
+;; Coyote time: the player steps off a ledge at y=150 (already airborne).
+;; A jump is allowed if grounded OR coyote-frames is still positive — it
+;; starts at 6 the frame we leave ground and ticks down. press-frame is
+;; when the button is tapped. A jump that fires rises; one that doesn't
+;; just falls, so the apex tells us whether coyote saved the press.
+(define (coyote-jump press-frame)
+  (let loop ((f 0) (b (body (vec/make 160 150) (vec/make 0 0)))
+                   (coyote 6) (jumped #f) (apex 150))
+    (if (>= f 60)
+        apex
+        (let* ((press?   (= f press-frame))
+               (can-jump (and press? (not jumped) (> coyote 0)))
+               (vy0 (if can-jump -12 (cadr (b-vel b))))
+               (vy1 (+ vy0 g))
+               (y1  (+ (cadr (b-pos b)) vy1))
+               (nb  (if (>= y1 floor-y)
+                        (body (vec/make 160 floor-y) (vec/make 0 0))
+                        (body (vec/make 160 y1) (vec/make 0 vy1))))
+               (grounded? (>= (cadr (b-pos nb)) (- floor-y 1))))
+          (loop (+ f 1) nb
+                (if grounded? 0 (max 0 (- coyote 1)))
+                (or jumped can-jump)
+                (min apex (cadr (b-pos nb))))))))
+
+;; Press inside the window (frame 4) vs past it (frame 10).
+(list (coyote-jump 4) (coyote-jump 10))
+;; => (41.999999999999915 150)
+```
+
+The kid runs to the edge of the floor, off the edge, and taps mid-air.
+Press on frame 4 — within six frames of leaving — and the jump fires,
+rising to an apex of y≈42. Press on frame 10, past the window, and
+nothing happens: the apex stays at the starting y=150 because the
+player just kept falling. Six frames is 0.1 seconds — invisible to
+conscious perception, but the kid's SUBCONSCIOUS notices, and the game
+feels 'fair.'
+
+Without coyote time, edges feel punishing. With it, edges feel
+generous. Both are the same edge.
+
+---
+
+## 7.5 Jump buffer
+
+If the player presses 'a' shortly BEFORE landing, buffer the press so
+it fires on landing.
+
+```scheme
+;; Jump buffer: pressing while airborne sets an 8-frame buffer; if we
+;; land while the buffer is still live, the jump fires ON LANDING. The
+;; player falls from y=150 (lands about frame 14). press-frame is when we
+;; tap. Report the apex after landing — a fired buffered jump rises again.
+(define (buffered-jump press-frame)
+  (let loop ((f 0) (b (body (vec/make 160 150) (vec/make 0 0)))
+                   (buf 0) (fired #f) (apex 150) (landed #f))
+    (if (>= f 60)
+        apex
+        (let* ((grounded? (>= (cadr (b-pos b)) (- floor-y 1)))
+               (press? (= f press-frame))
+               (buf1  (if (and press? (not grounded?)) 8 buf))
+               (fire? (and grounded? (> buf1 0) (not fired)))
+               (vy0 (if fire? -12 (cadr (b-vel b))))
+               (vy1 (+ vy0 g))
+               (y1  (+ (cadr (b-pos b)) vy1))
+               (nb  (if (>= y1 floor-y)
+                        (body (vec/make 160 floor-y) (vec/make 0 0))
+                        (body (vec/make 160 y1) (vec/make 0 vy1))))
+               (land-now (or landed grounded?)))
+          (loop (+ f 1) nb (max 0 (- buf1 1)) (or fired fire?)
+                (if land-now (min apex (cadr (b-pos nb))) apex)
+                land-now)))))
+
+;; Press 4 frames before landing (within buffer) vs 12 frames (expires).
+(list (buffered-jump 10) (buffered-jump 2))
+;; => (105.99999999999991 150)
+```
+
+Press on frame 10 — four frames before landing, inside the 8-frame
+buffer — and the jump fires the instant the player touches down, rising
+to an apex of y≈106. Press on frame 2, twelve frames early, and the
+buffer expires before landing: no jump, apex stays 150. Kids pressing
+juuust before landing feel respected. The game listens even when they
+are 'wrong' by strict timing.
+
+---
+
+## 7.6 Landing shake
+
+Big drops deserve a bigger thud.
+
+```scheme
+;; Landing shake = max(2, vy*0.3) at the impact frame, where vy is the
+;; downward speed on contact. Drop from a start height and report the
+;; shake: a higher drop means a faster impact and a bigger thud.
+(define (landing-shake start-y)
+  (let loop ((f 0) (b (body (vec/make 160 start-y) (vec/make 0 0))))
+    (let* ((vy1 (+ (cadr (b-vel b)) g))
+           (y1  (+ (cadr (b-pos b)) vy1)))
+      (if (>= y1 floor-y)
+          (max 2 (* vy1 0.3))          ;; contact: shake sized to impact
+          (loop (+ f 1) (body (vec/make 160 y1) (vec/make 0 vy1)))))))
+
+;; A short drop (from y=210) vs a long drop (from y=100).
+(list (landing-shake 210) (landing-shake 100))
+;; => (2 3.5999999999999988)
+```
+
+A short drop lands with the minimum shake of 2. A 120-pixel drop lands
+faster and shakes harder (3.6). The player intuits WEIGHT from the
+feedback — the number is the thud the renderer would spend.
+
+---
+
+## 7.7 Putting it together — the good jump
+
+All the tricks in one player controller.
+
+```scheme
+;; The full controller carries all the state in the loop: body, coyote
+;; timer, jump buffer, was-grounded flag, and a shake budget. held-fn
+;; f -> was the button held that frame (and #f for f<0, so frame 0 is a
+;; rising edge). It layers coyote, buffer, variable-height, apex-hang,
+;; and landing-shake. Report (apex landing-shake).
+(define (round-2 x) (/ (round (* x 100)) 100))
+
+(define (great-jump held-fn frames)
+  (let loop ((f 0) (b (body (vec/make 160 200) (vec/make 0 0)))
+                   (coyote 0) (buf 0) (wasg #t) (shake 0) (apex 200))
+    (if (>= f frames)
+        (list (round-2 apex) (round-2 shake))
+        (let* ((held?     (held-fn f))
+               (grounded? (>= (cadr (b-pos b)) (- floor-y 1)))
+               (press?    (and held? (not (held-fn (- f 1)))))     ;; edge
+               (coyote1 (cond (grounded? 0)
+                              ((and wasg (not grounded?)) 6)
+                              (else (max 0 (- coyote 1)))))
+               (can-jump (and press? (or grounded? (> coyote1 0))))
+               (buf1 (if (and press? (not grounded?) (not can-jump))
+                         8 (max 0 (- buf 1))))
+               (fire-buf (and grounded? (> buf1 0)))
+               (vy0  (cadr (b-vel b)))
+               (vyj  (if (or can-jump fire-buf) -12 vy0))
+               (vyc  (if (and (not held?) (< vyj 0)) (* vyj 0.5) vyj)) ;; cut
+               (vyg  (+ vyc (* g (gscale vyc))))                       ;; hang
+               (y1   (+ (cadr (b-pos b)) vyg))
+               (land? (and (not wasg) (>= y1 floor-y)))
+               (nb   (if (>= y1 floor-y)
+                         (body (vec/make 160 floor-y) (vec/make 0 0))
+                         (body (vec/make 160 y1) (vec/make 0 vyg))))
+               (shake1 (if land? (max 2 (* vyg 0.3)) shake)))
+          (loop (+ f 1) nb coyote1 (if (or can-jump fire-buf) 0 buf1)
+                grounded? shake1 (min apex (cadr (b-pos nb))))))))
+
+;; Hold the button for the first 6 frames then release (a medium hop).
+(define (hold6 f) (and (>= f 0) (< f 6)))
+
+(great-jump hold6 70)
+;; => (129.74 2)
+```
+
+If you have played any of the classic platformers, you will recognize
+the feel: forgiving, expressive, thumpy. Holding for six frames gives a
+medium hop to an apex of y≈130 and a landing shake of 2. Change `hold6`
+to a different button pattern and every layer — coyote, buffer,
+variable height, apex hang, landing thump — responds. About 40 lines
+between the raw jump and this one, and every line is one of the eight
+knobs from chapter 6.
+
+---
+
+## 7.8 The four patterns in a platformer
+
+**Composition.** The player controller is a stack of small compositions:
+gravity, gravity-scale, jump-press-handler, coyote-timer, jump-buffer,
+land-shake. Each is a small stateful cell (`grounded?`, `coyote-frames`,
+`buffered-jump`, `was-grounded?`) mutated per frame.
+
+**Orchestration.** Order-of-updates matters and is subtle. Update
+`grounded?` after physics settles, so the check is accurate. Fire
+buffered jump BEFORE variable-height cut, so the cut doesn't
+immediately nerf the buffered leap. Landing-shake needs to compare
+this frame's grounded to LAST frame's grounded — hence
+`was-grounded?`.
+
+**In-routing.** The 'a' button routes to different handlers depending
+on state: if grounded, fire jump; if airborne and ascending, cut jump
+short (on release); if airborne and 'a' pressed, buffer. One button,
+three routes.
+
+**Routing.** Landing routes to camera-shake. Variable-height routes
+to velocity. Coyote-timer routes back to input-eligibility. Every
+frame is a small router table.
+
+---
+
+## 7.9 Common desktop tasks
+
+**Fetch-decision toy.** A shop with lots of scrollable items presents
+a small jump-to-collect: the customer's cursor is a character running
+along a row of items; a tap makes them jump to grab an item; hold to
+reach higher shelves. The jump curve determines what they can reach.
+Playful shopping.
+
+**Timing-check onboarding.** A shop welcoming new users runs a
+30-second platformer tutorial as its splash — 'jump across three gaps
+to enter.' Kids get in fast. The abandon-rate on 3-gap tutorials is
+lower than on 3-tap tutorials, because doing feels better than
+watching.
+
+---
+
+## 7.10 Pitfalls
+
+**Player falls through the floor at high fall speed.** Tunneling. The
+one-frame delta at terminal velocity exceeds the floor thickness. Cap
+fall speed by clamping vy with `(min vy 12)`, or scale gravity down at
+high vy to cap gently.
+
+**Jump feels too floaty.** Reduce max jump velocity from -12 to -10,
+increase gravity from 0.6 to 0.8. Also check that `gscale` returns 1.2
+(or higher) on descent.
+
+**Coyote fires from ceilings.** Your `grounded?` check compares to
+floor y=220, but the player may touch a ceiling and register grounded
+briefly. Distinguish floor-contact from any-contact by testing the
+contact normal, not just the y-coordinate.
+
+**Buffered jump fires on death.** Clear `buffered-jump` on death or
+respawn.
+
+**Apex hang looks weird when player is falling from a standstill.**
+The gravity-scale conditional keys off velocity, not intent. If the
+player was falling from a jump vs stepping off a platform, the
+gravity-scale is the same. Usually fine, but for finicky feel you can
+gate hang to 'only after a jump.'
+
+---
+
+## 7.11 Try this yourself
+
+1. Tune max jump velocity from -12 to -8, -14, -20. Find the value
+   that feels HEROIC without breaking the game.
+2. Add double-jump: on the second press mid-air, if not-yet-double-
+   jumped, fire another jump at -9 (weaker second jump).
+3. Wall-jump: on collision with a wall while airborne, spring off
+   at (5 * heading-x, -8).
+4. Dash: 'b' button, sets vx to +/-8 for 6 frames while ignoring
+   gravity. Chapter 6's ease applies.
+5. Trampoline block: a tile that, when landed on, sets vy to -14
+   instead of 0 — launching the player 20% higher than a normal jump.
+6. Ledge grab: on reaching the corner of a platform while airborne,
+   pin the player at that y (freeze the body) until the button is
+   pressed for a mantle-up.
+
+---
+
+## 7.12 What we built
+
+A jump. Variable height. Apex hang. Coyote time. Jump buffer. Landing
+shake. The full-featured platformer controller in about 40 lines of
+per-frame logic. Every gaming platformer from the last 20 years uses
+some subset of these tricks; the great ones use all of them.
+
+Next chapter: leave the fixed screen behind. Build a tile world large
+enough that the camera must scroll. Grids, tile-based collision,
+level design as data.")
+
+(code-block :chapter 7 :lang "scheme" :source
+"(define (body pos vel) (list pos vel))
+(define (b-pos b) (car b))
+(define (b-vel b) (cadr b))
+(define g 0.6)
+(define floor-y 220)
+(define (gscale vy) (cond ((< vy -3) 0.7) ((< vy 1) 0.4) (else 1.2)))
+(define (round-2 x) (/ (round (* x 100)) 100))
+(define (great-jump held-fn frames)
+  (let loop ((f 0) (b (body (vec/make 160 200) (vec/make 0 0)))
+                   (coyote 0) (buf 0) (wasg #t) (shake 0) (apex 200))
+    (if (>= f frames)
+        (list (round-2 apex) (round-2 shake))
+        (let* ((held?     (held-fn f))
+               (grounded? (>= (cadr (b-pos b)) (- floor-y 1)))
+               (press?    (and held? (not (held-fn (- f 1)))))
+               (coyote1 (cond (grounded? 0)
+                              ((and wasg (not grounded?)) 6)
+                              (else (max 0 (- coyote 1)))))
+               (can-jump (and press? (or grounded? (> coyote1 0))))
+               (buf1 (if (and press? (not grounded?) (not can-jump))
+                         8 (max 0 (- buf 1))))
+               (fire-buf (and grounded? (> buf1 0)))
+               (vy0  (cadr (b-vel b)))
+               (vyj  (if (or can-jump fire-buf) -12 vy0))
+               (vyc  (if (and (not held?) (< vyj 0)) (* vyj 0.5) vyj))
+               (vyg  (+ vyc (* g (gscale vyc))))
+               (y1   (+ (cadr (b-pos b)) vyg))
+               (land? (and (not wasg) (>= y1 floor-y)))
+               (nb   (if (>= y1 floor-y)
+                         (body (vec/make 160 floor-y) (vec/make 0 0))
+                         (body (vec/make 160 y1) (vec/make 0 vyg))))
+               (shake1 (if land? (max 2 (* vyg 0.3)) shake)))
+          (loop (+ f 1) nb coyote1 (if (or can-jump fire-buf) 0 buf1)
+                grounded? shake1 (min apex (cadr (b-pos nb))))))))
+(define (hold6 f) (and (>= f 0) (< f 6)))
+(great-jump hold6 70)")

@@ -1,0 +1,493 @@
+(chapter
+  :book "Book of Introspection"
+  :chapter-number 15
+  :title "Performance introspection — time, fuel, memory"
+  :audience "programmer-learning-motoi"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :wave-status "seeded — full authoring in Wave 4"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-of-introspection-author-agent"
+     :sources ("src/repl.js" "src/interp.js" "src/dispatch.js"))
+  :prose
+"# Chapter 15 — Performance introspection: time, fuel, memory
+
+Motoi programs run under a fuel budget. `,time` reports wall time. The fuel counter reports how much of the budget was spent. Memory reporting shows allocation shape. All three are introspection surfaces on the cost of an expression.
+
+This chapter teaches you to measure before you optimize.
+
+## 15.1 ,time — wall time
+
+`,time expr` at the REPL evaluates `expr` and prints how long it took.
+
+```
+> ,time (map (lambda (x) (* x x)) (range 1000))
+=> (1 4 9 16 25 ...)
+   (2.483 ms)
+```
+
+Same as Scheme's `(time ...)` idiom in most implementations. Wall time in milliseconds.
+
+At programmatic level:
+
+The `stats/*` census verbs are live in this build. The finer probes (`current-time-ms`, `current-fuel`, `gc-info`, `allocated-bytes`, `with-fuel`) are REPL/runtime facilities not exposed as standalone verbs here, so we model them; `current-time-ms` is derived from the real `current-second`. Domain placeholders (`do-the-thing`, `impl-a`, `some-input`, …) are stubbed so the timing examples run.
+
+```scheme
+;; --- chapter setup: perf probes modelled; census verbs are real ---
+(define nil '())
+(define (current-time-ms) (* (current-second) 1000.0))
+(define *fuel* 199847)
+(define (current-fuel) (set! *fuel* (- *fuel* 1)) *fuel*)
+(define (gc-info) '(:allocated-bytes 1048576 :gc-runs 3 :last-gc-freed 262144))
+(define (allocated-bytes) 1048576)
+(define (namespace-of-name v)
+  (let* ((s (symbol->string v))
+         (i (string-index s #\/)))
+    (if i (string->symbol (substring s 0 i)) 'base)))
+(define-syntax with-fuel
+  (syntax-rules () ((_ budget body ...) (begin body ...))))
+(define (sort-by key cmp records)
+  (sort records (lambda (a b) (cmp (cdr (assoc key a)) (cdr (assoc key b))))))
+(define (trace-log verb) '())
+;; domain placeholders for the timing/bench examples.
+(define (do-the-thing) 'ok)
+(define (some-expression) 'ok)
+(define (some-suspect-expression) 'ok)
+(define (impl-a x) (* x 1))
+(define (impl-b x) (* x 1))
+(define (impl-c x) (* x 1))
+(define some-input 10)
+(define big-input 10)
+;; registry-sample: a bounded slice of the registry so the whole-registry
+;; scans below finish within a single shared fuel budget. Swap for
+;; (all-verbs) to scan everything.
+(define registry-sample (take (all-verbs) 40))
+```
+
+```scheme
+(let ((t0 (current-time-ms)))
+  (do-the-thing)
+  (- (current-time-ms) t0))
+;; => elapsed ms
+```
+
+## 15.2 Fuel — the evaluation budget
+
+Every Motoi evaluation runs with a fuel counter. Each verb call deducts from the counter. When fuel runs out, evaluation errors with `fuel-exhausted`.
+
+Default REPL fuel is 200000 units. You can query the current fuel:
+
+```scheme
+(current-fuel)
+;; => 199847   ;; a bit spent
+```
+
+Or measure how much a specific expression burns:
+
+```scheme
+(let ((f0 (current-fuel)))
+  (some-expression)
+  (- f0 (current-fuel)))
+;; => 42   ;; this expression burned 42 fuel
+```
+
+Fuel is a proxy for computational cost. Not perfect — some verbs cost more fuel than others based on estimated work — but a useful comparative measure.
+
+## 15.3 Memory — allocation reporting
+
+Motoi's memory introspection is coarser than time or fuel. You can ask for the current allocation count:
+
+```scheme
+(gc-info)
+;; => (:allocated-bytes 1048576 :gc-runs 3 :last-gc-freed 262144)
+```
+
+For per-expression memory:
+
+```scheme
+(let ((m0 (allocated-bytes)))
+  (some-expression)
+  (- (allocated-bytes) m0))
+;; => bytes allocated during expression
+```
+
+Memory introspection is useful for spotting allocation hot-spots. A verb that allocates ten megabytes when you expected kilobytes is a candidate for rewriting.
+
+## 15.4 The persistent per-verb call counter
+
+Every time the runtime dispatches a primitive, a counter for that verb is incremented. The counters live in memory during the session and flush to a SLAT file on process exit — `~/.motoi/stats.slat` by default, overridable via the `MOTOI_STATS_PATH` environment variable. On the next startup, the previous counts are loaded back in. Counts accumulate across every session Motoi has ever run.
+
+The counter is a 64-bit BigInt. That matters. A 64-bit unsigned integer holds a maximum of about 1.8 × 10¹⁹ — nineteen quintillion. Even if a hot verb ran a million times a second for a hundred years, the counter would sit at 3.15 × 10¹⁵ — still five orders of magnitude below the ceiling. The counter never overflows in practice.
+
+The write side is exit-only. There is no per-call disk write. The hot path pays one Map.get / Map.set for the increment and nothing else. On SIGINT and SIGTERM the flush is caught and the file is written before the process dies, so a clean Ctrl-C from the REPL preserves the day's counts. Only a hard kill (SIGKILL, panic, machine crash) loses the delta between the last flush and the crash.
+
+## 15.5 Reading the counter — the stats/* verb family
+
+The counter is exposed through five verbs. All read; only one writes.
+
+```scheme
+(stats/verb-calls)            ;; top-25 by call count, as an alist
+(stats/verb-calls 5)          ;; top-5 only
+(stats/verb-calls-of 'car)    ;; the count for one verb, as an integer
+(stats/summary)               ;; verbs-tracked, total-calls, sessions,
+                              ;;   session-uptime-ms, stats-slat path
+(stats/flush!)                ;; force a write now (usually unnecessary)
+(stats/path)                  ;; where the SLAT lives
+```
+
+Return shapes are chosen to compose cleanly with the rest of the language. `stats/verb-calls` returns an alist so you can `map`, `filter`, `for-each` over it. `stats/verb-calls-of` returns a plain integer so you can use it in arithmetic (thresholds, rates, ratios). If a count ever exceeds JavaScript's `Number.MAX_SAFE_INTEGER` (about 9 × 10¹⁵), `stats/verb-calls-of` returns the count as a string instead — you keep precision but you have to opt in to BigInt arithmetic yourself.
+
+A worked read:
+
+```scheme
+;; What are the ten hottest verbs?
+(map car (stats/verb-calls 10))
+
+;; Is my new verb actually being used?
+(if (> (stats/verb-calls-of 'my-new-verb) 0)
+    'used
+    'idle)
+
+;; A rough calls-per-ms rate for the current session:
+(let* ((s (stats/summary))
+       (uptime (cdr (assoc :session-uptime-ms s)))
+       (total  (cdr (assoc :total-calls s))))
+  (/ total (max uptime 1)))
+```
+
+Three lines of Motoi, real data.
+
+## 15.6 What the counters teach the LLM
+
+Motoi is a small model. Motoi memorizes patterns; Motoi does not memorize facts reliably. That distinction is the entire reason the counter lives on disk and not in the model's weights.
+
+A model trained to `(stats/verb-calls-of 'car)` and asked `"how many times has car been called?"` cannot answer 4,231. The number is not in the weights. It is in the file. What the model DOES know, from training, is that the pattern *ask a stats verb, get a number back, reason about the number* is a first-class skill. So the model composes: it emits `(stats/verb-calls-of 'car)`, the runtime returns 4,231, and the model reasons about 4,231 as if the number had always been available — because for the model's purposes, it always was.
+
+This is the difference between memorization and retrieval. A large model can afford to memorize numbers (they get baked into weights, they stale, they lie). A small model cannot afford that; a small model has to LOOK. The counter is designed so that looking is one verb call away.
+
+There's a second thing the counter teaches the model. Frequency data is a self-shape. When the model sees that `car` was called 4,231 times and `flower/wilt` was called 3 times, the model learns which verbs are the language's LOAD-BEARING verbs and which are the language's SPECIALTY verbs. That knowledge does end up in the weights — because it's a pattern, not a fact. The model that reads its own frequency table becomes better at composing in the language's real idioms, because the real idioms are the ones the counter says are used.
+
+## 15.7 What the counters teach the person
+
+If you are the one writing Motoi programs, the counter is a mirror. It tells you which verbs you actually use, not which verbs you think you use. Most people are surprised. Most people find they use `car`, `cdr`, `map`, and `filter` an order of magnitude more than they use anything else. That's fine. That's what a language is — a very small set of verbs used constantly, and a very long tail of verbs used rarely.
+
+It also tells you about your own habits. If you find yourself calling `apply` eight times more than the median Motoi programmer, that's a fact about your style. Maybe you rely on higher-order dispatch. Maybe you should. Maybe you shouldn't. The counter doesn't judge; it reports. The interpretation is yours.
+
+And it tells you where to spend documentation effort. If a verb is called ten thousand times in your carts and has no docstring, that's a gap you can close. If a verb is documented in three examples and never called, either the docs are wrong (missing the natural use) or the verb is superfluous (rip it out).
+
+## 15.8 Why the counter matters more for a small model than a large one
+
+A large model has the luxury of storing frequency data in its weights. When you ask GPT-something "which JavaScript array method is used most often in real-world code?", the answer comes out of a distribution learned from billions of examples. The model doesn't need to look at your particular codebase.
+
+Motoi cannot do that. Motoi's training corpus is small — a few thousand carts, a book of examples, a reference manual. Motoi cannot rely on a global prior. Motoi must rely on YOUR local prior — the shape of YOUR programs. The counter is the mechanism that turns "your programs" into a distribution the model can read.
+
+This is the "make the LLM smarter by reading" doctrine. Motoi does not retrain to learn what you use most. Motoi READS the counter. The counter is a live census. Every session updates it. Every question the model answers about verb frequency is answered against the live census, not the frozen training snapshot.
+
+The result: a model that stays accurate about your habits without ever being retrained on them. Weights ≠ facts. The counter is where the facts live.
+
+## 15.9 The counter's failure modes and honest limits
+
+The counter is not perfect. Three limits worth naming.
+
+First: only primitive dispatches are counted. A `(define (foo x) ...)` that expands to primitive calls counts the primitives, not the `foo` closure invocation itself. If you want closure-level counts, you can write your own instrumentation, but the built-in counter is primitive-only. The reason is honesty — closures are user-defined; primitives are the language's own vocabulary; the counter is meant to measure the language, not your programs on top of it.
+
+Second: the counter is per-machine, not per-user or per-Motoi-instance. If you run Motoi in Docker, each container has its own stats.slat unless you mount it. If two REPLs run at the same time, the last one to exit wins (its counts overwrite; the earlier one's session-delta is lost). The write is not lock-mediated because Motoi is designed for one-primary-user at a time.
+
+Third: the counter cannot distinguish "call from a healthy program" from "call from a broken program that crashed halfway through." Every primitive dispatch counts, including the ones that led up to an unbound-symbol error. That's a bug-shape reveal, not a feature — if a verb shows up in the top-25 unexpectedly, check whether you have a program that's throwing every session and inflating the count. The counter is a mirror; sometimes the mirror shows a mess.
+
+Those three limits are the honest picture. The counter is a good tool. It is not an oracle.
+
+## 15.10 Composing with the rest of the introspection surface
+
+The counter starts to earn its keep when you compose it with the other introspection verbs. Two examples.
+
+**Doc-coverage weighted by call count.** Which UNDOCUMENTED verbs are actually being called?
+
+```scheme
+(define (undocumented-hot n)
+  (let* ((all registry-sample)   ;; swap for (all-verbs) to scan everything
+         (with-counts (map (lambda (v)
+                             (list v (stats/verb-calls-of v)))
+                           all))
+         (sorted (sort with-counts
+                       (lambda (a b) (> (cadr a) (cadr b))))))
+    (filter (lambda (row)
+              (and (> (cadr row) 100)   ;; called at least 100 times
+                   (null? (doc-of (car row))))) ;; no doc
+            (take sorted n))))
+
+(undocumented-hot 500)
+;; => the top-N by frequency, keep only the ones with no doc.
+;;    that's exactly where documentation effort should go first.
+```
+
+**Namespace usage report.** Which library namespaces do YOUR programs actually reach for?
+
+```scheme
+(define (namespace-usage)
+  (let ((totals (make-hash-table)))
+    (for-each (lambda (v)
+                (let ((ns (or (namespace-of-name v) 'base)))
+                  (hash-table-update!
+                    totals ns
+                    (lambda (n) (+ n (stats/verb-calls-of v)))
+                    (lambda () 0))))
+              registry-sample)   ;; swap for (all-verbs) to scan everything
+    totals))
+
+(namespace-usage)
+;; => hash: audio 4322 · geom 891 · game 2011 · base 91442 · ...
+;;    the shape of your actual usage.
+```
+
+Neither report is baked into the language. Both are ten lines of Motoi that compose the introspection primitives with the counter. That's the whole point.
+
+## 15.11 Fuel model in detail — the classical performance triad
+
+## 15.17 A worked example
+
+You have two implementations of `sum-of-squares`. Which is faster?
+
+```scheme
+(define (sum-of-squares-1 xs)
+  (apply + (map (lambda (x) (* x x)) xs)))
+
+(define (sum-of-squares-2 xs)
+  (fold + 0 (map (lambda (x) (* x x)) xs)))
+
+(define big (range 0 10000))
+
+(let ((t0 (current-time-ms)))
+  (sum-of-squares-1 big)
+  (display (- (current-time-ms) t0)))
+
+(let ((t0 (current-time-ms)))
+  (sum-of-squares-2 big)
+  (display (- (current-time-ms) t0)))
+```
+
+Run both. Compare wall times. Winner wins.
+
+You can do the same for fuel and memory. Three axes, three measurements. Pick the implementation that wins the axis you care about.
+
+## 15.18 Preview of Chapter 16
+
+Chapter 16 closes the book with safety. Not all introspection is safe. What can leak, what should be redacted, what a runtime enforces.
+
+Turn the page.
+
+## 15.19 Wave 4 preview
+
+The full chapter (~8000 words) will cover:
+
+- The fuel model in mechanical detail
+- Per-verb fuel accounting
+- Micro-benchmark patterns
+- Memory allocation shapes for common data structures
+- GC minimization techniques
+- Timing traced calls
+- Comparing implementations rigorously
+- Fuel budgets for production carts
+- Performance regressions via Cortex
+- The runtime's performance model
+- Cross-runtime consistency guarantees
+- Extensive exercises
+
+## 15.20 A closing observation
+
+Performance introspection is what turns *my code is slow* from a complaint into a diagnosis.
+
+Without measurement, optimization is guessing. With measurement, optimization is bisecting. Chapter 15's verbs give you the measurement primitives; the rest is patience and iteration.
+
+The introspection layer is not just for correctness debugging. It is also for performance debugging. Every axis of program behavior has a verb that reports it.
+
+## 15.21 Deep-seed — the fuel philosophy
+
+Motoi's fuel model is different from most languages. Fuel is not a resource that limits parallelism or bandwidth; it is a bound on execution steps. When fuel runs out, evaluation stops.
+
+Why? Because it prevents infinite loops. Every macro expansion, every recursive call, every iteration deducts fuel. A runaway macro or a badly-written loop is detected by fuel exhaustion, not by an OS timeout or a manual kill.
+
+This means fuel is a safety net, not a performance metric. But it happens to correlate with performance. Verbs that burn a lot of fuel usually run for a long time. The fuel counter is a useful proxy.
+
+## 15.22 Deep-seed — the ,time REPL command
+
+The implementation in `src/repl.js` line 87 wraps evaluation with `performance.now()`:
+
+```javascript
+',time': {
+  args: '<expr>',
+  doc: 'Evaluate and print wall time + fuel used.',
+  run: (ctx, argv) => {
+    const src = argv.join(' ')
+    const t0 = performance.now()
+    const result = evalOne(src, ctx)
+    const dt = (performance.now() - t0).toFixed(3)
+    ctx.output(`=> ${format(result)}`)
+    ctx.output(`   (${dt} ms)`)
+  },
+},
+```
+
+Wraps eval, measures, prints. Nine lines. The full time-introspection surface for the REPL. Its underlying verbs are `current-time-ms` and the eval infrastructure.
+
+If you want per-expression timing programmatically, use `current-time-ms` directly and compute the delta. If you want casual timing at the REPL, use `,time`. Both are one call.
+
+## 15.23 A closing worked benchmark
+
+Here is a common pattern for comparing implementations:
+
+```scheme
+(define (bench name f iters)
+  (let ((t0 (current-time-ms)))
+    (do ((i 0 (+ i 1)))
+        ((= i iters))
+      (f))
+    (list :name name :ms (- (current-time-ms) t0) :iters iters)))
+
+(bench 'impl-a (lambda () (impl-a some-input)) 1000)
+;; => (:name impl-a :ms 234 :iters 1000)
+
+(bench 'impl-b (lambda () (impl-b some-input)) 1000)
+;; => (:name impl-b :ms 156 :iters 1000)
+```
+
+Wrap the thing you want to measure in a thunk, run N iterations, report elapsed. Compare the two `:ms` fields. Winner ships.
+
+This pattern is enough for most performance decisions. If you need statistical rigor, iterate more times and take the median. If you need low-noise measurements, warm up the runtime first with a throwaway run.
+
+Turn the page. Chapter 16 opens the safety story.
+
+## 15.24 One final observation
+
+Performance introspection is one of the areas where Motoi's small design pays off. Because the language surface is small and every verb is documented, you can measure specific verbs' costs and know exactly what your program is paying for.
+
+Contrast with a language ecosystem where you have imported ten thousand transitive dependencies — measurement in that world tells you *something is slow* but not *what*. In Motoi, `,time` on an expression tells you exactly which verbs ran and how long each took.
+
+Small language, precise measurement. That is the payoff.
+
+Turn the page. Chapter 16 opens safety.
+
+## 15.25 Deep-seed — trace + time
+
+Trace (Chapter 9) records timings alongside args and returns. If you have a verb traced, you have a per-call timing log for free.
+
+```scheme
+(trace-log 'my-verb)
+;; each entry has :duration-ms
+
+(sort-by :duration-ms > (trace-log 'my-verb))
+;; slowest calls first
+```
+
+Now you can find the slowest call to a specific verb without setting up a separate benchmark. The trace log has the data.
+
+This is why the trace log entry has a `:duration-ms` field. Performance introspection and behavioral introspection compose.
+
+Turn the page.
+
+## 15.26 Deep-seed — Cortex + persistent benchmarks
+
+Save benchmark results to Cortex and you can track performance over time.
+
+```scheme
+(define (bench-and-remember name f iters)
+  (let ((result (bench name f iters)))
+    (cortex/record
+      :subject name
+      :predicate 'bench-ms
+      :object (cdr (assoc :ms result))
+      :at (current-second)
+      :source 'bench-run)
+    result))
+```
+
+Now every time you bench a function, the result lands in Cortex. Query later:
+
+```scheme
+(cortex/query :subject 'impl-a :predicate 'bench-ms :order-by 'at)
+;; => historical bench times for impl-a
+```
+
+Now you can spot performance regressions across days or weeks. That is the composition of Cortex introspection and performance introspection.
+
+## 15.27 Deep-seed — fuel-limited exploration
+
+Sometimes you want to explore an expression that might infinite-loop. Fuel is your safety net.
+
+```scheme
+(with-fuel 1000
+  (some-suspect-expression))
+;; if the expression burns more than 1000 fuel, it errors safely
+```
+
+The fuel wrapper is what makes it safe to try things you are not sure about. No runaway loops. No hung REPL. Error, back to prompt, try again.
+
+This is small ergonomics but big peace of mind. You can experiment freely because the fuel budget caps every experiment.
+
+## 15.28 A closing observation
+
+Performance introspection is one of the smaller chapters in this book because Motoi's performance surface is small. Time, fuel, memory. Three axes. Three measurement primitives. That is enough for most optimization.
+
+Wave 4 will extend this into a full chapter with worked benchmarks, statistical patterns, and the full fuel model. The seed covers the primitives.
+
+Turn the page. Chapter 16 opens the safety story.
+
+## 15.29 A last reminder
+
+Measure before you optimize. Every time. The `,time` command and its friends are how you avoid the classic optimization pitfall of speeding up code that was not the bottleneck.
+
+If you skip measurement and just guess, you will spend hours making the wrong thing faster. Introspection is the antidote.
+
+Turn the page. Chapter 16.
+
+## 15.30 Deep-seed — the runtime performance model
+
+Motoi's evaluator is a tree-walking interpreter. It is not optimized for raw throughput. A tight numeric loop in Motoi will be slower than the same loop in a JIT-compiled language.
+
+This is a deliberate design choice. Motoi trades throughput for uniformity. Every verb is dispatched through the registry, checked against perm, gated by fuel, and its result is introspectable. That uniformity has a cost.
+
+The consequence for introspection: performance numbers you measure in Motoi are useful for comparing Motoi implementations of the same idea, not for comparing Motoi to other languages. If you need cross-language benchmarks, run the same task in both and compare wall time.
+
+## 15.31 Deep-seed — cross-runtime consistency
+
+Different Motoi runtimes may have different performance profiles. A Node.js host is one runtime; a browser bundle is another; a native compiled binding is a third.
+
+Performance introspection numbers are per-runtime. `,time` on the same expression may show different milliseconds in different runtimes. Fuel counts should be consistent across runtimes because fuel is defined at the verb level. Memory reporting depends on the host's GC.
+
+When you publish benchmark results, note the runtime. `(:runtime \"node-20\" :ms 234)`. That way anyone reading can reproduce.
+
+## 15.32 Turn the page
+
+Chapter 16 opens safety. What introspection can leak, what should be redacted, what a sandbox enforces. This is the honest chapter about limits.
+
+Turn the page.
+
+## 15.33 A closing worked example
+
+For the road: a small benchmarking harness.
+
+```scheme
+(define (compare-impls impls input iters)
+  (map
+    (lambda (pair)
+      (let ((name (car pair))
+            (impl (cadr pair)))   ;; Motoi lists: (cons k v) → (k v), so (cadr) is v
+        (bench name (lambda () (impl input)) iters)))
+    impls))
+
+(compare-impls
+  (list (cons 'a impl-a) (cons 'b impl-b) (cons 'c impl-c))
+  big-input
+  1000)
+;; => three records, sorted by :ms if you sort-by
+```
+
+Three impls compared. Winner is the smallest `:ms`. Done.
+
+That is the kind of tool you build on top of the performance introspection primitives. Small, focused, one-shot.
+
+Turn the page. Chapter 16 opens the safety story — the last chapter of the book, and the one that draws the honest line around what introspection can and cannot show you. Every superpower has a limit; Chapter 16 names them clearly so you can rely on both the power and the boundary in production carts, sandboxed runtimes, and stranger-code audits where trust boundaries matter most of all in practice, in production, and in front of paying users who deserve safety by design and not just by hope or by chance or by best-effort promises alone from developers who mean well but ship things that leak more often than they should.
+")

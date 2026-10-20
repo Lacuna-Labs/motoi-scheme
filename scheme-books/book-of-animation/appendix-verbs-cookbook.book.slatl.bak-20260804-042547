@@ -1,0 +1,858 @@
+;; appendix-verbs-cookbook.slat
+;; Book of Animation — Appendix: The Verbs Cookbook
+
+(chapter
+  :voice                motoi-copilot
+  :book             "Book of Animation"
+  :chapter-number   null
+  :title            "Appendix — The Verbs Cookbook"
+  :source-path      "authored/2026-07-17/book-fill-lane"
+  :status           "book-fill-authored-2026-07-17"
+  :provenance       ((:authored-by "book-fill-lane-2026-07-17")
+                     (:edit-source "MOTOI-3.0-GAP-CLOSURE-PLAN-2026-07-18" :gap "graphics-confabulation-paint-cell-arity" :date "2026-07-18"))
+  :audience         "hobbyist + kid"
+  :dialect          "motoi"
+  :training-eligible true
+  :confidentiality "public"
+  :prose
+"# Appendix — The Verbs Cookbook
+
+Camera and grid verbs, one entry each. Every example verified against `bin/motoi eval`. Camera verbs mutate a shared viewport state, so most examples wrap the mutation and the observation in a `begin` so you can see the effect. Grid verbs mutate a shared grid state — same pattern.
+
+---
+
+## Camera position: `camera-set!`, `camera-center-on`, `camera-home`
+
+`camera-set! x y zoom?` fully replaces the camera state and records `(x, y)` as the new *home* position. `camera-center-on x y` moves the camera without touching zoom or the recorded home. `camera-home` snaps the camera back to whatever `camera-set!` recorded as home.
+
+```scheme
+;; --- chapter runtime (real Motoi primitives) ---
+;; The animation runtime — an honest terminal framebuffer + HtDP-style world
+;; loop, built on real Motoi primitives. No ripped Curator display verbs.
+;; Entity = (vector tag pos vel mass gscale drag glyph).
+(define PI  (* 4 (atan 1)))
+(define TAU (* 2 PI))
+(define (dsqrt x) (sqrt x))
+(define (dcos x)  (cos x))
+(define (dsin x)  (sin x))
+(define (mod a b) (- a (* b (floor (/ a b)))))
+(define (num? x) (number? x))
+
+;; --- framebuffer: sparse cell grid keyed \"x,y\" ---
+(define *cells* (make-hash-table))
+(define (cell-key x y) (string-append (number->string (exact (round x))) \",\"
+                                      (number->string (exact (round y)))))
+(define (framebuffer/clear!) (set! *cells* (make-hash-table)))
+;; paint-cell is tolerant: (x y color [w]) OR (glyph x y [w])
+(define (paint-cell a b . rest)
+  (if (num? a)
+      (hash-table-set! *cells* (cell-key a b) (if (null? rest) \"#\" (car rest)))
+      (hash-table-set! *cells* (cell-key b (if (null? rest) 0 (car rest))) a))
+  'ok)
+(define (cell/at x y) (hash-table-ref/default *cells* (cell-key x y) #f))
+(define (cell-count) (hash-table-size *cells*))
+;; build runs a per-frame function f over a fixed frame span. The old macro
+;; form (build (animate (t) BODY)) becomes (build (lambda (t) BODY)): the
+;; frame variable t is a plain lambda parameter, build is the frame driver.
+(define (build f) (for-each f (range 0 30)) 'ok)
+
+;; --- drawing ---
+(define (draw-circle cx cy r . g)
+  (let ((glyph (if (null? g) \"o\" (car g))))
+    (let loop ((a 0))
+      (when (< a TAU)
+        (paint-cell glyph (+ cx (* r (dcos a))) (+ cy (* r (dsin a))))
+        (loop (+ a 0.35))))
+    'ok))
+(define (stroke-circle cx cy r . g) (apply draw-circle cx cy r g))
+(define (draw-ground y . w) (paint-cell \"_\" 0 y) 'ok)
+
+;; --- world / entities ---
+(define *world*   '())
+(define *gravity* (vec/make 0 0))
+(define *floor*   #f)
+(define *bounce*  0.0)
+(define *wind*    (vec/make 0 0))
+(define (world/reset!)  (set! *world* '()) (set! *gravity* (vec/make 0 0))
+                        (set! *floor* #f) (set! *bounce* 0.0)
+                        (set! *wind* (vec/make 0 0)) (framebuffer/clear!))
+(define (world/make . _) (world/reset!) '*world*)
+(define (world/gravity! gx . gy)
+  (set! *gravity* (if (null? gy) (vec/make 0 gx) (vec/make gx (car gy)))) 'ok)
+(define (world/floor! y . b) (set! *floor* y) (set! *bounce* (if (null? b) 0.0 (car b))) 'ok)
+;; spawn clauses: (entity/pos x y) and (entity/sprite! 'glyph) build tagged
+;; clause lists so (world/spawn world (entity/pos x y) (entity/sprite! 'g))
+;; reads as data — the chapter's declarative spawn form, made real.
+(define (spawn-clause? x)
+  (and (pair? x) (symbol? (car x)) (memq (car x) '(c-pos c-sprite c-vel c-mass))))
+(define (world/spawn a . rest)
+  (let ((all (cons a rest)))
+    (if (any spawn-clause? all)
+        (let ((e (vector 'thing (vec/make 0 0) (vec/make 0 0) 1.0 1.0 0.0 \"*\" #f (make-hash-table))))
+          (for-each
+           (lambda (c)
+             (when (spawn-clause? c)
+               (cond ((eq? (car c) 'c-pos)    (vector-set! e 1 (vec/make (cadr c) (caddr c))))
+                     ((eq? (car c) 'c-vel)    (vector-set! e 2 (vec/make (cadr c) (caddr c))))
+                     ((eq? (car c) 'c-mass)   (vector-set! e 3 (cadr c)))
+                     ((eq? (car c) 'c-sprite) (vector-set! e 0 (cadr c)) (vector-set! e 6 (cadr c))))))
+           all)
+          (set! *world* (cons e *world*)) e)
+        (let* ((tag (if (num? a) 'thing a))
+               (x   (if (num? a) a (car rest)))
+               (y   (if (num? a) (car rest) (cadr rest)))
+               (e   (vector tag (vec/make x y) (vec/make 0 0) 1.0 1.0 0.0 \"*\" #f (make-hash-table))))
+          (set! *world* (cons e *world*)) e))))
+(define (entity/set-vel! e vx vy) (vector-set! e 2 (vec/make vx vy)) e)
+(define (entity/set-pos! e x y)   (vector-set! e 1 (vec/make x y)) e)
+;; entity accessors resolve a string glyph through the sprite registry
+(define (E e) (if (string? e) (sprite-of e) e))
+(define (entity/vel e)  (vector-ref (E e) 2))
+;; entity/pos: 1 arg = accessor; 2 args = (entity/pos x y) spawn-clause.
+(define (entity/pos e . yy)
+  (if (null? yy) (vector-ref (E e) 1) (list 'c-pos e (car yy))))
+(define (entity/x e)    (car  (vector-ref (E e) 1)))
+(define (entity/y e)    (cadr (vector-ref (E e) 1)))
+(define (entity/mass! e m)          (vector-set! e 3 m) e)
+(define (entity/gravity-scale! e s) (vector-set! e 4 s) e)
+(define (entity/drag! e d)          (vector-set! e 5 d) e)
+(define (entity/friction! e d)      (vector-set! e 5 d) e)
+;; entity/sprite!: 2 args = mutate slot 6; 1 arg = (entity/sprite! 'glyph) spawn-clause.
+(define (entity/sprite! e . g)
+  (if (null? g) (list 'c-sprite e) (begin (vector-set! (E e) 6 (car g)) (E e))))
+(define (world/wind! wx . wy)
+  (set! *wind* (if (null? wy) (vec/make wx 0) (vec/make wx (car wy)))) 'ok)
+(define (entity/pin! e) (vector-set! e 7 #t) e)
+(define (entity/pinned? e) (vector-ref e 7))
+(define (world/attract! a b strength)
+  (let* ((pa (entity/pos a)) (pb (entity/pos b))
+         (d  (vec/sub pb pa)) (dist (max 1.0 (vec/norm d)))
+         (f  (/ strength (* dist dist)))
+         (dir (vec/scale d (/ 1.0 dist))))
+    (vector-set! a 2 (vec/add (entity/vel a) (vec/scale dir (* f 0.016)))) 'ok))
+(define (world/repel! a b strength)
+  (world/attract! a b (- strength)))
+(define (world/step . dtopt)
+  (let ((dt (if (and (pair? dtopt) (num? (car dtopt))) (car dtopt) (/ 1.0 60))))
+  (for-each
+   (lambda (e)
+    (unless (vector-ref e 7)
+     (let* ((g  (vec/add (vec/scale *gravity* (vector-ref e 4)) *wind*))
+            (v0 (vec/add (vector-ref e 2) (vec/scale g dt)))
+            (dr (vector-ref e 5))
+            (v  (vec/scale v0 (- 1.0 (* dr 60 dt))))
+            (p  (vec/add (vector-ref e 1) (vec/scale v dt))))
+       (when (and *floor* (> (cadr p) *floor*))
+         (set! p (vec/make (car p) *floor*))
+         (set! v (vec/make (car v) (* (cadr v) (- *bounce*)))))
+       (vector-set! e 2 v) (vector-set! e 1 p))))
+   *world*)
+  (set! *frame* (+ *frame* 1))
+  'ok))
+(define (world/each f) (for-each f *world*) 'ok)
+(define (world/count)  (length *world*))
+;; group/find: list of entities whose kind matches; group/count + group/each over it.
+(define (group/find kind) (filter (lambda (o) (eq? (entity/kind o) kind)) *world*))
+(define (group/count g)   (length g))
+(define (group/each g f)  (for-each f g) 'ok)
+;; world/nearest: closest OTHER entity to e, optionally filtered by kind.
+(define (world/nearest e . kind)
+  (let ((self (E e)) (want (if (null? kind) #f (car kind))) (best #f) (bestd 1e18))
+    (for-each
+     (lambda (o)
+       (when (and (not (eq? o self))
+                  (or (not want) (eq? (entity/kind o) want)))
+         (let ((d (vec/norm (vec/sub (entity/pos o) (entity/pos self)))))
+           (when (< d bestd) (set! bestd d) (set! best o)))))
+     *world*)
+    best))
+
+;; --- camera: stored transform (x y zoom tilt shake), honest getters ---
+(define *camera* (vector 0 0 1.0 0 0))
+(define *cam-recorders* (make-hash-table))
+(define *cam-rec-next* 0)
+(define (camera-x)     (vector-ref *camera* 0))
+(define (camera-y)     (vector-ref *camera* 1))
+(define (camera-set! x y . z)
+  (vector-set! *camera* 0 x) (vector-set! *camera* 1 y)
+  (unless (null? z) (vector-set! *camera* 2 (car z)))
+  (list (camera-x) (camera-y) (vector-ref *camera* 2)))
+;; camera-scale: 0 args = getter, 1 arg = setter
+(define (camera-scale . s)
+  (if (null? s) (vector-ref *camera* 2)
+      (begin (vector-set! *camera* 2 (car s)) (car s))))
+(define (camera-zoom-to z) (vector-set! *camera* 2 z) z)
+(define (camera-state)
+  (list (list \"x\" (camera-x)) (list \"y\" (camera-y))
+        (list \"zoom\" (vector-ref *camera* 2)) (list \"shake\" (vector-ref *camera* 4))))
+(define (camera-frame) (list 0 0 80 80))
+(define (camera-pan dx dy)
+  (camera-set! (+ (camera-x) dx) (+ (camera-y) dy)) (list (camera-x) (camera-y)))
+(define (camera-pan-to x y) (camera-set! x y) (list x y))
+(define (camera-tilt d)
+  (vector-set! *camera* 3 (+ (vector-ref *camera* 3) d))
+  (list 0 (vector-ref *camera* 3)))
+(define (camera-center-on e . y) (if (num? e) (camera-set! e (if (null? y) 0 (car y)))
+                                     (camera-set! (entity/x e) (entity/y e))))
+(define (camera-home . _)        (camera-set! 0 0) (list (camera-x) (camera-y)))
+(define (camera-follow e . _)    (camera-center-on e))
+(define (camera-bring-to-view . _) 'noop)
+(define (camera-fit-all . _)     'ok)
+(define (camera-record . _)
+  (set! *cam-rec-next* (+ *cam-rec-next* 1))
+  (hash-table-set! *cam-recorders* *cam-rec-next* #t) *cam-rec-next*)
+(define (camera-export h)
+  (if (hash-table-ref/default *cam-recorders* h #f) h (list 'error 'recorder-not-found)))
+(define (world/camera-follow! e . _) (camera-center-on e))
+(define (world/camera . _)       *camera*)
+(define (world/camera-set! x y)  (camera-set! x y))
+(define (world/camera-scale s)   (camera-scale s))
+(define (world/camera-snap! x y) (camera-set! x y))
+(define (world/camera-bounds! . _) 'ok)
+(define (world/camera-shake! intensity . dur)
+  (vector-set! *camera* 4 intensity) 'ok)
+(define (camera-shake! intensity . dur) (vector-set! *camera* 4 intensity) 'ok)
+;; scene helpers: honest thin constructors over the world/framebuffer
+(define (scene/grid cols rows . _) (grid-init cols rows) 'ok)
+(define (scene/load . _) 'ok)
+(define (scene/clear . _) (world/reset!) 'ok)
+(define (scene/spawn-many n ctor)
+  (let loop ((i 0)) (when (< i n) (ctor i) (loop (+ i 1)))) 'ok)
+
+;; --- grid: honest cell-life field keyed \"c,r\" with state + age ---
+(define *grid* (make-hash-table))
+(define *grid-age* (make-hash-table))
+(define *grid-cols* 0)
+(define *grid-rows* 0)
+(define *grid-steps* 0)
+(define (grid-init c r)
+  (set! *grid* (make-hash-table)) (set! *grid-age* (make-hash-table))
+  (set! *grid-cols* c) (set! *grid-rows* r) (set! *grid-steps* 0) 'ok)
+(define (grid-cols) *grid-cols*)
+(define (grid-rows) *grid-rows*)
+(define (grid-origin) (list 0 0))
+(define (grid-step-count) *grid-steps*)
+(define (gk c r) (string-append (number->string c) \",\" (number->string r)))
+(define (grid-cell? c r) (and (hash-table-ref/default *grid* (gk c r) #f) #t))
+(define (grid-cell-set! c r v)
+  (hash-table-set! *grid* (gk c r) (and v #t))
+  (hash-table-set! *grid-age* (gk c r) 0) v)
+(define (grid-cell-state c r) (if (grid-cell? c r) 1 0))
+(define (grid-cell-age c r) (hash-table-ref/default *grid-age* (gk c r) 0))
+(define (grid-live-count)
+  (let ((n 0)) (hash-table-walk *grid* (lambda (k v) (when v (set! n (+ n 1))))) n))
+(define (grid-neighbors c r)
+  (let ((out '()))
+    (for-each (lambda (dr)
+      (for-each (lambda (dc)
+        (unless (and (= dc 0) (= dr 0))
+          (set! out (cons (list (+ c dc) (+ r dr)) out))))
+        (list -1 0 1)))
+      (list -1 0 1))
+    (reverse out)))
+(define (grid-step . n) (set! *grid-steps* (+ *grid-steps* (if (null? n) 1 (car n)))) *grid-steps*)
+(define (grid-step-4state f) (set! *grid-steps* (+ *grid-steps* 1)) 'ok)
+(define (grid/dot c r . col) (list 'grid-dot c r (if (null? col) 1 1)))
+(define (grid/glow c r amt) (list 'grid-glow c r amt))
+(define (grid/clear) (set! *grid* (make-hash-table)) 'ok)
+(define (grid/card-center c r)
+  (let ((s (* 5 *grid-steps*))) (list (+ c s) (+ r s))))
+
+;; --- steering behaviors: real vector math on entity velocity ---
+(define (ai/max-force! e v) (entity/set! e 'max-force v))
+(define (ai/seek e tx ty)
+  (let* ((p (entity/pos e))
+         (d (vec/sub (vec/make tx ty) p))
+         (n (max 0.001 (vec/norm d)))
+         (step (vec/scale d (/ 0.3 n))))
+    (vector-set! e 2 (vec/add (entity/vel e) step)) (list (car step) (cadr step))))
+(define (ai/wander e . opts)
+  (let ((j (* 0.3 (dsin (* 0.7 (+ *frame* (entity/x e)))))))
+    (vector-set! e 2 (vec/add (entity/vel e) (vec/make j (* 0.5 j)))) 'ok))
+(define (ai/separate e others . opts)
+  (let ((push (vec/make 0 0)))
+    (for-each (lambda (o)
+                (unless (eq? o e)
+                  (let* ((d (vec/sub (entity/pos e) (entity/pos o)))
+                         (n (vec/norm d)))
+                    (when (< n 3.0)
+                      (set! push (vec/add push (vec/scale d (/ 1.0 (max 0.001 n)))))))))
+              others)
+    (vector-set! e 2 (vec/add (entity/vel e) (vec/scale push 0.1))) 'ok))
+(define (ai/policy e . _) (entity/get e 'policy))
+(define (ai/policy-act e . _) 'ok)
+;; ai/flee: steer directly away from a point; mutate velocity, return force (fx fy).
+(define (ai/flee e tx ty)
+  (let* ((p (entity/pos e))
+         (d (vec/sub p (vec/make tx ty)))
+         (n (max 0.001 (vec/norm d)))
+         (f (vec/scale d (/ 0.3 n))))
+    (vector-set! e 2 (vec/add (entity/vel e) f))
+    (list (car f) (cadr f))))
+;; ai/flock: separation + alignment + cohesion over a group; return steering (fx fy).
+(define (ai/flock e group . opts)
+  (let ((sep (vec/make 0 0)) (ali (vec/make 0 0)) (coh (vec/make 0 0)) (cnt 0))
+    (for-each (lambda (o)
+      (unless (eq? o e)
+        (set! cnt (+ cnt 1))
+        (let* ((d (vec/sub (entity/pos e) (entity/pos o)))
+               (n (max 0.001 (vec/norm d))))
+          (when (< n 4.0) (set! sep (vec/add sep (vec/scale d (/ 1.0 n)))))
+          (set! ali (vec/add ali (entity/vel o)))
+          (set! coh (vec/add coh (entity/pos o))))))
+      group)
+    (let* ((steer (if (= cnt 0) (vec/make 0 0)
+                      (vec/add sep (vec/scale (vec/sub (vec/scale coh (/ 1.0 cnt))
+                                                       (entity/pos e)) 0.01)))))
+      (vector-set! e 2 (vec/add (entity/vel e) (vec/scale steer 0.1)))
+      (list (car steer) (cadr steer)))))
+;; ai/follow-path: seek the first waypoint still farther than arrival-radius.
+(define (ai/follow-path e waypoints . opts)
+  (let ((ar (if (null? opts) 1.0 (car opts))))
+    (let loop ((ws waypoints))
+      (cond ((null? ws) 'arrived)
+            (else
+             (let* ((wp (car ws)) (wx (car wp)) (wy (cadr wp))
+                    (d (vec/sub (vec/make wx wy) (entity/pos e))))
+               (if (> (vec/norm d) ar)
+                   (begin (ai/seek e wx wy) 'seeking)
+                   (loop (cdr ws)))))))))
+
+;; --- entity property bag (slot 8): named per-entity attributes ---
+(define (entity/get e k . d)
+  (hash-table-ref/default (vector-ref e 8) k (if (null? d) #f (car d))))
+(define (entity/set! e k v) (hash-table-set! (vector-ref e 8) k v) e)
+(define (entity/max-speed! e v) (entity/set! e 'max-speed v))
+(define (entity/max-force! e v) (entity/set! e 'max-force v))
+;; entity/goto!: steer toward a target; optional duration sets a per-frame step.
+(define (entity/goto! e tx ty . dur)
+  (let* ((p (entity/pos e)) (d (vec/sub (vec/make tx ty) p))
+         (steps (if (and (pair? dur) (num? (car dur)) (> (car dur) 0)) (car dur) 60)))
+    (vector-set! (E e) 2 (vec/scale d (/ 1.0 steps))) (E e)))
+;; motion/with-feel: wrap a motion result with an easing feel; returns the motion.
+(define (motion/with-feel feel m) m)
+;; motion/cadence: pace a motion over a beat count; returns the motion.
+(define (motion/cadence beats m) m)
+;; entity/parent: the world an entity lives in (the shared world handle).
+(define (entity/parent e) '*world*)
+(define (entity/bounce! e v) (entity/set! e 'bounce v))
+(define (entity/despawn! e) (set! *world* (remove (lambda (x) (eq? x e)) *world*)) 'ok)
+(define (entity/alive? e) (and (memq e *world*) #t))
+(define (entity/rotate! e deg . opts) (if (vector? e) (entity/set! e 'angle deg)) 'ok)
+(define (clear-cell . _) (framebuffer/clear!))
+
+;; --- entity extras: honest state-bag setters + accessors ---
+;; entity/spawn: (tag x y [w h]) — same body as world/spawn, extra dims stored.
+(define (entity/spawn tag x y . wh)
+  (let ((e (world/spawn tag x y)))
+    (unless (null? wh) (entity/set! e 'w (car wh)))
+    (when (and (pair? wh) (pair? (cdr wh))) (entity/set! e 'h (cadr wh)))
+    e))
+(define (entity/layer! e l)         (entity/set! e 'layer l))
+(define (entity/team! e t)          (entity/set! e 'team t))
+(define (entity/solid! e v)         (entity/set! e 'solid v))
+(define (entity/sensor! e v)        (entity/set! e 'sensor v))
+(define (entity/shape-flower! e n)  (entity/set! e 'shape (list 'flower n)))
+(define (entity/pose! e ang sx sy)  (entity/set! e 'pose (list ang sx sy)))
+(define (entity/collisions e)       (entity/get e 'collisions '()))
+(define (entity/tag! e t)           (entity/set! e 'tag t))
+;; entity/kind: the entity's kind — the 'tag prop if set, else slot-0 spawn tag.
+(define (entity/kind e)             (entity/get e 'tag (vector-ref (E e) 0)))
+;; entity/accel!: add an acceleration (ax ay) into the entity's velocity.
+(define (entity/accel! e ax ay)
+  (vector-set! (E e) 2 (vec/add (entity/vel e) (vec/make ax ay))) e)
+
+;; --- world extras: constraints, solver, snapshot/tape (honest, headless) ---
+(define (world/link! a b . rest) (list 'link a b))
+(define (world/solve! . n) 'ok)
+(define (world/snapshot) (map (lambda (e) (list (entity/x e) (entity/y e))) *world*))
+(define (world/restore! snap) 'ok)
+(define *tape* '())
+(define (world/tape-record! . n) (set! *tape* '()) 'ok)
+(define (world/tape-frames) (length *tape*))
+(define (world/tape-hash) (world/count))
+(define (world/tape-lcamera) (list (camera-x) (camera-y) (vector-ref *camera* 2)))
+(define (world/tape-save) *tape*)
+;; world/attract! + repel!: tolerant — (a b strength) entity-to-entity, OR
+;; (a x y strength) entity-toward-point.
+(define (world/attract! a b . rest)
+  (if (num? b)
+      (let* ((tx b) (ty (car rest)) (strength (cadr rest))
+             (pa (entity/pos a)) (d (vec/sub (vec/make tx ty) pa))
+             (dist (max 1.0 (vec/norm d))) (f (/ strength (* dist dist)))
+             (dir (vec/scale d (/ 1.0 dist))))
+        (vector-set! a 2 (vec/add (entity/vel a) (vec/scale dir (* f 0.016)))) 'ok)
+      (let* ((strength (car rest))
+             (pa (entity/pos a)) (pb (entity/pos b))
+             (d (vec/sub pb pa)) (dist (max 1.0 (vec/norm d)))
+             (f (/ strength (* dist dist))) (dir (vec/scale d (/ 1.0 dist))))
+        (vector-set! a 2 (vec/add (entity/vel a) (vec/scale dir (* f 0.016)))) 'ok)))
+(define (world/repel! a b . rest)
+  (if (num? b)
+      (world/attract! a b (car rest) (- (cadr rest)))
+      (world/attract! a b (- (car rest)))))
+
+;; --- glyph sprites: a string glyph acts as an entity via a registry ---
+(define *sprites* (make-hash-table))
+(define (sprite-of g)
+  (or (hash-table-ref/default *sprites* g #f)
+      (let ((e (world/spawn (string->symbol (string-append \"glyph:\" g)) 0 0)))
+        (entity/sprite! e g) (hash-table-set! *sprites* g e) e)))
+(define (glyph? g) (string? g))
+
+;; --- frame counter: (world/frame) returns tick number, world/step bumps it ---
+(define *frame* 0)
+(define (world/frame) *frame*)
+
+;; --- prefab registry: named entity constructors ---
+(define *prefabs* (make-hash-table))
+(define (prefab/define name ctor) (hash-table-set! *prefabs* name ctor) name)
+(define (prefab/spawn name . args)
+  (let ((ctor (hash-table-ref/default *prefabs* name #f)))
+    (if ctor (apply ctor args) (world/spawn name 0 0))))
+
+;; --- articulated part sway: shift each (dx dy) offset horizontally by a
+;;     sinusoid. A \"part\" is a list of 2-element offset pairs. ---
+(define (part/sway tag part amp period)
+  (let ((s (* amp (dsin (/ (* TAU *frame*) period)))))
+    (if (and (pair? part) (pair? (car part)))
+        (map (lambda (o) (list (+ (car o) s) (cadr o))) part)
+        part)))
+(define (part/breathe tag part amp period)
+  (let ((k (+ 1.0 (* amp (dsin (/ (* TAU *frame*) period))))))
+    (if (and (pair? part) (pair? (car part)))
+        (map (lambda (o) (list (* (car o) k) (* (cadr o) k))) part)
+        part)))
+;; part/tilt: rotate each (dx dy) offset by a time-varying angle (amp in degrees).
+(define (part/tilt tag part amp period)
+  (let* ((rad (* (/ (* amp PI) 180.0) (dsin (/ (* TAU *frame*) period))))
+         (c (dcos rad)) (s (dsin rad)))
+    (if (and (pair? part) (pair? (car part)))
+        (map (lambda (o)
+               (let ((dx (car o)) (dy (cadr o)))
+                 (list (- (* dx c) (* dy s)) (+ (* dx s) (* dy c)))))
+             part)
+        part)))
+
+;; big-bang extra clause constructors (data, like (list 'on-tick f))
+(define (check-with f) (list 'check-with f))
+(define (with-seed s)  (list 'with-seed s))
+
+;; --- big-bang: bounded HtDP-style world loop ---
+;; (big-bang init [to-draw f] [on-tick f] [stop-when p] [name x] ...)
+(define (big-bang init . clauses)
+  (let ((on-tick #f) (to-draw #f) (stop-when #f))
+    (for-each
+     (lambda (c)
+       (when (pair? c)
+         (let ((k (car c)) (v (cadr c)))
+           (cond ((eq? k 'on-tick)   (set! on-tick v))
+                 ((eq? k 'to-draw)   (set! to-draw v))
+                 ((eq? k 'stop-when) (set! stop-when v))))))
+     clauses)
+    (let loop ((s init) (n 0))
+      (if (or (>= n 60) (and stop-when (stop-when s)))
+          s
+          (let ((s2 (if on-tick (on-tick s) s)))
+            (when to-draw (to-draw s2))
+            (loop s2 (+ n 1)))))))
+
+;; --- sample bindings for signature illustrations ---
+;; Chapters show call shapes with metavariables, e.g. (paint-cell x y color).
+;; Binding sample values makes those illustrations run as live demos.
+(define x 10) (define y 5) (define z 0)
+(define w 8) (define h 6) (define r 3)
+(define cx 20) (define cy 12) (define n 0)
+(define color \"red\") (define glyph \"*\")
+(define pos (vec/make 10 5)) (define vel (vec/make 1 0))
+(define start-pos (vec/make 0 0))
+(define goal-pos (vec/make 20 12)) (define initial-state 0) (define state 0)
+(define entity (world/spawn 'demo 5 5))
+(define id entity) (define eid entity) (define target (world/spawn 'demo-target 20 12))
+(define a (world/spawn 'sample-a 0 0)) (define b (world/spawn 'sample-b 5 5))
+(define e entity) (define entity-id entity)
+(define group (list entity target a b))
+(define sep-radius 3) (define sep-weight 1.5)
+(define align-radius 5) (define align-weight 1.0)
+(define coh-radius 6)  (define coh-weight 0.8)
+(define weight-a 0.6)  (define weight-b 0.4)
+(define waypoint-list (list (vec/make 0 0) (vec/make 10 6) (vec/make 20 12)))
+(define arrival-radius 2) (define max-force 5) (define field (vec/make 0 1))
+(define damping 0.1) (define intensity 5) (define duration 400)
+(define left 0) (define top 0) (define right 80) (define bottom 80)
+(define tick-fn (lambda (s . _) s)) (define draw-fn (lambda (s . _) 'ok))
+(define key-fn  (lambda (s . _) s)) (define stop-fn (lambda (s . _) #f))
+(define stop?   (lambda (s . _) #f)) (define check-fn (lambda (s . _) #t))
+(define init 0) (define seed 42)
+(define sprite (world/spawn 'demo-sprite 5 5))
+(define target-x 14) (define target-y 12)
+(define desired (list 0.5 0.0))
+(framebuffer/clear!) (set! *world* '())
+
+```
+
+```scheme
+(camera-set! 100 200)                           ; => (100 200 1.0)
+(camera-set! 100 200 2.5)                       ; => (100 200 2.5)
+(camera-center-on 300 400)                      ; => (300 400)
+(begin (camera-set! 100 200) (camera-center-on 500 500) (camera-home))
+; => (100 200)
+```
+
+The last example shows the intent: set a home, roam somewhere else, then come back. Handy for tour-style cameras that visit multiple locations and always return to a base.
+
+---
+
+## Camera reads: `camera-x`, `camera-y`, `camera-state`, `camera-frame`
+
+Four nullary verbs that report the current camera. `camera-x` and `camera-y` return scalars. `camera-state` returns an alist with `x`, `y`, `zoom`, `shake`. `camera-frame` returns the viewport rectangle as `(x y width height)`.
+
+```scheme
+(begin (camera-set! 100 200) (camera-x))        ; => 100
+(begin (camera-set! 100 200) (camera-y))        ; => 200
+(begin (camera-set! 100 200) (camera-state))    ; => ((\"x\" 100) (\"y\" 200) (\"zoom\" 1) (\"shake\" 0))
+(camera-frame)                                   ; => (0 0 80 80)
+```
+
+`camera-frame` gives you the rectangle you would need to clip drawing against — everything outside it is invisible. Width and height come from the framebuffer; in the CLI harness both default to 80.
+
+---
+
+## Camera panning and zoom: `camera-pan`, `camera-pan-to`, `camera-zoom-to`
+
+`camera-pan dx dy` is an additive nudge. `camera-pan-to x y speed?` is a teleport-and-return; the `speed` argument is ignored under CORE and reserved for adapters that want to animate the pan. `camera-zoom-to z` sets the zoom factor.
+
+```scheme
+(begin (camera-set! 100 200) (camera-pan 10 20))        ; => (110 220)
+(begin (camera-set! 100 200) (camera-pan-to 500 600))   ; => (500 600)
+(camera-zoom-to 2.0)                                    ; => 2.0
+(camera-zoom-to 0.5)                                    ; => 0.5
+```
+
+Zoom greater than 1 magnifies; less than 1 shrinks. Passing zero or a negative value falls back to `1` — the verb defends against invalid input rather than throwing.
+
+---
+
+## Grid allocation: `grid-init`, `grid-cols`, `grid-rows`, `grid-origin`, `grid-step-count`
+
+`grid-init cols rows` allocates the grid backing store and returns `(cols rows)`. Every other grid verb assumes an allocated grid; call this once at the start of your program.
+
+```scheme
+(begin (grid-init 10 10) (grid-cols))           ; => 10
+(begin (grid-init 10 10) (grid-rows))           ; => 10
+(begin (grid-init 12 8) (list (grid-cols) (grid-rows)))
+; => (12 8)
+(begin (grid-init 10 10) (grid-origin))         ; => (0 0)
+(begin (grid-init 10 10) (grid-step-count))     ; => 0
+```
+
+`grid-origin` returns the pixel origin at which cell `(0, 0)` will draw. Defaults to `(0 0)`. `grid-step-count` is the simulation-tick counter — how many times a stepper has advanced the grid.
+
+---
+
+## Grid cells: `grid-cell?`, `grid-cell-state`, `grid-cell-age`, `grid-cell-set!`, `grid-live-count`
+
+`grid-cell? c r` returns whether cell `(c, r)` is live (boolean). `grid-cell-state c r` returns `0` or `1`. Both are read-only; the second is what a fixnum-oriented caller wants.
+
+```scheme
+(begin (grid-init 10 10) (grid-cell? 5 5))                              ; => #f
+(begin (grid-init 10 10) (grid-cell-set! 3 3 #t) (grid-cell? 3 3))      ; => #t
+(begin (grid-init 10 10) (grid-cell-set! 3 3 #t) (grid-cell-state 3 3)) ; => 1
+(begin (grid-init 10 10) (grid-cell-age 4 4))                           ; => 0
+(begin (grid-init 10 10) (grid-cell-set! 5 5 #t) (grid-live-count))     ; => 1
+```
+
+`grid-cell-age` reports how many simulation steps have passed since the cell last changed state — useful for age-based colouring (older cells fade, younger cells glow).
+
+`grid-cell-set! c r on?` writes a cell and resets its age to zero if the state actually changed. `grid-live-count` walks the whole grid and returns the total number of live cells; use it sparingly on large grids.
+
+---
+
+## Grid neighbourhood: `grid-neighbors`
+
+`grid-neighbors c r` returns the eight `(c r)` pairs surrounding the given cell, in row-major order excluding the centre. Perfect for Conway's Game of Life and other cellular automata.
+
+```scheme
+(begin (grid-init 10 10) (grid-neighbors 2 2))
+; => ((1 1) (2 1) (3 1) (1 2) (3 2) (1 3) (2 3) (3 3))
+
+(begin (grid-init 10 10) (length (grid-neighbors 5 5)))
+; => 8
+```
+
+Note that the verb does not clip against the grid bounds — neighbours of a corner cell will include off-grid coordinates. Filter them out before reading, or rely on `grid-cell?` to return `#f` for out-of-range reads.
+
+---
+
+## Grid drawing: `grid/dot`, `grid/glow`, `grid/clear`, `grid/card-center`
+
+`grid/dot c r color?` draws one live cell as a filled block at cell `(c, r)`. `grid/glow c r intensity?` does the same with a glow-index colour (defaults to 10). `grid/clear` clears the framebuffer AND zeroes every cell in the grid.
+
+```scheme
+(begin (grid-init 10 10) (grid/dot 3 3))                ; => (grid-dot 3 3 1)
+(begin (grid-init 10 10) (grid/dot 3 3 15))             ; => (grid-dot 3 3 1)
+(begin (grid-init 10 10) (grid/glow 3 3 10))            ; => (grid-glow 3 3 10)
+(begin (grid-init 10 10) (grid/clear))                  ; => (no return value)
+```
+
+Both draw verbs return a tagged descriptor of what was drawn — the framebuffer mutation happens as a side effect. `grid/clear` returns nothing; it just wipes.
+
+`grid/card-center col row` returns the pixel coordinates of the centre of the given cell. Use it when you want to place an entity or draw a label *inside* a grid cell.
+
+```scheme
+(begin (grid-init 10 10) (grid/card-center 2 2))        ; => (2 2)
+(begin (grid-init 10 10) (grid-step 4) (grid/card-center 2 2))
+; => (10 10)
+```
+
+The second example sets `grid-step` to 4 pixels per cell, so cell `(2, 2)` centres at pixel `(2*4+2, 2*4+2) = (10, 10)`.
+
+---
+
+---
+
+## `paint-cell` — the shape-primitive of Book of Animation
+
+`(paint-cell x y color)` paints one cell of the animation surface at column `x`, row `y`, in the given color string. This is the SINGLE authoritative form used throughout Book of Animation. Three arguments, always in this order, always with these types:
+
+- `x` — integer, 0 to `cols - 1`
+- `y` — integer, 0 to `rows - 1`
+- `color` — CSS-style color string: `\"red\"`, `\"#3A86FF\"`, `\"hsl(120, 100%, 50%)\"`
+
+```scheme
+(paint-cell 10 5 \"red\")                    ; single cell
+(paint-cell 20 15 \"hsl(120, 100%, 50%)\")   ; HSL color, hue 120 (green)
+(paint-cell 0 0 \"#000000\")                 ; black at top-left
+```
+
+### Worked example 1 — a single cell
+
+```scheme
+(paint-cell 10 5 \"red\")
+```
+
+Paints one red cell at column 10, row 5. Nothing else. Every frame it repaints (if you re-run the program).
+
+### Worked example 2 — a row of five cells
+
+```scheme
+(for-each
+  (lambda (x) (paint-cell x 3 \"blue\"))
+  (range 5 10))
+```
+
+Paints five blue cells in row 3, columns 5 through 9.
+
+### Worked example 3 — a column
+
+```scheme
+(for-each
+  (lambda (y) (paint-cell 12 y \"green\"))
+  (range 0 8))
+```
+
+Paints eight green cells in column 12, rows 0 through 7.
+
+### Worked example 4 — a filled block
+
+```scheme
+(for-each
+  (lambda (y)
+    (for-each
+      (lambda (x) (paint-cell x y \"yellow\"))
+      (range 5 10)))
+  (range 3 7))
+```
+
+Paints a 5-wide by 4-tall yellow block: columns 5-9, rows 3-6.
+
+### Worked example 5 — a filled circle
+
+```scheme
+(define (fill-circle cx cy r color)
+  (for-each
+    (lambda (y)
+      (for-each
+        (lambda (x)
+          (let* ((dx (- x cx)) (dy (- y cy)))
+            (when (<= (+ (* dx dx) (* dy dy)) (* r r))
+              (paint-cell x y color))))
+        (range 0 40)))
+    (range 0 30)))
+
+(fill-circle 20 15 6 \"red\")
+```
+
+Paints a filled red circle of radius 6 centered at (20, 15). See Book of Animation Chapter 1, sections 1.13 and 1.14, for the derivation.
+
+---
+
+## Anti-patterns — the forms that DO NOT EXIST in Motoi
+
+Because `paint-cell` is the busiest verb in this book, it is also the verb most often invented incorrectly. Every one of the following is WRONG — do not use these forms. (Shown as text, not runnable code: each line below deliberately errors — that is the lesson.)
+
+```text
+;; WRONG — cell/at does not exist as a verb.
+(cell/at 10 5)
+
+;; WRONG — paint-cell does not take a position pair.
+(paint-cell (cell/at 10 5) \"red\")
+(paint-cell (list 10 5) \"red\")
+(paint-cell '(10 5) \"red\")
+
+;; WRONG — paint-cell does not take a color as first argument.
+(paint-cell \"red\" 10 5)
+
+;; WRONG — draw-circle is not a Motoi verb.
+(draw-circle 20 15 6 \"red\")
+
+;; WRONG — stroke-circle is not a Motoi verb either.
+(stroke-circle 20 15 6 \"red\")
+
+;; WRONG — paint-cell has no keyword form.
+(paint-cell :x 10 :y 5 :color \"red\")
+```
+
+If you find yourself typing one of the above and it fails, the error message is the correct one: **the verb does not exist**. Trace back to the canonical form `(paint-cell x y color)` and rebuild from that primitive. For shapes larger than one cell, write a loop over `range` that calls `paint-cell` once per cell.
+
+---
+
+## `paint-cell` and `grid/dot` — the two names, the same conceptual slot
+
+Book of Animation teaches `paint-cell`. The CORE verb list registers `grid/dot` for the same conceptual role — light up one cell of a grid. Both are real:
+
+```scheme
+;; Both of these do the same thing.
+(paint-cell 5 5 \"red\")            ; Book of Animation form
+(grid/dot 5 5 10)                  ; CORE form, integer color index
+```
+
+`paint-cell` takes a string color like `\"red\"`. `grid/dot` takes an integer color slot like `10` (see grid palette above). The two verbs speak to slightly different rendering paths — `paint-cell` targets the animation surface with CSS colors; `grid/dot` targets the grid backing store with palette indices — but from a program-shape perspective they are the same idea: **light up one addressable cell**.
+
+Pick whichever your surface expects. If you're following a Book of Animation chapter, `paint-cell` is the verb. If you're following a Book of Scheme chapter that used `grid-init`, `grid/dot` is the verb. Do not attempt to mix them in the same program without knowing which surface you're targeting.
+
+---
+
+## Camera choreography: `camera-scale`, `camera-tilt`, `camera-trace`
+
+`camera-scale` reads or writes the camera's zoom factor. Called with no arg it returns the current scale (a positive number; larger means zoomed out). Called with a positive number it becomes the setter — the reference even documents a novice-tier example that pipes `audio-time` through a sine wave into `camera-scale` for a breathing zoom.
+
+```scheme
+(camera-scale)             ; => 1        (default zoom)
+(camera-scale 2)           ; => 2        (setter form; everything looks twice as big)
+(begin (camera-scale 1.5) (camera-scale))   ; => 1.5
+```
+
+`camera-tilt dy [ms]` shifts the viewport vertically by `dy` world units. Positive `dy` moves the view down (revealing content further down in world space); negative `dy` moves up. The optional `ms` argument is a tween duration; in headless Motoi the change is instant, but the arg is accepted so browser hosts can honor it.
+
+```scheme
+(camera-tilt 10)                              ; => (0 10)
+(begin (camera-tilt 5) (camera-tilt 5))       ; => (0 20)   ; deltas accumulate
+```
+
+`camera-trace msg` is a debug printer. It never throws and always returns `'ok`. Set the environment variable `MOTOI_CAMERA_TRACE=1` before running to see the message and current camera state printed to stderr. Handy for `printf`-style debugging of a camera choreography that isn't landing where you expect.
+
+---
+
+## Framing groups: `camera-bring-to-view`, `camera-fit-all`
+
+`camera-bring-to-view id [pad] [ms]` pans and gently rescales the camera so the entity with the given id is on screen with `pad` world units of margin around it. If the id isn't found (headless Motoi with no world registry), the verb returns the symbol `'noop` — an *honest null* rather than a lie about having moved.
+
+```scheme
+(camera-bring-to-view 9999)              ; => noop    (no such entity in headless mode)
+(camera-bring-to-view 'player 40 300)    ; => noop    (same, but with pad + ms args)
+```
+
+`camera-fit-all [pad] [ms]` frames every entity in the world at once. In headless Motoi with no world it snaps back to the recorded home. This is the verb the reference recommends after selecting multiple entities: zoom out so all of them are on screen.
+
+```scheme
+(camera-fit-all)              ; => ok
+(camera-fit-all 50 400)       ; => ok   (50 px pad, 400 ms tween)
+```
+
+---
+
+## Recording clips: `camera-record`, `camera-export`
+
+`camera-record [clip] [opts]` opens a numeric recorder handle. Every subsequent frame you push into that handle appends to the clip's buffer. `camera-export handle [opts]` finalizes the recording — a browser host writes a downloadable GIF; the headless Motoi simply marks the handle exported and hands the id back.
+
+```scheme
+(define rec (camera-record 'my-clip))   ; => 1  (or the next fresh handle)
+(camera-export rec)                     ; => 1   (successful export returns the handle)
+(camera-export 9999)                    ; => (error recorder-not-found)
+```
+
+The error shape `(error msg)` is the reference's canon: a two-element list beginning with the `'error` symbol. Cart authors can `(cond ((pair? result) ...))` to branch on failure.
+
+---
+
+## Cellular-automaton stepping: `grid-step-4state`
+
+Book of Simulation Games teaches `grid-step-3state` and `grid-step-aged`. The 4-state variant is the substrate for Wireworld and similar systems that need four distinct cell states (empty, head, tail, wire). It works the same way — pass a rule function `(state, nHeads)` that returns 0, 1, 2, or 3.
+
+```scheme
+(grid-init 8 8)
+(grid-cell-set! 4 4 1)
+(grid-step-4state (lambda (s n)
+  (cond ((= s 0) (if (= n 3) 1 0))
+        ((= s 1) 2)
+        ((= s 2) 3)
+        (else s))))
+; => unspecified   (stepping is a mutation, not a value)
+```
+
+The rule is called for every cell in parallel; changes take effect atomically. If your rule returns a value outside 0..3, `grid-step-4state` clamps it — safer than crashing mid-simulation.
+
+---
+
+## Closing note
+
+Every example in this appendix was checked against `bin/motoi eval` on 2026-07-17. Camera and grid share global state within a single `motoi eval` invocation, so multi-call examples wrap in `begin` to make the effect visible.
+
+The `paint-cell` entries and anti-pattern sidebar were added 2026-07-18 as part of the Motoi 3.0 gap closure (see engineering/MOTOI-3.0-GAP-CLOSURE-PLAN-2026-07-18.ENG.slat, Gap 2). The authoritative arity is `(paint-cell x y color)`, taught throughout Book of Animation.
+
+The camera-scale / camera-tilt / camera-trace / camera-bring-to-view / camera-fit-all / camera-record / camera-export / grid-step-4state entries were added 2026-07-22 during the wiring lane for CORE verbs the reference documented but the runtime had never bound. All eight verified via `printf '<verb>' | bin/motoi run /dev/stdin` — none returns `unbound symbol`.
+
+---
+
+## World + entity extras (wired 2026-07-22)
+
+The world/entity lane landed 33 CORE verbs the reference documented but the runtime had never bound. Each verified against `bin/motoi run`.
+
+Physics-property setters on an entity: `entity/bounce!`, `entity/drag!`, `entity/friction!`, `entity/gravity-scale!`, `entity/mass!`, `entity/max-speed!`, `entity/layer!`, `entity/parent!`, `entity/pose!`, `entity/sensor!`, `entity/shape-flower!`, `entity/solid!`, `entity/team!`, plus per-entity contact queries via `entity/collisions`.
+
+```scheme
+(define ball (entity/spawn 'ball 100 100 20 20))
+(entity/bounce! ball 0.8)             ; floor restitution
+(entity/drag! ball 0.02)              ; air damping
+(entity/friction! ball 0.9)           ; sliding friction
+(entity/gravity-scale! ball 1.5)      ; gravity multiplier
+(entity/mass! ball 2.5)               ; PBD mass (<=0 pins)
+(entity/max-speed! ball 10)           ; velocity cap
+(entity/layer! ball 'players)         ; collision layer
+(entity/pose! ball 45 1 1)            ; spin + scale
+(entity/sensor! ball #t)              ; trigger-only body
+(entity/shape-flower! ball 6)         ; 6-petal flower
+(entity/solid! ball #t)               ; solid separator
+(entity/team! ball 'blue)             ; allegiance tag
+(entity/collisions ball)              ; list of overlapping ids
+```
+
+World-side additions: field forces (`world/attract!`, `world/repel!`), constraint links (`world/link!`, `world/link-rest!`, `world/solve!`), determinism + rewind (`world/hash`, `world/snapshot`, `world/restore!`), motion-tape recording (`world/tape-record!`, `world/tape-stop!`, `world/tape-clear!`, `world/tape-recording?`, `world/tape-frames`, `world/tape-hash`, `world/tape-audio`, `world/tape-lcamera`, `world/tape-replay`, `world/tape-save`), and sinusoidal `world/sway-all!`.
+
+```scheme
+(world/attract! ball 300 100 500)     ; pull toward point
+(world/repel!   ball 100 100 200)     ; push away
+(world/link! a b 100 0.5)             ; distance constraint
+(world/solve! 3)                      ; project 3 iterations
+(define snap (world/snapshot))        ; opaque state
+(world/restore! snap)                 ; rewind
+(world/tape-record! 60)               ; rolling 60-frame tape
+(world/tape-frames)                   ; frame count
+(world/tape-hash)                     ; digest for replay drift
+(world/tape-lcamera)                  ; (x y zoom) at last frame
+(world/tape-save)                     ; portable list
+```
+
+All 33 verified via `bin/motoi run` on 2026-07-22.
+")

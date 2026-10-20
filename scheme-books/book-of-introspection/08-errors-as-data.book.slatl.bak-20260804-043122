@@ -1,0 +1,636 @@
+(chapter
+  :book "Book of Introspection"
+  :chapter-number 8
+  :title "Errors as data — introspecting failure"
+  :audience "programmer-learning-motoi"
+  :dialect "motoi"
+  :voice "motoi-copilot"
+  :training-eligible #t
+  :confidentiality "public"
+  :wave-status "seeded — full authoring in Wave 2"
+  :provenance
+    (:authored-at "2026-07-17"
+     :authored-by "book-of-introspection-author-agent"
+     :sources ("src/interp.js" "src/dispatch.js" "engineering/LLM-AUGMENTED-REPL-1.0.ENG.slat"))
+  :prose
+"# Chapter 8 — Errors as data: introspecting failure
+
+An error in Motoi is not a string. It is a record. Records have fields. Fields have values. Every error you have ever raised or received is queryable the same way any other value is queryable.
+
+This chapter shows the shape of an error record, how to bind the last raised error, and how the error composes with the LLM-augmented `fix` and `pretty-error` verbs from Chapter 13.
+
+## 8.1 The error record shape
+
+An error record has, at minimum, these fields:
+
+- `:message` — a human-readable string
+- `:location` — where the error was raised (filename, line, column)
+- `:stack` — the call stack at the time of the error, as a list of records
+- `:cause` — the underlying cause if this error wraps another, or nil
+- `:kind` — a symbol categorizing the error: `type-error`, `arity-error`, `unknown-verb`, `perm-denied`, etc.
+- `:context` — optional metadata about what was happening when the error was raised
+- `:did-you-mean` — for unknown-verb errors, a list of nearest names
+
+The live runtime's structured-error surface is internal; so that the examples run, we model an error as a record (an alist under a tag) with the field accessors, the `last-error` handle, and the handling constructs (`catch`, `guard`, `with-handlers`) the chapter describes. The domain placeholders (`do-risky-thing`, `run-test`, etc.) are stubbed so the syntax examples run.
+
+```scheme
+;; --- chapter setup: the error system, modelled ---
+(define nil '())
+(define (make-error . kvs) (cons 'error-record kvs))
+(define (error-record? x) (and (pair? x) (eq? (car x) 'error-record)))
+(define (err-field e k)
+  (let loop ((xs (cdr e)))
+    (cond ((or (null? xs) (null? (cdr xs))) #f)
+          ((eq? (car xs) k) (cadr xs))
+          (else (loop (cddr xs))))))
+(define (assoc-ref k e) (err-field e k))
+(define *last-error*
+  (make-error ':kind 'unknown-verb ':message \"unknown verb: crdr\"
+              ':location '(:filename \"repl\" :line 1 :column 2)
+              ':did-you-mean '(cdr car)))
+(define (last-error) *last-error*)
+(define (err-message e) (err-field e ':message))
+(define (err-location e) (err-field e ':location))
+(define (error-kind e) (err-field e ':kind))
+(define (error-did-you-mean e) (err-field e ':did-you-mean))
+(define (error-stack e) (or (err-field e ':stack) '()))
+(define (error-cause e) (err-field e ':cause))
+(define (error-context e) (err-field e ':context))
+(define (error? e) (error-record? e))
+(define (runtime-shape v) (if (error-record? v) 'error 'value))
+(define (current-time-ms) 0)
+;; fix / pretty-error / format-error: modelled producers.
+(define (fix e) '(cdr '(1 2 3)))
+(define (pretty-error e)
+  \"You called `crdr` but Motoi has no such verb. Did you mean `cdr` (the tail of a list)?\")
+(define (format-error e) (or (err-message e) \"error\"))
+;; kind predicates, built from :kind.
+(define (type-error? e) (and (error? e) (eq? 'type-error (error-kind e))))
+(define (arity-error? e) (and (error? e) (eq? 'arity-error (error-kind e))))
+(define (perm-denied? e) (and (error? e) (eq? 'perm-denied (error-kind e))))
+(define (fuel-exhausted? e) (and (error? e) (eq? 'fuel-exhausted (error-kind e))))
+(define (unbound-symbol? e) (and (error? e) (eq? 'unbound-symbol (error-kind e))))
+;; raise-error: build + raise a structured error.
+(define (raise-error . kvs) (apply make-error kvs))
+;; catch / with-handlers: modelled over Scheme's real `guard`.
+(define-syntax catch
+  (syntax-rules ()
+    ((_ body handler) (guard (e (#t (handler e))) body))))
+(define (run-handlers clauses err)
+  (cond ((null? clauses) (raise err))
+        (((caar clauses) err) ((cadar clauses) err))
+        (else (run-handlers (cdr clauses) err))))
+(define-syntax with-handlers
+  (syntax-rules ()
+    ((_ ((pred handler) ...) body ...)
+     (guard (e (#t (run-handlers (list (list pred handler) ...) e)))
+       body ...))))
+;; domain placeholders used by the syntax examples.
+(define (do-risky-thing) 'ok)
+(define (do-thing) 'ok)
+(define (recover) 'recovered)
+(define (upstream-fetch) 'fetched)
+(define (run-test t) 'passed)
+(define (has-payment-method?) #t)
+(define (proceed x) x)
+(define (handle x) x)
+(define (handle-fuel e) 'handled-fuel)
+(define (handle-type e) 'handled-type)
+(define (handle-unknown e) 'handled-unknown)
+(define (handle-type-error e) 'handled-type-error)
+(define (handle-arity-error e) 'handled-arity-error)
+(define (refuse-and-log e) 'refused)
+(define (do-the-thing) 'ok)
+(define (some-failing-verb . args) (last-error))
+(define (some-code-that-might-fail) 'ok)
+(define test-suite '())
+(define input \"42\")
+(define user-id 'alice)
+(define _err *last-error*)
+(define underlying-io-error (make-error ':kind 'network-error ':message \"io failed\"))
+```
+
+Type-of on an error returns `error`:
+
+```scheme
+(runtime-shape (last-error))
+;; => error
+```
+
+Fields via projection verbs:
+
+```scheme
+(err-message (last-error))    ;; => \"unknown verb: crdr\"
+(err-location (last-error))   ;; => (:filename \"repl\" :line 1 :column 2)
+(error-kind (last-error))       ;; => 'unknown-verb
+(error-did-you-mean (last-error)) ;; => (cdr car)
+```
+
+## 8.2 last-error — the standard binding
+
+`(last-error)` returns the most recent error raised in the current session. If no error has been raised yet, returns nil.
+
+```text
+(crdr '(1 2 3))
+;; error: unknown verb: crdr
+
+(last-error)
+;; => #<error:unknown-verb :message \"unknown verb: crdr\" :did-you-mean (cdr car)>
+```
+
+The error record is bound. You can introspect it, project its fields, feed it to other verbs.
+
+## 8.3 Composing with the LLM
+
+Chapter 13's LLM-augmented `fix` verb takes an error record and returns a suggested fix:
+
+```scheme
+(fix (last-error))
+;; => (cdr '(1 2 3))
+```
+
+The LLM read the error record, saw the `:did-you-mean` field, generated a corrected form. The return is a form you can eval.
+
+`pretty-error` takes an error record and returns a paragraph:
+
+```scheme
+(pretty-error (last-error))
+;; => \"You called `crdr` but Motoi has no such verb. Did you mean `cdr` (the tail of a list)?\"
+```
+
+Both verbs work because the error is data. The LLM sees the fields; the return is human-readable prose or code.
+
+## 8.4 The taxonomy of errors Motoi actually produces
+
+Motoi's error surface is small and enumerable. The runtime raises seven distinct kinds. Every error is one of these; there is no eighth category hiding elsewhere.
+
+**`unbound-symbol`** — you referenced a name the env doesn't know. Includes typos (`(csr xs)` instead of `(cdr xs)`), missing installers (a verb that wasn't loaded), and legitimately unknown vocabulary. The error carries `:name` (what you asked for) and, optionally, `:did-you-mean` (the nearest match by edit distance if one exists within threshold).
+
+**`fuel-exhausted`** — the eval-step counter hit zero. Almost always a runaway loop or a recursion that didn't tail-call. Carries `:budget` (initial fuel) and `:consumed` (how much was spent).
+
+**`macro fuel exhausted`** — a separate budget for macro expansion. Fires when a fork-bomb-shaped macro expands past its cap. Distinct from eval fuel so a merely long-running program doesn't get flagged as a macro attack.
+
+**`wrong-arity`** — you called a verb with the wrong number of arguments. Carries `:verb`, `:expected` (a scalar or (min max) pair), and `:got` (what you passed).
+
+**`type-error`** — you passed the wrong type. Carries `:verb`, `:arg-position`, `:expected-type`, `:got-value`. Most common on the arithmetic primitives.
+
+**`parse-error`** — the reader couldn't parse. Carries `:position` (line and column) and `:message`. This fires before evaluation begins.
+
+**`rate-limited`** — the dispatcher's tier gate denied a call because the verb ran too often in its window. Carries `:verb`, `:tier`, `:spec` (like `1/30s`), and `:next-available-ms`.
+
+Every kind is a plain alist, not an opaque exception. That means you can filter, aggregate, log, and reason about them with the same list-verb kit you use for everything else in Motoi.
+
+## 8.5 Raising your own errors
+
+You can raise structured errors from your own code:
+
+```text
+(raise (list :kind 'my-custom-error
+             :when (current-time-ms)
+             :context (list :user 'alice :cart 'welcome)))
+```
+
+The raised value must be an alist with `:kind` at minimum. Anything else you add becomes context. The system doesn't inspect the fields — it just propagates the value through the error path — which means you can encode whatever information you want.
+
+The convention is: keep custom-error kinds under a namespace prefix so they don't collide with the seven built-in kinds. `my-domain/config-invalid` is cleaner than plain `config-invalid`.
+
+## 8.6 Error handling — with-handlers, guard, catch
+
+Three constructs, from simplest to most flexible.
+
+**`catch`** — recover from any error, get the raised value.
+
+```scheme
+(catch (do-risky-thing)
+       (lambda (err) 'fell-back))
+```
+
+**`guard`** — dispatch on error kind.
+
+```scheme
+(guard (err ((eq? (assoc-ref :kind err) 'fuel-exhausted) 'ran-out)
+            ((eq? (assoc-ref :kind err) 'type-error) 'wrong-shape)
+            (else (raise err)))
+  (do-risky-thing))
+```
+
+**`with-handlers`** — the same, but structured for a longer body.
+
+```scheme
+(with-handlers
+  ((fuel-exhausted? handle-fuel)
+   (type-error?     handle-type)
+   (unbound-symbol? handle-unknown))
+  (do-risky-thing))
+```
+
+Rule: only catch what you can meaningfully recover from. If you don't know how to handle a `fuel-exhausted`, don't catch it — let it propagate to the top level where the operator can see it.
+
+## 8.7 The :cause chain — errors that carry history
+
+When one error is thrown because of another (a downstream cart fails because an upstream fetch failed), you attach `:cause` so the chain is preserved:
+
+```scheme
+(catch (upstream-fetch)
+  (lambda (err)
+    (raise (list :kind 'my/downstream-failure
+                 :message "could not proceed"
+                 :cause err))))
+```
+
+Now when the outer error is printed, both are visible. The operator sees the surface message AND the underlying cause. Debugging chains of failures is much easier when the chain is a value.
+
+## 8.8 Contract enforcement — one shape of error
+
+Every verb in the reference declares a `:contract`. The dispatcher enforces contracts BEFORE the impl runs. If the args don't match, `type-error` fires with a specific `:arg-position` and `:expected-type`.
+
+That means the impl code doesn't have to check its arguments — the dispatcher has already done it. Wrong shape = clean type-error at the boundary, not a mysterious crash five stack frames deep.
+
+Contract enforcement is why Motoi's error surface stays small. Type errors are always at dispatch boundary. Fuel errors are always at eval step. Nothing hides deeper.
+
+## 8.9 Dispatcher errors — perm-denied, arity, unknown
+
+Three of the seven built-in error kinds come from the dispatcher, not the interpreter proper.
+
+`unbound-symbol` fires when the dispatcher looks up a verb and finds nothing. That includes typos and un-installed verbs.
+
+`wrong-arity` fires when arg count doesn't match the registered arity. The dispatcher checks arity from the registry BEFORE calling the impl.
+
+`rate-limited` fires when the tier gate denies. This one is unusual — it doesn't mean the code is wrong; it means the code is running too fast. The recovery is often "wait, then retry".
+
+Because these three come from the dispatcher, the error carries the verb name — which means you can trace back to WHICH verb was denied, not just that something went wrong.
+
+## 8.10 Errors + Cortex — logging errors as persistent facts
+
+An error thrown-and-caught leaves no trace unless you log it. `cortex/record` gives it persistence:
+
+```scheme
+(catch (do-thing)
+  (lambda (err)
+    (cortex/record 'errors err)
+    (recover)))
+```
+
+Now `(cortex/recall 'errors)` returns every error the system has ever logged. That's the data source for the diagnose-error tool the model uses to explain what went wrong.
+
+The pattern generalizes: any value that's important to remember can be recorded. Cortex is the persistence layer for facts across sessions.
+
+## 8.11 Error introspection at the REPL
+
+At the REPL, the last error is bound to `,last-error` (a meta-command) and to the `_err` symbol (a plain binding). Both point at the same value.
+
+```
+> (car '())                            ;; oops
+error: car of empty list
+
+> ,last-error
+((:kind 'type-error) (:verb 'car) (:got-value '()) (:message "car of empty list"))
+
+> (assoc-ref :verb _err)               ;; introspect it
+'car
+```
+
+You don't have to rerun the failing expression to inspect the error. The value is right there. Walk it with `assoc`, extract the fields you care about.
+
+## 8.12 Custom error kinds — grow your own taxonomy
+
+You are not limited to the seven built-in kinds. If your domain has recurring failure modes — say a shop cart's `checkout-blocked` error — invent a kind for it.
+
+```scheme
+(define (require-payment-method)
+  (unless (has-payment-method?)
+    (raise (list :kind 'shop/checkout-blocked
+                 :reason 'no-payment-method
+                 :suggested-fix "add a card"))))
+```
+
+Now every `checkout-blocked` error is a rich record. Handlers can dispatch on `:reason`. The suggested fix travels with the error. And when the diagnose-error tool encounters it, it doesn't have to guess — the fix hint is right there.
+
+Naming discipline: prefix custom kinds with a namespace, and keep the kind name kebab-case. `shop/checkout-blocked` not `ShopCheckoutBlocked` not `CheckoutFail`.
+
+## 8.13 Errors as return values (the alternative)
+
+Not every failure needs to raise. Sometimes it's cleaner to return the error as a value:
+
+```scheme
+(define (parse-price s)
+  (let ((n (string->number s)))
+    (if n
+        (list :ok n)
+        (list :err (list :kind 'my/bad-price :input s)))))
+```
+
+Callers pattern-match on the shape:
+
+```scheme
+(let ((r (parse-price input)))
+  (case (car r)
+    ((:ok)  (proceed (cadr r)))
+    ((:err) (handle (cadr r)))))
+```
+
+Return-value errors are useful when the failure is EXPECTED and part of the normal flow (parsing user input, network requests). Raise when the failure is EXCEPTIONAL and disrupts the normal flow (invariant violation, unrecoverable state).
+
+Rule of thumb: if the caller almost always wants to react to failure, return a value; if the caller almost always wants to bail out, raise.
+
+## 8.14 The error printer — how errors get shown
+
+When an uncaught error surfaces to the REPL, the runtime formats it. The formatter walks the alist and produces a short human string. `(assoc :message err)` becomes the headline; `(assoc :verb err)` becomes context; `(assoc :did-you-mean err)` becomes a suggestion line.
+
+You can format your own errors the same way. The runtime exports `format-error` — pass it an error alist and get back a display string:
+
+```scheme
+(display (format-error _err))
+(newline)
+```
+
+That way custom errors get the same pretty rendering as built-in kinds. No two formatters; one consistent look.
+
+## 8.15 Errors in the training corpus
+
+Every error record is a training example, if the model can see enough of them. The pattern is:
+
+- The failing program is the CONTEXT.
+- The error record is the LABEL.
+- The recovery (or a documented fix) is the ANSWER.
+
+Motoi's 1001 broken carts corpus (see chapter 12 for the search side, chapter 10 for the Cortex side) is built exactly this way. Each broken cart carries: the code that failed, the error it raised, the four reasoning tracks (linguistic, cs, math, engineering), and the fix. When the model learns from that corpus, it learns to recognize error shapes and propose fixes.
+
+That's why errors-as-data matters so much for a small model. Opaque exceptions can't be learned from. Alist errors can.
+
+## 8.16 The philosophy in one line
+
+Motoi treats errors as first-class values because the model has to reason about them the same way it reasons about everything else — with `assoc`, `filter`, `map`, and `cortex`. Errors are not a separate mechanism. They are just values with a `:kind` field. That's the whole trick.
+
+## 8.17 The pattern
+
+Whenever an error surprises you, do not read the printed message. Bind and introspect.
+
+```text
+(some-failing-verb 42)
+;; error printed
+
+(define e (last-error))
+(error-kind e)         ;; what kind
+(err-message e)      ;; the raw message
+(err-location e)     ;; where
+(error-stack e)        ;; the call chain
+(error-cause e)        ;; wrapped underlying?
+(error-context e)      ;; what was happening
+```
+
+Six fields. Five verbs. Complete picture.
+
+The printed error is a summary. The record is the full picture. When the summary does not tell you enough, introspect the record.
+
+## 8.18 A worked example — arity mismatch
+
+```text
+(car)
+;; error: arity mismatch — car expects 1 argument, got 0
+```
+
+Bind and introspect:
+
+```scheme
+(define e (last-error))
+(error-kind e)          ;; => 'arity-error
+(error-context e)       ;; => (:verb car :expected 1 :got 0)
+```
+
+The `:context` field gave you the exact expected and received arities. No parsing the message. The context is structured data.
+
+## 8.19 A worked example — perm denied
+
+```text
+(card/publish 'my-cart)
+;; error: perm denied — card/publish requires financial tier, caller has read tier
+
+(define e (last-error))
+(error-kind e)          ;; => 'perm-denied
+(error-context e)       ;; => (:verb card/publish :required financial :caller-tier read)
+```
+
+Again, the context tells you exactly what you need to know. Two structured fields — the required tier and the caller's tier — instead of a string you would have to parse.
+
+This is why errors as data matters. The dispatcher raises structured errors; the introspection layer reads them; the LLM composes with them. Every downstream tool benefits from the structure.
+
+## 8.20 Preview of Chapter 9
+
+Chapter 9 turns evaluation into a log. `,trace` records every call to a verb; `,watch` re-evaluates on every prompt. Both produce logs that are themselves values you can query.
+
+Turn the page.
+
+## 8.21 Wave 2 preview
+
+The full chapter will cover:
+
+- Every error kind Motoi produces (~15 kinds)
+- Raising structured errors from your own verbs
+- The with-handlers / guard / catch machinery
+- Nested errors with `:cause` chains
+- Contract enforcement patterns
+- Error handling patterns for cart authors
+- Interaction with Cortex logging
+- Custom error kinds via record subtyping
+- Errors as return values (the Result monad pattern)
+- The pretty-error and fix workflow in detail
+
+## 8.22 A closing observation
+
+Errors as data is one of Motoi's simpler design choices with one of the largest downstream benefits. Because errors are structured, every downstream tool — the REPL's pretty-printer, the LLM-augmented fix, the Cortex error log, the reference-manual generator — can consume them without parsing strings.
+
+If you have used a language where errors are strings, this will feel like a downgrade at first (fewer nice colored stack traces) and an upgrade after a week (every error is queryable and composable).
+
+Turn the page. Chapter 9 opens trace and watch.
+
+## 8.23 A last note
+
+The `last-error` binding is your session's error handle. It updates every time an error is raised. If you want to save an error for later, bind it explicitly:
+
+```scheme
+(some-failing-verb)
+(define my-error (last-error))
+```
+
+Now `my-error` is stable — it will not change when the next error is raised. This lets you compare errors across a session, or accumulate a list of errors to analyze together.
+
+For scripted error collection:
+
+```scheme
+(define errors '())
+(define (record-error e)
+  (set! errors (cons e errors)))
+
+(for-each
+  (lambda (test)
+    (with-handlers ((error? record-error))
+      (run-test test)))
+  test-suite)
+```
+
+Every failing test's error gets captured. Now `errors` is a list of records you can introspect, filter by kind, compare, or feed to the LLM for batch analysis.
+
+Turn the page.
+
+## 8.24 Deep-seed — every error kind Motoi ships
+
+Motoi's error kinds are a closed vocabulary. Every error raised by the runtime is tagged with one of these kinds. Cart authors can add their own kinds, but the base set is fixed:
+
+- `type-error` — a value's runtime type did not match what a verb expected
+- `arity-error` — wrong number of arguments to a verb
+- `unknown-verb` — the verb name is not in the registry
+- `unbound-variable` — the symbol has no binding in scope
+- `perm-denied` — the caller does not have the required permission tier
+- `rate-limit` — the verb was called too often
+- `fuel-exhausted` — the evaluation exceeded its fuel budget
+- `read-error` — the reader could not parse the source
+- `macro-error` — the macro expander failed
+- `contract-violation` — a runtime contract check failed
+- `sandbox-violation` — the sandbox refused the operation
+- `network-error` — an outbound network call failed
+- `not-implemented` — a stub verb was called
+- `user-error` — an error raised by user code via `(error ...)`
+- `wrapped` — an error wrapping another error via `:cause`
+
+Fifteen kinds. Every error you catch is one of these. Filter your error handling by kind:
+
+```scheme
+(with-handlers
+  ((type-error? handle-type-error)
+   (arity-error? handle-arity-error)
+   (perm-denied? refuse-and-log))
+  (do-the-thing))
+```
+
+The predicates (`type-error?`, `arity-error?`, etc.) are built from the error's `:kind` field. Each is one line:
+
+```scheme
+(define (type-error? e) (and (error? e) (eq? 'type-error (error-kind e))))
+```
+
+## 8.25 Deep-seed — raising your own errors
+
+To raise an error with structured fields, use `raise-error`:
+
+```scheme
+(raise-error
+  :kind 'my-error-kind
+  :message \"something went wrong\"
+  :context (list :user-id user-id :operation 'save))
+```
+
+The error becomes queryable via all the same field verbs. Downstream code that catches it can introspect the `:context` to know what to do about it.
+
+Your own error kinds are just symbols. There is no registration step. Pick a symbol that describes the failure and use it.
+
+## 8.26 Deep-seed — the guard construct
+
+```scheme
+(guard (e ((type-error? e) (display \"got a type error: \") (display (err-message e)))
+          ((error? e) (display \"got some other error: \") (display (err-message e))))
+  (some-code-that-might-fail))
+```
+
+The clauses are tried in order. The first predicate that matches gets to handle the error. If none match, the error propagates.
+
+`guard` is Scheme's standard error handling construct. Motoi supports it. It composes with the introspection layer because the error value is bound in each clause.
+
+## 8.27 Deep-seed — the :cause chain
+
+An error can wrap another error via `:cause`:
+
+```scheme
+(raise-error
+  :kind 'wrapped
+  :message \"failed to save user\"
+  :cause underlying-io-error)
+```
+
+The `:cause` field is another error record. You can walk the chain:
+
+```scheme
+(define (root-cause e)
+  (if (error-cause e)
+      (root-cause (error-cause e))
+      e))
+
+(root-cause (last-error))
+;; => the deepest cause
+```
+
+This is useful when an outer verb wraps a lower-level failure with more context. You can present the outer message to the user and drill down to the root cause for debugging.
+
+## 8.28 Deep-seed — errors and the training corpus
+
+Every documented error in the reference manual is a training pair. The model learns: when a user sees this error, the fix is this. When a user sees that error, the fix is that.
+
+This means errors' structured shape does double duty. It helps the human debug in real time. It also trains the model to reach for the right fix when a similar error comes up in the future.
+
+Well-structured errors are training data. Poorly-structured errors are noise. Motoi's discipline is that every runtime-raised error is well-structured; user-raised errors are the author's responsibility.
+
+## 8.29 A closing observation on error handling philosophy
+
+Motoi treats errors as values that flow through the system, not as exceptions that unwind it. The traditional exception model — throw, unwind stack, catch somewhere higher — is present via `guard` and `with-handlers`, but it is not the primary story.
+
+The primary story is: the runtime raises structured errors; the introspection layer reads them; the LLM composes with them; and the programmer at the REPL handles them by binding, introspecting, and deciding what to do.
+
+This is a different reflex than a Java or Python programmer might have. In those languages the reflex is `try / except: log(e)`. In Motoi the reflex is `(define e (last-error)); (introspect e)`. The intent is the same — understand the failure. The path is different.
+
+Which path is better depends on the language's shape. Motoi's shape rewards the introspection path.
+
+Turn the page. Chapter 9 opens trace and watch.
+
+## 8.30 One last practical pattern — error introspection at the REPL
+
+At the REPL, the most common workflow when something errors is:
+
+```
+> (some-verb 42)
+error: type error — expected number, got string
+
+> ,doc last-error
+Return the most recent error raised in the current session.
+
+> (define e (last-error))
+> (error-kind e)
+type-error
+> (error-context e)
+(:verb some-verb :expected number :got string :arg-index 0)
+```
+
+The context field told you exactly which argument was wrong and what shape was expected. That is often the entire debug — you now know your first argument to `some-verb` was a string when it should have been a number.
+
+This is what \"errors as data\" enables. The message would have told you a similar thing but you would have had to parse the message. The context gives you the same information as pre-parsed structured data.
+
+Reflex time. When an error surprises you, do not read the printed message twice. Bind and introspect.
+
+Turn the page.
+
+## 8.31 Where the kinds are catalogued — the error cards
+
+Introspecting *one* error tells you about *this* failure. But the failures repeat, and Motoi keeps a catalogue of the KINDS. The error census (`stats/error-counts`, `stats/error-summary`) counts every error that escapes to the top level, filed under a normalized key — `unbound-symbol`, `not-a-procedure`, `class:TypeError`, `fuel-exhausted`. When a key recurs enough to be a pattern rather than a fluke, it earns a teaching card.
+
+Those cards live in `scheme/reference/error-cards/` — one hand-authored card per kind of failure the census can produce. Each names what the wrong *means*, how to recognize it at a verb, how to detect it in code (with a runnable `guard` example), and the honest fix. It is the runtime companion to this chapter: here you learn to introspect *an* error as data; there you look up what a *kind* of error means and how others have fixed it. The honesty rule binds the shelf — every card's example is run through `./bin/motoi` and reproduces its output verbatim, so nothing aspirational ships.
+
+Three of the cards name what the census *cannot* see, which is exactly the introspector's blind spot worth knowing: silent non-errors (a wrong value, nothing thrown), reader/expand-time errors (they fire before the eval boundary the census watches), and roster keys reserved but never actually thrown. Boot the shelf at `error-cards/README.slatl`; the machine index is `error-cards/MANIFEST.slat`.
+
+## 8.32 Wave 2 preview one more time
+
+The full chapter (~8000 words) will show:
+
+- All 15 error kinds with worked examples of each
+- The full guard / with-handlers / catch machinery
+- Raising structured errors from user code
+- Custom error kinds and predicates
+- The :cause chain in depth
+- Contract enforcement via the runtime contract checker
+- Interaction with Cortex for error logging
+- Interaction with the LLM for pretty-error and fix
+- Errors as return values (Result monad)
+- The training corpus story for errors
+
+The seed lands enough that you can start introspecting errors today. The full chapter will fill in the machinery and the patterns.
+
+Turn the page. Chapter 9 opens trace and watch — the temporal dimension of introspection.
+")

@@ -1,0 +1,393 @@
+;; ch06-feel-deadzones-and-ease.book.slatl
+;; Book of Arcade Games — Chapter 6: Feel — Deadzones and Ease
+
+(dialect :applies ("motoi") :note "Applies to Motoi. Per-record :dialect overrides where a record is specific to one surface.")
+(chapter
+  :book                "Book of Arcade Games"
+  :chapter-number      6
+  :title               "Feel: Deadzones and Ease"
+  :dialect             "motoi"
+  :audience            :kid
+  :also-for            :adult
+  :content-rating      :G
+  :author-lane         "arcade-games-engineer-lane-2026-07-16"
+  :training-eligible   #t
+  :confidentiality     "public"
+  :voice               "motoi-teaching + game-design"
+  :book-version        "1.0.0"
+  :prose
+"You have a game. Physics is honest, collisions register, the ship
+thrusts, the paddle catches. The kid plays it for five minutes and puts
+it down. Your friend's game — same shape, same code density — plays for
+an hour. What is the difference?
+
+FEEL. The thousand tiny corrections between raw physics and something a
+human enjoys. Camera lag so the ship doesn't jitter. Ease curves so
+rotation doesn't snap. Screen-shake sized to impact velocity. Coyote
+time so the jump is generous. Input buffers so the fire is responsive.
+Sound cued a half-frame before the visual so the ear leads the eye.
+
+This chapter is 90% code that will look almost identical to earlier
+chapters — you'll see the ship-with-thrust from chapter 3 twice, side
+by side, before and after tuning. The lesson is that FEEL is code. It
+is not vibes. It is `tick/ease` and a handful of coefficients that ramp,
+decay, and lag. Every microsecond has a shape. We run both ships
+headless for twenty frames of the SAME held input and read the numbers
+back — the raw ship's motion and the polished ship's motion diverge on
+paper before you ever feel them.
+
+We do a before-and-after study on one game so the kid can SEE the
+difference. Then we build a knob-tuning workbench that lets you
+adjust ten parameters live and feel the change.
+
+---
+
+## 6.1 Before — the raw game
+
+Chapter 3's ship, unpolished.
+
+```scheme
+;; A ship is (pos vel angle). RAW controls: rotation snaps by 0.10 per
+;; frame while turning; thrust adds 0.20*(cos,sin) per frame while firing.
+;; drag scales velocity by 0.99 each frame.
+(define (ship pos vel angle) (list pos vel angle))
+(define (sh-pos s) (car s))
+(define (sh-vel s) (cadr s))
+(define (sh-ang s) (caddr s))
+(define (heading a) (vec/make (geom/cos a) (geom/sin a)))
+
+;; One raw frame: turn right, thrust, integrate.
+(define (raw-frame s)
+  (let* ((a (+ (sh-ang s) 0.10))
+         (v (vec/scale (vec/add (sh-vel s) (vec/scale (heading a) 0.20)) 0.99))
+         (p (vec/add (sh-pos s) v)))
+    (ship p v a)))
+
+;; Run 20 frames of held right+thrust; report (final-angle final-speed).
+(define (raw-ship)
+  (let loop ((f 0) (s (ship (vec/make 160 120) (vec/make 0 0) 0)))
+    (if (>= f 20)
+        (list (sh-ang s) (vec/norm (sh-vel s)))
+        (loop (+ f 1) (raw-frame s)))))
+
+(raw-ship)
+;; => (2.0000000000000004 3.036347910049358)
+```
+
+Play this and the rotation is instant — it snaps a clean 0.10 radians
+every frame, reaching exactly 2.0 after 20. Thrust is instant too — the
+full 0.20 push lands on frame one. That is what earlier chapters teach
+for clarity. But instant is not what the human hand wants: the angle
+climbs linearly and the speed piles up with no ramp.
+
+---
+
+## 6.2 After — the polished game
+
+Same game, tuned.
+
+```scheme
+;; Same ship, POLISHED. Rotation eases in via a rot-vel that ramps
+;; (accel 0.01, cap 0.08). Thrust CHARGES up (0.08/frame, cap 1.0) and
+;; tick/ease shapes the charge into an S-curve push. We carry
+;; (ship rot-vel thrust-charge) through the loop instead of set!.
+(define (polished-ship)
+  (let loop ((f 0) (s (ship (vec/make 160 120) (vec/make 0 0) 0))
+                   (rv 0) (tc 0))
+    (if (>= f 20)
+        (list (sh-ang s) (vec/norm (sh-vel s)))
+        (let* ((rv2 (min 0.08 (+ rv 0.01)))          ;; hold right: ramp
+               (ang (+ (sh-ang s) rv2))
+               (tc2 (min 1.0 (+ tc 0.08)))            ;; hold thrust: charge
+               (thr (* 0.20 (tick/ease tc2)))
+               (v   (vec/scale (vec/add (sh-vel s)
+                                        (vec/scale (heading ang) thr)) 0.99))
+               (p   (vec/add (sh-pos s) v)))
+          (loop (+ f 1) (ship p v ang) rv2 tc2)))))
+
+(polished-ship)
+;; => (1.32 2.473657809540062)
+```
+
+Same twenty frames of the same held input — but the numbers differ.
+The angle reaches 1.32 instead of 2.0 because rotation velocity RAMPS
+from 0 up to its 0.08 cap instead of snapping. The speed is 2.47
+instead of 3.04 because thrust EASES in through `tick/ease` instead of
+slamming to full on frame one. Same physics. Same primitives. Different
+coefficients. Radically different feel.
+
+`tick/ease x` is a smoothstep — takes a linear 0-to-1 and returns an
+S-curve 0-to-1 that starts slow, accelerates through the middle, eases
+into 1. It is the single most-used feel primitive in games. Whenever
+you have 'a parameter changes over time and abrupt looks bad,' wrap it
+in `tick/ease`.
+
+---
+
+## 6.3 The eight knobs
+
+Appendix H tabulates. Here is the shortlist every arcade game tunes.
+
+**1. Acceleration.** How fast do you reach max speed from a standstill?
+Small = deliberate; large = twitchy. Fighter jets: large. Trucks:
+small.
+
+**2. Deceleration.** How fast do you stop when input releases?
+Independent of acceleration! Fast decel = precise. Slow decel = drifty.
+Space games tune decel low.
+
+**3. Apex hang.** For jumping games: how long does the player spend
+at the top of the arc? Scale gravity down to 0.7x while `vy` is near
+zero for a hangtime effect — just multiply the gravity vec by 0.7 in
+that window. See chapter 7.
+
+**4. Coyote time.** After walking off a ledge, how many frames can the
+player still jump? Typically 4-8 frames. See chapter 7 and Appendix F.
+
+**5. Jump buffer.** If the player presses jump N frames BEFORE landing,
+buffer the press so it fires on landing. Typically 6-10 frame buffer.
+
+**6. Screen shake.** How much does the screen shake on impact? Scale
+with impact velocity: keep a shake number, add `(* impact-vel 0.3)` on
+a hit, multiply it by a decay each frame. Decay factor 0.85 = 3-4 frame
+shake; 0.98 = 10+ frames. Section 6.6 computes exactly this.
+
+**7. Sound pitch.** On impact, a hit sound at a pitch scaled by impact
+velocity gives satisfying variety. Even without pitch control,
+alternating between two sounds on successive impacts reduces monotony.
+(Audio is a consumer-repo concern; here we track the number that would
+drive it.)
+
+**8. Sound volume.** Softer sounds for background events, louder for
+critical. A master-volume multiplier ducks all audio during dialogue.
+
+---
+
+## 6.4 A knob-tuning workbench
+
+Wire the knobs to buttons so you can tune live.
+
+```scheme
+;; A workbench is a KNOB VECTOR fed to the same rotation math. Index 0
+;; is rot-acc, 1 is rot-max, 2 is rot-dec. To 'tune' is to change a knob
+;; and re-run; the final angle after a fixed hold is the feel summary.
+(define (run-with-knobs knobs frames)
+  (let ((rot-acc (vector-ref knobs 0))
+        (rot-max (vector-ref knobs 1)))
+    (let loop ((f 0) (ang 0) (rv 0))
+      (if (>= f frames)
+          ang
+          (let ((rv2 (min rot-max (+ rv rot-acc))))
+            (loop (+ f 1) (+ ang rv2) rv2))))))
+
+;; Stately knobs (tiny accel) vs twitchy knobs (big accel), same hold.
+(define stately (vector 0.001 0.08 0.85))
+(define twitchy (vector 0.050 0.08 0.85))
+
+(list (run-with-knobs stately 30) (run-with-knobs twitchy 30))
+;; => (0.46500000000000036 2.370000000000001)
+```
+
+Change one knob, re-run, read the number: `rot-acc` at 0.001 barely
+turns the ship in 30 frames (angle 0.465), while 0.05 whips it around
+(angle 2.37). On a live cabinet the kid would nudge that value with a
+button and feel the change; here we re-run and read it. The knob values
+that FEEL right are the ones the kid keeps.
+
+This is how real game designers tune. Get the game running end-to-end,
+then spend a week on knobs.
+
+---
+
+## 6.5 Wobble and pace, computed by hand
+
+Two feel-shaping ideas are worth building from primitives.
+
+A WOBBLE adds micro-jitter to a motion so it feels alive instead of
+robotic. Applied to a character's sprite: a tiny breath-cycle offset on
+the DRAWN position, leaving the physics position untouched.
+
+A PACE reshapes the timing of a motion without changing its endpoints.
+A ball can travel from A to B in the same duration but with an ease-in,
+ease-out, or linear pace — that is `tick/ease` applied to the fraction
+of the way there.
+
+```scheme
+;; A wobble is a tiny sinusoidal offset added to the DRAWN position, not
+;; the physics position. The ship coasts; each frame we offset its y by
+;; 0.5*sin(frame*0.5). The path stays straight; the sprite breathes.
+;; Report the drawn y at frames 0..3.
+(define (draw-y frame) (* 0.5 (geom/sin (* frame 0.5))))
+(define (feel-wobble)
+  (map (lambda (f) (+ 120 (draw-y f))) (iota 4)))
+
+(feel-wobble)
+;; => (120 120.2397127693021 120.42073549240395 120.49874749330203)
+```
+
+Subtle. The kid may not consciously see the fractions of a pixel. But
+turn the offset off and the motion feels sterile. That is the wobble's
+whole job.
+
+---
+
+## 6.6 Impact-scaled shake
+
+Not all impacts deserve the same shake. A tap-collision should not
+rattle the screen; a boss-hit should. Scale shake by impact velocity.
+
+```scheme
+;; A bouncing ball; on each floor-hit we add impact-scaled shake to a
+;; shake budget that decays 0.85 per frame. The renderer would read that
+;; budget to jitter the view; here we just record it. Report (frame
+;; shake) at each bounce over ~160 frames.
+(define (body pos vel) (list pos vel))
+(define (b-pos b) (car b))
+(define (b-vel b) (cadr b))
+(define (round-2 x) (/ (round (* x 100)) 100))
+(define g (vec/make 0 0.3))
+(define floor-y 240)
+
+;; Step returns (next-body impact-speed). impact-speed is the downward
+;; velocity at the moment of contact, 0 on a non-bounce frame.
+(define (bounce-step b)
+  (let* ((v (vec/add (b-vel b) g))
+         (p (vec/add (b-pos b) v)))
+    (if (> (cadr p) floor-y)
+        (list (body (vec/make (car p) floor-y)
+                    (vec/make (car v) (* -0.85 (cadr v))))
+              (cadr v))
+        (list (body p v) 0))))
+
+(define (impact-scaled-shake)
+  (let loop ((f 0) (b (body (vec/make 160 20) (vec/make 0 0)))
+                   (shake 0) (peaks '()))
+    (if (>= f 160)
+        (reverse peaks)
+        (let* ((r      (bounce-step b))
+               (nb     (car r))
+               (impact (cadr r))
+               (sh1    (* shake 0.85))                      ;; decay
+               (sh2    (if (> impact 1.0) (+ sh1 (* impact 0.5)) sh1)))
+          (loop (+ f 1) nb sh2
+                (if (> impact 1.0)
+                    (cons (list f (round-2 sh2)) peaks)
+                    peaks))))))
+
+(impact-scaled-shake)
+;; => ((37 5.7) (101 4.76) (154 3.91))
+```
+
+The first bounce shakes hard (5.7). Subsequent bounces shake less
+(4.76, then 3.91) because velocity has decayed. The screen tells the
+kid, without words, that the ball is losing energy.
+
+---
+
+## 6.7 The four patterns for feel
+
+**Composition.** Feel is composed. A polished ship = raw ship +
+rotation-ease + thrust-ease + camera-lag + shake. Each layer costs a
+few lines. Together they transform the play experience. Composition of
+feel-layers is how a game gets great.
+
+**Orchestration.** Order-of-application matters. Poll BEFORE update.
+Update BEFORE draw. Apply screen shake to camera AFTER the shot's
+impact registers. If you shake before the collision this frame, you
+show yesterday's shake for today's hit — subtly wrong.
+
+**In-routing.** Feel affects the in-routing itself. An 8-frame input
+buffer changes how buttons ROUTE — a fire pressed 6 frames before
+landing still routes to fire, arriving on the landing frame. That
+delay is invisible to the player and invaluable to the feel.
+
+**Routing.** Feel routes back out to display (camera shake), audio
+(pitch/volume), and sometimes back to input (rumble via haptic
+routing). Feel is the OUTBOUND polish on every action.
+
+---
+
+## 6.8 Common desktop tasks
+
+**Shop-cursor deadzone.** In a shop's browsing UI, cursor movement can
+be given a small deadzone (0.5 mm equivalent) before scrolling begins.
+Kids scrolling on a shaky bus don't accidentally scroll past their
+target. Same math as camera deadzone.
+
+**Purchase-confirmation ease.** After 'buy', the button smoothly eases
+into a checkmark shape over 12 frames rather than instantly swapping.
+The tick/ease call is the same one your ship uses. Physics of UI
+transitions is UI FEEL.
+
+---
+
+## 6.9 Pitfalls
+
+**Everything too smooth.** Over-easing makes controls feel sluggish
+and unresponsive. There is a bar — too twitchy is uncomfortable, too
+smooth is uncomfortable, and the sweet spot is narrow. Playtest.
+
+**Camera shake nauseating.** Shake magnitude scales linearly but
+perception is exponential. Cap total shake at 20 pixels. Decay fast.
+
+**Deadzone hides bugs.** A deadzone that suppresses tiny input can
+also suppress input from a broken joystick you should be reporting.
+Log raw input in dev mode.
+
+**Buffered input replays after death.** If the player dies with 'a'
+still in the input buffer, don't fire on respawn. Clear the buffer.
+
+**Feel-tuning goes on forever.** Set a hard cap. Ship the game. Iterate
+in a post-release patch. Perfection is the enemy of shipping.
+
+---
+
+## 6.10 Try this yourself
+
+1. Take chapter 2's paddle game. Add rotation-ease-style acceleration
+   to paddle movement. Does the game feel better?
+2. Add a shake budget to the brick game — small addition on brick hit,
+   big on paddle catch. Track it as a number like section 6.6. Where
+   does the magnitude feel right?
+3. Keep the last 30 frames of button state in a list and print it as an
+   'input echo' bar. Now you can SEE your own inputs and debug feel.
+4. Record a list of your inputs, then replay the same list with feel-off
+   and feel-on coefficients. Note which run 'feels more like a game.'
+5. Tune the workbench: change the knob-adjust step so precision knobs
+   (rot-acc, thr) move by 0.001 and coarse knobs (dead-x) move by 1.
+6. Track a `thrust-charge`-scaled volume number while 'a' is held — the
+   value a sound engine in the consumer repo would read.
+
+---
+
+## 6.11 What we built
+
+Ease, deadzone, camera lag, impact-scaled shake, tuning workbench.
+The eight knobs. `tick/ease` as the workhorse of every feel decision.
+`motion/with-feel` and `motion/with-pace` as the polish-layer verbs.
+
+Next chapter: the hardest simple thing in game design. The jump. Slow
+apex hang, fast fall, generous coyote, generous buffer. Chapter 7 is
+where a kid learns that feel is code by tuning ONE specific action
+across ten specific frames.")
+
+(code-block :chapter 6 :lang "scheme" :source
+"(define (ship pos vel angle) (list pos vel angle))
+(define (sh-pos s) (car s))
+(define (sh-vel s) (cadr s))
+(define (sh-ang s) (caddr s))
+(define (heading a) (vec/make (geom/cos a) (geom/sin a)))
+(define (feel-anchor)
+  (let loop ((f 0) (s (ship (vec/make 160 120) (vec/make 0 0) 0))
+                   (rv 0) (tc 0))
+    (if (>= f 20)
+        (list (sh-ang s) (vec/norm (sh-vel s)))
+        (let* ((rv2 (min 0.08 (+ rv 0.01)))
+               (ang (+ (sh-ang s) rv2))
+               (tc2 (min 1.0 (+ tc 0.08)))
+               (thr (* 0.20 (tick/ease tc2)))
+               (v   (vec/scale (vec/add (sh-vel s)
+                                        (vec/scale (heading ang) thr)) 0.99))
+               (p   (vec/add (sh-pos s) v)))
+          (loop (+ f 1) (ship p v ang) rv2 tc2)))))
+(feel-anchor)")

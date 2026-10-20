@@ -1,0 +1,131 @@
+;; appendix-verbs-cookbook.slat
+;; Book of Sound — Appendix: The Verbs Cookbook
+
+(chapter
+  :voice                motoi-copilot
+  :book             "Book of Sound"
+  :chapter-number   null
+  :title            "Appendix — The Verbs Cookbook"
+  :source-path      "authored/2026-07-17/book-fill-lane"
+  :status           "book-fill-authored-2026-07-17"
+  :audience         "hobbyist + kid"
+  :dialect          "motoi"
+  :training-eligible true
+  :confidentiality "public"
+  :prose
+"# Appendix — The Verbs Cookbook
+
+Notes on drum-kit playback via `synth/kit`. Verified against `bin/motoi eval`.
+
+---
+
+## Drum kit hit: `synth/kit`
+
+`synth/kit patch step?` plays one hit from the internal drum kit. `patch` is a symbol naming which drum to hit; `step` is an optional integer identifying which step of a pattern the hit belongs to (defaults to zero). Returns the symbol `'ok` on success, or `'error` if the audio engine is unavailable.
+
+```scheme
+(synth/kit)                             ; => ok    (default patch, defaults to 440Hz fallback)
+(synth/kit 'kick)                       ; => ok
+(synth/kit 'snare)                      ; => ok
+(synth/kit 'hat)                        ; => ok
+(synth/kit 'kick 3)                     ; => ok    (kick, on step 3 of a pattern)
+```
+
+The built-in patch names are `'kick`, `'snare`, `'hat`, `'crash`, `'clap`. Unknown patches still play — they fall back to a 440Hz tone marked with the requested patch name — which is convenient during development but a bug to catch before ship. If a beat is not landing on the drum you expect, check the patch name first.
+
+Under the CLI harness the audio engine is a no-op, so every call returns `'ok` without producing sound. In a browser host with the audio engine wired up, each call triggers the corresponding synth-model hit.
+
+The `step` argument is a hint — some engines use it to skip re-triggers when a step has already fired this bar. In CORE it is stored and available to the engine; how the engine uses it is implementation-defined.
+
+---
+
+## Chord playback: `synth/chord`
+
+`synth/chord notes dur?` plays a list of MIDI note numbers together as a chord. `dur` is the duration in seconds; defaults to 0.5. The notes argument must be a proper list — `(list 60 64 67)` or `'(60 64 67)`. Passing a non-list returns the symbol `'error` without touching the audio engine; a valid list dispatches into the audio engine and returns `'ok` if the engine accepts the notes, `'error` if it does not.
+
+```scheme
+(synth/chord 'not-a-list)                       ; => error   (arg-shape guard)
+(synth/chord '(60 64 67))                       ; => error   (headless CLI: no audio adapter)
+(synth/chord (list 60 64 67))                   ; => error   (same reason)
+```
+
+Under the CLI harness the audio engine is not wired and every real dispatch returns `'error`. In a browser host with the audio engine installed, `(synth/chord '(60 64 67))` starts a C major triad — all three notes at the same cursor position, sustained for `dur` seconds.
+
+The chord verb rewinds the audio cursor between notes so they truly overlap rather than playing sequentially — this is the difference from calling `note/strike` in a loop.
+
+---
+
+## Downbeat rounding: `land-on-downbeat`
+
+`land-on-downbeat beat` rounds a fractional beat value to the nearest whole beat. Used by scheduling code that wants an event to snap to the next downbeat rather than land off-beat.
+
+```scheme
+(land-on-downbeat 3.7)                          ; => 4
+(land-on-downbeat 3.4)                          ; => 3
+(land-on-downbeat 0)                            ; => 0
+(land-on-downbeat 2.5)                          ; => 3
+```
+
+The verb is pure — no clock, no state. Pass in the beat position you *would* be at without snapping; get back the beat position you *want* to be at.
+
+---
+
+## Reading the live audio bus: the dashed `audio-*` family
+
+The reference documents fourteen dashed-name verbs that read (and in some cases mutate) the live audio bus. All fourteen are wired in `bin/motoi run` as of 2026-07-22. In headless mode they return honest-zero (empty snapshot); in a browser host with a wired analyser bridge they return real FFT numbers.
+
+`audio-band n` returns amplitude 0..1 in log-spaced band `n`. `audio-bands` returns the whole vector of eight bands (bass → treble). Prefer `audio-bands` if you need more than one band per frame — it's snap-cached, so eight `audio-band` calls in one frame all read the same underlying frame's bytes.
+
+```scheme
+(audio-band 0)             ; => 0        (bass band, no audio bridge)
+(audio-bands)              ; => (0 0 0 0 0 0 0 0)
+(audio-perceptual-bands)   ; => (0 0 0 0)   ; bass low-mid high-mid brilliance
+```
+
+`audio-rms` returns overall loudness this frame; `audio-peak` returns the loudest band. Both live in 0..1. Together they let a cart animate one dimension (brightness, particle count, camera scale) off *loudness* rather than a specific frequency.
+
+```scheme
+(audio-rms)                ; => 0
+(audio-peak)               ; => 0
+```
+
+`audio-bpm` returns the currently detected BPM as a number, or `#f` if the detector hasn't locked yet. `audio-beat?` is edge-triggered: it fires `#t` exactly once per beat, `#f` on every other frame. Together they are the rhythm-lock: `audio-bpm` gives you the tempo, `audio-beat?` gives you the pulse.
+
+```scheme
+(audio-bpm)                ; => #f       (headless mode, detector never locks)
+(audio-beat?)              ; => #f
+(audio-time)               ; => <secs>   (seconds since first audio-* call)
+(audio-playing?)           ; => #f       (no bridge, nothing to play)
+```
+
+`audio-tempo bpm?` is the getter / setter for a *manually asserted* tempo — useful when a cart wants to run a rhythm-locked animation before the detector has any signal to look at. `audio-master-volume level?` is the master fader (0.0 = mute, 1.0 = full).
+
+```scheme
+(audio-tempo)              ; => 0        (no tempo asserted or detected)
+(audio-tempo 120)          ; => 120      (setter form)
+(audio-master-volume 0.5)  ; => 0.5      (halved)
+```
+
+`audio-bar-clock handle [bars-per-rotation]` returns a bar-aligned phase clock as an alist with keys `'phase` (0..1 fractional bar progress), `'radians` (equivalent angle), `'bpm`, and `'bars`. Kids reach for this when they want a rotating vinyl-record graphic to spin in sync with the song.
+
+```scheme
+(audio-bar-clock 1 1)      ; => ((phase 0.0002) (radians 0.001) (bpm 120) (bars 1))
+```
+
+`audio-play source [opts]` starts playback and returns an opaque numeric handle. `audio-halt handle` stops the given handle and returns a zero-duration handle (0). The reference treats `audio-halt` as the inverse of `audio-play`.
+
+```scheme
+(define h (audio-play 'kick))    ; => 1     (fresh handle)
+(audio-halt h)                   ; => 0     (zero-duration handle)
+```
+
+**Honest null.** In terminal Motoi none of these produce sound and every reader returns a sensible-typed zero. That is by design: a program that reads `audio-rms` and multiplies by 100 should get 0, not a crash. Cart authors write against the shape of the readers, not against the assumption that a bridge is present.
+
+---
+
+## Closing note
+
+Every example in this appendix was checked against `bin/motoi eval` on 2026-07-17. `'ok` from the CLI does not mean sound emerged from your speakers — it means the verb was dispatched. Wire an audio host to hear anything.
+
+The fourteen dashed `audio-*` entries were added 2026-07-22 during the wiring lane for CORE verbs the reference documented but the runtime had never bound. All fourteen verified via `printf '<verb>' | bin/motoi run /dev/stdin` — none returns `unbound symbol`. See `lib/audio/audio-core.js` for the installer and `setAudioBridge` for the hook a browser host uses to plug in a live analyser.
+")

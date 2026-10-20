@@ -1,0 +1,458 @@
+(chapter
+  :book             "Book of Limits"
+  :chapter-number   "A"
+  :kind             "appendix"
+  :title            "Reading the Error — how to tell a verb is failing, what Motoi throws, and what it means"
+  :audience         "motoi-copilot + operators + programmer-learning-motoi"
+  :dialect          "motoi"
+  :voice            "motoi-copilot"
+  :training-eligible #t
+  :confidentiality  "public"
+  :provenance
+    ((:authored-at "2026-07-27"
+      :authored-by "introspection+limits authoring lane"
+      :method "every error message and every code block in this appendix was produced by running it through ./bin/motoi run — nothing here is aspirational"
+      :sources
+        ((:impl "src/interp.js" :note "the actual throw sites")
+         (:impl "lib/system/verb-stats.js" :note "normalizeError → error-key")
+         (:book "book-of-introspection" :chapter 8 :section "errors-as-data")
+         (:reference "scheme/reference/00b-introspection.slat" :section "stats/error-*"))))
+  :prose
+"# Appendix A — Reading the Error
+
+This is the honest-floor companion to Chapter 8 of the Book of
+Introspection. Chapter 8 tells you what an error *could* be in the
+fullest design: a rich record with a `:kind`, a `:did-you-mean`, a
+`:cause` chain. This appendix tells you what an error *actually is*
+when you run Motoi today — and it is rougher than the design. Reading
+errors well means reading the rough truth, not the brochure.
+
+Everything in this appendix was produced by actually running it. If a
+message looks strange, it is because Motoi really says that. The point
+of the Book of Limits is to speak the truth at the edges, and the edge
+of the error system is one of the most useful truths a programmer — or
+a small model writing code for one — can hold.
+
+## A.1 The first question: did a verb error at all?
+
+You would think this is obvious. It is not. Motoi *checks types* — it
+will stop you for handing a number to a string verb — but it does not
+check *magnitude*, and it has only one number type. So the first skill
+is telling a real failure apart from a silent surprise.
+
+There are exactly three outcomes when you run a form:
+
+1. **A value.** The line prints a result. The program ran to the end.
+2. **A stop.** A line begins with `error:`. Evaluation halted there;
+   nothing after it ran.
+3. **A surprise.** A value prints — but it is not the value you meant.
+   No `error:` line. The number simply left the range where it could be
+   represented.
+
+Start with the good news, because it is recent and it is real. The
+type-confusion mistakes that a permissive core would have swallowed all
+stop cleanly now, and they name the verb, the type wanted, and the
+value received:
+
+```scheme
+(string-length 42)
+;; => error: string-length: expected a string, got the number 42
+```
+
+```scheme
+(+ 1 'a)
+;; => error: +: expected a number, got the symbol a
+```
+
+```scheme
+(/ 5 0)
+;; => error: /: division by zero
+```
+
+```scheme
+(car '())
+;; => error: car: expected a pair, got the empty list
+```
+
+That last pair is worth holding onto. **Motoi never hands you an
+infinity from division.** `(/ 5 0)`, `(/ 1.0 0.0)` and `(/ 0.0 0.0)`
+all stop. If you have read a Scheme book that told you dividing by zero
+yields `+inf.0`, that book was not describing Motoi.
+
+Outcome 3 is the dangerous one, and it is the one this appendix exists
+for. It lives entirely in arithmetic, because Motoi has exactly one
+number type — a floating-point double — and a double can run out of
+room:
+
+```scheme
+(expt 2 1024)
+;; => +inf.0
+```
+
+That is not an error. The true answer is a 309-digit integer, and no
+double can hold it, so the value quietly becomes infinity. Multiply two
+large numbers and the same thing happens:
+
+```scheme
+(* 1e308 10)
+;; => +inf.0
+```
+
+Subtract one infinity from another and you get the value that means
+\"there is no answer here\":
+
+```scheme
+(- (* 1e308 10) (* 1e308 10))
+;; => +nan.0
+```
+
+Ask for a root that does not exist on the number line and you get it
+again, still without a stop:
+
+```scheme
+(math/sqrt -1)
+;; => +nan.0
+```
+
+And the quietest surprise of all — the one that catches every
+programmer once — is that doubles cannot hold most decimal fractions
+exactly:
+
+```scheme
+(+ 0.1 0.2)
+;; => 0.30000000000000004
+```
+
+**The lesson of the honest floor:** a program that produced a value did
+not necessarily succeed. Motoi will stop you when you confuse a *type*;
+it will not stop you when a number goes out of range, goes imaginary,
+or lands a hair off. This is why the disciplined reflex is not \"read
+the error\" but \"wrap and check\" — see A.6.
+
+## A.2 The clean errors — the ones that read like Scheme
+
+When Motoi *does* stop, most of the time it stops cleanly, with a
+message that reads like a language talking to you. These are the ones
+worth memorizing, because they cover the great majority of real
+mistakes.
+
+**`unbound symbol: <name>`**
+
+```text
+(frobnicate 3)
+;; error: unbound symbol: frobnicate
+```
+
+You used a name Motoi does not know. Three real causes, in order of
+likelihood: (1) a typo — you meant `cdr` and wrote `crd`; (2) the verb
+lives in a library that has not been loaded (an SRFI part you did not
+pull in); (3) the name genuinely does not exist in the language. This
+is the single most common error, and the friendliest — it names exactly
+what it could not find.
+
+**`not a function: <value>`**
+
+```text
+(1 2 3)
+;; error: not a function: 1
+```
+
+You put something in the head position of a call that is not callable.
+Here, the literal `1`. This almost always means a misplaced paren — you
+wrote `(1 2 3)` when you meant `'(1 2 3)` (a *quoted* list), or you
+shadowed a verb name with a number and then tried to call it.
+
+**`fuel exhausted`**
+
+```text
+(let loop ((n 0)) (loop (+ n 1)))
+;; error: fuel exhausted
+```
+
+The evaluator has a step budget. A loop with no base case, or a
+recursion that does not tail-call, burns through it and stops. This is
+a *safety* stop, not a logic complaint: it means \"this would have run
+forever, so I stopped it.\" The fix is almost never 'more fuel' — it is
+a missing base case or an accumulator that never converges.
+
+**`macro fuel exhausted`**
+
+A separate budget, for macro *expansion* rather than evaluation. It
+fires when a macro expands into more macro calls without bottoming out
+— a fork-bomb-shaped macro. It is kept distinct from eval fuel on
+purpose: a merely long-running program should not be mistaken for a
+macro attack, and vice versa.
+
+**Your own message, from `(error ...)`**
+
+```text
+(error \"custom boom\" 1 2)
+;; error: custom boom 1 2
+```
+
+When you call R7RS `error` yourself, the message is your string
+followed by your *irritants* (the extra values). This is the one error
+whose text you fully control — so control it well. A good message names
+the verb, the bad value, and what was expected.
+
+## A.3 The leaky errors — when a host error escapes
+
+Here is the part the brochure does not print. Motoi runs on
+JavaScript, and its core verbs are thin. When you hand a verb an
+argument so wrong that its implementation trips *before* any Scheme-level
+check, you do not get a clean Scheme error. You get the raw host error,
+leaking straight through:
+
+```text
+(car)
+;; error: Cannot read properties of undefined (reading '0')
+```
+
+`car` with no argument reached for its first argument's head, found no
+argument at all, and JavaScript complained about reading a property of
+`undefined`. Another:
+
+```text
+(cdr 7)
+;; error: a.slice is not a function
+```
+
+`cdr` of `7` tried to call a list operation on a number. The number has
+no `.slice`, and the host said so. And:
+
+```text
+(assoc 1)
+;; error: Cannot read properties of undefined (reading 'find')
+```
+
+`assoc` with a missing second argument reached for a list that was not
+there.
+
+**How to recognize a leaky error:** the message does not read like
+Scheme. It talks about *properties*, *undefined*, `.slice`, `.find`,
+`reading '0'`. Those words are never part of your program. When you see
+them, translate: *a verb received an argument so far outside its
+contract that its guts failed before it could tell you politely.*
+
+The *meaning* is almost always the same as a type error: you passed the
+wrong shape, or too few arguments. The leaky message is uglier but the
+fix is the same — look at the verb, look at what you handed it, and fix
+the shape. A.4 shows how the census quietly cleans these up for you.
+
+**Why this matters for the honest floor:** a leaky error is Motoi
+admitting an incomplete edge. It is not lying to you — it is showing
+you its seams. A programmer who knows the seams is faster than one who
+expected a polished record and got confused by `.slice`.
+
+## A.4 The error card — what the census remembers
+
+Every error that *escapes* to the top level (see A.6 for what
+'escapes' means) is filed. The filing system is the error census, and
+each filed error is, in effect, a small card:
+
+```scheme
+(stats/error-counts 5)
+;; => a sample session, not a fixed answer; your own counts will differ
+;;
+;;    ((:unbound-symbol 11 real)
+;;     (:class:TypeError 4 provisional)
+;;     (:not-a-procedure 2 provisional)
+;;     (:fuel-exhausted 1 provisional))
+```
+
+Read a card left to right:
+
+- **The key** — a *normalized* name for the error. This is the
+  census's gift: the ugly leaky messages from A.3 all collapse into one
+  tidy key, `class:TypeError`. The census did the translation you would
+  otherwise do by eye. Clean errors keep clean keys: `unbound-symbol`,
+  `not-a-procedure`, `fuel-exhausted`.
+- **The count** — how many times this exact shape of failure has been
+  seen, across every session, stored on disk (never in the model's
+  weights). Eleven unbound symbols. Facts live in the counter.
+- **The status** — `provisional` or `real`. A brand-new failure mode is
+  `provisional`; once it has recurred enough to be a *pattern* rather
+  than a fluke, it is promoted to `real`. This is the census deciding
+  which wrongs are worth building a lesson around.
+
+The summary card gives the whole shape at a glance:
+
+```scheme
+(stats/error-summary)
+;; => a sample session again; the shape is the promise, the numbers are not
+;;
+;;    ((:distinct-errors 4) (:total-errors 18) (:real 1)
+;;     (:provisional 3) (:novel-this-session 0)
+;;     (:errors-this-session 0) (:stats-slat \"/Users/you/.motoi/stats.slat\"))
+```
+
+Four distinct shapes of failure, eighteen failures in total, one shape
+mature enough to be `real`. And it names the file: the whole census is
+a plain `.slat` file on disk. You can open it. It is not a black box.
+
+The card in this section is a metaphor — but Motoi keeps the *literal*
+cards too. `scheme/reference/error-cards/` is a whole shelf, one hand-
+authored card per KIND of failure the census counts: what the wrong
+means, how to recognize it at a verb, how to detect it in code, and the
+honest fix. Where this appendix reads *one* count, a card reads the
+coordinate behind it — `class:TypeError` has a card that explains why a
+leaky host error (A.3) lands there and not in `not-a-procedure`. Each
+card's example is run through `./bin/motoi` and reproduces its output
+verbatim; nothing aspirational ships. When the census promotes a
+`provisional` key to `real`, that is the signal a card is owed — and the
+mint script (`error-cards/scripts/mint-error-cards.mjs`) scaffolds the
+stub for a human to fill. Boot the shelf at `error-cards/README.slatl`.
+
+## A.5 What a single verb's failures look like
+
+To ask 'how often has *this specific* failure happened?', name the key:
+
+```scheme
+(stats/error-count-of \"unbound-symbol\")
+;; => whatever your census has counted so far; 11 on the machine above
+```
+
+And to turn that into a *health signal* — a fraction of all failures —
+divide by the total:
+
+```scheme
+(define (error-share key)
+  (let ((total (cadr (assoc :total-errors (stats/error-summary))))
+        (c (stats/error-count-of key)))
+    (if (> total 0)
+        (exact->inexact (/ c total))
+        0)))
+(error-share \"unbound-symbol\")
+;; => 0.611...
+```
+
+Sixty-one percent of everything that ever went wrong was an unbound
+symbol. That is a *finding*. It says: the most valuable thing this
+system could do to help its users is catch typos and missing imports
+before they run. The census turned a pile of failures into a priority.
+
+## A.6 The reliable way to tell a verb errored: wrap it
+
+Reading `error:` off a screen is for humans at a REPL. A *program* — or
+a model writing one — needs a mechanical answer. The answer is `guard`,
+Scheme's standard error trap:
+
+```scheme
+(guard (e (#t 'it-errored))
+  (frobnicate 3))
+;; => it-errored
+```
+
+If the clause fires, the body errored. If it does not, the body
+returned. That is the whole test. Wrap it into a helper that never
+throws and always tells you which way it went:
+
+```scheme
+(define (safe-call thunk)
+  (guard (e (#t (list :err (if (error-object? e)
+                               (error-object-message e)
+                               e))))
+    (list :ok (thunk))))
+
+(list (safe-call (lambda () (+ 1 2)))
+      (safe-call (lambda () (error \"no price\" 42))))
+;; => ((:ok 3) (:err \"no price\"))
+```
+
+`(:ok value)` means it ran; `(:err message)` means it stopped. Now
+failure is a *value* you can branch on, collect, or count — not a
+screen you have to read.
+
+**A crucial subtlety — guard hides errors from the census.** An error
+you catch with `guard` is *handled*. It never escaped to the top level,
+so the census does **not** count it:
+
+```text
+(guard (e (#t 'handled)) (car))   ;; census unchanged
+(car)                              ;; census +1 class:TypeError
+```
+
+This is correct, not a bug. The census is a record of failures that
+actually *stopped a program*. A failure you anticipated and handled is
+not a failure of the system — it is the system working. So: catch what
+you can handle, and let the rest escape, where the census can learn
+from it.
+
+## A.7 `error-object-message` and `error-object-irritants`
+
+When you catch a *clean* error (one raised by `error`), you can read its
+parts. Two R7RS accessors do the work:
+
+```scheme
+(guard (e (#t (error-object-message e)))
+  (error \"bad price\" 42 'widget))
+;; => \"bad price\"
+
+(guard (e (#t (error-object-irritants e)))
+  (error \"bad price\" 42 'widget))
+;; => (42 widget)
+```
+
+The message is your headline; the irritants are the values you attached.
+Guard the accessor behind `error-object?`, though — a *raised* value is
+not always an error object. You can `raise` any value at all:
+
+```scheme
+(guard (e (#t e))
+  (raise (list (list :kind 'shop/empty-cart)
+               (list :cart 'welcome))))
+;; => ((:kind shop/empty-cart) (:cart welcome))
+```
+
+That is not an error object — it is a plain alist you chose to raise. So
+`(error-object? e)` would be `#f`, and you would read it with `assoc`
+instead. The rule: **`error-object?` first, then the right accessor.**
+
+## A.8 The taxonomy, in one table
+
+Fix this table in memory. It is the whole error surface of Motoi as it
+runs today.
+
+| What you see                                   | Census key         | What it means                                     |
+|------------------------------------------------|--------------------|---------------------------------------------------|
+| `error: unbound symbol: X`                     | `unbound-symbol`   | Typo, or a library not loaded, or no such name.   |
+| `error: not a function: X`                     | `not-a-procedure`  | Non-callable in head position; usually a paren.   |
+| `error: fuel exhausted`                        | `fuel-exhausted`   | Runaway loop / non-tail recursion. Missing base.  |
+| `error: macro fuel exhausted`                  | `macro-fuel-*`     | A macro expanded without bottoming out.           |
+| `error: <your text> <irritants>`              | (varies)           | Your own `(error ...)`. You control this message. |
+| `error: Cannot read properties of undefined…`  | `class:TypeError`  | Leaky host error: arg too wrong / too few. A.3.   |
+| `error: a.slice is not a function`             | `class:TypeError`  | Leaky host error: non-list to a list verb.        |
+| `+inf.0` / `-inf.0` where you wanted a number  | *(none)*           | Overflow. The magnitude left what a double holds.  |
+| `+nan.0` where you wanted a number             | *(none)*           | No answer exists, e.g. `(math/sqrt -1)`.          |
+
+The top four rows are clean and enumerable. The two `class:TypeError`
+rows are the leaky seam. The bottom two rows are the honest floor — the
+failures the language will *not* announce, and in Motoi they are all
+numeric. Type confusion is announced; range and domain are not.
+
+## A.9 The reflex, stated once
+
+- If a verb printed a value, do not trust it blindly — a wrong value is
+  a real possibility, because arithmetic overflows and goes undefined
+  without stopping. When it matters, wrap and assert the *shape* and
+  the *finiteness* of the result, not just its presence.
+- If a verb stopped with an `error:` line that reads like Scheme, read
+  the key from A.8 and fix the named thing.
+- If a verb stopped with a message about `undefined` or `.slice` or
+  `.find`, translate it: you handed a verb a shape it could not use.
+  The census already filed it under `class:TypeError`.
+- To detect failure mechanically, `guard` and return a tagged value.
+- To learn from failure across time, let it escape and read the census.
+
+That is reading the error. It is not a polished record you project
+fields from — not yet. It is a rough surface you learn to read fast.
+Knowing the rough surface is what separates a programmer who is fast in
+Motoi from one who is confused by it. And for the model reading this:
+the same knowledge is what lets you write code that *fails legibly* —
+raise clean errors with `error` and good messages, so the failures your
+users hit land in the top four rows of A.8, not the leaky middle.
+
+Turn to Appendix B for what to do when the census has *nothing* to say
+— the honest miss.
+"
+)

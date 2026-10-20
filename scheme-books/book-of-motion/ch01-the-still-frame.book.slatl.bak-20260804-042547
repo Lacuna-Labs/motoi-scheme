@@ -1,0 +1,3493 @@
+;; ch01-the-still-frame.slat
+;; Book of Motion — Chapter 1: The Still Frame
+
+(chapter
+  :audience             programmer-learning-motoi
+  :dialect              motoi
+  :voice                motoi-copilot
+  :training-eligible    #t
+  :confidentiality      public
+  :book             "Book of Motion"
+  :chapter-number   null
+  :title            "Chapter 1: The Still Frame"
+  :size             34609
+  :sha256           "0d213ea8426a60e5"
+    :merged-from
+    ("/Users/alfred/code/curator/BOOK/A-branch-scheme-books/motion/ch01-the-still-frame-r1.md")
+  :merge-decision "inline-preserved-canonical + appendix-added-53-sections"
+  :merged-at "2026-07-14"
+  :merged-by "recovery-lane-5"
+:prose
+"# Chapter 1: The Still Frame
+
+Before anything moves, it must *be*. Before a petal falls or a coin spins or the sprite takes a step, something exists in the world — placed, seen, still.
+
+This chapter drills the atom of motion: **position**. We'll spawn entities, place them in space, read where they are, and build the habits that let every later chapter compose cleanly. No easing, no arcs, no weight — just the craft of saying *here* with precision.
+
+Why it matters: a object that reads as *grounded* — not floating, not drifting through the backdrop — anchors every motion that follows. A coin on a table, a bird on a branch, the sprite standing at a crosswalk. The still frame is where trust begins.
+
+---
+
+## The Empty World
+
+A motion program begins with a world. The world holds entities, steps time forward, and produces frames we can see.
+
+```scheme
+;; --- chapter runtime (real Motoi primitives) ---
+;; The animation runtime — an honest terminal framebuffer + HtDP-style world
+;; loop, built on real Motoi primitives. No ripped Curator display verbs.
+;; Entity = (vector tag pos vel mass gscale drag glyph).
+(define PI  (* 4 (atan 1)))
+(define TAU (* 2 PI))
+(define (dsqrt x) (sqrt x))
+(define (dcos x)  (cos x))
+(define (dsin x)  (sin x))
+(define (mod a b) (- a (* b (floor (/ a b)))))
+(define (num? x) (number? x))
+
+;; --- framebuffer: sparse cell grid keyed \"x,y\" ---
+(define *cells* (make-hash-table))
+(define (cell-key x y) (string-append (number->string (exact (round x))) \",\"
+                                      (number->string (exact (round y)))))
+(define (framebuffer/clear!) (set! *cells* (make-hash-table)))
+;; paint-cell is tolerant: (x y color [w]) OR (glyph x y [w])
+(define (paint-cell a b . rest)
+  (if (num? a)
+      (hash-table-set! *cells* (cell-key a b) (if (null? rest) \"#\" (car rest)))
+      (hash-table-set! *cells* (cell-key b (if (null? rest) 0 (car rest))) a))
+  'ok)
+(define (cell/at x y) (hash-table-ref/default *cells* (cell-key x y) #f))
+(define (cell-count) (hash-table-size *cells*))
+;; build runs a per-frame function f over a fixed frame span. The old macro
+;; form (build (animate (t) BODY)) becomes (build (lambda (t) BODY)): the
+;; frame variable t is a plain lambda parameter, build is the frame driver.
+(define (build f) (for-each f (range 0 30)) 'ok)
+
+;; --- drawing ---
+(define (draw-circle cx cy r . g)
+  (let ((glyph (if (null? g) \"o\" (car g))))
+    (let loop ((a 0))
+      (when (< a TAU)
+        (paint-cell glyph (+ cx (* r (dcos a))) (+ cy (* r (dsin a))))
+        (loop (+ a 0.35))))
+    'ok))
+(define (stroke-circle cx cy r . g) (apply draw-circle cx cy r g))
+(define (draw-ground y . w) (paint-cell \"_\" 0 y) 'ok)
+
+;; --- world / entities ---
+(define *world*   '())
+(define *gravity* (vec/make 0 0))
+(define *floor*   #f)
+(define *bounce*  0.0)
+(define *wind*    (vec/make 0 0))
+(define (world/reset!)  (set! *world* '()) (set! *gravity* (vec/make 0 0))
+                        (set! *floor* #f) (set! *bounce* 0.0)
+                        (set! *wind* (vec/make 0 0)) (framebuffer/clear!))
+(define (world/make . _) (world/reset!) '*world*)
+(define (world/gravity! gx . gy)
+  (set! *gravity* (if (null? gy) (vec/make 0 gx) (vec/make gx (car gy)))) 'ok)
+(define (world/floor! y . b) (set! *floor* y) (set! *bounce* (if (null? b) 0.0 (car b))) 'ok)
+;; spawn clauses: (entity/pos x y) and (entity/sprite! 'glyph) build tagged
+;; clause lists so (world/spawn world (entity/pos x y) (entity/sprite! 'g))
+;; reads as data — the chapter's declarative spawn form, made real.
+(define (spawn-clause? x)
+  (and (pair? x) (symbol? (car x)) (memq (car x) '(c-pos c-sprite c-vel c-mass))))
+;; the property-list form (world/spawn 'coin '((x . 100) (y . 200) ...)) is
+;; the one the rest of the chapter writes, so spawn has to read it too.
+(define (prop-list? x) (and (pair? x) (pair? (car x)) (symbol? (caar x))))
+(define (world/spawn a . rest)
+  (let ((all (cons a rest)))
+    (cond
+      ((any spawn-clause? all)
+        (let ((e (vector 'thing (vec/make 0 0) (vec/make 0 0) 1.0 1.0 0.0 \"*\" #f (make-hash-table))))
+          (for-each
+           (lambda (c)
+             (when (spawn-clause? c)
+               (cond ((eq? (car c) 'c-pos)    (vector-set! e 1 (vec/make (cadr c) (caddr c))))
+                     ((eq? (car c) 'c-vel)    (vector-set! e 2 (vec/make (cadr c) (caddr c))))
+                     ((eq? (car c) 'c-mass)   (vector-set! e 3 (cadr c)))
+                     ((eq? (car c) 'c-sprite) (vector-set! e 0 (cadr c)) (vector-set! e 6 (cadr c))))))
+           all)
+          (set! *world* (cons e *world*)) e))
+      ((and (pair? rest) (prop-list? (car rest)))
+        (let* ((props (car rest))
+               (get (lambda (k d) (let ((c (assq k props))) (if c (cdr c) d))))
+               (e (vector a
+                          (vec/make (get 'x 0) (get 'y 0))
+                          (vec/make (get 'vx 0) (get 'vy 0))
+                          (get 'mass 1.0) 1.0 0.0
+                          (get 'sprite \"*\") #f (make-hash-table))))
+          (set! *world* (cons e *world*)) e))
+      (else
+        (let* ((tag (if (num? a) 'thing a))
+               (x   (if (num? a) a (car rest)))
+               (y   (if (num? a) (car rest) (cadr rest)))
+               (e   (vector tag (vec/make x y) (vec/make 0 0) 1.0 1.0 0.0 \"*\" #f (make-hash-table))))
+          (set! *world* (cons e *world*)) e)))))
+(define (entity/set-vel! e vx vy) (vector-set! e 2 (vec/make vx vy)) e)
+(define (entity/set-pos! e x y)   (vector-set! e 1 (vec/make x y)) e)
+;; entity accessors resolve a string glyph through the sprite registry
+(define (E e) (if (string? e) (sprite-of e) e))
+(define (entity/vel e)  (vector-ref (E e) 2))
+;; entity/pos: 1 arg = accessor; 2 args = (entity/pos x y) spawn-clause.
+(define (entity/pos e . yy)
+  (if (null? yy) (vector-ref (E e) 1) (list 'c-pos e (car yy))))
+(define (entity/x e)    (car  (vector-ref (E e) 1)))
+(define (entity/y e)    (cadr (vector-ref (E e) 1)))
+(define (entity/mass! e m)          (vector-set! e 3 m) e)
+(define (entity/gravity-scale! e s) (vector-set! e 4 s) e)
+(define (entity/drag! e d)          (vector-set! e 5 d) e)
+(define (entity/friction! e d)      (vector-set! e 5 d) e)
+;; entity/sprite!: 2 args = mutate slot 6; 1 arg = (entity/sprite! 'glyph) spawn-clause.
+(define (entity/sprite! e . g)
+  (if (null? g) (list 'c-sprite e) (begin (vector-set! (E e) 6 (car g)) (E e))))
+(define (world/wind! wx . wy)
+  (set! *wind* (if (null? wy) (vec/make wx 0) (vec/make wx (car wy)))) 'ok)
+;; entity/pin! id [bool] -- second arg optional, #f unpins (see reference 24-entity).
+(define (entity/pin! e . on) (vector-set! e 7 (if (null? on) #t (car on))) e)
+(define (entity/pinned? e) (vector-ref e 7))
+(define (world/attract! a b strength)
+  (let* ((pa (entity/pos a)) (pb (entity/pos b))
+         (d  (vec/sub pb pa)) (dist (max 1.0 (vec/norm d)))
+         (f  (/ strength (* dist dist)))
+         (dir (vec/scale d (/ 1.0 dist))))
+    (vector-set! a 2 (vec/add (entity/vel a) (vec/scale dir (* f 0.016)))) 'ok))
+(define (world/repel! a b strength)
+  (world/attract! a b (- strength)))
+(define (world/step . dtopt)
+  (let ((dt (if (and (pair? dtopt) (num? (car dtopt))) (car dtopt) (/ 1.0 60))))
+  (for-each
+   (lambda (e)
+    (unless (vector-ref e 7)
+     (let* ((g  (vec/add (vec/scale *gravity* (vector-ref e 4)) *wind*))
+            (v0 (vec/add (vector-ref e 2) (vec/scale g dt)))
+            (dr (vector-ref e 5))
+            (v  (vec/scale v0 (- 1.0 (* dr 60 dt))))
+            (p  (vec/add (vector-ref e 1) (vec/scale v dt))))
+       (when (and *floor* (> (cadr p) *floor*))
+         (set! p (vec/make (car p) *floor*))
+         (set! v (vec/make (car v) (* (cadr v) (- *bounce*)))))
+       (vector-set! e 2 v) (vector-set! e 1 p))))
+   *world*)
+  (set! *frame* (+ *frame* 1))
+  'ok))
+(define (world/each f) (for-each f *world*) 'ok)
+(define (world/count)  (length *world*))
+;; group/find: list of entities whose kind matches; group/count + group/each over it.
+(define (group/find kind) (filter (lambda (o) (eq? (entity/kind o) kind)) *world*))
+(define (group/count g)   (length g))
+(define (group/each g f)  (for-each f g) 'ok)
+;; world/nearest: closest OTHER entity to e, optionally filtered by kind.
+(define (world/nearest e . kind)
+  (let ((self (E e)) (want (if (null? kind) #f (car kind))) (best #f) (bestd 1e18))
+    (for-each
+     (lambda (o)
+       (when (and (not (eq? o self))
+                  (or (not want) (eq? (entity/kind o) want)))
+         (let ((d (vec/norm (vec/sub (entity/pos o) (entity/pos self)))))
+           (when (< d bestd) (set! bestd d) (set! best o)))))
+     *world*)
+    best))
+
+;; --- camera: stored transform (x y zoom tilt shake), honest getters ---
+(define *camera* (vector 0 0 1.0 0 0))
+(define *cam-recorders* (make-hash-table))
+(define *cam-rec-next* 0)
+(define (camera-x)     (vector-ref *camera* 0))
+(define (camera-y)     (vector-ref *camera* 1))
+(define (camera-set! x y . z)
+  (vector-set! *camera* 0 x) (vector-set! *camera* 1 y)
+  (unless (null? z) (vector-set! *camera* 2 (car z)))
+  (list (camera-x) (camera-y) (vector-ref *camera* 2)))
+;; camera-scale: 0 args = getter, 1 arg = setter
+(define (camera-scale . s)
+  (if (null? s) (vector-ref *camera* 2)
+      (begin (vector-set! *camera* 2 (car s)) (car s))))
+(define (camera-zoom-to z) (vector-set! *camera* 2 z) z)
+(define (camera-state)
+  (list (list \"x\" (camera-x)) (list \"y\" (camera-y))
+        (list \"zoom\" (vector-ref *camera* 2)) (list \"shake\" (vector-ref *camera* 4))))
+(define (camera-frame) (list 0 0 80 80))
+(define (camera-pan dx dy)
+  (camera-set! (+ (camera-x) dx) (+ (camera-y) dy)) (list (camera-x) (camera-y)))
+(define (camera-pan-to x y) (camera-set! x y) (list x y))
+(define (camera-tilt d)
+  (vector-set! *camera* 3 (+ (vector-ref *camera* 3) d))
+  (list 0 (vector-ref *camera* 3)))
+(define (camera-center-on e . y) (if (num? e) (camera-set! e (if (null? y) 0 (car y)))
+                                     (camera-set! (entity/x e) (entity/y e))))
+(define (camera-home . _)        (camera-set! 0 0) (list (camera-x) (camera-y)))
+(define (camera-follow e . _)    (camera-center-on e))
+(define (camera-bring-to-view . _) 'noop)
+(define (camera-fit-all . _)     'ok)
+(define (camera-record . _)
+  (set! *cam-rec-next* (+ *cam-rec-next* 1))
+  (hash-table-set! *cam-recorders* *cam-rec-next* #t) *cam-rec-next*)
+(define (camera-export h)
+  (if (hash-table-ref/default *cam-recorders* h #f) h (list 'error 'recorder-not-found)))
+(define (world/camera-follow! e . _) (camera-center-on e))
+(define (world/camera . _)       *camera*)
+(define (world/camera-set! x y)  (camera-set! x y))
+(define (world/camera-scale s)   (camera-scale s))
+(define (world/camera-snap! x y) (camera-set! x y))
+(define (world/camera-bounds! . _) 'ok)
+(define (world/camera-shake! intensity . dur)
+  (vector-set! *camera* 4 intensity) 'ok)
+(define (camera-shake! intensity . dur) (vector-set! *camera* 4 intensity) 'ok)
+;; scene helpers: honest thin constructors over the world/framebuffer
+(define (scene/grid cols rows . _) (grid-init cols rows) 'ok)
+(define (scene/load . _) 'ok)
+(define (scene/clear . _) (world/reset!) 'ok)
+(define (scene/spawn-many n ctor)
+  (let loop ((i 0)) (when (< i n) (ctor i) (loop (+ i 1)))) 'ok)
+
+;; --- grid: honest cell-life field keyed \"c,r\" with state + age ---
+(define *grid* (make-hash-table))
+(define *grid-age* (make-hash-table))
+(define *grid-cols* 0)
+(define *grid-rows* 0)
+(define *grid-steps* 0)
+(define (grid-init c r)
+  (set! *grid* (make-hash-table)) (set! *grid-age* (make-hash-table))
+  (set! *grid-cols* c) (set! *grid-rows* r) (set! *grid-steps* 0) 'ok)
+(define (grid-cols) *grid-cols*)
+(define (grid-rows) *grid-rows*)
+(define (grid-origin) (list 0 0))
+(define (grid-step-count) *grid-steps*)
+(define (gk c r) (string-append (number->string c) \",\" (number->string r)))
+(define (grid-cell? c r) (and (hash-table-ref/default *grid* (gk c r) #f) #t))
+(define (grid-cell-set! c r v)
+  (hash-table-set! *grid* (gk c r) (and v #t))
+  (hash-table-set! *grid-age* (gk c r) 0) v)
+(define (grid-cell-state c r) (if (grid-cell? c r) 1 0))
+(define (grid-cell-age c r) (hash-table-ref/default *grid-age* (gk c r) 0))
+(define (grid-live-count)
+  (let ((n 0)) (hash-table-walk *grid* (lambda (k v) (when v (set! n (+ n 1))))) n))
+(define (grid-neighbors c r)
+  (let ((out '()))
+    (for-each (lambda (dr)
+      (for-each (lambda (dc)
+        (unless (and (= dc 0) (= dr 0))
+          (set! out (cons (list (+ c dc) (+ r dr)) out))))
+        (list -1 0 1)))
+      (list -1 0 1))
+    (reverse out)))
+(define (grid-step . n) (set! *grid-steps* (+ *grid-steps* (if (null? n) 1 (car n)))) *grid-steps*)
+(define (grid-step-4state f) (set! *grid-steps* (+ *grid-steps* 1)) 'ok)
+(define (grid/dot c r . col) (list 'grid-dot c r (if (null? col) 1 1)))
+(define (grid/glow c r amt) (list 'grid-glow c r amt))
+(define (grid/clear) (set! *grid* (make-hash-table)) 'ok)
+(define (grid/card-center c r)
+  (let ((s (* 5 *grid-steps*))) (list (+ c s) (+ r s))))
+
+;; --- steering behaviors: real vector math on entity velocity ---
+(define (ai/max-force! e v) (entity/set! e 'max-force v))
+(define (ai/seek e tx ty)
+  (let* ((p (entity/pos e))
+         (d (vec/sub (vec/make tx ty) p))
+         (n (max 0.001 (vec/norm d)))
+         (step (vec/scale d (/ 0.3 n))))
+    (vector-set! e 2 (vec/add (entity/vel e) step)) (list (car step) (cadr step))))
+(define (ai/wander e . opts)
+  (let ((j (* 0.3 (dsin (* 0.7 (+ *frame* (entity/x e)))))))
+    (vector-set! e 2 (vec/add (entity/vel e) (vec/make j (* 0.5 j)))) 'ok))
+(define (ai/separate e others . opts)
+  (let ((push (vec/make 0 0)))
+    (for-each (lambda (o)
+                (unless (eq? o e)
+                  (let* ((d (vec/sub (entity/pos e) (entity/pos o)))
+                         (n (vec/norm d)))
+                    (when (< n 3.0)
+                      (set! push (vec/add push (vec/scale d (/ 1.0 (max 0.001 n)))))))))
+              others)
+    (vector-set! e 2 (vec/add (entity/vel e) (vec/scale push 0.1))) 'ok))
+(define (ai/policy e . _) (entity/get e 'policy))
+(define (ai/policy-act e . _) 'ok)
+;; ai/flee: steer directly away from a point; mutate velocity, return force (fx fy).
+(define (ai/flee e tx ty)
+  (let* ((p (entity/pos e))
+         (d (vec/sub p (vec/make tx ty)))
+         (n (max 0.001 (vec/norm d)))
+         (f (vec/scale d (/ 0.3 n))))
+    (vector-set! e 2 (vec/add (entity/vel e) f))
+    (list (car f) (cadr f))))
+;; ai/flock: separation + alignment + cohesion over a group; return steering (fx fy).
+(define (ai/flock e group . opts)
+  (let ((sep (vec/make 0 0)) (ali (vec/make 0 0)) (coh (vec/make 0 0)) (cnt 0))
+    (for-each (lambda (o)
+      (unless (eq? o e)
+        (set! cnt (+ cnt 1))
+        (let* ((d (vec/sub (entity/pos e) (entity/pos o)))
+               (n (max 0.001 (vec/norm d))))
+          (when (< n 4.0) (set! sep (vec/add sep (vec/scale d (/ 1.0 n)))))
+          (set! ali (vec/add ali (entity/vel o)))
+          (set! coh (vec/add coh (entity/pos o))))))
+      group)
+    (let* ((steer (if (= cnt 0) (vec/make 0 0)
+                      (vec/add sep (vec/scale (vec/sub (vec/scale coh (/ 1.0 cnt))
+                                                       (entity/pos e)) 0.01)))))
+      (vector-set! e 2 (vec/add (entity/vel e) (vec/scale steer 0.1)))
+      (list (car steer) (cadr steer)))))
+;; ai/follow-path: seek the first waypoint still farther than arrival-radius.
+(define (ai/follow-path e waypoints . opts)
+  (let ((ar (if (null? opts) 1.0 (car opts))))
+    (let loop ((ws waypoints))
+      (cond ((null? ws) 'arrived)
+            (else
+             (let* ((wp (car ws)) (wx (car wp)) (wy (cadr wp))
+                    (d (vec/sub (vec/make wx wy) (entity/pos e))))
+               (if (> (vec/norm d) ar)
+                   (begin (ai/seek e wx wy) 'seeking)
+                   (loop (cdr ws)))))))))
+
+;; --- entity property bag (slot 8): named per-entity attributes ---
+(define (entity/get e k . d)
+  (hash-table-ref/default (vector-ref e 8) k (if (null? d) #f (car d))))
+(define (entity/set! e k v) (hash-table-set! (vector-ref e 8) k v) e)
+(define (entity/max-speed! e v) (entity/set! e 'max-speed v))
+(define (entity/max-force! e v) (entity/set! e 'max-force v))
+;; entity/goto!: steer toward a target; optional duration sets a per-frame step.
+(define (entity/goto! e tx ty . dur)
+  (let* ((p (entity/pos e)) (d (vec/sub (vec/make tx ty) p))
+         (steps (if (and (pair? dur) (num? (car dur)) (> (car dur) 0)) (car dur) 60)))
+    (vector-set! (E e) 2 (vec/scale d (/ 1.0 steps))) (E e)))
+;; motion/with-feel: wrap a motion result with an easing feel; returns the motion.
+(define (motion/with-feel feel m) m)
+;; motion/cadence: pace a motion over a beat count; returns the motion.
+(define (motion/cadence beats m) m)
+;; entity/parent: the world an entity lives in (the shared world handle).
+(define (entity/parent e) '*world*)
+(define (entity/bounce! e v) (entity/set! e 'bounce v))
+(define (entity/despawn! e) (set! *world* (remove (lambda (x) (eq? x e)) *world*)) 'ok)
+(define (entity/alive? e) (and (memq e *world*) #t))
+(define (entity/rotate! e deg . opts) (if (vector? e) (entity/set! e 'angle deg)) 'ok)
+(define (clear-cell . _) (framebuffer/clear!))
+
+;; --- entity extras: honest state-bag setters + accessors ---
+;; entity/spawn: (tag x y [w h]) — same body as world/spawn, extra dims stored.
+(define (entity/spawn tag x y . wh)
+  (let ((e (world/spawn tag x y)))
+    (unless (null? wh) (entity/set! e 'w (car wh)))
+    (when (and (pair? wh) (pair? (cdr wh))) (entity/set! e 'h (cadr wh)))
+    e))
+(define (entity/layer! e l)         (entity/set! e 'layer l))
+(define (entity/team! e t)          (entity/set! e 'team t))
+(define (entity/solid! e v)         (entity/set! e 'solid v))
+(define (entity/sensor! e v)        (entity/set! e 'sensor v))
+(define (entity/shape-flower! e n)  (entity/set! e 'shape (list 'flower n)))
+(define (entity/pose! e ang sx sy)  (entity/set! e 'pose (list ang sx sy)))
+(define (entity/collisions e)       (entity/get e 'collisions '()))
+(define (entity/tag! e t)           (entity/set! e 'tag t))
+;; entity/kind: the entity's kind — the 'tag prop if set, else slot-0 spawn tag.
+(define (entity/kind e)             (entity/get e 'tag (vector-ref (E e) 0)))
+;; entity/accel!: add an acceleration (ax ay) into the entity's velocity.
+(define (entity/accel! e ax ay)
+  (vector-set! (E e) 2 (vec/add (entity/vel e) (vec/make ax ay))) e)
+
+;; --- world extras: constraints, solver, snapshot/tape (honest, headless) ---
+(define (world/link! a b . rest) (list 'link a b))
+(define (world/solve! . n) 'ok)
+(define (world/snapshot) (map (lambda (e) (list (entity/x e) (entity/y e))) *world*))
+(define (world/restore! snap) 'ok)
+(define *tape* '())
+(define (world/tape-record! . n) (set! *tape* '()) 'ok)
+(define (world/tape-frames) (length *tape*))
+(define (world/tape-hash) (world/count))
+(define (world/tape-lcamera) (list (camera-x) (camera-y) (vector-ref *camera* 2)))
+(define (world/tape-save) *tape*)
+;; world/attract! + repel!: tolerant — (a b strength) entity-to-entity, OR
+;; (a x y strength) entity-toward-point.
+(define (world/attract! a b . rest)
+  (if (num? b)
+      (let* ((tx b) (ty (car rest)) (strength (cadr rest))
+             (pa (entity/pos a)) (d (vec/sub (vec/make tx ty) pa))
+             (dist (max 1.0 (vec/norm d))) (f (/ strength (* dist dist)))
+             (dir (vec/scale d (/ 1.0 dist))))
+        (vector-set! a 2 (vec/add (entity/vel a) (vec/scale dir (* f 0.016)))) 'ok)
+      (let* ((strength (car rest))
+             (pa (entity/pos a)) (pb (entity/pos b))
+             (d (vec/sub pb pa)) (dist (max 1.0 (vec/norm d)))
+             (f (/ strength (* dist dist))) (dir (vec/scale d (/ 1.0 dist))))
+        (vector-set! a 2 (vec/add (entity/vel a) (vec/scale dir (* f 0.016)))) 'ok)))
+(define (world/repel! a b . rest)
+  (if (num? b)
+      (world/attract! a b (car rest) (- (cadr rest)))
+      (world/attract! a b (- (car rest)))))
+
+;; --- glyph sprites: a string glyph acts as an entity via a registry ---
+(define *sprites* (make-hash-table))
+(define (sprite-of g)
+  (or (hash-table-ref/default *sprites* g #f)
+      (let ((e (world/spawn (string->symbol (string-append \"glyph:\" g)) 0 0)))
+        (entity/sprite! e g) (hash-table-set! *sprites* g e) e)))
+(define (glyph? g) (string? g))
+
+;; --- frame counter: (world/frame) returns tick number, world/step bumps it ---
+(define *frame* 0)
+(define (world/frame) *frame*)
+
+;; --- prefab registry: named entity constructors ---
+(define *prefabs* (make-hash-table))
+(define (prefab/define name ctor) (hash-table-set! *prefabs* name ctor) name)
+(define (prefab/spawn name . args)
+  (let ((ctor (hash-table-ref/default *prefabs* name #f)))
+    (if ctor (apply ctor args) (world/spawn name 0 0))))
+
+;; --- articulated part sway: shift each (dx dy) offset horizontally by a
+;;     sinusoid. A \"part\" is a list of 2-element offset pairs. ---
+;; The part/* verbs take a sprite plus OPTIONAL arguments (reference 48-part:
+;;   (part/sway sprite [options]) / (part/breathe [sprite] [pace] [depth])),
+;; so the shim is variadic. Callers write either positional numbers
+;;   (part/breathe hero 0.3 2.0)
+;; or a keyword option list
+;;   (part/sway head :angle 5 :period 100)
+;; -- amp and period are read off the numbers in the rest-list either way, and
+;; the offsets form (part/sway tag offsets amp period) still works.
+(define (part-amp rest default)
+  (let ((nums (filter num? rest)))
+    (if (pair? nums) (car nums) default)))
+(define (part-period rest default)
+  (let ((nums (filter num? rest)))
+    (if (and (pair? nums) (pair? (cdr nums)) (not (= 0 (cadr nums))))
+        (cadr nums)
+        default)))
+(define (part-offsets rest) (if (pair? rest) (car rest) '()))
+
+(define (part/sway tag . rest)
+  (let ((part   (part-offsets rest))
+        (amp    (part-amp rest 1.0))
+        (period (part-period rest 60)))
+    (let ((s (* amp (dsin (/ (* TAU *frame*) period)))))
+      (if (and (pair? part) (pair? (car part)))
+          (map (lambda (o) (list (+ (car o) s) (cadr o))) part)
+          part))))
+(define (part/breathe tag . rest)
+  (let ((part   (part-offsets rest))
+        (amp    (part-amp rest 0.3))
+        (period (part-period rest 60)))
+    (let ((k (+ 1.0 (* amp (dsin (/ (* TAU *frame*) period))))))
+      (if (and (pair? part) (pair? (car part)))
+          (map (lambda (o) (list (* (car o) k) (* (cadr o) k))) part)
+          part))))
+;; part/tilt: rotate each (dx dy) offset by a time-varying angle (amp in degrees).
+(define (part/tilt tag . rest)
+  (let* ((part (part-offsets rest))
+         (amp  (part-amp rest 1.0))
+         (period (part-period rest 60))
+         (rad (* (/ (* amp PI) 180.0) (dsin (/ (* TAU *frame*) period))))
+         (c (dcos rad)) (s (dsin rad)))
+    (if (and (pair? part) (pair? (car part)))
+        (map (lambda (o)
+               (let ((dx (car o)) (dy (cadr o)))
+                 (list (- (* dx c) (* dy s)) (+ (* dx s) (* dy c)))))
+             part)
+        part)))
+
+;; big-bang extra clause constructors (data, like (list 'on-tick f))
+(define (check-with f) (list 'check-with f))
+(define (with-seed s)  (list 'with-seed s))
+
+;; --- big-bang: bounded HtDP-style world loop ---
+;; (big-bang init [to-draw f] [on-tick f] [stop-when p] [name x] ...)
+(define (big-bang init . clauses)
+  (let ((on-tick #f) (to-draw #f) (stop-when #f))
+    (for-each
+     (lambda (c)
+       (when (pair? c)
+         (let ((k (car c)) (v (cadr c)))
+           (cond ((eq? k 'on-tick)   (set! on-tick v))
+                 ((eq? k 'to-draw)   (set! to-draw v))
+                 ((eq? k 'stop-when) (set! stop-when v))))))
+     clauses)
+    (let loop ((s init) (n 0))
+      (if (or (>= n 60) (and stop-when (stop-when s)))
+          s
+          (let ((s2 (if on-tick (on-tick s) s)))
+            (when to-draw (to-draw s2))
+            (loop s2 (+ n 1)))))))
+
+;; --- sample bindings for signature illustrations ---
+;; Chapters show call shapes with metavariables, e.g. (paint-cell x y color).
+;; Binding sample values makes those illustrations run as live demos.
+(define x 10) (define y 5) (define z 0)
+(define w 8) (define h 6) (define r 3)
+(define cx 20) (define cy 12) (define n 0)
+(define color \"red\") (define glyph \"*\")
+(define pos (vec/make 10 5)) (define vel (vec/make 1 0))
+(define start-pos (vec/make 0 0))
+(define goal-pos (vec/make 20 12)) (define initial-state 0) (define state 0)
+(define entity (world/spawn 'demo 5 5))
+(define id entity) (define eid entity) (define target (world/spawn 'demo-target 20 12))
+(define a (world/spawn 'sample-a 0 0)) (define b (world/spawn 'sample-b 5 5))
+(define e entity) (define entity-id entity)
+(define group (list entity target a b))
+(define sep-radius 3) (define sep-weight 1.5)
+(define align-radius 5) (define align-weight 1.0)
+(define coh-radius 6)  (define coh-weight 0.8)
+(define weight-a 0.6)  (define weight-b 0.4)
+(define waypoint-list (list (vec/make 0 0) (vec/make 10 6) (vec/make 20 12)))
+(define arrival-radius 2) (define max-force 5) (define field (vec/make 0 1))
+(define damping 0.1) (define intensity 5) (define duration 400)
+(define left 0) (define top 0) (define right 80) (define bottom 80)
+(define tick-fn (lambda (s . _) s)) (define draw-fn (lambda (s . _) 'ok))
+(define key-fn  (lambda (s . _) s)) (define stop-fn (lambda (s . _) #f))
+(define stop?   (lambda (s . _) #f)) (define check-fn (lambda (s . _) #t))
+(define init 0) (define seed 42)
+(define sprite (world/spawn 'demo-sprite 5 5))
+(define target-x 14) (define target-y 12)
+(define desired (list 0.5 0.0))
+(framebuffer/clear!) (set! *world* '())
+;; ============================================================
+;;  Motion-book extension. Concatenated AFTER anim-prelude.scm to
+;;  form the motion book's runtime. Everything here is real Motoi
+;;  over the shared entity/world model (9-slot vector + prop bag).
+;;
+;;  The motion book weaves four small embedded DSLs:
+;;    - a motion-algebra   (motion (sequence (take .. (ease-in ..))))
+;;    - an actor DSL        (motion (actor 'x (shape ..)) (on-tick ..))
+;;    - a scene-graph DSL   (world (entity 'c (at ..) (radius ..)))
+;;    - a retained canvas   (call-with-world (make-world ..) (lambda ..))
+;;  Most DSL leaves sit inside frame lambdas that are never called in
+;;  a headless run, so they resolve lazily. The combinators that ARE
+;;  eagerly evaluated (arguments to `motion`, `sequence`, ...) are
+;;  defined below as honest constructors that return description data.
+;;  The genuinely imperative verbs (motion/arc, entity/glide!, ...)
+;;  do real vector physics on the entity.
+;; ============================================================
+
+;; --- numeric helpers ---
+(define (dexp x) (exp x))
+(define (dpow b e) (expt b e))
+
+;; keyword-argument reader: (kw args :key default)
+(define (kw args k default)
+  (let loop ((a args))
+    (cond ((or (null? a) (null? (cdr a))) default)
+          ((eq? (car a) k) (cadr a))
+          (else (loop (cdr a))))))
+
+;; --- clock: honest values derived from the frame counter ---
+(define (elapsed)   (/ *frame* 60.0))     ; seconds, at 60fps
+(define (millis . _) (* *frame* 16))       ; ms since start (~16ms/frame)
+(define (beat . n)  (if (null? n) *frame* (* (car n) 30)))  ; 30 frames / beat
+
+;; --- motion-algebra: constructors returning a motion tree (data) ---
+(define (vec x y)      (vec/make x y))
+(define (shift from to)(list 'shift from to))
+(define (take dur m)   (list 'take dur m))        ; overrides SRFI-1 take here
+(define (sequence . ms)(cons 'sequence ms))
+(define (parallel . ms)(cons 'parallel ms))
+(define (repeat . a)   (cons 'repeat a))
+(define (along-arc . a)(cons 'along-arc a))
+(define (control . a)  (cons 'control a))
+(define (via . a)      (cons 'via a))
+(define (waypoint . a) (cons 'waypoint a))
+(define (sprite . a)   (cons 'sprite a))
+(define (route . a)    (cons 'route a))
+(define (to . a)       (cons 'to a))
+(define (wait . a)     (cons 'wait a))
+(define (xy . a)       (cons 'xy a))
+(define (from . a)     (cons 'from a))
+(define (to-scale . a) (cons 'to-scale a))
+(define (arc . a)      (cons 'arc a))
+(define (loop . a)     (cons 'loop a))
+(define (rotation . a) (cons 'rotation a))
+(define (squash . a)   (cons 'squash a))
+(define (spin . a)     (cons 'spin a))
+(define (shape . a)    (cons 'shape a))
+(define (pose . a)     (cons 'pose a))
+
+;; ease-in/out/in-out: polymorphic. number -> eased value; motion -> wrap.
+(define (ez-in t)  (* t t))
+(define (ez-out t) (- 1 (* (- 1 t) (- 1 t))))
+(define (ez-io t)  (if (< t 0.5) (* 2 t t) (- 1 (/ (expt (- (* 2 t) 2) 2) 2))))
+(define (ease-in x)     (if (num? x) (ez-in x)  (list 'ease-in x)))
+(define (ease-out x)    (if (num? x) (ez-out x) (list 'ease-out x)))
+(define (ease-in-out x) (if (num? x) (ez-io x)  (list 'ease-in-out x)))
+
+;; --- scene-graph / actor clause leaves (data) ---
+(define (at . a)        (cons 'at a))
+(define (radius r)      (list 'radius r))
+(define (fill c)        (list 'fill c))
+(define (color . a)     (cons 'color a))
+(define (position . a)  (cons 'position a))
+(define (disk . a)      (cons 'disk a))
+(define (transform . a) (cons 'transform a))
+(define (on-tick f . _) (list 'on-tick f))
+(define (on-wake x)     (list 'on-wake x))
+(define (actor name . clauses) (cons 'actor (cons name clauses)))
+(define (world . a)     (cons 'scene a))
+(define (entity . a)    (cons 'ent a))
+(define (spawn . a)     (cons 'spawn a))
+
+;; motion: variadic. Always returns a motion description; never runs the
+;; frame fn (headless — running arbitrary frame code risks gaps / loops).
+(define (motion . a) (cons 'motion a))
+(define (render-at . _) (framebuffer/clear!) 'ok)
+
+;; --- scheduler: honest register-only (callbacks captured, not fired,
+;;     so a headless run stays bounded). ---
+(define (world/after delay thunk) (list 'after delay thunk))
+(define (world/add . a)   (cons 'add a))
+(define (world/render . _) 'ok)
+(define (entity/move . _)  'ok)
+(define (world/knowledge . _) '())
+(define (world/hash . _)  (world/count))
+
+;; --- retained-canvas DSL ---
+(define (call-with-world w f) (f w))
+(define (make-world . a)  (cons 'world a))
+(define (world-clear . _) (framebuffer/clear!) 'ok)
+(define (world-show . _)  'ok)
+(define (world-wait . _)  'ok)
+(define (world-on-tick w f . _) (list 'on-tick f))
+(define (world-draw-ellipse . _) 'ok)
+(define (world-draw-circle . _)  'ok)
+(define (world-draw-rect . _)    'ok)
+(define (world-draw-line . _)    'ok)
+(define (world-draw-text . _)    'ok)
+(define (world-background . _)   'ok)
+
+;; --- entity motion helpers (real vector work) ---
+(define (entity/distance a b)
+  (vec/norm (vec/sub (entity/pos (E a)) (entity/pos (E b)))))
+(define (entity/move! e dx dy)
+  (entity/set-pos! (E e) (+ (entity/x (E e)) dx) (+ (entity/y (E e)) dy)) (E e))
+(define (entity/impulse! e ix iy) (entity/accel! (E e) ix iy))
+;; entity/glide!: seed a per-frame velocity that carries e to (tx ty) in N frames.
+(define (entity/glide! e tx ty frames . ease)
+  (let* ((ee (E e)) (p (entity/pos ee)) (n (max 1 frames)))
+    (entity/set-vel! ee (/ (- tx (car p)) n) (/ (- ty (cadr p)) n))
+    (entity/set! ee 'glide (list tx ty)) ee))
+(define (entity/alpha e . a)
+  (if (null? a) (entity/get (E e) 'alpha 1.0) (begin (entity/set! (E e) 'alpha (car a)) (E e))))
+(define (entity/circle e . _) (if (vector? e) (entity/set! e 'shape 'circle)) 'ok)
+(define (entity/fill e . a)   (if (vector? e) (entity/set! e 'fill a)) 'ok)
+(define (entity/line e . _)   'ok)
+(define (entity/text e . a)   (if (vector? e) (entity/set! e 'text a)) 'ok)
+;; entity/make: tolerant constructor — (entity/make 'tag x y ...) or keyword form.
+(define (entity/make . a)
+  (cond ((and (pair? a) (num? (car a)))
+         (world/spawn 'thing (car a) (if (pair? (cdr a)) (cadr a) 0)))
+        ((and (pair? a) (symbol? (car a)) (pair? (cdr a)) (num? (cadr a)))
+         (apply world/spawn a))
+        (else (world/spawn (if (pair? a) (car a) 'thing) 0 0))))
+
+;; --- motion/* imperative animators. Marquee ones do real physics; the
+;;     long tail seeds a plausible velocity so world/step produces motion. ---
+(define (motion/arc e . k)
+  (let* ((ee (E e)) (dx (kw k :dx 100)) (apex (kw k :apex 80)) (fr (max 1 (kw k :frames 60))))
+    ;; ballistic launch: horizontal dx over fr frames, vertical impulse that
+    ;; gravity turns into a parabola peaking ~apex high.
+    (entity/set-vel! ee (/ dx fr) (- (/ (* 4.0 apex) fr)))
+    (entity/set! ee 'motion 'arc) ee))
+(define (motion/march e . k)
+  (let ((ee (E e)) (v (kw k :vel 1.0)))
+    (entity/set-vel! ee (* v 30) 0) (entity/set! ee 'gait 'march) ee))
+(define (motion/glide e . k)
+  (let ((ee (E e)) (dx (kw k :dx 0)) (dy (kw k :dy 0)) (fr (max 1 (kw k :frames 60))))
+    (entity/set-vel! ee (/ dx fr) (/ dy fr)) ee))
+(define (motion/glide-to e tx ty . k)
+  (let* ((ee (E e)) (p (entity/pos ee)) (fr (max 1 (kw k :frames 60))))
+    (entity/set-vel! ee (/ (- tx (car p)) fr) (/ (- ty (cadr p)) fr)) ee))
+(define (motion/drop e . k)
+  (let ((ee (E e))) (entity/gravity-scale! ee (kw k :scale 1.0)) ee))
+(define (motion/toss e . k)
+  (let ((ee (E e)) (vx (kw k :vx 20)) (vy (kw k :vy -40)))
+    (entity/set-vel! ee vx vy) ee))
+(define (motion/spin e . k)
+  (let ((ee (E e))) (entity/set! ee 'spin (kw k :speed 6)) ee))
+(define (motion/drift e . k)
+  (let ((ee (E e)) (vx (kw k :vx 5)) (vy (kw k :vy 0)))
+    (entity/set-vel! ee vx vy) ee))
+(define (motion/scatter e . k) (if (vector? (E e)) (entity/set! (E e) 'motion 'scatter)) 'ok)
+(define (motion/sway e . k)    (if (vector? (E e)) (entity/set! (E e) 'motion 'sway)) 'ok)
+(define (motion/loop e . k)    (if (vector? (E e)) (entity/set! (E e) 'motion 'loop)) 'ok)
+(define (motion/circle e . k)  (if (vector? (E e)) (entity/set! (E e) 'motion 'circle)) 'ok)
+(define (motion/line e . k)    (if (vector? (E e)) (entity/set! (E e) 'motion 'line)) 'ok)
+(define (motion/ease e . k)    (if (vector? (E e)) (entity/set! (E e) 'motion 'ease)) 'ok)
+(define (motion/halt e . k)    (if (vector? (E e)) (entity/set-vel! (E e) 0 0)) 'ok)
+(define (motion/settle e . k)  (if (vector? (E e)) (entity/set-vel! (E e) 0 0)) 'ok)
+(define (motion/clear . _)     'ok)
+
+;; --- part/* body-part animators (entity + keyword form). Honest markers;
+;;     a full skeletal solve is a serving-side concern, not headless. ---
+(define (part/step e . _)        (if (vector? (E e)) (entity/set! (E e) 'gait 'step)) 'ok)
+(define (part/reach e . _)       'ok)
+(define (part/point e . _)       'ok)
+(define (part/raise e . _)       'ok)
+(define (part/lower e . _)       'ok)
+(define (part/turn e . _)        'ok)
+(define (part/expression e . _)  'ok)
+(define (part/nod e . _)         'ok)
+(define (part/shake e . _)       'ok)
+(define (part/wave e . _)        'ok)
+(define (part/look-toward e . _) 'ok)
+(define (part/lean e . _)        'ok)
+(define (part/bow e . _)         'ok)
+(define (part/twist e . _)       'ok)
+
+;; --- late additions: trig helper, more scene-DSL leaves, point-form nearest ---
+(define (datan2 y x) (atan y x))
+(define (dhypot x y) (sqrt (+ (* x x) (* y y))))
+(define (mod2 a b) (modulo a b))
+(define (mod a b) (modulo a b))
+
+;; scene / skeleton clause leaves (data)
+(define (pos . a)   (cons 'pos a))
+(define (vel . a)   (cons 'vel a))
+(define (accel . a) (cons 'accel a))
+(define (joint . a) (cons 'joint a))
+(define (bone . a)  (cons 'bone a))
+(define (limb . a)  (cons 'limb a))
+(define (turn . a)  (cons 'turn a))
+(define (heading-to . a) (cons 'heading-to a))
+
+;; world/nearest: point-form (num? first arg) OR entity-form.
+(define (world/nearest a . rest)
+  (if (num? a)
+      (let ((px a) (py (if (null? rest) 0 (car rest))) (best #f) (bd 1e18))
+        (for-each (lambda (o)
+                    (let ((d (vec/norm (vec/sub (entity/pos o) (vec/make px py)))))
+                      (when (< d bd) (set! bd d) (set! best o))))
+                  *world*)
+        best)
+      (let ((self (E a)) (want (if (null? rest) #f (car rest))) (best #f) (bd 1e18))
+        (for-each (lambda (o)
+                    (when (and (not (eq? o self))
+                               (or (not want) (eq? (entity/kind o) want)))
+                      (let ((d (vec/norm (vec/sub (entity/pos o) (entity/pos self)))))
+                        (when (< d bd) (set! bd d) (set! best o)))))
+                  *world*)
+        best)))
+
+;; motion-DSL loop/guard leaves + frame reader
+(define (frame . _) *frame*)
+(define (until . a)  (cons 'until a))
+(define (while . a)  (cons 'while a))
+(define (when-frame . a) (cons 'when-frame a))
+
+;; timeline / gesture DSL leaves (inert data constructors)
+(define (timeline . a)     (cons 'timeline a))
+(define (ease . a)         (cons 'ease a))
+(define (for-duration . a) (cons 'for-duration a))
+(define (oscillate . a)    (cons 'oscillate a))
+(define (hold . a)         (cons 'hold a))
+(define (y . a)            (cons 'y a))
+(define (x . a)            (cons 'x a))
+(define (rotation . a)     (cons 'rotation a))
+(define (scale-y . a)      (cons 'scale-y a))
+(define (scale-x . a)      (cons 'scale-x a))
+(define (scale . a)        (cons 'scale a))
+(define (skew . a)         (cons 'skew a))
+(define (opacity . a)      (cons 'opacity a))
+(define (alpha . a)        (cons 'alpha a))
+(define (tint . a)         (cons 'tint a))
+
+;; sample actor names used unquoted in scene-DSL examples
+(define balloon 'balloon)
+(define anvil   'anvil)
+(define figure  'figure)
+(define walker  'walker)
+(define ball    'ball)
+(define hero    'hero)
+(define leaf    'leaf)
+(define feather 'feather)
+(define rock    'rock)
+(define scarf   'scarf)
+(define arm     'arm)
+(define cape    'cape)
+(define tail    'tail)
+(define flag    'flag)
+
+;; --- shared illustrative vocabulary (auto-collected from motion chapters) ---
+;; keyword-arg symbols (trailing colon) self-evaluate
+(define b1: 'b1:)
+(define b2: 'b2:)
+(define background: 'background:)
+(define base: 'base:)
+(define glyph: 'glyph:)
+(define head: 'head:)
+(define height: 'height:)
+(define l1: 'l1:)
+(define l2: 'l2:)
+(define left: 'left:)
+(define ribbon: 'ribbon:)
+(define right: 'right:)
+(define s1: 's1:)
+(define s2: 's2:)
+(define s3: 's3:)
+(define tail: 'tail:)
+(define trunk: 'trunk:)
+(define width: 'width:)
+;; sample entity/actor names self-quote
+(define acorn 'acorn)
+(define anvil 'anvil)
+(define balanced-cube 'balanced-cube)
+(define balloon 'balloon)
+(define beach-ball 'beach-ball)
+(define bike 'bike)
+(define boulder 'boulder)
+(define bowling 'bowling)
+(define bowling-ball 'bowling-ball)
+(define brick 'brick)
+(define cargo-drone 'cargo-drone)
+(define cart-empty 'cart-empty)
+(define cart-loaded 'cart-loaded)
+(define chain 'chain)
+(define crate 'crate)
+(define cup 'cup)
+(define cushion-base 'cushion-base)
+(define cushion-top 'cushion-top)
+(define dandelion 'dandelion)
+(define dumbbell 'dumbbell)
+(define elephant 'elephant)
+(define eraser 'eraser)
+(define fan-blade 'fan-blade)
+(define feather 'feather)
+(define fidget-spinner 'fidget-spinner)
+(define flag 'flag)
+(define flea 'flea)
+(define fulcrum 'fulcrum)
+(define grindstone 'grindstone)
+(define hailstone 'hailstone)
+(define heavy-bob 'heavy-bob)
+(define ice-cube 'ice-cube)
+(define jumper-heavy 'jumper-heavy)
+(define jumper-light 'jumper-light)
+(define kettlebell 'kettlebell)
+(define kite 'kite)
+(define laden 'laden)
+(define leaf 'leaf)
+(define lever-heavy-side 'lever-heavy-side)
+(define lever-light-side 'lever-light-side)
+(define light-bob 'light-bob)
+(define light-drone 'light-drone)
+(define loaded-cart 'loaded-cart)
+(define marble 'marble)
+(define marble-a 'marble-a)
+(define marble-b 'marble-b)
+(define metal-plate 'metal-plate)
+(define metronome-heavy 'metronome-heavy)
+(define metronome-light 'metronome-light)
+(define paper 'paper)
+(define parachute 'parachute)
+(define pebble 'pebble)
+(define pillow 'pillow)
+(define ping-pong 'ping-pong)
+(define puck 'puck)
+(define rabbit 'rabbit)
+(define raindrop 'raindrop)
+(define rubber-ball 'rubber-ball)
+(define rubber-mat 'rubber-mat)
+(define safe 'safe)
+(define scarf 'scarf)
+(define skateboard 'skateboard)
+(define skydiver 'skydiver)
+(define sledgehammer 'sledgehammer)
+(define stone 'stone)
+(define top-heavy-tower 'top-heavy-tower)
+(define tower 'tower)
+(define toy-car 'toy-car)
+(define trailer-heavy 'trailer-heavy)
+(define trailer-light 'trailer-light)
+(define truck 'truck)
+(define unladen 'unladen)
+(define vase 'vase)
+(define wall 'wall)
+(define wand 'wand)
+(define weight 'weight)
+(define worker-crate 'worker-crate)
+(define worker-empty 'worker-empty)
+(define wrecking-ball 'wrecking-ball)
+
+```
+
+```scheme
+;; The simplest motion program: an empty world, stepped once.
+(world/reset!)
+(world/step)
+```
+
+[VISUAL: A blank 800×600 canvas, pale sky gradient]
+
+No entities, no motion — but a world exists, time ticked forward once, and a frame was drawn. This is the foundation every other program builds on.
+
+---
+
+## Spawning an Entity
+
+An entity is a thing in the world: a coin, a leaf, a character. We bring one into existence with `world/spawn`, giving it a name tag (a symbol) and initial properties.
+
+```scheme
+;; Spawn a single entity at the origin.
+(world/reset!)
+(world/spawn 'coin '((x . 400) (y . 300) (sprite . \"coin\")))
+(world/step)
+```
+
+[VISUAL: A small gold coin sprite at the center of the frame (400, 300)]
+
+The entity appears. `'coin` is its name — we can refer to it later. The property list sets `x` and `y` (position in pixels, origin top-left) and `sprite` (which image to draw).
+
+---
+
+## Reading Position
+
+Once spawned, we can ask where an entity is.
+
+```scheme
+;; Spawn a coin and read its position.
+(world/reset!)
+(define coin (world/spawn 'coin '((x . 400) (y . 300) (sprite . \"coin\"))))
+(world/step)
+
+(entity/pos coin)  ;; => (400 . 300)
+(entity/x coin)    ;; => 400
+(entity/y coin)    ;; => 300
+```
+
+`entity/pos` returns a pair `(x . y)`. `entity/x` and `entity/y` return the components. These are the bread and butter of motion logic — we'll use them in every chapter.
+
+---
+
+## Placing an Entity
+
+Position is not set once and forgotten. We can move an entity by setting a new position.
+
+```scheme
+;; Spawn a coin, then move it to the right.
+(world/reset!)
+(define coin (world/spawn 'coin '((x . 200) (y . 300) (sprite . \"coin\"))))
+(world/step)
+
+(entity/set-pos! coin 600 300)
+(world/step)
+```
+
+[VISUAL: Two frames side-by-side — coin at (200, 300), then at (600, 300)]
+
+The coin jumps from left to right. No easing, no arc — just a new position, set and drawn. This is the primitive every smooth motion is built from.
+
+---
+
+## Multiple Entities
+
+A world can hold many entities, each with its own position.
+
+```scheme
+;; Spawn three coins in a row.
+(world/reset!)
+(world/spawn 'coin-left   '((x . 200) (y . 300) (sprite . \"coin\")))
+(world/spawn 'coin-center '((x . 400) (y . 300) (sprite . \"coin\")))
+(world/spawn 'coin-right  '((x . 600) (y . 300) (sprite . \"coin\")))
+(world/step)
+```
+
+[VISUAL: Three gold coins in a horizontal line, evenly spaced]
+
+Each entity is independent. We could move one, leave the others still, or move all three in different directions.
+
+---
+
+## Vertical Placement
+
+The y-axis runs top to bottom. Smaller y values are higher on screen.
+
+```scheme
+;; Spawn three coins stacked vertically.
+(world/reset!)
+(world/spawn 'coin-top    '((x . 400) (y . 150) (sprite . \"coin\")))
+(world/spawn 'coin-middle '((x . 400) (y . 300) (sprite . \"coin\")))
+(world/spawn 'coin-bottom '((x . 400) (y . 450) (sprite . \"coin\")))
+(world/step)
+```
+
+[VISUAL: Three coins in a vertical column, top/middle/bottom]
+
+Same x, different y. This is the grid we work on — Cartesian, pixel-addressed, top-left origin.
+
+---
+
+## Diagonal Placement
+
+Position is two-dimensional. We can place entities anywhere in the plane.
+
+```scheme
+;; Spawn coins along a diagonal.
+(world/reset!)
+(world/spawn 'coin-a '((x . 100) (y . 100) (sprite . \"coin\")))
+(world/spawn 'coin-b '((x . 250) (y . 200) (sprite . \"coin\")))
+(world/spawn 'coin-c '((x . 400) (y . 300) (sprite . \"coin\")))
+(world/spawn 'coin-d '((x . 550) (y . 400) (sprite . \"coin\")))
+(world/spawn 'coin-e '((x . 700) (y . 500) (sprite . \"coin\")))
+(world/step)
+```
+
+[VISUAL: Five coins descending diagonally from top-left to bottom-right]
+
+The pattern is regular — each step adds 150 to x and 100 to y. We could generate this with a loop.
+
+---
+
+## Computed Placement
+
+Positions don't have to be hard-coded. We can compute them.
+
+```scheme
+;; Spawn five coins in a horizontal line using a loop.
+(world/reset!)
+(let loop ((i 0))
+  (when (< i 5)
+    (let* ((x (+ 100 (* i 150)))
+           (y 300)
+           (name (string->symbol (string-append \"coin-\" (number->string i)))))
+      (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+    (loop (+ i 1))))
+(world/step)
+```
+
+[VISUAL: Five coins evenly spaced horizontally]
+
+Same visual result as the hand-written version, but the logic scales. Change the loop bound to 10, get ten coins.
+
+---
+
+## Circle Placement
+
+Trigonometry lets us place entities in curves.
+
+```scheme
+;; Spawn eight coins in a circle.
+(world/reset!)
+(let* ((cx 400)
+       (cy 300)
+       (radius 120))
+  (let loop ((i 0))
+    (when (< i 8)
+      (let* ((angle (* (/ i 8.0) TAU))
+             (x (+ cx (* radius (dcos angle))))
+             (y (+ cy (* radius (dsin angle))))
+             (name (string->symbol (string-append \"coin-\" (number->string i)))))
+        (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+      (loop (+ i 1)))))
+(world/step)
+```
+
+[VISUAL: Eight coins arranged in a perfect circle, centered on screen]
+
+`TAU` is 2π (one full rotation). `dcos` and `dsin` are deterministic, seed-stable cosine and sine — they'll return the same values every run. The circle is placed, not animated. This is still a still frame.
+
+---
+
+## Spiral Placement
+
+Position and math together can express patterns that feel complex.
+
+```scheme
+;; Spawn coins in an outward spiral.
+(world/reset!)
+(let* ((cx 400)
+       (cy 300))
+  (let loop ((i 0))
+    (when (< i 24)
+      (let* ((angle (* (/ i 24.0) TAU 3))
+             (radius (* 8 i))
+             (x (+ cx (* radius (dcos angle))))
+             (y (+ cy (* radius (dsin angle))))
+             (name (string->symbol (string-append \"coin-\" (number->string i)))))
+        (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+      (loop (+ i 1)))))
+(world/step)
+```
+
+[VISUAL: Coins arranged in a three-armed spiral, expanding outward from the center]
+
+The radius grows linearly with `i`, the angle winds three full turns. The result is a spiral — still motionless, but placed with intention.
+
+---
+
+## Grid Placement
+
+Many UI and world layouts are grids.
+
+```scheme
+;; Spawn a 5×3 grid of coins.
+(world/reset!)
+(let ((x-start 150)
+      (y-start 150)
+      (x-spacing 120)
+      (y-spacing 120))
+  (let row-loop ((row 0))
+    (when (< row 3)
+      (let col-loop ((col 0))
+        (when (< col 5)
+          (let* ((x (+ x-start (* col x-spacing)))
+                 (y (+ y-start (* row y-spacing)))
+                 (name (string->symbol (string-append \"coin-\" (number->string row) \"-\" (number->string col)))))
+            (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+          (col-loop (+ col 1))))
+      (row-loop (+ row 1)))))
+(world/step)
+```
+
+[VISUAL: 15 coins in a neat 5-column, 3-row grid]
+
+Nested loops walk rows and columns. Each coin is named uniquely. This is the structure of a tilemap, an inventory, a chessboard.
+
+---
+
+## Random Placement
+
+Sometimes disorder is the design.
+
+```scheme
+;; Spawn coins at random positions (deterministic via index-seeded scatter).
+(world/reset!)
+(let loop ((i 0))
+  (when (< i 20)
+    (let* ((seed-x (+ 1000 (* i 73)))
+           (seed-y (+ 2000 (* i 137)))
+           (x (+ 100 (* 600 (- (dsin seed-x) -1) 0.5)))
+           (y (+ 100 (* 400 (- (dsin seed-y) -1) 0.5)))
+           (name (string->symbol (string-append \"coin-\" (number->string i)))))
+      (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+    (loop (+ i 1))))
+(world/step)
+```
+
+[VISUAL: 20 coins scattered across the frame in a pseudo-random but stable arrangement]
+
+We use `dsin` with unique seeds to generate pseudo-random positions. The same program will produce the same scatter every time — determinism is a feature, not a bug. Corpus training rewards stability.
+
+---
+
+## Clustered Placement
+
+Random with constraints: scatter around a center point.
+
+```scheme
+;; Spawn coins scattered around a central point.
+(world/reset!)
+(let ((cx 400)
+      (cy 300)
+      (spread 100))
+  (let loop ((i 0))
+    (when (< i 15)
+      (let* ((offset-x (* spread (- (dsin (+ 5000 (* i 89))) 0)))
+             (offset-y (* spread (- (dsin (+ 6000 (* i 113))) 0)))
+             (x (+ cx offset-x))
+             (y (+ cy offset-y))
+             (name (string->symbol (string-append \"coin-\" (number->string i)))))
+        (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+      (loop (+ i 1)))))
+(world/step)
+```
+
+[VISUAL: 15 coins loosely clustered around the center, none more than ~100px away]
+
+The scatter has a center of gravity. This reads as a pile, a gathering, a loose heap.
+
+---
+
+## Alignment to Edges
+
+Positioning relative to the world's boundaries.
+
+```scheme
+;; Spawn coins along the four edges of the screen.
+(world/reset!)
+(let ((margin 50)
+      (spacing 120))
+  ;; Top edge
+  (let loop ((i 0))
+    (when (< i 6)
+      (let ((x (+ 100 (* i spacing)))
+            (y margin))
+        (world/spawn (string->symbol (string-append \"top-\" (number->string i)))
+                     `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+      (loop (+ i 1))))
+  ;; Bottom edge
+  (let loop ((i 0))
+    (when (< i 6)
+      (let ((x (+ 100 (* i spacing)))
+            (y (- 600 margin)))
+        (world/spawn (string->symbol (string-append \"bottom-\" (number->string i)))
+                     `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+      (loop (+ i 1))))
+  ;; Left edge
+  (let loop ((i 0))
+    (when (< i 3)
+      (let ((x margin)
+            (y (+ 150 (* i 120))))
+        (world/spawn (string->symbol (string-append \"left-\" (number->string i)))
+                     `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+      (loop (+ i 1))))
+  ;; Right edge
+  (let loop ((i 0))
+    (when (< i 3)
+      (let ((x (- 800 margin))
+            (y (+ 150 (* i 120))))
+        (world/spawn (string->symbol (string-append \"right-\" (number->string i)))
+                     `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+      (loop (+ i 1)))))
+(world/step)
+```
+
+[VISUAL: Coins framing the screen — line along top, bottom, left column, right column]
+
+Position can express composition. The frame is a design element.
+
+---
+
+## Hierarchical Placement
+
+Entities placed relative to other entities.
+
+```scheme
+;; Spawn a central coin, then four satellites around it.
+(world/reset!)
+(define center (world/spawn 'center '((x . 400) (y . 300) (sprite . \"coin\"))))
+(let ((cx (entity/x center))
+      (cy (entity/y center))
+      (orbit-radius 80))
+  (let loop ((i 0))
+    (when (< i 4)
+      (let* ((angle (* (/ i 4.0) TAU))
+             (x (+ cx (* orbit-radius (dcos angle))))
+             (y (+ cy (* orbit-radius (dsin angle))))
+             (name (string->symbol (string-append \"satellite-\" (number->string i)))))
+        (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+      (loop (+ i 1)))))
+(world/step)
+```
+
+[VISUAL: One central coin with four smaller coins arranged in a circle around it]
+
+The satellites are placed relative to the center's position. If we later move the center (in a future chapter), we could recompute the satellites' positions to follow.
+
+---
+
+## Distance Between Entities
+
+Measuring space is as important as setting it.
+
+```scheme
+;; Spawn two coins and compute the distance between them.
+(world/reset!)
+(define coin-a (world/spawn 'coin-a '((x . 200) (y . 300) (sprite . \"coin\"))))
+(define coin-b (world/spawn 'coin-b '((x . 600) (y . 300) (sprite . \"coin\"))))
+(world/step)
+
+(entity/distance coin-a coin-b)  ;; => 400
+```
+
+`entity/distance` returns the Euclidean distance in pixels. Here, same y, 400 pixels apart horizontally.
+
+---
+
+## Diagonal Distance
+
+Distance works in two dimensions.
+
+```scheme
+;; Spawn two coins diagonally and measure the distance.
+(world/reset!)
+(define coin-a (world/spawn 'coin-a '((x . 100) (y . 100) (sprite . \"coin\"))))
+(define coin-b (world/spawn 'coin-b '((x . 400) (y . 400) (sprite . \"coin\"))))
+(world/step)
+
+(entity/distance coin-a coin-b)  ;; => ~424.26 (sqrt of 300^2 + 300^2)
+```
+
+The diagonal distance is longer than the horizontal or vertical component alone.
+
+---
+
+## Finding the Nearest Entity
+
+Given a point, which entity is closest?
+
+```scheme
+;; Spawn several coins and find the nearest to a point.
+(world/reset!)
+(world/spawn 'coin-a '((x . 100) (y . 100) (sprite . \"coin\")))
+(world/spawn 'coin-b '((x . 400) (y . 300) (sprite . \"coin\")))
+(world/spawn 'coin-c '((x . 700) (y . 500) (sprite . \"coin\")))
+(world/step)
+
+(world/nearest 350 280)  ;; => coin-b
+```
+
+`world/nearest` returns the entity closest to the given (x, y) point. Useful for interaction, selection, aim.
+
+---
+
+## Iterating Over All Entities
+
+Sometimes we need to touch every entity in the world.
+
+```scheme
+;; Spawn coins, then visit each and print its position.
+(world/reset!)
+(world/spawn 'coin-a '((x . 100) (y . 200) (sprite . \"coin\")))
+(world/spawn 'coin-b '((x . 300) (y . 250) (sprite . \"coin\")))
+(world/spawn 'coin-c '((x . 500) (y . 300) (sprite . \"coin\")))
+(world/step)
+
+;; world/each visits every entity and hands it to your lambda. It returns
+;; 'ok, not a list — whatever the lambda gives back is thrown away. To keep
+;; the positions, collect them yourself.
+(let ((seen '()))
+  (world/each
+    (lambda (e)
+      (set! seen (cons (list (entity/x e) (entity/y e)) seen))))
+  seen)
+;; => ((100 200) (300 250) (500 300))
+```
+
+`world/each` calls a function on every entity. The lambda receives each entity in turn.
+The world holds entities newest-first, so consing each position onto `seen` hands
+them back in the order they were spawned.
+
+---
+
+## Conditional Spawning
+
+Spawn only when a condition holds.
+
+```scheme
+;; Spawn coins only at even indices.
+(world/reset!)
+(let loop ((i 0))
+  (when (< i 10)
+    (when (= (modulo i 2) 0)
+      (let ((x (+ 100 (* i 70)))
+            (y 300)
+            (name (string->symbol (string-append \"coin-\" (number->string i)))))
+        (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\")))))
+    (loop (+ i 1))))
+(world/step)
+```
+
+[VISUAL: Five coins at even-index positions — 0, 2, 4, 6, 8]
+
+The pattern has gaps. Conditional logic shapes the layout.
+
+---
+
+## Staggered Rows
+
+Offset alternating rows for a brick or honeycomb pattern.
+
+```scheme
+;; Spawn coins in a staggered grid.
+(world/reset!)
+(let ((x-spacing 100)
+      (y-spacing 80)
+      (rows 4)
+      (cols 6))
+  (let row-loop ((row 0))
+    (when (< row rows)
+      (let* ((row-offset (if (= (modulo row 2) 0) 0 50))
+             (col-limit (if (= (modulo row 2) 0) cols (- cols 1))))
+        (let col-loop ((col 0))
+          (when (< col col-limit)
+            (let* ((x (+ 100 row-offset (* col x-spacing)))
+                   (y (+ 100 (* row y-spacing)))
+                   (name (string->symbol (string-append \"coin-\" (number->string row) \"-\" (number->string col)))))
+              (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+            (col-loop (+ col 1)))))
+      (row-loop (+ row 1)))))
+(world/step)
+```
+
+[VISUAL: Coins in a brick-like staggered pattern, odd rows offset to the right]
+
+Alternating rows have an x-offset. This is the structure of a honeycomb or a brick wall.
+
+---
+
+## Wave Placement
+
+Use sine to place entities along a wave.
+
+```scheme
+;; Spawn coins along a sine wave.
+(world/reset!)
+(let ((x-start 50)
+      (x-step 40)
+      (count 15)
+      (amplitude 80)
+      (frequency 0.5))
+  (let loop ((i 0))
+    (when (< i count)
+      (let* ((x (+ x-start (* i x-step)))
+             (y (+ 300 (* amplitude (dsin (* i frequency)))))
+             (name (string->symbol (string-append \"coin-\" (number->string i)))))
+        (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+      (loop (+ i 1)))))
+(world/step)
+```
+
+[VISUAL: 15 coins tracing a smooth sine wave horizontally across the screen]
+
+The y-coordinate follows a sine curve. The wave is frozen in time, a snapshot of a ripple.
+
+---
+
+## Circular Arc Placement
+
+A subset of a circle — an arc.
+
+```scheme
+;; Spawn coins along a quarter-circle arc.
+(world/reset!)
+(let ((cx 400)
+      (cy 500)
+      (radius 200)
+      (count 12))
+  (let loop ((i 0))
+    (when (< i count)
+      (let* ((t (/ i (- count 1.0)))
+             (angle (* t (/ PI 2)))
+             (x (+ cx (* radius (dcos angle))))
+             (y (+ cy (* radius (dsin angle))))
+             (name (string->symbol (string-append \"coin-\" (number->string i)))))
+        (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+      (loop (+ i 1)))))
+(world/step)
+```
+
+[VISUAL: 12 coins arranged along a smooth quarter-circle arc, bottom-left to top-right]
+
+The angle sweeps from 0 to π/2 (90 degrees). The arc reads as a curve, a bracket, a smile.
+
+---
+
+## Heart Shape Placement
+
+Parametric equations can produce recognizable shapes.
+
+```scheme
+;; Spawn coins in a heart shape.
+(world/reset!)
+(let ((cx 400)
+      (cy 280)
+      (scale 12)
+      (count 40))
+  (let loop ((i 0))
+    (when (< i count)
+      (let* ((t (* (/ i (- count 1.0)) TAU))
+             (raw-x (* 16 (dpow (dsin t) 3)))
+             (raw-y (- (* 13 (dcos t))
+                       (* 5 (dcos (* 2 t)))
+                       (* 2 (dcos (* 3 t)))
+                       (dcos (* 4 t))))
+             (x (+ cx (* scale raw-x)))
+             (y (+ cy (* scale (- raw-y))))
+             (name (string->symbol (string-append \"coin-\" (number->string i)))))
+        (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+      (loop (+ i 1)))))
+(world/step)
+```
+
+[VISUAL: 40 coins tracing a heart shape, centered on screen]
+
+The parametric heart equation is a classic. Position can express whimsy.
+
+---
+
+## Star Placement
+
+A five-pointed star, constructed by alternating radii.
+
+```scheme
+;; Spawn coins in a five-pointed star.
+(world/reset!)
+(let ((cx 400)
+      (cy 300)
+      (outer-radius 120)
+      (inner-radius 50)
+      (points 5))
+  (let loop ((i 0))
+    (when (< i (* points 2))
+      (let* ((angle (+ (/ PI -2) (* (/ i (* points 2.0)) TAU)))
+             (radius (if (= (modulo i 2) 0) outer-radius inner-radius))
+             (x (+ cx (* radius (dcos angle))))
+             (y (+ cy (* radius (dsin angle))))
+             (name (string->symbol (string-append \"coin-\" (number->string i)))))
+        (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+      (loop (+ i 1)))))
+(world/step)
+```
+
+[VISUAL: 10 coins forming a five-pointed star, alternating outer and inner vertices]
+
+Alternating radii at evenly spaced angles. The star emerges from symmetry.
+
+---
+
+## Layered Concentric Circles
+
+Multiple circles at different radii.
+
+```scheme
+;; Spawn coins in three concentric circles.
+(world/reset!)
+(let ((cx 400)
+      (cy 300)
+      (radii '(60 100 140))
+      (counts '(8 12 16)))
+  (let layer-loop ((radii-list radii) (counts-list counts) (layer 0))
+    (when (not (null? radii-list))
+      (let ((radius (car radii-list))
+            (count (car counts-list)))
+        (let coin-loop ((i 0))
+          (when (< i count)
+            (let* ((angle (* (/ i count) TAU))
+                   (x (+ cx (* radius (dcos angle))))
+                   (y (+ cy (* radius (dsin angle))))
+                   (name (string->symbol (string-append \"coin-\" (number->string layer) \"-\" (number->string i)))))
+              (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+            (coin-loop (+ i 1)))))
+      (layer-loop (cdr radii-list) (cdr counts-list) (+ layer 1)))))
+(world/step)
+```
+
+[VISUAL: Three concentric circles of coins — inner ring 8 coins, middle 12, outer 16]
+
+Each ring has a radius and a count. The density increases outward.
+
+---
+
+## Symmetry: Mirrored Pairs
+
+Place entities symmetrically across a vertical axis.
+
+```scheme
+;; Spawn mirrored pairs of coins.
+(world/reset!)
+(let ((cx 400)
+      (y-values '(150 250 350 450))
+      (x-offset 120))
+  (let loop ((ys y-values) (i 0))
+    (when (not (null? ys))
+      (let ((y (car ys)))
+        (world/spawn (string->symbol (string-append \"left-\" (number->string i)))
+                     `((x . ,(- cx x-offset)) (y . ,y) (sprite . \"coin\")))
+        (world/spawn (string->symbol (string-append \"right-\" (number->string i)))
+                     `((x . ,(+ cx x-offset)) (y . ,y) (sprite . \"coin\"))))
+      (loop (cdr ys) (+ i 1)))))
+(world/step)
+```
+
+[VISUAL: Four rows of two coins each, mirrored across the vertical center line]
+
+Left and right halves are reflections. Symmetry suggests balance, intention.
+
+---
+
+## Fractal-Like Placement: Sierpiński Approximation
+
+Recursive structures can be approximated with loops and conditionals.
+
+```scheme
+;; Spawn coins approximating a Sierpiński triangle (3 levels).
+(world/reset!)
+(define (draw-triangle cx cy size level)
+  (when (> level 0)
+    (let* ((half-size (/ size 2))
+           (h (* size 0.866)))
+      (world/spawn (string->symbol (string-append \"t-\" (number->string level) \"-\" (number->string cx) \"-\" (number->string cy)))
+                   `((x . ,cx) (y . ,cy) (sprite . \"coin\")))
+      (draw-triangle cx (- cy (/ h 2)) half-size (- level 1))
+      (draw-triangle (- cx (/ size 4)) (+ cy (/ h 4)) half-size (- level 1))
+      (draw-triangle (+ cx (/ size 4)) (+ cy (/ h 4)) half-size (- level 1)))))
+
+(draw-triangle 400 300 200 3)
+(world/step)
+```
+
+[VISUAL: Coins placed in a Sierpiński-like triangular fractal pattern, three recursion levels]
+
+Recursive placement builds self-similar structures. The pattern hints at infinity within finite bounds.
+
+---
+
+## Chessboard Pattern
+
+Alternating placement in a grid, like a checkerboard.
+
+```scheme
+;; Spawn coins in a checkerboard pattern.
+(world/reset!)
+(let ((rows 6)
+      (cols 8)
+      (cell-size 60)
+      (x-start 100)
+      (y-start 100))
+  (let row-loop ((r 0))
+    (when (< r rows)
+      (let col-loop ((c 0))
+        (when (< c cols)
+          (when (= (modulo (+ r c) 2) 0)
+            (let ((x (+ x-start (* c cell-size) (/ cell-size 2)))
+                  (y (+ y-start (* r cell-size) (/ cell-size 2))))
+              (world/spawn (string->symbol (string-append \"coin-\" (number->string r) \"-\" (number->string c)))
+                           `((x . ,x) (y . ,y) (sprite . \"coin\")))))
+          (col-loop (+ c 1))))
+      (row-loop (+ r 1)))))
+(world/step)
+```
+
+[VISUAL: Coins placed on alternating squares of an 8×6 checkerboard grid]
+
+The parity check `(modulo (+ r c) 2)` creates the alternation. This is the structure of a board game, a tile floor.
+
+---
+
+## Radial Burst
+
+Lines radiating from a center.
+
+```scheme
+;; Spawn coins in radial lines from the center.
+(world/reset!)
+(let ((cx 400)
+      (cy 300)
+      (num-rays 12)
+      (ray-length 180)
+      (coins-per-ray 6))
+  (let ray-loop ((ray 0))
+    (when (< ray num-rays)
+      (let* ((angle (* (/ ray num-rays) TAU))
+             (dx (dcos angle))
+             (dy (dsin angle)))
+        (let coin-loop ((step 1))
+          (when (<= step coins-per-ray)
+            (let* ((dist (* (/ step coins-per-ray) ray-length))
+                   (x (+ cx (* dist dx)))
+                   (y (+ cy (* dist dy)))
+                   (name (string->symbol (string-append \"ray-\" (number->string ray) \"-\" (number->string step)))))
+              (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+            (coin-loop (+ step 1)))))
+      (ray-loop (+ ray 1)))))
+(world/step)
+```
+
+[VISUAL: 12 rays of coins radiating from the center like a sunburst, 6 coins per ray]
+
+Each ray is a line segment. The pattern suggests explosion, sun rays, impact.
+
+---
+
+## Fibonacci Spiral Approximation
+
+The golden ratio spiral, approximated discretely.
+
+```scheme
+;; Spawn coins in a Fibonacci-like spiral.
+(world/reset!)
+(let ((cx 400)
+      (cy 300)
+      (golden-angle 2.39996323)
+      (count 80))
+  (let loop ((i 0))
+    (when (< i count)
+      (let* ((angle (* i golden-angle))
+             (radius (* 3 (dsqrt i)))
+             (x (+ cx (* radius (dcos angle))))
+             (y (+ cy (* radius (dsin angle))))
+             (name (string->symbol (string-append \"coin-\" (number->string i)))))
+        (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+      (loop (+ i 1)))))
+(world/step)
+```
+
+[VISUAL: 80 coins spiraling outward in a Fibonacci-like pattern, dense at center, sparse at edge]
+
+The golden angle (≈137.5°) produces a phyllotactic spiral, like sunflower seeds. Position can encode natural growth.
+
+---
+
+## Entity State: Custom Properties
+
+Entities can carry arbitrary state beyond position.
+
+```scheme
+;; Spawn coins with custom \"value\" property, then read it.
+(world/reset!)
+(define coin-small (world/spawn 'coin-small '((x . 200) (y . 300) (sprite . \"coin\") (value . 1))))
+(define coin-large (world/spawn 'coin-large '((x . 600) (y . 300) (sprite . \"coin\") (value . 10))))
+(world/step)
+
+(entity/get coin-small 'value)  ;; => 1
+(entity/get coin-large 'value)  ;; => 10
+```
+
+`entity/get` retrieves a custom property. We can store type, health, color, weight — anything the motion logic needs.
+
+---
+
+## Conditional Placement by State
+
+Spawn location depends on entity properties.
+
+```scheme
+;; Spawn coins in different rows based on value.
+(world/reset!)
+(let ((values '(1 5 10 1 10 5 1 10)))
+  (let loop ((vals values) (i 0))
+    (when (not (null? vals))
+      (let* ((value (car vals))
+             (y (cond ((= value 1) 150)
+                      ((= value 5) 300)
+                      ((= value 10) 450)
+                      (else 300)))
+             (x (+ 100 (* i 80)))
+             (name (string->symbol (string-append \"coin-\" (number->string i)))))
+        (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\") (value . ,value))))
+      (loop (cdr vals) (+ i 1)))))
+(world/step)
+```
+
+[VISUAL: Three horizontal rows — top row (value=1), middle (value=5), bottom (value=10)]
+
+Properties drive layout. This is the beginning of data-driven composition.
+
+---
+
+## Grouped Entities: Spatial Clustering by Type
+
+Place entities in clusters based on a category.
+
+```scheme
+;; Spawn three clusters of coins, each cluster a different \"type\".
+(world/reset!)
+(define (spawn-cluster cx cy count type-name)
+  (let loop ((i 0))
+    (when (< i count)
+      (let* ((offset-x (* 40 (- (dsin (+ 3000 (* i 71))) 0)))
+             (offset-y (* 40 (- (dsin (+ 4000 (* i 103))) 0)))
+             (x (+ cx offset-x))
+             (y (+ cy offset-y))
+             (name (string->symbol (string-append (symbol->string type-name) \"-\" (number->string i)))))
+        (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\") (type . ,type-name))))
+      (loop (+ i 1)))))
+
+(spawn-cluster 200 200 8 'bronze)
+(spawn-cluster 400 300 8 'silver)
+(spawn-cluster 600 400 8 'gold)
+(world/step)
+```
+
+[VISUAL: Three distinct clusters of coins — top-left (bronze), center (silver), bottom-right (gold)]
+
+Each cluster has a center and a type tag. This is the structure of faction units, resource nodes, categorized UI elements.
+
+---
+
+## Entity as Anchor Point
+
+Use one entity's position as the anchor for a pattern.
+
+```scheme
+;; Spawn a \"home\" coin, then scatter others around it.
+(world/reset!)
+(define home (world/spawn 'home '((x . 400) (y . 300) (sprite . \"coin\"))))
+(let ((hx (entity/x home))
+      (hy (entity/y home))
+      (count 12)
+      (spread 100))
+  (let loop ((i 0))
+    (when (< i count)
+      (let* ((angle (* (/ i count) TAU))
+             (radius (* spread (+ 0.5 (* 0.5 (dsin (+ 7000 (* i 61)))))))
+             (x (+ hx (* radius (dcos angle))))
+             (y (+ hy (* radius (dsin angle))))
+             (name (string->symbol (string-append \"sat-\" (number->string i)))))
+        (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+      (loop (+ i 1)))))
+(world/step)
+```
+
+[VISUAL: Central \"home\" coin surrounded by 12 satellites at varying distances, like a loose orbit]
+
+The home entity is the reference. The satellites are placed relative to it.
+
+---
+
+## Collision-Free Placement (Simulated)
+
+Place entities ensuring minimum separation.
+
+```scheme
+;; Spawn coins ensuring no two are closer than a threshold.
+(world/reset!)
+(define min-separation 80)
+(define candidates '())
+
+(define (too-close? x y)
+  (let loop ((cs candidates))
+    (if (null? cs)
+        #f
+        (let* ((c (car cs))
+               (cx (car c))
+               (cy (cdr c))
+               (dx (- x cx))
+               (dy (- y cy))
+               (dist (dsqrt (+ (* dx dx) (* dy dy)))))
+          (if (< dist min-separation)
+              #t
+              (loop (cdr cs)))))))
+
+(let attempt-loop ((i 0) (placed 0))
+  (when (and (< placed 15) (< i 100))
+    (let* ((seed-x (+ 8000 (* i 97)))
+           (seed-y (+ 9000 (* i 131)))
+           (x (+ 100 (* 600 (- (dsin seed-x) -1) 0.5)))
+           (y (+ 100 (* 400 (- (dsin seed-y) -1) 0.5))))
+      (if (too-close? x y)
+          (attempt-loop (+ i 1) placed)
+          (begin
+            (set! candidates (cons (cons x y) candidates))
+            (world/spawn (string->symbol (string-append \"coin-\" (number->string placed)))
+                         `((x . ,x) (y . ,y) (sprite . \"coin\")))
+            (attempt-loop (+ i 1) (+ placed 1)))))))
+
+(world/step)
+```
+
+[VISUAL: ~15 coins scattered, each at least 80px away from any other]
+
+We test each candidate position against already-placed coins. If too close, skip it. This is the logic for non-overlapping spawns, bubble packing.
+
+---
+
+## Position as Narrative: A Path
+
+Coins placed to suggest a route, a trail, a journey.
+
+```scheme
+;; Spawn coins tracing a winding path.
+(world/reset!)
+(let ((waypoints '((100 . 300) (200 . 200) (350 . 250) (500 . 150) (650 . 200) (750 . 300))))
+  (let loop ((points waypoints) (i 0))
+    (when (not (null? points))
+      (let* ((pt (car points))
+             (x (car pt))
+             (y (cdr pt))
+             (name (string->symbol (string-append \"coin-\" (number->string i)))))
+        (world/spawn name `((x . ,x) (y . ,y) (sprite . \"coin\"))))
+      (loop (cdr points) (+ i 1)))))
+(world/step)
+```
+
+[VISUAL: Six coins placed in a gentle S-curve path from left to right]
+
+The positions tell a story: a trail through the woods, a route on a map, breadcrumbs.
+
+---
+
+## Entity Count and World Census
+
+How many entities are in the world?
+
+```scheme
+;; Spawn coins and count them.
+(world/reset!)
+(let loop ((i 0))
+  (when (< i 7)
+    (world/spawn (string->symbol (string-append \"coin-\" (number->string i)))
+                 `((x . ,(+ 100 (* i 100))) (y . 300) (sprite . \"coin\")))
+    (loop (+ i 1))))
+(world/step)
+
+(world/count)  ;; => 7
+```
+
+`world/count` returns the total number of live entities. Useful for spawn caps, victory conditions, UI counters.
+
+---
+
+## Despawning Entities
+
+Entities can be removed from the world.
+
+```scheme
+;; Spawn three coins, then despawn the middle one.
+(world/reset!)
+(define coin-a (world/spawn 'coin-a '((x . 200) (y . 300) (sprite . \"coin\"))))
+(define coin-b (world/spawn 'coin-b '((x . 400) (y . 300) (sprite . \"coin\"))))
+(define coin-c (world/spawn 'coin-c '((x . 600) (y . 300) (sprite . \"coin\"))))
+(world/step)
+
+(entity/despawn! coin-b)
+(world/step)
+```
+
+[VISUAL: Two frames — first with three coins, second with two (middle coin gone)]
+
+`entity/despawn!` removes the entity. It's no longer in the world, won't be drawn, won't be iterated.
+
+---
+
+## Conditional Despawn
+
+Remove entities that meet a condition.
+
+```scheme
+;; Spawn coins, then despawn any with x > 500.
+(world/reset!)
+(world/spawn 'coin-a '((x . 200) (y . 300) (sprite . \"coin\")))
+(world/spawn 'coin-b '((x . 400) (y . 300) (sprite . \"coin\")))
+(world/spawn 'coin-c '((x . 600) (y . 300) (sprite . \"coin\")))
+(world/spawn 'coin-d '((x . 700) (y . 300) (sprite . \"coin\")))
+(world/step)
+
+(world/each
+  (lambda (e)
+    (when (> (entity/x e) 500)
+      (entity/despawn! e))))
+(world/step)
+```
+
+[VISUAL: Four coins initially, then only the two on the left remain]
+
+We walk all entities and despawn those beyond a threshold. This is culling, cleanup, off-screen removal.
+
+---
+
+## The World Hash: Stable State Fingerprint
+
+The world has a deterministic hash.
+
+```scheme
+;; Spawn coins in a specific pattern and get the world hash.
+(world/reset!)
+(world/spawn 'coin-a '((x . 100) (y . 200) (sprite . \"coin\")))
+(world/spawn 'coin-b '((x . 300) (y . 300) (sprite . \"coin\")))
+(world/spawn 'coin-c '((x . 500) (y . 400) (sprite . \"coin\")))
+(world/step)
+
+(world/hash)  ;; => a deterministic integer
+```
+
+`world/hash` returns a hash of the entire world state. Same initial state → same hash. Useful for replay verification, network sync checks, regression tests.
+
+---
+
+## Snapshot and Restore
+
+The world can be saved and restored.
+
+```scheme
+;; Spawn coins, take a snapshot, change the world, restore.
+(world/reset!)
+(define coin-a (world/spawn 'coin-a '((x . 200) (y . 300) (sprite . \"coin\"))))
+(world/step)
+
+(define snapshot (world/snapshot))
+
+(entity/set-pos! coin-a 600 300)
+(world/step)
+
+(world/restore! snapshot)
+(world/step)
+```
+
+[VISUAL: Three frames — coin at (200, 300), then at (600, 300), then back at (200, 300)]
+
+`world/snapshot` captures the state, `world/restore!` rewinds. This is the foundation of undo, replay, deterministic rollback.
+
+---
+
+## Exercises
+
+You've seen 40 worked examples of the still frame — position as the atom of motion. Now try these:
+
+1. **The Constellation**: Spawn 20 coins to form a recognizable constellation shape (Big Dipper, Orion's Belt, or invent your own). Use only x/y coordinates and `world/spawn`.
+
+2. **The Tile Floor**: Write a program that spawns a 10×10 checkerboard of coins, but only on the \"black\" squares. Use a loop and a parity check.
+
+3. **The Scatter Field**: Spawn 30 coins randomly scattered, but ensure none spawn within 60 pixels of the edges (a margin). Use deterministic `dsin`-based pseudo-random placement.
+
+4. **The Spiral Staircase**: Spawn coins in a rising spiral — each successive coin is higher (lower y) and rotates around a center. Combine a loop, `dcos`/`dsin`, and a linearly increasing radius.
+
+5. **The Cleanup Crew**: Spawn 25 coins randomly, then despawn any that are within 100 pixels of the center point (400, 300). Print the count before and after.
+
+6. **The Golden Grid**: Spawn coins in a grid where row spacing increases by the golden ratio (×1.618) each row. Start with 40px spacing, increase each row. Stop after 5 rows.
+
+---
+
+**End of Chapter 1**. You can now place entities in the world with precision, intention, and variety. Every motion program begins here.
+
+Next chapter: *Velocity* — the second atom, where still things begin to move.
+
+
+---
+
+## Notes and Additional Considerations from r1 draft
+
+*The following material comes from an earlier or parallel revision draft (r1 draft). It is preserved here because content costs thought — nothing gets thrown away. Some passages restate the chapter's core ideas in a different voice; others introduce examples or angles not covered above. Read as supplemental exercises for the same discipline.*
+
+### A Single Shape
+
+The simplest frame: one entity, one place.
+
+```scheme
+(define (frame t)
+  (world
+    (entity 'circle
+            (at 200 150)
+            (radius 40)
+            (fill 'coral))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A coral circle centered at (200, 150) against a blank background.]
+
+We define a function `frame` that takes time `t` — though we ignore it for now. Inside, we build a `world` containing one `entity`. The entity is a circle, positioned at (200, 150), with radius 40 and filled coral.
+
+`(render-at 0.0)` samples the frame at time zero.
+
+---
+
+
+### Position Matters
+
+Move it. The frame changes, but nothing moves — we're looking at a *different* still moment.
+
+```scheme
+(define (frame t)
+  (world
+    (entity 'circle
+            (at 320 180)
+            (radius 40)
+            (fill 'skyblue))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A skyblue circle at (320, 180).]
+
+Same structure, different coordinates. In animation, you'll vary position over time — but first, prove to yourself you can place a shape *anywhere*.
+
+---
+
+
+### Two Entities
+
+A world with two inhabitants.
+
+```scheme
+(define (frame t)
+  (world
+    (entity 'circle
+            (at 100 100)
+            (radius 30)
+            (fill 'gold))
+    (entity 'circle
+            (at 220 100)
+            (radius 30)
+            (fill 'tomato))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Two circles side by side — gold on the left, tomato on the right.]
+
+Each `entity` form adds one shape to the world. They don't know about each other; they just *are*, at the same time.
+
+---
+
+
+### Rectangles
+
+Circles aren't everything.
+
+```scheme
+(define (frame t)
+  (world
+    (entity 'rect
+            (at 150 120)
+            (width 80)
+            (height 50)
+            (fill 'lavender))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A lavender rectangle centered at (150, 120).]
+
+A `rect` entity needs `width` and `height` instead of `radius`. The `at` point is the center.
+
+---
+
+
+### Layering
+
+Later entities draw *on top of* earlier ones.
+
+```scheme
+(define (frame t)
+  (world
+    (entity 'rect
+            (at 200 150)
+            (width 120)
+            (height 120)
+            (fill 'midnightblue))
+    (entity 'circle
+            (at 200 150)
+            (radius 40)
+            (fill 'gold))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A gold circle centered on a midnight-blue square.]
+
+The rectangle appears first in the code, so it draws first. The circle draws second, on top.
+
+---
+
+
+### Offset Layers
+
+Shift the top layer to reveal the bottom.
+
+```scheme
+(define (frame t)
+  (world
+    (entity 'rect
+            (at 180 140)
+            (width 100)
+            (height 100)
+            (fill 'darkslategray))
+    (entity 'circle
+            (at 210 160)
+            (radius 35)
+            (fill 'wheat))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A wheat circle partially overlapping a dark-slate-gray square, offset to the lower right.]
+
+Depth starts to emerge when shapes don't perfectly align.
+
+---
+
+
+### Stroke
+
+Outlines give definition.
+
+```scheme
+(define (frame t)
+  (world
+    (entity 'circle
+            (at 200 150)
+            (radius 50)
+            (fill 'white)
+            (stroke 'black)
+            (stroke-width 3))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A white circle with a bold black outline.]
+
+The `stroke` verb sets the outline color; `stroke-width` sets its thickness.
+
+---
+
+
+### No Fill
+
+Sometimes only the outline matters.
+
+```scheme
+(define (frame t)
+  (world
+    (entity 'circle
+            (at 200 150)
+            (radius 50)
+            (fill 'none)
+            (stroke 'crimson)
+            (stroke-width 2))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A crimson ring — no interior fill.]
+
+`(fill 'none)` means transparent interior.
+
+---
+
+
+### Many Circles
+
+A cluster.
+
+```scheme
+(define (frame t)
+  (world
+    (entity 'circle (at 160 140) (radius 20) (fill 'orchid))
+    (entity 'circle (at 200 140) (radius 20) (fill 'orchid))
+    (entity 'circle (at 240 140) (radius 20) (fill 'orchid))
+    (entity 'circle (at 180 170) (radius 20) (fill 'orchid))
+    (entity 'circle (at 220 170) (radius 20) (fill 'orchid))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Five orchid circles arranged in two staggered rows.]
+
+Repetition creates pattern. Each circle is independent, but together they form a group.
+
+---
+
+
+### Varying Size
+
+Not everything is the same scale.
+
+```scheme
+(define (frame t)
+  (world
+    (entity 'circle (at 150 150) (radius 60) (fill 'lightblue))
+    (entity 'circle (at 270 150) (radius 40) (fill 'lightblue))
+    (entity 'circle (at 360 150) (radius 25) (fill 'lightblue))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Three light-blue circles shrinking from left to right.]
+
+Size difference implies distance or importance.
+
+---
+
+
+### Helper Function for Repetition
+
+When patterns emerge, name them.
+
+```scheme
+(define (dot x y)
+  (entity 'circle
+          (at x y)
+          (radius 8)
+          (fill 'gold)))
+
+(define (frame t)
+  (world
+    (dot 100 100)
+    (dot 120 100)
+    (dot 140 100)
+    (dot 160 100)
+    (dot 180 100)))
+
+(render-at 0.0)
+```
+
+[VISUAL: A horizontal row of five small gold dots.]
+
+The helper `dot` wraps the common structure. We call it five times with different coordinates.
+
+---
+
+
+### Recursive Patterns
+
+Generate structure with recursion.
+
+```scheme
+(define (dots x y n)
+  (if (zero? n)
+      '()
+      (cons (entity 'circle (at x y) (radius 6) (fill 'teal))
+            (dots (+ x 25) y (- n 1)))))
+
+(define (frame t)
+  (apply world (dots 80 120 8)))
+
+(render-at 0.0)
+```
+
+[VISUAL: A horizontal line of eight small teal circles, evenly spaced.]
+
+`dots` builds a list of entities recursively. `apply world` spreads that list into the `world` form.
+
+---
+
+
+### Grid
+
+Two dimensions of recursion.
+
+```scheme
+(define (row x y n)
+  (if (zero? n)
+      '()
+      (cons (entity 'circle (at x y) (radius 5) (fill 'slateblue))
+            (row (+ x 20) y (- n 1)))))
+
+(define (grid x y cols rows)
+  (if (zero? rows)
+      '()
+      (append (row x y cols)
+              (grid x (+ y 20) cols (- rows 1)))))
+
+(define (frame t)
+  (apply world (grid 100 80 10 6)))
+
+(render-at 0.0)
+```
+
+[VISUAL: A 10×6 grid of small slate-blue circles.]
+
+`row` generates one horizontal line; `grid` stacks rows vertically.
+
+---
+
+
+### Rotation
+
+<!-- BUILD: rotation verb implementation for entities -->
+
+*[needs: rotation transform on entity]*
+
+Rotation would let us tilt rectangles, spin stars, orient arrows. The engine doesn't yet expose `(rotate angle)` on entities — when it does, a frame like this will run:
+
+```scheme
+(define (frame t)
+  (world
+    (entity 'rect
+            (at 200 150)
+            (width 80)
+            (height 40)
+            (fill 'coral)
+            (rotate 0.25)))) ; radians
+
+(render-at 0.0)
+```
+
+We'll mark this gap and move forward with forms that *do* run now.
+
+---
+
+
+### Opacity
+
+Transparency layers shapes.
+
+```scheme
+(define (frame t)
+  (world
+    (entity 'circle (at 180 150) (radius 50) (fill 'red) (opacity 0.6))
+    (entity 'circle (at 220 150) (radius 50) (fill 'blue) (opacity 0.6))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Two overlapping circles — red and blue — with a purple blend in the center.]
+
+`(opacity 0.6)` makes each circle 60% opaque. Where they overlap, colors mix.
+
+---
+
+
+### Background Color
+
+The world itself can have a tint.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'ivory)
+    (entity 'circle
+            (at 200 150)
+            (radius 50)
+            (fill 'darkgreen))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A dark-green circle on an ivory background.]
+
+`(background 'ivory)` sets the world's fill color.
+
+---
+
+
+### A Simple Lamp
+
+Compose shapes into an object.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'midnightblue)
+    ; pole
+    (entity 'rect (at 200 200) (width 8) (height 120) (fill 'gray))
+    ; base
+    (entity 'rect (at 200 260) (width 40) (height 10) (fill 'dimgray))
+    ; bulb
+    (entity 'circle (at 200 145) (radius 20) (fill 'yellow) (opacity 0.9))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A simple lamp — vertical pole, horizontal base, glowing yellow bulb on top — against a midnight-blue background.]
+
+Three entities, one conceptual object. The order matters: pole, then base, then bulb on top.
+
+---
+
+
+### Centered Scene
+
+Composition as framing.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'lightgray)
+    (entity 'rect (at 200 220) (width 160) (height 80) (fill 'saddlebrown))
+    (entity 'circle (at 200 180) (radius 30) (fill 'peachpuff))
+    (entity 'circle (at 185 175) (radius 5) (fill 'black))
+    (entity 'circle (at 215 175) (radius 5) (fill 'black))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A simple face — peach circle with two black dot eyes — sitting atop a brown rectangle (shoulders/body).]
+
+Four shapes, one figure. Eyes are smaller circles positioned within the head circle.
+
+---
+
+
+### Depth Through Scale and Position
+
+Objects lower in the frame feel closer.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'skyblue)
+    ; far hill
+    (entity 'circle (at 200 180) (radius 80) (fill 'green) (opacity 0.7))
+    ; near hill
+    (entity 'circle (at 200 220) (radius 100) (fill 'darkgreen))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Two overlapping semi-circles suggesting rolling hills — a lighter, smaller one behind a darker, larger one in front.]
+
+The smaller, lighter hill reads as distant; the larger, darker one as near.
+
+---
+
+
+### Overlap and Occlusion
+
+What's in front hides what's behind.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'lightyellow)
+    (entity 'circle (at 160 150) (radius 40) (fill 'orange))
+    (entity 'circle (at 200 150) (radius 40) (fill 'red))
+    (entity 'circle (at 240 150) (radius 40) (fill 'purple))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Three overlapping circles — orange, red, purple — with red partially covering orange and purple partially covering red.]
+
+Drawing order creates the sense that the purple circle is \"in front.\"
+
+---
+
+
+### A Tree
+
+Vertical composition.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'aliceblue)
+    ; trunk
+    (entity 'rect (at 200 200) (width 20) (height 80) (fill 'saddlebrown))
+    ; foliage
+    (entity 'circle (at 200 150) (radius 50) (fill 'forestgreen))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A simple tree — brown trunk with a round green canopy on top.]
+
+Two shapes, one recognizable form.
+
+---
+
+
+### Multiple Trees
+
+A grove.
+
+```scheme
+(define (tree x y)
+  (list
+    (entity 'rect (at x (+ y 50)) (width 15) (height 60) (fill 'saddlebrown))
+    (entity 'circle (at x y) (radius 40) (fill 'green))))
+
+(define (frame t)
+  (apply world
+         (cons (background 'lightcyan)
+               (append (tree 120 140)
+                       (tree 200 150)
+                       (tree 280 145)))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Three simple trees at slightly different heights and positions.]
+
+`tree` returns a list of two entities. We `append` the lists and `cons` the background onto the front.
+
+---
+
+
+### Stars in the Sky
+
+Many small elements.
+
+```scheme
+(define (star x y)
+  (entity 'circle (at x y) (radius 2) (fill 'white)))
+
+(define (frame t)
+  (world
+    (background 'navy)
+    (star 80 60)
+    (star 130 80)
+    (star 200 50)
+    (star 250 90)
+    (star 300 70)
+    (star 340 55)
+    (star 370 85)))
+
+(render-at 0.0)
+```
+
+[VISUAL: Tiny white dots scattered across a dark-blue sky.]
+
+Each star is a small white circle. Together they suggest a night sky.
+
+---
+
+
+### Procedural Stars
+
+Generate them.
+
+```scheme
+(define (stars n)
+  (if (zero? n)
+      '()
+      (cons (entity 'circle
+                    (at (+ 50 (* n 40)) (+ 60 (* (modulo n 3) 20)))
+                    (radius 2)
+                    (fill 'white))
+            (stars (- n 1)))))
+
+(define (frame t)
+  (apply world
+         (cons (background 'midnightblue)
+               (stars 10))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Ten small white stars distributed across the frame.]
+
+Position varies by index and modulo to create pseudo-random scatter.
+
+---
+
+
+### Ground and Sky
+
+Horizon line.
+
+```scheme
+(define (frame t)
+  (world
+    ; sky
+    (entity 'rect (at 200 100) (width 400) (height 200) (fill 'skyblue))
+    ; ground
+    (entity 'rect (at 200 250) (width 400) (height 100) (fill 'tan))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Upper half sky-blue, lower half tan, divided by a horizontal line.]
+
+Two large rectangles compose into a horizon.
+
+---
+
+
+### A House
+
+Geometric construction.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'lightblue)
+    ; walls
+    (entity 'rect (at 200 180) (width 100) (height 80) (fill 'beige))
+    ; roof
+    (entity 'circle (at 200 140) (radius 60) (fill 'darkred) (opacity 1.0))
+    ; door
+    (entity 'rect (at 200 210) (width 30) (height 50) (fill 'brown))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A simple house — beige walls, dark-red domed roof, brown door.]
+
+The roof is a circle placed so its lower half suggests a dome. The door draws last, on top.
+
+---
+
+
+### Window Panes
+
+Detail work.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'lightblue)
+    ; walls
+    (entity 'rect (at 200 180) (width 100) (height 80) (fill 'wheat))
+    ; roof
+    (entity 'circle (at 200 135) (radius 65) (fill 'maroon))
+    ; window
+    (entity 'rect (at 170 170) (width 20) (height 20) (fill 'lightyellow) (stroke 'black) (stroke-width 1))
+    ; door
+    (entity 'rect (at 220 200) (width 25) (height 40) (fill 'saddlebrown))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A house with a small window and a door.]
+
+The window is a small rectangle with a stroke to suggest panes.
+
+---
+
+
+### Shadow
+
+A dark shape beneath.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'white)
+    ; shadow
+    (entity 'circle (at 210 240) (radius 40) (fill 'black) (opacity 0.2))
+    ; ball
+    (entity 'circle (at 200 180) (radius 40) (fill 'coral))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A coral ball with a subtle dark shadow beneath it, offset slightly to the right.]
+
+The shadow is a semi-transparent black circle drawn first, beneath the ball.
+
+---
+
+
+### Layered Opacity
+
+Atmospheric depth.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'lightcyan)
+    ; far mountain
+    (entity 'circle (at 200 160) (radius 100) (fill 'gray) (opacity 0.4))
+    ; mid mountain
+    (entity 'circle (at 200 180) (radius 90) (fill 'slategray) (opacity 0.6))
+    ; near mountain
+    (entity 'circle (at 200 200) (radius 80) (fill 'darkslategray) (opacity 0.9))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Three overlapping semi-circles suggesting distant mountains, each darker and more opaque than the last.]
+
+Opacity and color shift create atmospheric perspective.
+
+---
+
+
+### A Pond
+
+Ellipse suggestion with overlapping circles.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'lightgreen)
+    ; water
+    (entity 'circle (at 180 180) (radius 70) (fill 'steelblue) (opacity 0.7))
+    (entity 'circle (at 220 180) (radius 70) (fill 'steelblue) (opacity 0.7))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Two overlapping circles forming a rough ellipse of blue water.]
+
+Overlapping identical circles approximate an ellipse.
+
+---
+
+
+### Leaves Falling (Still)
+
+Capture mid-fall, frozen.
+
+```scheme
+(define (leaf x y)
+  (entity 'circle (at x y) (radius 8) (fill 'gold) (opacity 0.8)))
+
+(define (frame t)
+  (world
+    (background 'wheat)
+    (leaf 100 80)
+    (leaf 150 130)
+    (leaf 200 100)
+    (leaf 250 160)
+    (leaf 300 110)))
+
+(render-at 0.0)
+```
+
+[VISUAL: Five gold circles scattered as if leaves suspended mid-air.]
+
+Even frozen, their positions suggest motion — but we're seeing a single instant.
+
+---
+
+
+### A Fence
+
+Repetition as structure.
+
+```scheme
+(define (post x)
+  (entity 'rect (at x 200) (width 8) (height 60) (fill 'saddlebrown)))
+
+(define (frame t)
+  (world
+    (background 'lightblue)
+    (post 80)
+    (post 120)
+    (post 160)
+    (post 200)
+    (post 240)
+    (post 280)
+    (post 320)))
+
+(render-at 0.0)
+```
+
+[VISUAL: Seven evenly spaced vertical brown posts forming a fence.]
+
+Same shape, different x-coordinates.
+
+---
+
+
+### Recursive Fence
+
+Generate posts.
+
+```scheme
+(define (posts x n)
+  (if (zero? n)
+      '()
+      (cons (entity 'rect (at x 200) (width 10) (height 70) (fill 'brown))
+            (posts (+ x 35) (- n 1)))))
+
+(define (frame t)
+  (apply world
+         (cons (background 'skyblue)
+               (posts 60 10))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Ten fence posts spaced evenly across the frame.]
+
+`posts` recurses to build a list; `apply world` spreads it.
+
+---
+
+
+### Varying Heights
+
+Posts of different lengths.
+
+```scheme
+(define (posts-varied x heights)
+  (if (null? heights)
+      '()
+      (cons (entity 'rect
+                    (at x 200)
+                    (width 10)
+                    (height (car heights))
+                    (fill 'sienna))
+            (posts-varied (+ x 30) (cdr heights)))))
+
+(define (frame t)
+  (apply world
+         (cons (background 'lightyellow)
+               (posts-varied 80 '(60 70 65 80 75 70 85)))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Seven fence posts with varying heights creating an irregular skyline.]
+
+We pass a list of heights and `car` / `cdr` through it.
+
+---
+
+
+### A Garden Row
+
+Different shapes in sequence.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'beige)
+    ; row of plants
+    (entity 'circle (at 100 180) (radius 15) (fill 'green))
+    (entity 'circle (at 140 180) (radius 15) (fill 'green))
+    (entity 'circle (at 180 180) (radius 15) (fill 'green))
+    (entity 'circle (at 220 180) (radius 15) (fill 'green))
+    (entity 'circle (at 260 180) (radius 15) (fill 'green))
+    ; flowers on top
+    (entity 'circle (at 100 165) (radius 6) (fill 'red))
+    (entity 'circle (at 140 165) (radius 6) (fill 'yellow))
+    (entity 'circle (at 180 165) (radius 6) (fill 'pink))
+    (entity 'circle (at 220 165) (radius 6) (fill 'orange))
+    (entity 'circle (at 260 165) (radius 6) (fill 'violet))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A row of five green plant circles, each topped with a small colored flower.]
+
+Layering: plants first, then flowers on top.
+
+---
+
+
+### Color Gradient (Manual Steps)
+
+Discrete steps approximating a gradient.
+
+```scheme
+(define (frame t)
+  (world
+    (entity 'rect (at 60 150) (width 40) (height 300) (fill 'darkblue))
+    (entity 'rect (at 100 150) (width 40) (height 300) (fill 'blue))
+    (entity 'rect (at 140 150) (width 40) (height 300) (fill 'steelblue))
+    (entity 'rect (at 180 150) (width 40) (height 300) (fill 'skyblue))
+    (entity 'rect (at 220 150) (width 40) (height 300) (fill 'lightblue))
+    (entity 'rect (at 260 150) (width 40) (height 300) (fill 'lightcyan))
+    (entity 'rect (at 300 150) (width 40) (height 300) (fill 'white))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Seven vertical stripes shifting from dark blue to white.]
+
+A discrete gradient: each stripe is one color.
+
+---
+
+
+### Nested Circles
+
+Concentric rings.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'black)
+    (entity 'circle (at 200 150) (radius 100) (fill 'darkred))
+    (entity 'circle (at 200 150) (radius 75) (fill 'red))
+    (entity 'circle (at 200 150) (radius 50) (fill 'orange))
+    (entity 'circle (at 200 150) (radius 25) (fill 'yellow))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Concentric circles radiating outward — yellow center, then orange, red, dark red.]
+
+Each circle is drawn in order, smaller ones on top.
+
+---
+
+
+### A Target
+
+Alternating colors.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'white)
+    (entity 'circle (at 200 150) (radius 90) (fill 'black))
+    (entity 'circle (at 200 150) (radius 70) (fill 'white))
+    (entity 'circle (at 200 150) (radius 50) (fill 'black))
+    (entity 'circle (at 200 150) (radius 30) (fill 'white))
+    (entity 'circle (at 200 150) (radius 10) (fill 'black))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A classic bullseye target — alternating black and white rings.]
+
+Five circles, same center, shrinking radii.
+
+---
+
+
+### Radial Symmetry
+
+Dots around a center.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'ivory)
+    (entity 'circle (at 200 150) (radius 6) (fill 'black))
+    (entity 'circle (at 260 150) (radius 6) (fill 'black))
+    (entity 'circle (at 140 150) (radius 6) (fill 'black))
+    (entity 'circle (at 200 90) (radius 6) (fill 'black))
+    (entity 'circle (at 200 210) (radius 6) (fill 'black))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Five black dots — one center, four at cardinal directions.]
+
+Manually placed to suggest a plus sign or simple radial pattern.
+
+---
+
+
+### A Flower (Petal Circles)
+
+Overlapping circles as petals.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'lightgreen)
+    ; petals
+    (entity 'circle (at 200 130) (radius 20) (fill 'pink))
+    (entity 'circle (at 220 145) (radius 20) (fill 'pink))
+    (entity 'circle (at 215 165) (radius 20) (fill 'pink))
+    (entity 'circle (at 185 165) (radius 20) (fill 'pink))
+    (entity 'circle (at 180 145) (radius 20) (fill 'pink))
+    ; center
+    (entity 'circle (at 200 150) (radius 15) (fill 'gold))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Five pink circles arranged in a ring around a gold center — a simple flower.]
+
+Six circles total: five petals, one center.
+
+---
+
+
+### Complex Scene: Sunset
+
+Many elements compose a moment.
+
+```scheme
+(define (frame t)
+  (world
+    ; sky gradient (approximated)
+    (entity 'rect (at 200 80) (width 400) (height 160) (fill 'orange))
+    (entity 'rect (at 200 200) (width 400) (height 160) (fill 'coral))
+    ; sun
+    (entity 'circle (at 200 160) (radius 50) (fill 'yellow) (opacity 0.9))
+    ; ground
+    (entity 'rect (at 200 270) (width 400) (height 60) (fill 'saddlebrown))
+    ; tree silhouette
+    (entity 'rect (at 320 240) (width 12) (height 60) (fill 'black))
+    (entity 'circle (at 320 210) (radius 30) (fill 'black))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A sunset scene — orange and coral sky, yellow sun, brown ground, and a black tree silhouette on the right.]
+
+Seven entities compose into a recognizable moment.
+
+---
+
+
+### Reflection
+
+Mirrored shapes suggest water.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'skyblue)
+    ; sky ball
+    (entity 'circle (at 200 120) (radius 30) (fill 'white))
+    ; horizon
+    (entity 'rect (at 200 180) (width 400) (height 4) (fill 'navy))
+    ; water ball (reflection)
+    (entity 'circle (at 200 240) (radius 30) (fill 'white) (opacity 0.5))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A white circle above a horizontal line, with a semi-transparent version below — suggesting a reflection in water.]
+
+Same shape, flipped position, lower opacity.
+
+---
+
+
+### A Clock Face
+
+Tick marks and hands (frozen at a time).
+
+```scheme
+(define (frame t)
+  (world
+    (background 'white)
+    ; face
+    (entity 'circle (at 200 150) (radius 80) (fill 'none) (stroke 'black) (stroke-width 2))
+    ; 12 o'clock tick
+    (entity 'rect (at 200 75) (width 3) (height 10) (fill 'black))
+    ; 3 o'clock tick
+    (entity 'rect (at 275 150) (width 10) (height 3) (fill 'black))
+    ; 6 o'clock tick
+    (entity 'rect (at 200 225) (width 3) (height 10) (fill 'black))
+    ; 9 o'clock tick
+    (entity 'rect (at 125 150) (width 10) (height 3) (fill 'black))
+    ; hour hand (pointing ~3)
+    (entity 'rect (at 235 150) (width 30) (height 4) (fill 'black))
+    ; minute hand (pointing ~12)
+    (entity 'rect (at 200 110) (width 4) (height 40) (fill 'black))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A clock face with four tick marks and two hands showing approximately 3:00.]
+
+Composed from rectangles and a circle outline.
+
+---
+
+
+### Chess Board (Partial)
+
+Alternating squares.
+
+```scheme
+(define (square x y color)
+  (entity 'rect (at x y) (width 30) (height 30) (fill color)))
+
+(define (frame t)
+  (world
+    (background 'white)
+    (square 100 100 'black)
+    (square 130 100 'white)
+    (square 160 100 'black)
+    (square 190 100 'white)
+    (square 100 130 'white)
+    (square 130 130 'black)
+    (square 160 130 'white)
+    (square 190 130 'black)
+    (square 100 160 'black)
+    (square 130 160 'white)
+    (square 160 160 'black)
+    (square 190 160 'white)
+    (square 100 190 'white)
+    (square 130 190 'black)
+    (square 160 190 'white)
+    (square 190 190 'black)))
+
+(render-at 0.0)
+```
+
+[VISUAL: A 4×4 checkerboard pattern.]
+
+Helper function `square` generates each tile; we call it sixteen times with alternating colors.
+
+---
+
+
+### Recursive Checkerboard
+
+Generate the board.
+
+```scheme
+(define (row x y n color1 color2)
+  (if (zero? n)
+      '()
+      (cons (entity 'rect (at x y) (width 25) (height 25) (fill color1))
+            (row (+ x 25) y (- n 1) color2 color1))))
+
+(define (board x y cols rows)
+  (if (zero? rows)
+      '()
+      (append (row x y cols (if (even? rows) 'black 'white)
+                            (if (even? rows) 'white 'black))
+              (board x (+ y 25) cols (- rows 1)))))
+
+(define (frame t)
+  (apply world
+         (cons (background 'beige)
+               (board 80 80 8 8))))
+
+(render-at 0.0)
+```
+
+[VISUAL: An 8×8 checkerboard.]
+
+`row` alternates colors horizontally; `board` stacks rows and flips the starting color each row.
+
+---
+
+
+### Spiral (Discrete Steps)
+
+Dots tracing a spiral path.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'black)
+    (entity 'circle (at 200 150) (radius 4) (fill 'white))
+    (entity 'circle (at 210 150) (radius 4) (fill 'white))
+    (entity 'circle (at 215 160) (radius 4) (fill 'white))
+    (entity 'circle (at 210 170) (radius 4) (fill 'white))
+    (entity 'circle (at 195 175) (radius 4) (fill 'white))
+    (entity 'circle (at 180 170) (radius 4) (fill 'white))
+    (entity 'circle (at 170 155) (radius 4) (fill 'white))
+    (entity 'circle (at 175 140) (radius 4) (fill 'white))
+    (entity 'circle (at 190 130) (radius 4) (fill 'white))
+    (entity 'circle (at 210 130) (radius 4) (fill 'white))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Ten white dots arranged in a loose spiral.]
+
+Manually placed to suggest a spiral — later we'll generate these paths mathematically.
+
+---
+
+
+### Layered Depth: Foreground, Midground, Background
+
+Three distinct layers.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'lightblue)
+    ; background: distant mountains
+    (entity 'circle (at 200 160) (radius 90) (fill 'gray) (opacity 0.5))
+    ; midground: tree
+    (entity 'rect (at 280 200) (width 10) (height 50) (fill 'saddlebrown))
+    (entity 'circle (at 280 175) (radius 25) (fill 'green))
+    ; foreground: large rock
+    (entity 'circle (at 120 230) (radius 40) (fill 'darkslategray))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A layered scene — faint mountains in back, a tree in the middle, a large rock in front.]
+
+Order and opacity create depth: distant objects drawn first and lighter, near objects last and darker.
+
+---
+
+
+### A Night Window
+
+Light in darkness.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'black)
+    ; building silhouette
+    (entity 'rect (at 200 200) (width 120) (height 200) (fill 'darkslategray))
+    ; window
+    (entity 'rect (at 200 180) (width 40) (height 50) (fill 'yellow) (opacity 0.9))
+    ; stars
+    (entity 'circle (at 80 60) (radius 2) (fill 'white))
+    (entity 'circle (at 140 50) (radius 2) (fill 'white))
+    (entity 'circle (at 300 70) (radius 2) (fill 'white))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A dark building with one glowing yellow window, stars in the night sky.]
+
+The window is bright against the dark building and background.
+
+---
+
+
+### Still Life: Table and Objects
+
+Compose a classic still-life frame.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'linen)
+    ; table
+    (entity 'rect (at 200 240) (width 300) (height 80) (fill 'saddlebrown))
+    ; bowl
+    (entity 'circle (at 150 220) (radius 30) (fill 'white) (stroke 'black) (stroke-width 1))
+    ; fruit
+    (entity 'circle (at 150 210) (radius 12) (fill 'red))
+    ; bottle
+    (entity 'rect (at 250 215) (width 20) (height 50) (fill 'darkgreen))
+    (entity 'circle (at 250 192) (radius 8) (fill 'darkgreen))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A brown table with a white bowl containing red fruit, and a green bottle beside it.]
+
+Five entities compose a still-life scene: table, bowl, fruit, bottle body, bottle neck.
+
+---
+
+
+### Depth of Field (Via Blur Proxy)
+
+<!-- BUILD: blur filter or depth-of-field shader -->
+
+*[needs: blur or depth-of-field rendering]*
+
+In a real engine, we'd apply a blur filter to background entities. For now, we approximate with opacity and color softness:
+
+```scheme
+(define (frame t)
+  (world
+    (background 'white)
+    ; far (soft)
+    (entity 'circle (at 120 150) (radius 50) (fill 'lightgray) (opacity 0.4))
+    ; mid
+    (entity 'circle (at 200 150) (radius 50) (fill 'gray) (opacity 0.7))
+    ; near (sharp)
+    (entity 'circle (at 280 150) (radius 50) (fill 'black) (opacity 1.0))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Three circles — the left one faint, the middle one mid-tone, the right one sharp and dark.]
+
+Opacity and color intensity stand in for focus depth until true blur is wired.
+
+---
+
+
+### Abstract Composition
+
+Pure form and color.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'white)
+    (entity 'rect (at 100 100) (width 80) (height 80) (fill 'red))
+    (entity 'circle (at 200 150) (radius 60) (fill 'blue) (opacity 0.7))
+    (entity 'rect (at 300 200) (width 100) (height 60) (fill 'yellow))
+    (entity 'circle (at 150 220) (radius 40) (fill 'green) (opacity 0.8))))
+
+(render-at 0.0)
+```
+
+[VISUAL: Overlapping geometric shapes in primary colors — non-representational composition.]
+
+No attempt to depict a \"thing\" — just shape, position, color, overlap.
+
+---
+
+
+### A Frozen Moment: Juggler
+
+Balls in mid-air.
+
+```scheme
+(define (frame t)
+  (world
+    (background 'aliceblue)
+    ; juggler (simplified)
+    (entity 'circle (at 200 230) (radius 15) (fill 'peachpuff))
+    (entity 'rect (at 200 260) (width 30) (height 40) (fill 'blue))
+    ; balls in air
+    (entity 'circle (at 160 120) (radius 10) (fill 'red))
+    (entity 'circle (at 200 80) (radius 10) (fill 'green))
+    (entity 'circle (at 240 110) (radius 10) (fill 'yellow))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A simple figure (circle head, rectangle body) with three colored balls suspended above.]
+
+The balls are frozen mid-juggle. Nothing moves, but the composition implies motion.
+
+---
+
+
+### The Final Frame: A Complete World at Rest
+
+Everything together — composition, depth, detail.
+
+```scheme
+(define (tree x y)
+  (list
+    (entity 'rect (at x (+ y 40)) (width 12) (height 50) (fill 'saddlebrown))
+    (entity 'circle (at x y) (radius 30) (fill 'darkgreen))))
+
+(define (cloud x y)
+  (list
+    (entity 'circle (at (- x 15) y) (radius 18) (fill 'white) (opacity 0.8))
+    (entity 'circle (at x y) (radius 22) (fill 'white) (opacity 0.8))
+    (entity 'circle (at (+ x 15) y) (radius 18) (fill 'white) (opacity 0.8))))
+
+(define (frame t)
+  (apply world
+         (append
+           (list (background 'skyblue))
+           ; sky layer
+           (cloud 100 60)
+           (cloud 280 50)
+           ; distant mountains
+           (list (entity 'circle (at 150 170) (radius 70) (fill 'gray) (opacity 0.5))
+                 (entity 'circle (at 250 165) (radius 80) (fill 'slategray) (opacity 0.6)))
+           ; ground
+           (list (entity 'rect (at 200 250) (width 400) (height 100) (fill 'green)))
+           ; trees
+           (tree 120 210)
+           (tree 180 215)
+           (tree 310 205)
+           ; house
+           (list (entity 'rect (at 240 230) (width 60) (height 50) (fill 'beige))
+                 (entity 'circle (at 240 205) (radius 35) (fill 'darkred))
+                 (entity 'rect (at 240 245) (width 18) (height 30) (fill 'brown))))))
+
+(render-at 0.0)
+```
+
+[VISUAL: A complete still scene — sky with clouds, distant mountains, green ground, three trees, and a small house with a domed roof and door.]
+
+Dozens of entities, helpers for trees and clouds, layered carefully. This is a single frozen frame — a world at rest, ready to come alive when time begins to move.
+
+---
+
+## Cookbook: shape primitives on the still frame
+
+Everything above draws with entities and the scene algebra. Underneath sits a
+second, more elementary family: the `img/*` shape primitives, which build a
+single image value you can measure, combine, and transform. They are the
+smallest pieces a still frame is made of. Each line below is a complete program;
+the surrounding call reads a fact off the image so you can see it worked.
+
+### One shape at a time
+
+An image primitive takes a size, a fill mode, and a color (or, for triangles and
+stars, a color argument that doubles as the point count in the classic recipe
+form). `image-width` reads the bounding box back.
+
+```scheme
+; A solid triangle is a genuine image value.
+(image? (img/triangle 20 'solid 6))
+
+; An ellipse's width is just the width you asked for.
+(image-width (img/ellipse 24 14 'solid 'white))   ; => 24
+
+; A horizontal line 48 pixels wide really is 48 wide.
+(= (image-width (img/line 48 'white)) 48)   ; => #t
+```
+
+### Polygons and stars
+
+Regular polygons and stars are the workhorses of any sprite sheet. The star's
+bounding box is `2*r + 1` — the classic odd-width so it has a true center pixel.
+
+```scheme
+; A regular hexagon of radius 20.
+(image-width (img/regular-polygon 20 6 'solid 'green))
+
+; A 5-pointed star: its bounding box is 2r + 1.
+(= (image-width (img/star 15 'solid 2)) (+ (* 2 15) 1))   ; => #t
+
+; A star-polygon with an explicit spoke count.
+(image-width (img/star-poly 10 5 'solid 'white))
+```
+
+### Stretching and composing
+
+`scale/xy` stretches an image by independent x and y factors — the move that
+turns a circle into an ellipse or a square into a banner. And once you have
+several shapes, `beside`, `above`, and `overlay` glue them into a frame.
+
+```scheme
+; Stretch a circle 1.3x wide and 0.6x tall.
+(image-width (scale/xy 1.3 0.6 (img/circle 10 'solid 12)))
+
+; A tiny scene: a triangle, a star, and an ellipse in a row.
+(image? (beside (img/triangle 18 'solid 6)
+                (img/star 12 'solid 2)
+                (img/ellipse 20 12 'solid 'white)))
+```
+
+These primitives are the same ones the reference manual documents one program at
+a time. Reach for entities when you are staging a *world*; reach for `img/*` when
+you want a single, measurable *picture*.
+
+---
+
+")

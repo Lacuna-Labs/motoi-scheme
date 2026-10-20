@@ -1,0 +1,275 @@
+// comb.js — combinatorics: factorial, nCr, nPr, Pascal, Bell, Stirling.
+//
+// Provenance: 2026-07-22 (Alfred completion sweep, applied-math lane).
+// Reference chapter 15-comb.slat documents 13 verbs; none were wired. This
+// file wires all 13 with honest combinatorics.
+//
+// Doctrine:
+//   * Every verb is a pure function on integers. Non-integer inputs are
+//     truncated silently (matches the flexible-input convention in
+//     lib/math/basic.js for gcd/lcm).
+//   * Bell / partition-count / Catalan use recurrences with a small memo
+//     table so B(20) etc. stay fast without global state.
+//   * Numeric range: results overflow JS `number` (2^53) once n gets big
+//     (~n=170 for factorial). We don't switch to BigInt here — the
+//     reference documents this as a caveat ("safe range n<25 for Bell").
+
+import { Sym } from '../../src/reader.js'
+
+
+import { isList, seqVerb } from '../base/list.js'
+// ── inline registration metadata (2026-07-22) ────────────────────
+// See engineering/HOW-TO-REGISTER-A-VERB.md.
+export const VERBS = [
+  'comb/bell',
+  'comb/binomial-coeffs',
+  'comb/catalan',
+  'comb/choose',
+  'comb/derangement',
+  'comb/factorial',
+  'comb/multichoose',
+  'comb/multinomial',
+  'comb/partition-count',
+  'comb/pascal-row',
+  'comb/pascal-triangle',
+  'comb/permute',
+  'comb/stirling2',
+]
+export const LAZY = true
+export const BOOK = 'book-of-math/ch-advanced-02-combinatorics-counting'
+
+export const TESTS = [
+  // Factorial: 5! = 120, 0! = 1
+  ['(comb/factorial 5)', '120'],
+  ['(comb/factorial 0)', '1'],
+  // Choose: C(5, 2) = 10, C(5, 0) = 1
+  ['(comb/choose 5 2)', '10'],
+  ['(comb/choose 5 0)', '1'],
+  // Permute: P(5, 2) = 20
+  ['(comb/permute 5 2)', '20'],
+  // Bell: B(3) = 5, B(0) = 1
+  ['(comb/bell 3)', '5'],
+  ['(comb/bell 0)', '1'],
+  // Catalan: C(0)=1, C(1)=1, C(4)=14
+  ['(comb/catalan 0)', '1'],
+  ['(comb/catalan 4)', '14'],
+  // Derangement: D(4) = 9
+  ['(comb/derangement 4)', '9'],
+  // Multichoose: (n+k-1) choose k. C(4,2) = 6 = multichoose(3,2)
+  ['(comb/multichoose 3 2)', '6'],
+  // Multinomial: (2+3+1)! / (2!·3!·1!) = 720 / 12 = 60
+  ['(comb/multinomial (list 2 3 1))', '60'],
+  // Partition-count: p(5) = 7
+  ['(comb/partition-count 5)', '7'],
+  // Pascal row 4: (1 4 6 4 1)
+  ['(comb/pascal-row 4)', '(1 4 6 4 1)'],
+  // Pascal triangle rows 0..2
+  ['(comb/pascal-triangle 2)', '((1) (1 1) (1 2 1))'],
+  // Stirling2: S(4,2) = 7
+  ['(comb/stirling2 4 2)', '7'],
+  // Binomial coefficients — expansion (x+y)^4 has coeffs (1 4 6 4 1)
+  ['(comb/binomial-coeffs 4)', '(1 4 6 4 1)'],
+]
+
+export function installComb(env, fuel) {
+  const def = (n, f, perm = 'read') => env.define(n, seqVerb(f), { perm })
+
+  // Local memo tables. Each call is deterministic; memo is a soft cache.
+  const factMemo = [1]
+  function factorial(n) {
+    n = n | 0
+    if (n < 0) throw new Error('comb/factorial: n must be non-negative')
+    if (n < factMemo.length) return factMemo[n]
+    let f = factMemo[factMemo.length - 1]
+    for (let i = factMemo.length; i <= n; i++) {
+      f *= i
+      factMemo.push(f)
+    }
+    return f
+  }
+
+  // (comb/factorial n) → n!
+  def('comb/factorial', (n) => factorial(n))
+
+  // (comb/choose n k) → C(n, k). Uses multiplicative formula to avoid the
+  // large-factorial precision blow-up.
+  def('comb/choose', (n, k) => {
+    n = n | 0; k = k | 0
+    if (k < 0 || k > n) return 0
+    if (k > n - k) k = n - k
+    let c = 1
+    for (let i = 0; i < k; i++) c = c * (n - i) / (i + 1)
+    return Math.round(c)
+  })
+
+  // (comb/permute n k) → P(n, k) = n! / (n-k)! = n·(n-1)·...·(n-k+1)
+  def('comb/permute', (n, k) => {
+    n = n | 0; k = k | 0
+    if (k < 0 || k > n) return 0
+    let p = 1
+    for (let i = 0; i < k; i++) p *= (n - i)
+    return p
+  })
+
+  // (comb/bell n) → Bell number B(n) via triangle recurrence.
+  //
+  // B(0) = 1. B(n+1) = sum over k of C(n,k)·B(k). Uses the Bell triangle
+  // for O(n²) computation.
+  def('comb/bell', (n) => {
+    n = n | 0
+    if (n < 0) throw new Error('comb/bell: n must be non-negative')
+    if (n === 0) return 1
+    // Bell triangle: row 0 = [1]; row k begins with last of row k-1, then
+    // each next entry = prev + entry above. B(n) = first element of row n.
+    let row = [1]
+    for (let i = 1; i <= n; i++) {
+      const next = [row[row.length - 1]]
+      for (let j = 0; j < row.length; j++) {
+        next.push(next[j] + row[j])
+      }
+      row = next
+    }
+    return row[0]
+  })
+
+  // (comb/catalan n) → nth Catalan number C_n = C(2n,n)/(n+1).
+  def('comb/catalan', (n) => {
+    n = n | 0
+    if (n < 0) throw new Error('comb/catalan: n must be non-negative')
+    // Use choose(2n, n) / (n+1)
+    let c = 1
+    for (let i = 0; i < n; i++) c = c * (2 * n - i) / (i + 1)
+    return Math.round(c / (n + 1))
+  })
+
+  // (comb/derangement n) → !n, count of permutations with no fixed point.
+  //
+  // Recurrence: !n = (n-1)·(!(n-1) + !(n-2)); !0 = 1, !1 = 0.
+  def('comb/derangement', (n) => {
+    n = n | 0
+    if (n < 0) throw new Error('comb/derangement: n must be non-negative')
+    if (n === 0) return 1
+    if (n === 1) return 0
+    let a = 1, b = 0
+    for (let i = 2; i <= n; i++) {
+      const c = (i - 1) * (a + b)
+      a = b
+      b = c
+    }
+    return b
+  })
+
+  // (comb/multichoose n k) → number of k-multisets from n distinct types.
+  //
+  // Formula: C(n+k-1, k).
+  def('comb/multichoose', (n, k) => {
+    n = n | 0; k = k | 0
+    if (n < 0 || k < 0) return 0
+    // Inline the choose formula.
+    const N = n + k - 1
+    let K = k
+    if (K < 0 || K > N) return 0
+    if (K > N - K) K = N - K
+    let c = 1
+    for (let i = 0; i < K; i++) c = c * (N - i) / (i + 1)
+    return Math.round(c)
+  })
+
+  // (comb/multinomial ks) → (sum ks)! / prod(k! for k in ks)
+  def('comb/multinomial', (ks) => {
+    if (!isList(ks)) throw new Error('comb/multinomial: expected list')
+    let sum = 0
+    for (const k of ks) sum += (k | 0)
+    let num = factorial(sum)
+    let den = 1
+    for (const k of ks) den *= factorial(k | 0)
+    return num / den
+  })
+
+  // (comb/partition-count n) → p(n), number of partitions of n.
+  //
+  // Euler pentagonal recurrence: p(n) = sum_{k} (-1)^(k-1)·p(n - k(3k-1)/2)
+  // over all k such that the argument is non-negative.
+  def('comb/partition-count', (n) => {
+    n = n | 0
+    if (n < 0) throw new Error('comb/partition-count: n must be non-negative')
+    const p = new Array(n + 1).fill(0)
+    p[0] = 1
+    for (let i = 1; i <= n; i++) {
+      let s = 0
+      for (let k = 1; ; k++) {
+        const g1 = k * (3 * k - 1) / 2
+        const g2 = k * (3 * k + 1) / 2
+        if (g1 > i && g2 > i) break
+        const sign = (k % 2 === 1) ? 1 : -1
+        if (g1 <= i) s += sign * p[i - g1]
+        if (g2 <= i) s += sign * p[i - g2]
+      }
+      p[i] = s
+    }
+    return p[n]
+  })
+
+  // (comb/pascal-row n) → n-th row of Pascal's triangle as a list.
+  def('comb/pascal-row', (n) => {
+    n = n | 0
+    if (n < 0) throw new Error('comb/pascal-row: n must be non-negative')
+    const row = [1]
+    for (let k = 1; k <= n; k++) {
+      row.push(Math.round(row[k - 1] * (n - k + 1) / k))
+    }
+    return row
+  })
+
+  // (comb/pascal-triangle n) → list of rows 0..n.
+  def('comb/pascal-triangle', (n) => {
+    n = n | 0
+    if (n < 0) throw new Error('comb/pascal-triangle: n must be non-negative')
+    const tri = []
+    for (let i = 0; i <= n; i++) {
+      const row = [1]
+      for (let k = 1; k <= i; k++) {
+        row.push(Math.round(row[k - 1] * (i - k + 1) / k))
+      }
+      tri.push(row)
+    }
+    return tri
+  })
+
+  // (comb/stirling2 n k) → S(n, k), Stirling numbers of the second kind.
+  //
+  // Recurrence: S(n,k) = k·S(n-1,k) + S(n-1,k-1). S(0,0) = 1; S(n,0) = 0
+  // for n>0; S(0,k) = 0 for k>0.
+  def('comb/stirling2', (n, k) => {
+    n = n | 0; k = k | 0
+    if (n < 0 || k < 0) return 0
+    if (k === 0) return n === 0 ? 1 : 0
+    if (k > n) return 0
+    const dp = Array.from({ length: n + 1 }, () => new Array(k + 1).fill(0))
+    dp[0][0] = 1
+    for (let i = 1; i <= n; i++) {
+      const maxJ = Math.min(i, k)
+      for (let j = 1; j <= maxJ; j++) {
+        dp[i][j] = j * dp[i - 1][j] + dp[i - 1][j - 1]
+      }
+    }
+    return dp[n][k]
+  })
+
+  // (comb/binomial-coeffs n) → list of coefficients of (x+y)^n.
+  //
+  // Same as pascal-row.
+  def('comb/binomial-coeffs', (n) => {
+    n = n | 0
+    if (n < 0) throw new Error('comb/binomial-coeffs: n must be non-negative')
+    const row = [1]
+    for (let k = 1; k <= n; k++) {
+      row.push(Math.round(row[k - 1] * (n - k + 1) / k))
+    }
+    return row
+  })
+
+  return env
+}
+
+export default installComb

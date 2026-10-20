@@ -1,0 +1,1302 @@
+;; ch16-the-summit.slat
+;; Book of Challenges — Chapter 16 — The Summit
+
+(chapter
+  :audience             programmer-learning-motoi
+  :dialect              motoi
+  :voice                motoi-copilot
+  :training-eligible    #t
+  :confidentiality      public
+  :book             "Book of Challenges"
+  :chapter-number   null
+  :title            "Chapter 16 — The Summit"
+  :size             59343
+  :sha256           "bb43001500943a59"
+  :prose
+"# Chapter 16 — The Summit
+
+We've climbed through recursion, folds, closures, and multi-verb orchestration—each technique a handhold, each program a step higher. Now we stand at the summit: programs that combine everything at once, honestly and clean. Deep recursion interleaves with higher-order composition; data transforms in stages, each stage a computation or a fold; failure is checked at every boundary; and the whole thing runs top-to-bottom, alone, producing something real.
+
+This is not harder *syntax*—it's harder *orchestration*. The surface remains ordinary Scheme forms plus a small bench of instrument readers, but the programs ask you to hold more in your head: a recursive descent that closes over state, a pipeline where each stage can fail, a fold that builds a structure another fold consumes. The reward is fluency—the ability to look at a messy problem and see a clean route through it, step by step, check by check, no faking.
+
+We'll start with programs a confident intermediate could follow, then ramp to genuinely hard compositions—mutual recursion coordinating instrument reads, multi-stage pipelines with guarded escalation, closures that capture and transform across nested maps. Each one runs alone. Each one handles failure honestly. And each one does something a lab needs: scan a sensor grid and build a cross-reference, reconcile buffer occupancy across channels, route a signal based on history, decide what to resupply and when.
+
+## The instrument bench
+
+Every program in this chapter reads from a small bench of *instrument readers* — pure functions that stand in for real sensors. Each reader returns a record (an alist), a number, `'nan` when a channel is dark, or an `(escalate ...)` shape when a channel hard-faults. Define the bench once and every later program can use it.
+
+```scheme
+;; --- Instrument bench: deterministic stand-in readers over a sensor grid. ---
+;; Each returns a record/number, 'nan (no signal), or (escalate ...) (hard fault).
+
+;; buffer occupancy on a channel; channel 105 is dark
+(define (sensor-reading id)
+  (cond ((= id 105) 'nan)
+        ((even? id) (modulo (* id 7) 25))
+        (else (modulo (* id 3) 30))))
+
+;; a probe channel record: state + sample count; channel 67890 is dark
+(define (channel-record id)
+  (if (= id 67890)
+      'nan
+      (list (list \"state\" (if (odd? id) \"active\" \"idle\"))
+            (list \"quantity\" (modulo (* id 3) 12)))))
+
+;; a run record with a phase and an energy reading (as a string)
+(define (run-record id)
+  (list (list \"phase\" (if (= 0 (modulo id 2)) \"settled\" \"transient\"))
+        (list \"energy\" (number->string (modulo (* id 5) 500)))))
+
+;; a specimen detail record: source lab, occupancy, unit cost
+(define (specimen-detail id)
+  (if (eq? id 'nan)
+      'nan
+      (list (list \"source\" (if (even? id) \"LabA\" \"LabB\"))
+            (list \"stock\" (modulo (* id 2) 20))
+            (list \"price\" (+ 1 (modulo id 9))))))
+
+;; a specimen catalog for a bench: a short list of specimen records
+(define (specimen-catalog bench-id)
+  (map (lambda (k) (list (list \"id\" (+ (* bench-id 10) k))))
+       '(1 2 3)))
+
+;; a subject profile with tags
+(define (subject-profile id)
+  (list (list \"tags\" (if (= 0 (modulo id 3))
+                         (list \"recheck\" \"priority\")
+                         (list \"clear\")))))
+
+;; a telemetry report for a metric: a numeric value
+(define (telemetry-report metric ctx)
+  (list (list \"value\" (+ 0.01 (/ (string-length metric) 100.0)))))
+
+;; trial metrics for a run
+(define (trial-metrics id)
+  (list (list \"open_rate\" (/ (modulo (* id 7) 100) 100.0))))
+
+;; recall a cached note for a key; some keys are dark
+(define (bench-recall axis key)
+  (if (and (string? key) (> (string-length key) 3))
+      (string-append \"note:\" key)
+      'nan))
+
+;; top-k related channels for an embedding
+(define (bench-topk embedding key k)
+  (map (lambda (n) (list (list \"id\" (+ 1000 n))
+                         (list \"embedding\" (string-append embedding \"-\" (number->string n)))))
+       (list 1 2 3)))
+
+\"bench ready\"
+```
+
+**What's happening:** these are ordinary Scheme functions — no external verbs — but they *behave* like instruments: deterministic, sometimes dark (`'nan`), always honestly shaped. Every program below reads from this bench.
+
+---
+
+## Warm-Up: Deep Recursion with an Instrument at the Leaf
+
+We'll open with a recursive descent that reads an instrument at each leaf—simple in shape, but it teaches the pattern: recurse through structure, hit the reader, check the result, and only then continue. No assumptions.
+
+This program walks a nested list of channel IDs, reads occupancy for each via `sensor-reading`, and collects the results in a flat list. If any read is dark, it records `'nan` honestly.
+
+```scheme
+;; Read occupancy for a nested list of channel IDs, recursively.
+;; Returns a flat list of (id . quantity) pairs, 'nan for any dark channel.
+
+(define (read-channel-tree tree)
+  (cond
+    ((null? tree) '())
+    ((pair? (car tree))
+     (append (read-channel-tree (car tree))
+             (read-channel-tree (cdr tree))))
+    (else
+     (let ((id (car tree))
+           (rest-results (read-channel-tree (cdr tree))))
+       (let ((reading (sensor-reading id)))
+         (if (eq? reading 'nan)
+             (cons (cons id 'nan) rest-results)
+             (cons (cons id reading) rest-results)))))))
+
+(define nested-ids
+  '((101 102) (103 (104 105)) 106))
+
+(read-channel-tree nested-ids)
+;; -> ((101 . 3) (102 . 14) (103 . 9) (104 . 3) (105 . nan) (106 . 17))
+;; Recursion flattens the tree; the instrument is checked at every leaf.
+```
+
+**What's hard here:** The recursion is not just cons-walking—it has to recognize nested pairs and flatten them, *and* read an instrument at each scalar, *and* check the result before threading it into the output. A beginner would flatten first, then map—this does it in one pass.
+
+---
+
+## Recursive Accumulator + Instrument Guard
+
+Now we add an accumulator to carry state down the recursion, and we guard every read with a check that can short-circuit the whole descent. This program scans a list of probe channel IDs, reads metadata for each via `channel-record`, and accumulates only those that are active and not empty. If any read returns an escalation, the whole program escalates immediately—no partial results.
+
+```scheme
+;; Collect active, non-empty channels from a list of IDs.
+;; Short-circuits on any read failure with an escalation.
+
+(define (collect-active-channels ids)
+  (letrec ((loop (lambda (remaining acc)
+                   (if (null? remaining)
+                       acc
+                       (let ((id (car remaining)))
+                         (let ((meta (channel-record id)))
+                           (cond
+                             ((and (pair? meta)
+                                   (eq? (car meta) 'escalate))
+                              meta) ; escalate immediately
+                             ((eq? meta 'nan)
+                              (loop (cdr remaining) acc)) ; skip 'nan
+                             (else
+                              (let ((state (cadr (assoc \"state\" meta)))
+                                    (qty (cadr (assoc \"quantity\" meta))))
+                                (if (and (equal? state \"active\")
+                                         (> qty 0))
+                                    (loop (cdr remaining)
+                                          (cons (cons id meta) acc))
+                                    (loop (cdr remaining) acc)))))))))))
+    (loop ids '())))
+
+(define test-ids '(12345 67890 11223))
+
+(collect-active-channels test-ids)
+;; -> ((11223 (\"state\" \"active\") (\"quantity\" 9)) (12345 (\"state\" \"active\") (\"quantity\" 3)))
+;; Channel 67890 is dark, so it is simply skipped. Note the printed shape:
+;; each entry is `(cons id meta)` where meta is itself a list, so the
+;; printer splices instead of showing a dot. Note also the ORDER — the
+;; accumulator conses, so the results come back last-kept-first.
+;; or (escalate \"read failed\" <detail>) if any read fails structurally.
+```
+
+**What's hard here:** The accumulator pattern is standard, but the guard logic is woven in—every read result is pattern-matched (escalate / 'nan / success), and the recursion only continues if success. A beginner would let the errors pile up; this stops cleanly.
+
+---
+
+## Higher-Order: A Fold that Reads an Instrument Inside Its Reducer
+
+Folds abstract iteration, but they get hard when the reducer itself orchestrates reads. This program folds over a list of run IDs, reading run details for each via `run-record`, and accumulates total energy—but only for settled runs. The read lives *inside* the fold's lambda, and every result is checked before contributing to the accumulator.
+
+```scheme
+;; Sum energy from settled runs by folding over run IDs and reading per step.
+
+(define (sum-settled-energy run-ids)
+  (fold (lambda (id acc)
+           (let ((run (run-record id)))
+             (cond
+               ((eq? run 'nan) acc) ; skip failures
+               ((and (pair? run)
+                     (eq? (car run) 'escalate)) acc) ; skip escalations
+               (else
+                (let ((phase (cadr (assoc \"phase\" run)))
+                      (energy (cadr (assoc \"energy\" run))))
+                  (if (equal? phase \"settled\")
+                      (+ acc (string->number energy))
+                      acc))))))
+         0
+         run-ids))
+
+(define test-runs '(9001 9002 9003 9004))
+
+(sum-settled-energy test-runs)
+;; => sum of settled-run energies, skipping 'nan and transient runs
+```
+
+**What's hard here:** The fold is not just summing—it's reading an instrument, parsing alists, checking two conditions, and converting strings to numbers, all inside the reducer. A beginner would map-then-fold; this does both in one pass, and handles failure mid-stream without breaking.
+
+---
+
+## Multi-Instrument Pipeline: Read, Transform, Read Again
+
+Real orchestration often chains reads: the output of one becomes the input of the next, and each stage can fail. This program reads a specimen's detail via `specimen-detail`, extracts its source lab, reads that lab's calibration set via `lab-calibration`, and returns the names of all calibrators. If any stage fails, it escalates cleanly.
+
+```scheme
+;; A lab's calibrators, keyed by lab name.
+(define (lab-calibration lab)
+  (if (equal? lab \"LabA\")
+      (list (list (list \"title\" \"CalX\")) (list (list \"title\" \"CalY\")))
+      (list (list (list \"title\" \"CalZ\")))))
+
+;; Read a specimen's calibrators by chaining two reads with failure checks.
+(define (get-specimen-calibrators specimen-id)
+  (let ((specimen (specimen-detail specimen-id)))
+    (cond
+      ((eq? specimen 'nan)
+       (escalate \"specimen read failed\" specimen-id))
+      ((and (pair? specimen) (eq? (car specimen) 'escalate))
+       specimen)
+      (else
+       (let ((lab (cadr (assoc \"source\" specimen))))
+         (let ((calibrators (lab-calibration lab)))
+           (cond
+             ((eq? calibrators 'nan)
+              (escalate \"calibration read failed\" lab))
+             ((and (pair? calibrators) (eq? (car calibrators) 'escalate))
+              calibrators)
+             (else
+              (map (lambda (p) (cadr (assoc \"title\" p)))
+                   calibrators)))))))))
+
+(get-specimen-calibrators 56789)
+;; => (\"CalZ\")  (LabB, odd id)
+;; or (escalate \"specimen read failed\" 56789) if the first read fails.
+```
+
+**What's hard here:** Two reads, each dependent on the last; three cond branches per read (escalate / 'nan / success); and a final map over the successful result. This is the *shape* of real routes—close-data-close-paren—and it requires you to hold the whole chain in your head while writing it.
+
+---
+
+## Deep Recursion with Closure Capture
+
+Closures let you carry state through recursion without explicit accumulators. This program walks a tree of categories (nested lists), calling `bench-recall` at each node to check if there's a cached note, and collects all notes found. The search axis is captured in the closure, so it doesn't need to be passed down.
+
+```scheme
+;; Walk a category tree, recall notes for each category using a captured axis, collect results.
+
+(define (gather-category-notes tree axis)
+  (letrec ((walk (lambda (node)
+                   (if (null? node)
+                       '()
+                       (let ((cat-name (car node))
+                             (children (cdr node)))
+                         (let ((note (bench-recall axis cat-name)))
+                           (let ((note-result (if (eq? note 'nan)
+                                                  '()
+                                                  (list (cons cat-name note)))))
+                             (if (and (pair? children) (not (string? (car children))))
+                                 (append note-result
+                                         (apply append (map walk children)))
+                                 note-result))))))))
+    (walk tree)))
+
+(define category-tree
+  '(\"Thermal\"
+    (\"Coolant\" (\"Primary\") (\"Secondary\"))
+    (\"Airflow\" (\"Intake\"))))
+
+(gather-category-notes category-tree \"seasonal\")
+;; => ((\"Coolant\" \"note:Coolant\") ...)
+;; Closure captures \"seasonal\", recursion walks the tree, instrument read per node.
+```
+
+**What's hard here:** The closure captures `axis` so `walk` stays clean; the recursion has to distinguish leaf strings from nested lists; `map` over children requires `apply append` to flatten; and every `bench-recall` is checked before cons-ing. This is higher-order + recursion + closure + instrument + guard, all at once.
+
+---
+
+## Mutual Recursion Coordinating Instruments
+
+Sometimes a problem is best split into two functions that call each other. This program processes a list of subject IDs: `process-subject` reads profile data for one subject, and if they carry a \"recheck\" tag, it delegates to `process-rechecks`, which reads their run history and recursively processes each run's subject (in case of linked samples). The two functions call each other, and each reads instruments.
+
+```scheme
+;; Mutually recursive functions: process subjects, delegate to recheck handler, which recurses back.
+
+(define (process-subjects subject-ids)
+  (letrec ((process-subject
+            (lambda (id)
+              (let ((profile (subject-profile id)))
+                (cond
+                  ((eq? profile 'nan) '())
+                  ((and (pair? profile) (eq? (car profile) 'escalate)) '())
+                  (else
+                   (let ((tags (cadr (assoc \"tags\" profile))))
+                     (if (member \"recheck\" tags)
+                         (process-rechecks id)
+                         (list (cons id \"processed\")))))))))
+           (process-rechecks
+            (lambda (id)
+              (let ((runs (specimen-catalog id)))
+                (cond
+                  ((eq? runs 'nan) '())
+                  ((and (pair? runs) (eq? (car runs) 'escalate)) '())
+                  (else
+                   (let ((linked-ids (map (lambda (o)
+                                            (cadr (assoc \"id\" o)))
+                                          runs)))
+                     (append (list (cons id \"recheck-done\"))
+                             (apply append (map (lambda (lid)
+                                                  (list (cons lid \"processed\")))
+                                                linked-ids))))))))))
+    (apply append (map process-subject subject-ids))))
+
+(process-subjects '(101 102 103))
+;; => a flat list of (id . \"processed\") / (id . \"recheck-done\") pairs
+;; Mutual recursion: process-subject calls process-rechecks, which maps back over linked samples.
+```
+
+**What's hard here:** Two functions defined in the same `letrec` so they see each other; each reads an instrument; `process-rechecks` maps and recurses; every read is guarded; and the final result is flattened via `apply append`. This is coordination at the edge of what fits in your head.
+
+---
+
+## Pipeline: Read, Map-Transform, Filter, Fold, Read Again
+
+A five-stage pipeline: read a list of specimens, transform each into a candidate record, filter by a condition, fold to compute a summary, then read detail for the top candidate. Each stage can fail; the program checks at every boundary.
+
+```scheme
+;; Five-stage pipeline: read specimens, transform, filter, fold to find top, read detail.
+
+(define (find-top-resupply bench-id)
+  ;; Stage 1: Read specimen catalog
+  (let ((specimens (map (lambda (rec)
+                          (let ((id (cadr (assoc \"id\" rec))))
+                            (list (list \"id\" id)
+                                  (list \"stock\" (modulo (* id 2) 12))
+                                  (list \"draw_30d\" (modulo (* id 5) 40)))))
+                        (specimen-catalog bench-id))))
+    (cond
+      ((eq? specimens 'nan)
+       (escalate \"read specimens failed\" bench-id))
+      ((and (pair? specimens) (eq? (car specimens) 'escalate))
+       specimens)
+      (else
+       ;; Stage 2: Map-transform to candidates
+       (let ((candidates (map (lambda (p)
+                                (let ((id (cadr (assoc \"id\" p)))
+                                      (stock (cadr (assoc \"stock\" p)))
+                                      (draw (cadr (assoc \"draw_30d\" p))))
+                                  (list id stock draw (/ draw (max stock 1)))))
+                              specimens)))
+         ;; Stage 3: Filter for low stock, high draw
+         (let ((filtered (filter (lambda (c)
+                                   (let ((stock (cadr c))
+                                         (velocity (cadddr c)))
+                                     (and (< stock 10) (> velocity 2))))
+                                 candidates)))
+           (if (null? filtered)
+               'nan
+               ;; Stage 4: Fold to find highest draw rate
+               (let ((top (fold (lambda (c best)
+                                   (if (> (cadddr c) (cadddr best))
+                                       c
+                                       best))
+                                 (car filtered)
+                                 (cdr filtered))))
+                 (let ((top-id (car top)))
+                   ;; Stage 5: Read detail for top candidate
+                   (let ((detail (specimen-detail top-id)))
+                     (cond
+                       ((eq? detail 'nan)
+                        (escalate \"read detail failed\" top-id))
+                       ((and (pair? detail) (eq? (car detail) 'escalate))
+                        detail)
+                       (else
+                        (cons 'resupply-candidate detail)))))))))))))
+
+(find-top-resupply 42)
+;; => (resupply-candidate (\"source\" \"LabA\") (\"stock\" . n) ...) or 'nan
+;; Five stages, each checked, one clean flow.
+```
+
+**What's hard here:** Five nested `let`s, each dependent on the last; map, filter, fold all in sequence; three separate reads, each guarded; and the final result tagged. This is the shape of real data routes—and it runs alone, top to bottom.
+
+---
+
+## Recursive Descent with Instrument-Driven Routing
+
+This program walks a nested decision tree (represented as an alist of conditions and outcomes), calling `telemetry-report` at each decision point to read a metric, then recursing based on the result. It's a recursive interpreter that drives routing with instrument data.
+
+```scheme
+;; Walk a decision tree, read a metric at each node to determine which branch to take.
+
+(define (route-decision tree context)
+  (cond
+    ((null? tree) 'no-decision)
+    ((string? tree) tree) ; leaf node: return the decision
+    (else
+     (let ((metric (cadr (assoc \"metric\" tree)))
+           (threshold (cadr (assoc \"threshold\" tree)))
+           (on-true (cadr (assoc \"on-true\" tree)))
+           (on-false (cadr (assoc \"on-false\" tree))))
+       (let ((report (telemetry-report metric context)))
+         (cond
+           ((eq? report 'nan)
+            (escalate \"metric read failed\" metric))
+           ((and (pair? report) (eq? (car report) 'escalate))
+            report)
+           (else
+            (let ((value (cadr (assoc \"value\" report))))
+              (if (> value threshold)
+                  (route-decision on-true context)
+                  (route-decision on-false context))))))))))
+
+(define decision-tree
+  '((\"condition\" \"flow-rate\")
+    (\"metric\" \"flow\")
+    (\"threshold\" 0.02)
+    (\"on-true\" \"increase-pumping\")
+    (\"on-false\" ((\"condition\" \"leak-rate\")
+                   (\"metric\" \"leak\")
+                   (\"threshold\" 0.5)
+                   (\"on-true\" \"seal-line\")
+                   (\"on-false\" \"hold-steady\")))))
+
+(route-decision decision-tree '((\"station\" \"S-12345\")))
+;; -> \"increase-pumping\"
+;; The bench reader is deterministic: the \"flow\" metric reports 0.05, which
+;; clears the 0.02 threshold, so the walk takes the on-true leaf and never
+;; looks at the nested leak-rate node.
+```
+
+**What's hard here:** The tree is a nested alist, so you have to parse it while recursing; every node reads a metric, and the result determines which branch to take; the recursion can go deep; and every read is checked. This is a recursive interpreter—hard to write, satisfying to run.
+
+---
+
+## Fold Inside a Map Inside a Filter, All Reading Instruments
+
+Composition gets dense when you nest higher-order functions, each with reads inside. This program filters a list of trials by checking their metrics via `trial-metrics`, then maps over the survivors to read detailed sample scores via `sample-scores`, then folds each score list to compute an average, returning trial IDs with their avg score.
+
+```scheme
+;; sample scores for a trial: a list of records with a numeric score
+(define (sample-scores id)
+  (map (lambda (n) (list (list \"score\" (/ (modulo (* id n) 100) 100.0))))
+       '(1 2 3 4)))
+
+;; Filter trials by open rate, map to read sample scores, fold each to compute average.
+(define (trial-score-summary trial-ids)
+  ;; Stage 1: Filter by open rate > 0.2
+  (let ((qualified (filter (lambda (id)
+                             (let ((metrics (trial-metrics id)))
+                               (cond
+                                 ((eq? metrics 'nan) #f)
+                                 ((and (pair? metrics) (eq? (car metrics) 'escalate)) #f)
+                                 (else
+                                  (let ((open-rate (cadr (assoc \"open_rate\" metrics))))
+                                    (> open-rate 0.2))))))
+                           trial-ids)))
+    ;; Stage 2: Map to read scores, fold each to compute average
+    (map (lambda (id)
+           (let ((engagement (sample-scores id)))
+             (cond
+               ((eq? engagement 'nan)
+                (cons id 'nan))
+               ((and (pair? engagement) (eq? (car engagement) 'escalate))
+                (cons id 'escalate))
+               (else
+                (let ((scores (map (lambda (e) (cadr (assoc \"score\" e)))
+                                   engagement)))
+                  (let ((avg (if (null? scores)
+                                 0
+                                 (/ (fold + 0 scores) (length scores)))))
+                    (cons id avg)))))))
+         qualified)))
+
+(trial-score-summary '(501 502 503 504))
+;; => a list of (id . avg) for trials whose open rate cleared the bar
+;; Filter keeps survivors, map reads for each, fold computes avg, result is (id . avg).
+```
+
+**What's hard here:** Filter reads an instrument and checks it; map reads another and checks it; inside the map is a nested map to extract scores, then a fold to sum them; and every check guards against 'nan and escalate. This is composition stacked three deep—hard to write without losing track.
+
+---
+
+## Recursive Tree Accumulation with Multi-Instrument Coordination
+
+This program walks a tree of specimen categories, calling `bench-topk` at each node to find related specimens, then calling `specimen-detail` for each to check stock, and accumulating only in-stock specimens. The recursion carries an accumulator, and each leaf does two reads in sequence.
+
+```scheme
+;; Walk a category tree, topk to find related specimens, read stock for each, accumulate in-stock.
+
+(define (collect-in-stock-related tree embedding)
+  (letrec ((walk (lambda (node acc)
+                   (cond
+                     ((null? node) acc)
+                     ((string? node)
+                      (let ((related (bench-topk embedding node 5)))
+                        (cond
+                          ((eq? related 'nan) acc)
+                          ((and (pair? related) (eq? (car related) 'escalate)) acc)
+                          (else
+                           (let ((specimen-ids (map (lambda (r) (cadr (assoc \"id\" r)))
+                                                    related)))
+                             (fold (lambda (id a)
+                                      (let ((specimen (specimen-detail id)))
+                                        (cond
+                                          ((eq? specimen 'nan) a)
+                                          ((and (pair? specimen) (eq? (car specimen) 'escalate)) a)
+                                          (else
+                                           (let ((stock (cadr (assoc \"stock\" specimen))))
+                                             (if (> stock 0)
+                                                 (cons (cons id stock) a)
+                                                 a))))))
+                                    acc
+                                    specimen-ids))))))
+                     ((pair? node)
+                      (walk (cdr node) (walk (car node) acc)))
+                     (else acc)))))
+    (walk tree '())))
+
+(define cat-tree '(\"Coolant\" (\"Additives\" \"Buffers\")))
+
+(collect-in-stock-related cat-tree \"thermal-v2\")
+;; => ((id . stock) ...) for related specimens with stock > 0
+;; Recursion walks tree, topk at each leaf, specimen read per result, accumulate stock > 0.
+```
+
+**What's hard here:** Recursive tree walk; read at each leaf; fold over the results, calling *another* read inside the fold; accumulator threaded through the recursion; and every read guarded. This is multi-instrument coordination inside recursion—genuinely hard, and it runs.
+
+---
+
+## Closure Factory: Higher-Order Function Returning Configured Closures
+
+This program returns a function that itself returns a decision—a closure factory. The outer function configures a threshold and a metric name, and returns a lambda that reads telemetry for a given station, checks the metric, and returns a decision. This is higher-order composition with reads inside closures.
+
+```scheme
+;; Closure factory: return a decision function configured with a metric and threshold.
+
+(define (make-metric-decision metric threshold decision-true decision-false)
+  (lambda (station-id)
+    (let ((report (telemetry-report metric (list (list \"station\" station-id)))))
+      (cond
+        ((eq? report 'nan)
+         (escalate \"metric read failed\" metric))
+        ((and (pair? report) (eq? (car report) 'escalate))
+         report)
+        (else
+         (let ((value (cadr (assoc \"value\" report))))
+           (if (> value threshold)
+               decision-true
+               decision-false)))))))
+
+(define check-flow (make-metric-decision \"flow\" 0.03 \"invest\" \"hold\"))
+
+(check-flow \"S-98765\")
+;; -> \"invest\"  ; \"flow\" reports 0.05, which is above the 0.03 threshold
+
+(define check-leak (make-metric-decision \"leak\" 0.6 \"seal-line\" \"ok\"))
+
+(check-leak \"S-11111\")
+;; -> \"ok\"  ; \"leak\" reports 0.05 too, which is BELOW the 0.6 threshold
+```
+
+**What's hard here:** Three levels of lambda—`make-metric-decision` returns a closure that captures four parameters; the closure reads an instrument and checks it; and you can call `make-metric-decision` multiple times to create different decision functions. This is the power of closures + reads: reusable, configurable, and clean.
+
+---
+
+## Pipeline with Guarded Fold and Final Escalation
+
+This program chains three stages: read all channels via `channel-list`, fold over them to compute total value (qty × weight), then read bench stats via `bench-stats` to compare. If the fold produces zero (indicating all channels were 'nan), the program escalates rather than returning a fake result.
+
+```scheme
+;; a bench's channels: quantity + a numeric weight (as a string)
+(define (channel-list bench-id)
+  (map (lambda (n) (list (list \"quantity\" (+ 1 (modulo (* bench-id n) 5)))
+                         (list \"price\" (number->string (+ 2 (modulo n 4))))))
+       '(1 2 3)))
+
+;; bench aggregate stats
+(define (bench-stats bench-id)
+  (list (list \"throughput_30d\" (+ 100 (modulo (* bench-id 7) 900)))))
+
+;; Read channels, fold to compute total occupancy value, read stats, escalate if fold fails.
+(define (occupancy-value-vs-stats bench-id)
+  ;; Stage 1: Read channels
+  (let ((channels (channel-list bench-id)))
+    (cond
+      ((eq? channels 'nan)
+       (escalate \"channel read failed\" bench-id))
+      ((and (pair? channels) (eq? (car channels) 'escalate))
+       channels)
+      (else
+       ;; Stage 2: Fold to compute total value
+       (let ((total-value (fold (lambda (channel acc)
+                                   (let ((qty (cadr (assoc \"quantity\" channel)))
+                                         (weight (cadr (assoc \"price\" channel))))
+                                     (+ acc (* qty (string->number weight)))))
+                                 0
+                                 channels)))
+         (if (= total-value 0)
+             (escalate \"no valid channels\" bench-id)
+             ;; Stage 3: Read stats for comparison
+             (let ((stats (bench-stats bench-id)))
+               (cond
+                 ((eq? stats 'nan)
+                  (escalate \"stats read failed\" bench-id))
+                 ((and (pair? stats) (eq? (car stats) 'escalate))
+                  stats)
+                 (else
+                  (let ((throughput (cadr (assoc \"throughput_30d\" stats))))
+                    (list (list \"occupancy_value\" total-value)
+                          (list \"throughput_30d\" throughput)
+                          (list \"turns_per_month\" (/ throughput total-value)))))))))))))
+
+(occupancy-value-vs-stats 77777)
+;; -> ((\"occupancy_value\" 39) (\"throughput_30d\" 939) (\"turns_per_month\" 24.076923076923077))
+;; Three stages, fold in the middle, escalate if fold is empty, final comparison returned.
+```
+
+**What's hard here:** The fold calls `string->number` and does arithmetic inside the reducer; if the fold yields zero, the program escalates *before* the third stage; and the final result is a computed ratio. This is guarded fold + escalate-on-empty + multi-stage—every piece matters.
+
+---
+
+## Recursive Alist Walk with Instrument-Driven Transformation
+
+This program recursively walks a nested alist (representing a specimen catalog), calling `visibility-read` at each specimen node to read a signal strength, and replaces the specimen's \"visibility\" field with the read value. If any read fails, it leaves the field as 'nan—but keeps walking. The recursion has to recognize alist structure and transform in place.
+
+```scheme
+;; signal strength for a specimen page
+(define (visibility-read ctx page)
+  (list (list \"impressions\" (+ 100 (modulo (string-length page) 2000)))))
+
+;; Walk a nested specimen alist, read signal for each specimen, update \"visibility\" in place.
+(define (enrich-catalog-with-signal catalog station-id)
+  (cond
+    ((null? catalog) '())
+    ((not (pair? catalog)) catalog)
+    ((and (pair? (car catalog)) (string? (caar catalog)))
+     ;; It's an alist entry
+     (let ((key (caar catalog))
+           (value (cdar catalog)))
+       (if (equal? key \"specimen_id\")
+           ;; Read signal for this specimen. Entries are list-built —
+           ;; (\"specimen_id\" \"spec-101\") — so `value` is the one-element
+           ;; list (\"spec-101\") and the id itself is its car.
+           (let ((impressions (visibility-read station-id (car value))))
+             (cons (car catalog)
+                   (cons (list \"visibility\" (if (eq? impressions 'nan)
+                                                'nan
+                                                (cadr (assoc \"impressions\" impressions))))
+                         (enrich-catalog-with-signal (cdr catalog) station-id))))
+           (cons (cons key (enrich-catalog-with-signal value station-id))
+                 (enrich-catalog-with-signal (cdr catalog) station-id)))))
+    (else
+     (cons (enrich-catalog-with-signal (car catalog) station-id)
+           (enrich-catalog-with-signal (cdr catalog) station-id)))))
+
+(define sample-catalog
+  '((\"category\" \"Thermal\")
+    (\"specimens\" (((\"specimen_id\" \"spec-101\") (\"name\" \"Probe\"))
+                    ((\"specimen_id\" \"spec-102\") (\"name\" \"Gauge\"))))))
+
+(enrich-catalog-with-signal sample-catalog \"station:bench-1\")
+;; => the same alist with each specimen gaining a \"visibility\" field
+;; Recursion walks the alist structure, read called per specimen, result inserted.
+```
+
+**What's hard here:** The recursion has to distinguish alist entries from nested lists; it has to recognize the \"specimen_id\" key and trigger a read; the result is inserted *into* the structure, not accumulated separately; and the whole thing reconstructs the alist as it goes. This is recursive transform + read + structure-preserving—hard to get right without careful thought.
+
+---
+
+## Fold with Stateful Closure: Accumulate and Decide
+
+This program folds over a list of events, but the reducer is a closure that captures a threshold and makes stateful decisions. For each event, it calls `anomaly-detect` to check if the event is anomalous, and accumulates only those that cross the threshold. The closure captures both the threshold and the anomaly context.
+
+```scheme
+;; anomaly score for an event under a context
+(define (anomaly-detect event ctx)
+  (let ((v (cadr (assoc \"value\" event))))
+    (list (list \"anomaly_score\" (/ (modulo v 100) 100.0)))))
+
+;; Fold over events with a stateful closure that reads an instrument and decides per event.
+(define (detect-anomalous-events events threshold context)
+  (let ((reducer (lambda (event acc)
+                   (let ((anomaly (anomaly-detect event context)))
+                     (cond
+                       ((eq? anomaly 'nan) acc)
+                       ((and (pair? anomaly) (eq? (car anomaly) 'escalate)) acc)
+                       (else
+                        (let ((score (cadr (assoc \"anomaly_score\" anomaly))))
+                          (if (> score threshold)
+                              (cons (cons event score) acc)
+                              acc))))))))
+    (fold reducer '() events)))
+
+(define test-events
+  '(((\"timestamp\" 100) (\"value\" 120))
+    ((\"timestamp\" 200) (\"value\" 340))
+    ((\"timestamp\" 300) (\"value\" 125))))
+
+(detect-anomalous-events test-events 0.3 '((\"metric\" \"throughput_per_hour\")))
+;; => a list of (event . score) for events over the threshold
+;; Fold with closure: read inside reducer, threshold captured, decision per event.
+```
+
+**What's hard here:** The reducer is a lambda defined with `let`, capturing `threshold` and `context`; inside it, a read is done and checked; the result is compared to the threshold; and only matches are cons-ed. This is stateful fold + closure + read—clean, reusable, and hard to hold in your head the first time.
+
+---
+
+## Multi-Stage Orchestration: Read, Transform, Re-Read, Aggregate
+
+This program orchestrates four reads in sequence, each stage dependent on the last: read occupancy via `sensor-reading`, transform to compute resupply quantities, read specimen details via `specimen-detail` for each item needing resupply, and aggregate by source lab. Each stage can fail; the program checks at every boundary.
+
+```scheme
+;; Four-stage orchestration: read occupancy, compute resupply, read specimen details, aggregate by source.
+
+(define (resupply-plan-by-source specimen-ids)
+  ;; Stage 1: Read occupancy for each specimen
+  (let ((stock-data (map (lambda (id)
+                           (let ((qty (sensor-reading id)))
+                             (if (eq? qty 'nan)
+                                 (cons id 0)
+                                 (cons id qty))))
+                         specimen-ids)))
+    ;; Stage 2: Transform to resupply candidates (occupancy < 5 → resupply)
+    (let ((resupplies (filter (lambda (entry)
+                                (< (cdr entry) 5))
+                              stock-data)))
+      (if (null? resupplies)
+          '()
+          ;; Stage 3: Read specimen details for each resupply candidate
+          (let ((details (map (lambda (entry)
+                                (let ((id (car entry)))
+                                  (let ((specimen (specimen-detail id)))
+                                    (if (or (eq? specimen 'nan)
+                                            (and (pair? specimen) (eq? (car specimen) 'escalate)))
+                                        (cons id '((\"source\" \"unknown\")))
+                                        (cons id specimen)))))
+                              resupplies)))
+            ;; Stage 4: Aggregate by source
+            (let ((by-source (fold (lambda (entry acc)
+                                      (let ((id (car entry))
+                                            (prod (cdr entry)))
+                                        (let ((source (cadr (assoc \"source\" prod))))
+                                          (let ((existing (assoc source acc)))
+                                            (if existing
+                                                (map (lambda (e)
+                                                       (if (equal? (car e) source)
+                                                           (cons source (cons id (cdr e)))
+                                                           e))
+                                                     acc)
+                                                (cons (cons source (list id)) acc))))))
+                                    '()
+                                    details)))
+              by-source))))))
+
+(resupply-plan-by-source '(201 202 203 204 205))
+;; -> ((\"LabA\" 204) (\"LabB\" 201))
+;; Only two of the five channels read below the resupply threshold of 5:
+;; 201 and 204 both report 3, while 202, 203 and 205 report 14, 9 and 15.
+;; Stage 2 is a filter, so the later stages only ever see those two.
+;; Four stages: read, filter-transform, read again, aggregate by key.
+```
+
+**What's hard here:** Four nested `let`s, each stage doing real work; two separate reads (sensor-reading and specimen-detail), each guarded; fold at the end that builds an alist and updates it in place; and the whole thing runs top-to-bottom. This is orchestration at summit difficulty—every stage matters, and it's all reads + core Scheme.
+
+---
+
+## Recursive Generator with Instrument-Driven Continuation
+
+This program recursively generates a sequence of recommendations by calling `bench-topk` at each step, taking the top result, reading its detail via `specimen-detail`, and recursing with the next embedding. It stops when it hits a depth limit or when a read fails. This is a recursive generator—each step produces one item and continues.
+
+```scheme
+;; Recursively generate a recommendation chain: topk, read detail, recurse with next embedding.
+
+(define (generate-recommendation-chain start-embedding depth limit)
+  (if (>= depth limit)
+      '()
+      (let ((candidates (bench-topk start-embedding \"specimens\" 3)))
+        (cond
+          ((eq? candidates 'nan) '())
+          ((and (pair? candidates) (eq? (car candidates) 'escalate)) '())
+          ((null? candidates) '())
+          (else
+           (let ((top (car candidates)))
+             (let ((id (cadr (assoc \"id\" top)))
+                   (next-emb (cadr (assoc \"embedding\" top))))
+               (let ((detail (specimen-detail id)))
+                 (cond
+                   ((eq? detail 'nan)
+                    (generate-recommendation-chain next-emb (+ depth 1) limit))
+                   ((and (pair? detail) (eq? (car detail) 'escalate))
+                    (generate-recommendation-chain next-emb (+ depth 1) limit))
+                   (else
+                    (cons (cons id detail)
+                          (generate-recommendation-chain next-emb (+ depth 1) limit))))))))))))
+
+(generate-recommendation-chain \"thermal-2025\" 0 5)
+;; => ((id . <detail>) (id . <detail>) ...) up to the depth limit
+;; Recursive generator: read at each step, recurse with next, stop at limit.
+```
+
+**What's hard here:** The recursion is generative—it doesn't walk existing data, it *creates* data by reading instruments at each step; it has to check the topk result, extract an embedding, read detail, check again, then recurse; and it stops cleanly when it hits the limit or when reads fail. This is instrument-driven recursion—genuinely hard, and satisfying when it runs.
+
+---
+
+## Fold with Nested Map and Instrument Coordination
+
+This program folds over a list of bench IDs, but inside each fold step it maps over specimen IDs (read via an instrument), calling another read for each, then summing the results before adding to the accumulator. It's fold-map-read-read, all nested.
+
+```scheme
+;; Fold over benches, map over specimens per bench (read via instrument), read detail per specimen, sum, accumulate.
+
+(define (total-occupancy-value-across-benches bench-ids)
+  (fold (lambda (bench-id acc)
+           (let ((specimens (specimen-catalog bench-id)))
+             (cond
+               ((eq? specimens 'nan) acc)
+               ((and (pair? specimens) (eq? (car specimens) 'escalate)) acc)
+               (else
+                (let ((bench-value (fold (lambda (prod inner-acc)
+                                           (let ((id (cadr (assoc \"id\" prod))))
+                                             (let ((detail (specimen-detail id)))
+                                               (cond
+                                                 ((eq? detail 'nan) inner-acc)
+                                                 ((and (pair? detail) (eq? (car detail) 'escalate)) inner-acc)
+                                                 (else
+                                                  (let ((stock (cadr (assoc \"stock\" detail)))
+                                                        (price (cadr (assoc \"price\" detail))))
+                                                    (+ inner-acc (* stock price))))))))
+                                         0
+                                         specimens)))
+                  (+ acc bench-value))))))
+         0
+         bench-ids))
+
+(total-occupancy-value-across-benches '(10 20 30))
+;; => total occupancy value across all benches
+;; Fold over benches, inner fold over specimens (read via instrument), read per specimen, arithmetic, sum.
+```
+
+**What's hard here:** Two folds, one nested inside the other; two reads, one per fold level; guards at both levels; arithmetic inside the inner reducer; and the outer fold sums the inner results. This is nested higher-order + multi-instrument + accumulation—hard to parse, harder to write, satisfying when it works.
+
+---
+
+## Recursive Descent with Dynamic Dispatch
+
+This program walks a command tree where each node specifies a reader to call and arguments to pass. The recursion dynamically dispatches the read based on the node's \"action\" field, checks the result, and recurses based on success or failure. This is a recursive interpreter with read dispatch.
+
+```scheme
+;; Walk a command tree, dispatch reads dynamically per node, recurse based on result.
+
+(define (execute-command-tree tree context)
+  (cond
+    ((null? tree) '())
+    ((string? tree) tree) ; leaf: return the string
+    (else
+     (let ((action (cadr (assoc \"action\" tree)))
+           (args (cadr (assoc \"args\" tree)))
+           (on-success (cadr (assoc \"on-success\" tree)))
+           (on-failure (cadr (assoc \"on-failure\" tree))))
+       (let ((result (cond
+                       ((equal? action \"read-specimen\")
+                        (specimen-detail (cadr (assoc \"id\" args))))
+                       ((equal? action \"check-occupancy\")
+                        (sensor-reading (cadr (assoc \"id\" args))))
+                       ((equal? action \"read-stats\")
+                        (bench-stats (cadr (assoc \"bench\" args))))
+                       (else 'nan))))
+         (cond
+           ((eq? result 'nan)
+            (execute-command-tree on-failure context))
+           ((and (pair? result) (eq? (car result) 'escalate))
+            (execute-command-tree on-failure context))
+           (else
+            (execute-command-tree on-success context))))))))
+
+(define command-tree
+  '((\"action\" \"check-occupancy\")
+    (\"args\" ((\"id\" 501)))
+    (\"on-success\" \"proceed-to-resupply\")
+    (\"on-failure\" ((\"action\" \"read-stats\")
+                     (\"args\" ((\"bench\" 999)))
+                     (\"on-success\" \"alert-low-occupancy\")
+                     (\"on-failure\" \"escalate-to-human\")))))
+
+(execute-command-tree command-tree '())
+;; -> \"proceed-to-resupply\"
+;; Channel 501 reads 3 — a real number, not 'nan — so the walk takes the
+;; on-success branch and the whole fallback subtree is never executed.
+```
+
+**What's hard here:** The tree specifies reads to call dynamically, so the program has to parse the action and dispatch to the right reader; the recursion depends on the result; and the tree can go several levels deep. This is a command interpreter—hard to write, powerful to use.
+
+---
+
+## Map with Nested Fold and Closure
+
+This program maps over a list of trials, and for each trial it folds over a list of metrics (read via instrument), accumulating a summary. The fold is defined as a closure inside the map's lambda, and it reads a metric per name.
+
+```scheme
+;; a trial's metric record with several fields
+(define (trial-metric-record id)
+  (list (list \"open_rate\" (/ (modulo (* id 7) 100) 100.0))
+        (list \"click_rate\" (/ (modulo (* id 3) 100) 100.0))
+        (list \"unsub_rate\" (/ (modulo id 100) 100.0))))
+
+;; Map over trials, fold over metrics per trial (read via instrument), closure inside map.
+(define (trial-metric-summaries trial-ids metric-names)
+  (map (lambda (id)
+         (let ((metrics (trial-metric-record id)))
+           (cond
+             ((eq? metrics 'nan)
+              (cons id 'nan))
+             ((and (pair? metrics) (eq? (car metrics) 'escalate))
+              (cons id 'escalate))
+             (else
+              (let ((summary (fold (lambda (metric-name acc)
+                                      (let ((value (cadr (assoc metric-name metrics))))
+                                        (cons (cons metric-name value) acc)))
+                                    '()
+                                    metric-names)))
+                (cons id summary))))))
+       trial-ids))
+
+(trial-metric-summaries '(601 602 603) '(\"open_rate\" \"click_rate\" \"unsub_rate\"))
+;; => ((id . ((metric . value) ...)) ...)
+;; Map reads a record, fold extracts metrics, result is (id . summary).
+```
+
+**What's hard here:** Map reads an instrument; inside it, fold iterates over metric names and builds an alist; the fold is a closure inside the map's lambda; and every read is guarded. This is nested higher-order + read + closure—hard to follow, clean once you see it.
+
+---
+
+## Pipeline with Retry Logic via Recursion
+
+This program wraps a multi-stage pipeline in a recursive retry: if any stage fails, it retries up to a limit. Each retry re-runs the whole pipeline, and the recursion tracks attempts. This is guarded pipeline + recursive retry.
+
+```scheme
+;; Multi-stage pipeline with recursive retry logic: if any stage fails, retry up to limit.
+
+(define (read-and-aggregate-with-retry bench-id attempts max-attempts)
+  (if (>= attempts max-attempts)
+      (escalate \"max retries exceeded\" bench-id)
+      (let ((specimens (specimen-catalog bench-id)))
+        (cond
+          ((eq? specimens 'nan)
+           (read-and-aggregate-with-retry bench-id (+ attempts 1) max-attempts))
+          ((and (pair? specimens) (eq? (car specimens) 'escalate))
+           (read-and-aggregate-with-retry bench-id (+ attempts 1) max-attempts))
+          (else
+           (let ((total (fold (lambda (p acc)
+                                 (let ((stock (sensor-reading (cadr (assoc \"id\" p)))))
+                                   (+ acc (if (eq? stock 'nan) 0 stock))))
+                               0
+                               specimens)))
+             (let ((stats (bench-stats bench-id)))
+               (cond
+                 ((eq? stats 'nan)
+                  (read-and-aggregate-with-retry bench-id (+ attempts 1) max-attempts))
+                 ((and (pair? stats) (eq? (car stats) 'escalate))
+                  (read-and-aggregate-with-retry bench-id (+ attempts 1) max-attempts))
+                 (else
+                  (list (list \"total_occupancy\" total)
+                        (list \"throughput_30d\" (cadr (assoc \"throughput_30d\" stats)))))))))))))
+
+(read-and-aggregate-with-retry 88888 0 3)
+;; -> ((\"total_occupancy\" 36) (\"throughput_30d\" 416))
+;; Every read succeeds on the first try, so no retry ever fires. The retry
+;; path is still the interesting part of the code — but a test that never
+;; takes it has not tested it.
+;; Retries up to 3 times if any read fails, then escalates.
+```
+
+**What's hard here:** The whole pipeline is inside a recursive function; if any read fails, the function calls itself with incremented attempts; the recursion has a base case that escalates; and the pipeline itself has two stages, each guarded. This is pipeline + retry via recursion—hard to structure, robust in practice.
+
+---
+
+## Fold with Stateful Accumulator and Conditional Reads
+
+This program folds over a list of run IDs, but the accumulator is a record (an alist) that tracks both total and count. The reducer reads a run only when needed, and updates the accumulator conditionally.
+
+```scheme
+;; Fold with stateful accumulator: track count and total, read conditionally, update record.
+
+(define (conditional-run-aggregate run-ids condition-fn)
+  (fold (lambda (id acc)
+           (let ((run (run-record id)))
+             (cond
+               ((eq? run 'nan) acc)
+               ((and (pair? run) (eq? (car run) 'escalate)) acc)
+               (else
+                (if (condition-fn run)
+                    (let ((total (cadr (assoc \"total\" acc)))
+                          (count (cadr (assoc \"count\" acc)))
+                          (amount (string->number (cadr (assoc \"energy\" run)))))
+                      (list (list \"total\" (+ total amount))
+                            (list \"count\" (+ count 1))))
+                    acc)))))
+         '((\"total\" 0) (\"count\" 0))
+         run-ids))
+
+(define high-energy? (lambda (run)
+                       (> (string->number (cadr (assoc \"energy\" run))) 100)))
+
+;; Runs 701 and 702 report 5 and 10; runs 721 and 730 report 105 and 150.
+;; Two clear the bar, two do not — which is what you want from a test.
+(conditional-run-aggregate '(701 721 702 730) high-energy?)
+;; -> ((\"total\" 255) (\"count\" 2))
+;; Fold with record accumulator, read per step, conditional update.
+
+;; Watch what happens when NOTHING passes. The accumulator comes back exactly
+;; as it started, and \"total 0, count 0\" is a perfectly honest answer that is
+;; also indistinguishable from \"the reads all failed\". If the two cases need
+;; different handling, the accumulator has to carry a third field for how many
+;; runs were seen at all.
+(conditional-run-aggregate '(701 702 703 704) high-energy?)
+;; -> ((\"total\" 0) (\"count\" 0))
+```
+
+**What's hard here:** The accumulator is an alist representing a record; the reducer extracts fields, reads a run, checks a condition via a passed-in lambda, then updates the record by rebuilding the alist. This is stateful fold + higher-order + read + conditional—four techniques in one.
+
+---
+
+## Recursive Alist Transform with Multi-Instrument Coordination per Node
+
+This program recursively walks a nested alist (a specimen catalog with categories and specimens), calling `bench-recall` for each category and `specimen-detail` for each specimen, and enriching the alist in place with the read data. This is recursive transform + two reads + structure-preserving.
+
+```scheme
+;; Walk a nested catalog alist, recall per category, read detail per specimen, enrich in place.
+
+(define (enrich-catalog catalog context)
+  (cond
+    ((null? catalog) '())
+    ((not (pair? catalog)) catalog)
+    ((and (pair? (car catalog)) (string? (caar catalog)))
+     ;; Entries are list-built — (\"category\" \"Outdoor\") — so `value` is the
+     ;; one-element list (\"Outdoor\"); the leaf itself is its car.
+     (let ((key (caar catalog))
+           (value (cdar catalog)))
+       (cond
+         ((equal? key \"category\")
+          (let ((note (bench-recall context (car value))))
+            (cons (car catalog)
+                  (cons (list \"category_note\" (if (eq? note 'nan) \"\" note))
+                        (enrich-catalog (cdr catalog) context)))))
+         ((equal? key \"specimen_id\")
+          (let ((detail (specimen-detail (car value))))
+            (cons (car catalog)
+                  (cons (list \"specimen_detail\" (if (or (eq? detail 'nan)
+                                                        (and (pair? detail) (eq? (car detail) 'escalate)))
+                                                    '()
+                                                    detail))
+                        (enrich-catalog (cdr catalog) context)))))
+         (else
+          (cons (cons key (enrich-catalog value context))
+                (enrich-catalog (cdr catalog) context))))))
+    (else
+     (cons (enrich-catalog (car catalog) context)
+           (enrich-catalog (cdr catalog) context)))))
+
+(define sample-catalog
+  '((\"category\" \"Outdoor\")
+    (\"specimens\" (((\"specimen_id\" 501) (\"name\" \"Tent\"))
+                    ((\"specimen_id\" 502) (\"name\" \"Backpack\"))))))
+
+(enrich-catalog sample-catalog \"specimen-notes-v3\")
+;; => the same alist enriched with category_note and specimen_detail fields
+;; Recursive walk, two reads, structure rebuilt with enrichment.
+```
+
+**What's hard here:** The recursion has to recognize two different keys and call two different reads; the result is inserted *into* the structure; and the whole alist is reconstructed as it's walked. This is multi-instrument + recursive transform + structure-preserving—hard, and genuinely useful.
+
+---
+
+## Fold with Nested Filter and Read Inside Filter Predicate
+
+This program folds over a list of trials, but inside each fold step it filters a list of samples (read via instrument), and the filter predicate itself calls *another* read to check engagement. It's fold-read-filter-read, all nested.
+
+```scheme
+;; samples for a trial: records with an email-like key
+(define (trial-samples id)
+  (map (lambda (n) (list (list \"email\" (string-append \"s\" (number->string (+ (* id 10) n))))))
+       '(1 2 3 4)))
+
+;; engagement score for a sample key
+(define (sample-engagement key)
+  (list (list \"score\" (/ (modulo (string-length key) 10) 10.0))))
+
+;; Fold over trials, read samples per trial, filter by engagement (read inside predicate), sum count.
+(define (engaged-sample-count-across-trials trial-ids engagement-threshold)
+  (fold (lambda (id acc)
+           (let ((samples (trial-samples id)))
+             (cond
+               ((eq? samples 'nan) acc)
+               ((and (pair? samples) (eq? (car samples) 'escalate)) acc)
+               (else
+                (let ((engaged (filter (lambda (sub)
+                                         (let ((key (cadr (assoc \"email\" sub))))
+                                           (let ((engagement (sample-engagement key)))
+                                             (cond
+                                               ((eq? engagement 'nan) #f)
+                                               ((and (pair? engagement) (eq? (car engagement) 'escalate)) #f)
+                                               (else
+                                                (let ((score (cadr (assoc \"score\" engagement))))
+                                                  (> score engagement-threshold)))))))
+                                       samples)))
+                  (+ acc (length engaged)))))))
+         0
+         trial-ids))
+
+(engaged-sample-count-across-trials '(801 802 803) 0.3)
+;; => total count of engaged samples across trials
+;; Fold over trials, read to fetch samples, filter with read inside predicate, sum length.
+```
+
+**What's hard here:** Outer fold reads an instrument; filter inside the fold; filter predicate calls *another* read and checks it; and the fold accumulates the count. This is four-level nesting—fold, read, filter, read—and every check matters. Hard to write, clean to read once you see it.
+
+---
+
+## Recursive Zipper: Walk and Transform with Position Tracking
+
+This program uses a zipper pattern to walk a nested list, tracking position (depth and path), calling a reader at each leaf, and inserting the result along with position metadata. This is recursive zipper + read + metadata.
+
+```scheme
+;; Recursive zipper: walk nested list, track depth and path, read at each leaf, insert with metadata.
+
+(define (enrich-with-position tree read-fn depth path)
+  (cond
+    ((null? tree) '())
+    ((not (pair? tree))
+     (let ((result (read-fn tree)))
+       (list 'leaf tree result depth path)))
+    (else
+     (cons (enrich-with-position (car tree) read-fn (+ depth 1) (append path '(car)))
+           (enrich-with-position (cdr tree) read-fn depth (append path '(cdr)))))))
+
+(define (note-for-id id)
+  (bench-recall \"specimen-notes\" (number->string id)))
+
+(define sample-tree '(101 (102 103) 104))
+
+(enrich-with-position sample-tree note-for-id 0 '())
+;; => nested (leaf value result depth path) structures
+;; Zipper walks tree, tracks position, reads at each leaf, inserts metadata.
+```
+
+**What's hard here:** The recursion tracks both depth and path (a list of car/cdr steps); at each leaf it reads an instrument; and the result is a new structure that includes the original value, the read result, and the position. This is zipper + read + metadata—hard to structure, powerful for debugging or audit trails.
+
+---
+
+## Multi-Stage with Partial Escalation and Recovery
+
+This program runs a three-stage pipeline where if the second stage fails, it attempts a fallback read, and if *that* fails, it escalates—but the first stage's result is preserved. This is partial escalation + recovery.
+
+```scheme
+;; Three-stage pipeline with fallback: if stage 2 fails, try alternate read; preserve stage 1 result either way.
+
+(define (read-with-fallback specimen-id)
+  ;; Stage 1: Read specimen
+  (let ((specimen (specimen-detail specimen-id)))
+    (cond
+      ((eq? specimen 'nan)
+       (escalate \"specimen read failed\" specimen-id))
+      ((and (pair? specimen) (eq? (car specimen) 'escalate))
+       specimen)
+      (else
+       (let ((stage1-result (list \"specimen\" specimen)))
+         ;; Stage 2: Read occupancy (with fallback)
+         (let ((occupancy (sensor-reading specimen-id)))
+           (cond
+             ((eq? occupancy 'nan)
+              ;; Fallback: try alternate source (the specimen's own stock field)
+              (let ((alt (specimen-detail specimen-id)))
+                (cond
+                  ((eq? alt 'nan)
+                   (list stage1-result (list \"occupancy\" 'fallback-failed)))
+                  ((and (pair? alt) (eq? (car alt) 'escalate))
+                   (list stage1-result (list \"occupancy\" 'fallback-failed)))
+                  (else
+                   (list stage1-result (list \"occupancy\" (cadr (assoc \"stock\" alt))))))))
+             ((and (pair? occupancy) (eq? (car occupancy) 'escalate))
+              (list stage1-result (list \"occupancy\" 'escalate)))
+             (else
+              ;; Stage 3: Combine results
+              (list stage1-result (list \"occupancy\" occupancy))))))))))
+
+(read-with-fallback 999)
+;; -> ((\"specimen\" ((\"source\" \"LabB\") (\"stock\" 18) (\"price\" 1))) (\"occupancy\" 27))
+;; Channel 999 answers, so the fallback never runs. Ask for a DARK channel
+;; and you can watch the fallback do its job — 105 has no sensor, so the
+;; occupancy comes from the specimen record's own stock field instead:
+(read-with-fallback 105)
+;; -> ((\"specimen\" ((\"source\" \"LabB\") (\"stock\" 10) (\"price\" 7))) (\"occupancy\" 10))
+;; Stage 1 always succeeds or escalates; stage 2 tries fallback if primary is dark; result preserved either way.
+```
+
+**What's hard here:** Three stages, but stage 2 has a fallback branch; if the fallback also fails, the program *doesn't* escalate—it returns a partial result; and the final output is a list combining both stages. This is guarded pipeline + fallback + partial escalation—messy in practice, clean with careful structure.
+
+---
+
+## Fold with Lookahead: Access Next Element in Reducer
+
+This program folds over a list of events, but the reducer needs to look at the *next* event to make a decision. We pass the whole list and manually car/cdr to look ahead. This is fold with lookahead.
+
+```scheme
+;; Fold with lookahead: reducer accesses current and next element to decide.
+
+(define (detect-transitions events)
+  (let loop ((remaining events) (acc '()))
+    (if (null? remaining)
+        (reverse acc)
+        (let ((current (car remaining))
+              (next (if (null? (cdr remaining))
+                        '()
+                        (cadr remaining))))
+          (let ((current-phase (cadr (assoc \"phase\" current)))
+                (next-phase (if (null? next)
+                                \"\"
+                                (cadr (assoc \"phase\" next)))))
+            (if (and (equal? current-phase \"transient\")
+                     (equal? next-phase \"settled\"))
+                (loop (cdr remaining) (cons (list \"transition\" current) acc))
+                (loop (cdr remaining) acc)))))))
+
+(define test-events
+  '(((\"id\" 1) (\"phase\" \"transient\"))
+    ((\"id\" 2) (\"phase\" \"settled\"))
+    ((\"id\" 3) (\"phase\" \"settled\"))
+    ((\"id\" 4) (\"phase\" \"transient\"))
+    ((\"id\" 5) (\"phase\" \"settled\"))))
+
+(detect-transitions test-events)
+;; => ((\"transition\" . event) ...) for transient→settled boundaries
+;; Named-let walks the list, looks ahead to the next element, accumulates matches.
+```
+
+**What's hard here:** We're not using `fold`—we're using named-let recursion to walk the list, because we need to access both `car` and `cadr`; the reducer checks current and next; and the result is accumulated in reverse, then reversed at the end. This is manual fold + lookahead—hard to structure, useful for state-machine patterns.
+
+---
+
+## Recursive Memoization with Read Caching
+
+This program recursively reads data via an instrument, but caches results in an alist so repeated reads with the same ID don't re-read. The cache is passed down the recursion and updated at each step. This is recursive memoization + read.
+
+```scheme
+;; Recursive read with memoization: cache read results in an alist, avoid re-reading.
+
+(define (read-with-cache id cache)
+  (let ((cached (assoc id cache)))
+    (if cached
+        (values (cdr cached) cache)
+        (let ((result (specimen-detail id)))
+          (cond
+            ((eq? result 'nan)
+             (values 'nan cache))
+            ((and (pair? result) (eq? (car result) 'escalate))
+             (values result cache))
+            (else
+             (values result (cons (cons id result) cache))))))))
+
+(define (read-tree-with-cache tree cache)
+  (cond
+    ((null? tree) (values '() cache))
+    ((not (pair? tree))
+     (read-with-cache tree cache))
+    (else
+     (let-values (((left-result new-cache1) (read-tree-with-cache (car tree) cache)))
+       (let-values (((right-result new-cache2) (read-tree-with-cache (cdr tree) new-cache1)))
+         (values (cons left-result right-result) new-cache2))))))
+
+(define sample-tree '(101 (102 101) 103))
+
+;; The procedure returns TWO values, so catch them both and look at each one.
+;; The tree mentions 101 twice but the cache only ever gains one entry for it —
+;; that is the whole point of threading the cache through the recursion.
+(let-values (((results cache) (read-tree-with-cache sample-tree '())))
+  (list (list \"distinct-ids-cached\" (length cache))
+        (list \"cached-ids\" (map car cache))))
+;; -> ((\"distinct-ids-cached\" 3) (\"cached-ids\" (103 102 101)))
+
+(let-values (((results cache) (read-tree-with-cache sample-tree '())))
+  results)
+;; -> (((\"source\" \"LabB\") (\"stock\" 2) (\"price\" 3)) (((\"source\" \"LabA\") (\"stock\" 4) (\"price\" 4)) ((\"source\" \"LabB\") (\"stock\" 2) (\"price\" 3))) ((\"source\" \"LabB\") (\"stock\" 6) (\"price\" 5)))
+;; Recursion threads cache, reads only once per ID, returns both results and updated cache.
+```
+
+**What's hard here:** The cache is an alist threaded through the recursion; `let-values` is used to receive both the result and the updated cache; the recursion has to pass the cache forward at each step; and the instrument is read only if the ID is not in the cache. This is memoization + recursion + read—hard to thread state through recursion, but clean once you see it.
+
+---
+
+## Pipeline with Conditional Branch and Rejoin
+
+This program runs a pipeline where the second stage branches based on a condition: if true, it reads one instrument; if false, it reads another. Both branches rejoin at stage three. This is conditional pipeline.
+")
