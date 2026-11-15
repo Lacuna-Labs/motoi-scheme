@@ -1,0 +1,76 @@
+;; triggers — the standing conditions and schedules that start carts, as a cart (design §4, §12.4; P3). It replaces
+;; `triggers.py`, whose in-memory `_state` fired ipad-verify on every API boot (design §2: 29 boots, 20 spawns on 10-23;
+;; F-13). Here `last` is seeded from the trigger's own history (the newest `history[].at` the `triggers` read returns)
+;; and kept in the cart's memory, which the checkpoint carries across a foreman restart.
+;; A trigger fires by FILING a run (`(file …)`, design §5.1, §7.2), never by spawning: the key is `<id>@<slot>`, and the
+;; foreman returns the open run under that key instead of filing it twice. An act cart that is filed still waits for
+;; the owner's press on each act (T7 open: until then every fire asks). Kinds, as `triggers.json` writes them:
+;;   every   due when now − last ≥ every_s                         key <id>@<floor(now / every_s)>
+;;   at      due when now ≥ at_s (today's HH:MM) and last < at_s     key <id>@<at_s>
+;;   read    fires when `holds` turns true (edge), at most every 600 s; re-arms when it turns false
+;; U-trig: one ipad-6h filing per 6 h over a day, with ten restarts in between (test/carts.test.mjs).
+(lacuna-cart 'triggers
+  '((does . "checks every armed trigger once a minute and files the run its cart is due, with last seeded from the trigger's history and kept across restarts")
+    (version . 1)
+    (agent . ((tier . watch)
+              (verbs . (on every hand file report remember recall))))
+    (restart . permanent)
+    (deadlines . ((hand . 30)))
+    (contract . ((goal . "each armed trigger files its cart once per due slot, never on a boot")
+                 (done-check . "a standing cart: one filing per slot per trigger in the run record; none at a restart")))
+    (sentry . ())
+    (touches . ("triggers"))
+    (done . "a standing cart: it runs until the owner stops it")
+    (exam . U-trig)))
+
+(define min-gap 600)                  ; a condition that flickers files at most every ten minutes (triggers.py MIN_GAP_S)
+
+;; an alist of (id value) pairs kept in memory: read and replace by id
+(define (lookup id pairs dflt)
+  (cond ((null? pairs) dflt)
+        ((equal? (car (car pairs)) id) (car (cdr (car pairs))))
+        (else (lookup id (cdr pairs) dflt))))
+(define (store id v pairs)
+  (cons (list id v) (filter (lambda (p) (not (equal? (car p) id))) pairs)))
+
+;; last: the cart's own memory first; else the trigger's newest history row, written into memory at once
+(define (last-of row)
+  (let* ((id (get row 'id "")) (seen (lookup id (recall 'last '()) #f)))
+    (if seen
+        seen
+        (let ((t (get row 'last 0)))
+          (remember 'last (store id t (recall 'last '())))
+          t))))
+
+(define (file! row key why)
+  (remember 'last (store (get row 'id "") (now) (recall 'last '())))
+  (remember 'filed (+ 1 (recall 'filed 0)))
+  (file (list (list 'key key) (list 'cart (get row 'cart "")) (list 'trigger (get row 'id "")) (list 'evidence why))))
+
+(define (slot-key row n) (string-append (get row 'id "") "@" (number->string n)))
+
+(define (check row)
+  (let ((t (now)) (last (last-of row)) (every-s (get row 'every_s 0)) (at-s (get row 'at_s 0)))
+    (cond ((not (get row 'enabled #t)) #f)
+          ((> every-s 0)
+             (when (>= (- t last) every-s)
+               (file! row (slot-key row (floor (/ t every-s))) (string-append "every " (number->string every-s) " s"))))
+          ((> at-s 0)
+             (when (and (>= t at-s) (< last at-s))
+               (file! row (slot-key row at-s) (get row 'evidence "at its time"))))
+          (else
+             (let* ((id (get row 'id "")) (holds (get row 'holds #f)) (was (lookup id (recall 'was '()) #f)))
+               (when (and holds (not was) (>= (- t last) min-gap))
+                 (file! row (slot-key row (floor t)) (get row 'evidence "its condition turned true")))
+               (remember 'was (store id holds (recall 'was '()))))))))
+
+(define (tick) (hand 'triggers))
+(define (start) (tick))
+(every 60 tick)
+
+(on 'hand (lambda (r)
+  (if (get r 'ok #f)
+      (for-each check (get (get r 'result '()) 'rows '()))
+      (report 'step (string-append "the triggers read did not answer: " (get r 'why "no reason") "; the next minute reads again")))))
+
+(on 'hand-timeout (lambda (x) (report 'step "the triggers read overran its deadline; the next minute reads again")))

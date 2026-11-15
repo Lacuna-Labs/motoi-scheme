@@ -1,0 +1,80 @@
+;; recall-tender — the cortex re-index errand, once an hour, through broker.sock.
+;; It replaces the retired errand runner's hourly reindex. It holds no mind.
+;; The rules: one errand at a time; exit 75 means the brain/GPU was busy, counted, never retried inside the hour;
+;; twelve consecutive exit 75 park the errand for 6 h and say so once; a failure is said once, and the same
+;; failure again is counted, not said again. The act `cortex-reindex` runs cortex reindex under broker.sock;
+;; the cart never runs a shell.
+;; U-recall: 0 restarts in 1 h; one failed errand is said once (test/carts.test.mjs).
+(lacuna-cart 'recall-tender
+  '((does . "runs the cortex re-index errand once an hour through broker.sock, parks it after 12 consecutive exit 75, and says each new failure once")
+    (version . 1)
+    (agent . ((tier . act)
+              (verbs . (on every after act hand report remember recall))))
+    (acts . (cortex-reindex))
+    (restart . permanent)
+    (deadlines . ((hand . 120) (cortex-reindex . 900)))
+    (contract . ((goal . "the cortex re-index errand runs at most once an hour and never loops on exit 75")
+                 (done-check . "a standing cart: every hour reads ran, busy, parked or failed-said; never two errands open at once")))
+    (sentry . ())
+    (touches . ("cortex"))
+    (done . "a standing cart: it runs until the owner stops it")
+    (exam . U-recall)))
+
+(define busy-limit 12)                ; consecutive exit 75 before the errand parks
+(define park-seconds 21600)           ; a parked errand tries once more after 6 h
+
+;; one errand at a time; a park holds every hour until it ends
+(define (tend)
+  (cond ((recall 'running #f) (report 'step "the last reindex has not answered; this hour is skipped"))
+        ((> (recall 'parked-until 0) (now))
+           (report 'step "parked after 12 consecutive exit 75; the next try is after the park"))
+        (else (remember 'running #t) (act 'cortex-reindex "reindex"))))
+
+(define (start) (tend))
+(every 3600 tend)
+
+;; a failure is said once; the same words again only raise its count
+(define (say-once why)
+  (if (equal? why (recall 'last-why ""))
+      (remember 'repeats (+ 1 (recall 'repeats 0)))
+      (begin (remember 'last-why why) (remember 'repeats 0)
+             (report 'alert (string-append "recall-tender: " why)))))
+
+(define (busy)
+  (remember 'busy (+ 1 (recall 'busy 0)))
+  (if (>= (recall 'busy 0) busy-limit)
+      (begin (remember 'busy 0)
+             (remember 'parked-until (+ (now) park-seconds))
+             (say-once "the recall errand parked: 12 consecutive exit 75 (the GPU/brain was busy); it tries again in 6 h"))
+      (report 'step (string-append "the brain was busy (exit 75): " (number->string (recall 'busy 0))
+                                   " of 12 before the errand parks"))))
+
+(define (finish status why)
+  (remember 'running #f)
+  (remember 'press-said #f)
+  (cond ((= status 0) (remember 'busy 0) (remember 'last-why "") (report 'step "the recall errand ran: status 0"))
+        ((= status 75) (busy))
+        (else (remember 'busy 0)
+              (say-once (string-append "the recall errand failed: status " (number->string status) "; " why)))))
+
+(define (status-of r)
+  (get r 'status (get r 'exit_code (if (get r 'ok #f) 0 1))))
+
+(define (follow) (hand 'job (recall 'job "")))
+
+(on 'act (lambda (r)
+  (cond ((get r 'waiting #f)
+           (unless (recall 'press-said #f)
+             (remember 'press-said #t)
+             (report 'press (get r 'said "the recall errand waits for the owner's press (standing press, T7)"))))
+        ((get r 'job #f) (remember 'job (get r 'job "")) (after 30 follow))
+        (else (finish (status-of r) (get r 'why (get r 'tail "no tail")))))))
+
+(on 'hand (lambda (r)
+  (let ((j (get r 'result '())))
+    (cond ((not (get r 'ok #f)) (after 60 follow))
+          ((get j 'running #f) (after 30 follow))
+          (else (finish (status-of j) (get j 'why (get j 'tail "no tail"))))))))
+
+(on 'hand-timeout (lambda (x) (after 60 follow)))
+(on 'act-timeout (lambda (x) (finish 15 "the errand overran its deadline and was killed (exit 15); it is never re-sent")))

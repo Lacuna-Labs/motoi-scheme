@@ -1,0 +1,104 @@
+;; backup — the world's snapshot as a run (design §12.4; §21 O-58; work order §12.2: replaces the `backup` calendar
+;; kicker and workers.py's snapshot, which kept 12 hourly bundles × 1.26 GB, design §2). One run: commit and bundle
+;; ~/lacuna-world into ~/Lacuna-Backups (act `bundle`), list the bundles, then the RESTORE DRILL: the newest bundle is
+;; reopened and verified (`bundle-verify`: `git bundle verify` plus its heads) before anything is pruned. Retention:
+;; the newest 3 bundles, plus the newest of each of the newest 3 days. A drill that fails stops the run with nothing
+;; pruned. It holds no mind. The trigger that files it hourly is in triggers.json (armed by the owner's press).
+;; U-backup: 3 hourly + 3 daily kept, the newest restorable, no prune before the drill (test/carts.test.mjs).
+(lacuna-cart 'backup
+  '((does . "bundles the world into ~/Lacuna-Backups, reopens and verifies the newest bundle, then prunes to the newest 3 plus the newest of each of 3 days")
+    (version . 2)
+    (agent . ((tier . act)
+              (verbs . (on act hand report remember recall done))))
+    (acts . (bundle prune))
+    (restart . transient)
+    (deadlines . ((hand . 120) (bundle . 600) (bundle-verify . 300) (prune . 120) (cart . 1800)))
+    ;; done when the restore drill holds: the newest bundle the `bundles` read lists carries today's date, and the
+    ;; `bundle-verify` read was asked for that bundle and says verified with at least one head (the executor's answers)
+    (contract . ((goal . "a restorable bundle of the world exists and at most 3 hourly + 3 daily are kept")
+                 (done-check . "(and (has 'bundles) (has 'bundle-verify) (get bundle-verify 'ok #f)
+                                     (let* ((ns (sort (filter string? (map (lambda (b) (get b 'name #f))
+                                                                           (get (get bundles 'result '()) 'bundles '())))
+                                                      string<?))
+                                            (newest (if (null? ns) #f (car (reverse ns))))
+                                            (day (string-append \"lacuna-world-\" (substring today 0 4) (substring today 5 7)
+                                                                (substring today 8 10)))
+                                            (v (get bundle-verify 'result '())) (h (get v 'heads '())))
+                                       (and newest (string-prefix? day newest) (member newest (args-of 'bundle-verify))
+                                            (get v 'verified #f) (if (list? h) (pair? h) (and (number? h) (> h 0))))))")))
+    (sentry . ())
+    (touches . ("backups"))
+    (done . "the newest bundle reopened and verified, and the old ones pruned, or the run stopped at a named step and said why")
+    (exam . U-backup)))
+
+(define hourly 3)
+(define daily 3)
+
+(define (step! s) (remember 'step s) (report 'step (string-append "starting " (symbol->string s))))
+(define (finish said) (report 'summary said) (done said))
+
+;; ── retention (workers.py _bundles_to_keep, as a program) ─────────────────────────────────────────────────────────
+;; names are lacuna-world-YYYYMMDD-HHMM.bundle; the name sorts by time
+(define (bundle? n) (and (string-prefix? "lacuna-world-" n) (string-suffix? ".bundle" n) (= (string-length n) 33)))
+(define (day-of n) (substring n 13 21))
+(define (last-n xs n) (if (> (length xs) n) (list-tail xs (- (length xs) n)) xs))
+;; ascending names → the newest name of each day, ascending
+(define (per-day ns)
+  (cond ((null? ns) '())
+        ((and (pair? (cdr ns)) (equal? (day-of (car ns)) (day-of (car (cdr ns))))) (per-day (cdr ns)))
+        (else (cons (car ns) (per-day (cdr ns))))))
+(define (keep-of ns) (append (last-n ns hourly) (last-n (per-day ns) daily)))
+(define (prune-of ns) (let ((keep (keep-of ns))) (filter (lambda (n) (not (member n keep))) ns)))
+
+;; ── the run ───────────────────────────────────────────────────────────────────────────────────────────────────────
+(define (start) (step! 'bundle) (act 'bundle))
+
+(define (listed r)
+  (let ((ns (sort (filter bundle? (map (lambda (b) (get b 'name "")) (get (get r 'result '()) 'bundles '()))) string<?)))
+    (cond ((not (get r 'ok #f)) (finish (string-append "stopped at list: " (get r 'why "the bundles could not be read"))))
+          ((null? ns) (finish "stopped at list: no bundle exists after the bundle step"))
+          (else (remember 'names ns)
+                (remember 'newest (car (last-n ns 1)))
+                (step! 'drill)
+                (hand 'bundle-verify (car (last-n ns 1)))))))
+
+;; the executor answers the heads as a LIST of names (lacuna-executor/reads/world.mjs); a count reads the same
+(define (heads-of v) (let ((h (get v 'heads 0))) (if (list? h) (length h) (if (number? h) h 0))))
+
+(define (drilled r)
+  (let ((v (get r 'result '())) (newest (recall 'newest "")))
+    (if (and (get r 'ok #f) (get v 'verified #f) (> (heads-of v) 0))
+        (let ((old (prune-of (recall 'names '()))))
+          (report 'step (string-append "restore drill passed: " newest " verified, " (number->string (heads-of v)) " head(s)"))
+          (remember 'pruned (length old))
+          (if (null? old)
+              (finish (string-append newest " made and verified; " (number->string (length (recall 'names '()))) " kept, none pruned"))
+              (begin (step! 'prune) (act 'prune old))))
+        (finish (string-append "stopped at the restore drill: " newest " did not verify ("
+                               (get r 'why (get v 'why "no reason")) "); nothing was pruned")))))
+
+(on 'act (lambda (r)
+  (let ((s (recall 'step 'bundle)))
+    (cond ((get r 'waiting #f) (report 'press (get r 'said "waiting for the owner's press")))
+          ((get r 'dry #f) (report 'would (get r 'would ""))
+                           (if (eq? s 'bundle) (begin (step! 'list) (hand 'bundles))
+                               (finish "dry run: every act answered what it would do; nothing was touched")))
+          ((not (get r 'ok #f)) (finish (string-append "stopped at " (symbol->string s) ": " (get r 'why "no reason"))))
+          ((eq? s 'bundle) (report 'step (string-append "bundle made: " (get r 'bundle "?"))) (step! 'list) (hand 'bundles))
+          (else (finish (string-append (recall 'newest "") " made and verified; "
+                                       (number->string (- (length (recall 'names '())) (recall 'pruned 0))) " kept, "
+                                       (number->string (recall 'pruned 0)) " pruned")))))))
+
+(on 'hand (lambda (r)
+  (case (get r 'op 'none)
+    ((bundles) (listed r))
+    ((bundle-verify) (drilled r))
+    (else #f))))
+
+;; 3.0 resume (§8): an issued act is followed, never issued again; a read is asked again (reads are idempotent)
+(on 'resume (lambda (c)
+  (case (recall 'step 'none)
+    ((list) (hand 'bundles))
+    ((drill) (hand 'bundle-verify (recall 'newest "")))
+    ((none) (start))
+    (else (report 'step "resumed: the issued act is followed, never issued again")))))

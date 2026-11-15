@@ -1,0 +1,107 @@
+;; self-health — "I think I'm sick here" (architecture ch. 5 §5.12; work order §9.3, §9.4). One pass: the
+;; `health-facts` read answers each law's measured value (from the telemetry ledger, ~/lacuna-world/ledger/telemetry.slat,
+;; and the box) and the box tickets already open; the program decides sick or well by the design's own gates, so no mind
+;; decides. A sick law files ONE ticket (kind box, dedupe key `self-health:<law>`) and a three-line mail note for Claude;
+;; a law already open only raises its count. The 26B is asked once, at `diagnose`, for one sentence of cause; with no
+;; brain the point falls back to skip and the ticket stands without it; the tickets are filed before the brain is asked,
+;; and the pass ends after 120 s whether or not the sentence came. It repairs nothing (`may_touch none`), pushes nothing to the desk, and
+;; never wakes Claude: mail is the channel.
+;; U-self: 3 planted faults → 3 tickets and 3 mail notes; a second run → 0 new, 3 counts raised (test/carts.test.mjs).
+(lacuna-cart 'self-health
+  '((does . "measures each health law against the design's gates and files one box ticket and one mail note per sick law, or raises the count of one already open")
+    (version . 2)
+    (agent . ((tier . watch)
+              (verbs . (on after hand report remember recall need-brain done))))
+    (judgment . ((diagnose . skip)))
+    (restart . temporary)
+    (deadlines . ((hand . 120) (cart . 900)))
+    ;; done when the `health-facts` read is all green or each red is named: every law over its gate (the gates are the
+    ;; `laws` table below, one list in both places; test/cart-done-forms.test.mjs holds them equal) and every port that
+    ;; does not answer has a ticket or a count raised under its key
+    (contract . ((goal . "every sick law has exactly one open box ticket, and Claude's mail names it")
+                 (done-check . "(and (has 'health-facts) (get health-facts 'ok #f)
+                                     (let* ((f (get (get health-facts 'result '()) 'facts '()))
+                                            (named (filter string? (map (lambda (x) (get (car x) 'key #f))
+                                                                        (append (reported 'ticket) (reported 'ticket-count)))))
+                                            (named? (lambda (k) (pair? (filter (lambda (n) (string-suffix? (string-append \":\" k) n)) named))))
+                                            (red? (lambda (g) (let ((v (get f (car g) #f)) (lim (car (cdr (cdr g)))))
+                                                                (and (number? v) (if (eq? (car (cdr g)) '>) (> v lim) (< v lim))))))
+                                            (gates '((forge-tender-restarts > 0) (ipad-fires-6h > 1) (notices-per-body > 1) (free-gb < 25)
+                                                     (bundles > 6) (pytest-red > 0) (uncommitted-old > 0) (contracts-stalled > 0)
+                                                     (promises-overdue > 0) (orphan-workers > 0) (units-missing > 0) (minds-below-gate > 0)))
+                                            (reds (append (map (lambda (g) (symbol->string (car g))) (filter red? gates))
+                                                          (map (lambda (s) (string-append \"service-\" (number->string (get s 'port 0))))
+                                                               (filter (lambda (s) (not (get s 'up #f))) (get f 'services '()))))))
+                                       (null? (filter (lambda (k) (not (named? k))) reds))))")))
+    (sentry . ())
+    (touches . ("work:box" "mail:to-claude"))
+    (done . "every law measured; each sick one ticketed once or counted, and the mail note written")
+    (exam . U-self)))
+
+;; the laws: (key words op threshold source); a fact the read cannot measure is said, never guessed
+(define laws
+  '(("forge-tender-restarts" "forge-tender restarts in the last hour" > 0 "design §15 P0 gate")
+    ("ipad-fires-6h" "ipad-verify trigger fires in 6 h" > 1 "design §15 P0 gate; F-13")
+    ("notices-per-body" "identical notices per body in an hour" > 1 "design §9; F-15")
+    ("free-gb" "disk free, GB" < 25 "design §15 P0 gate")
+    ("bundles" "world bundles kept" > 6 "design §21 O-58 (3 hourly + 3 daily)")
+    ("pytest-red" "pytest reds on dev" > 0 "design §15 P0 gate")
+    ("uncommitted-old" "uncommitted paths older than 24 h" > 0 "ch. 5 §5.12.1")
+    ("contracts-stalled" "contracts stalled or exit 99" > 0 "design §16 F-06")
+    ("promises-overdue" "open promises past deadline with no ticket" > 0 "design §9, §18")
+    ("orphan-workers" "worker records with no cart file" > 0 "design §12.3")
+    ("units-missing" "carts whose exam has no unit" > 0 "design §12.4")
+    ("minds-below-gate" "minds in service below the 90% gate" > 0 "design §9, §18")))
+
+(define (key-of law) (car law))
+(define (words-of law) (car (cdr law)))
+(define (sick? op v lim) (if (eq? op '>) (> v lim) (< v lim)))
+
+(define (open-count key open)
+  (cond ((null? open) #f) ((equal? (get (car open) 'key "") key) (get (car open) 'count 1)) (else (open-count key (cdr open)))))
+
+(define (file-or-count! key words value lim source open)
+  (let ((was (open-count (string-append "self-health:" key) open)))
+    (if was
+        (begin (remember 'counted (+ 1 (recall 'counted 0)))
+               (report 'ticket-count (list (list 'key (string-append "self-health:" key)) (list 'count (+ 1 was)) (list 'value value))))
+        (begin (remember 'filed (+ 1 (recall 'filed 0)))
+               (remember 'sick (cons (string-append words " = " (number->string value)) (recall 'sick '())))
+               (report 'ticket (list (list 'kind 'box) (list 'key (string-append "self-health:" key)) (list 'law source)
+                                     (list 'measured value) (list 'threshold lim) (list 'what words) (list 'may_touch 'none)))
+               (report 'mail (list (list 'kind 'self-report) (list 'severity 'sick)
+                                   (list 'what (string-append words ": " (number->string value) " against " (number->string lim)))
+                                   (list 'evidence (list (list 'law source) (list 'ticket (string-append "self-health:" key))))))))))
+
+(define (measure facts open)
+  (for-each (lambda (law)
+              (let ((v (get facts (string->symbol (key-of law)) #f)) (op (car (cdr (cdr law)))) (lim (car (cdr (cdr (cdr law))))))
+                (cond ((not (number? v)) (report 'unmeasured (words-of law)))
+                      ((sick? op v lim) (file-or-count! (key-of law) (words-of law) v lim (car (cdr (cdr (cdr (cdr law))))) open))
+                      (else #f))))
+            laws)
+  ;; services: each port that does not answer is its own law
+  (for-each (lambda (s)
+              (unless (get s 'up #f)
+                (file-or-count! (string-append "service-" (number->string (get s 'port 0)))
+                                (string-append "port " (number->string (get s 'port 0)) " answers") 0 1 "ch. 5 §5.12.1 services" open)))
+            (get facts 'services '())))
+
+(define (finish)
+  (done (string-append (number->string (recall 'filed 0)) " ticket(s) filed, " (number->string (recall 'counted 0)) " count(s) raised")))
+
+(define (start) (hand 'health-facts))
+
+(on 'hand (lambda (r)
+  (if (not (get r 'ok #f))
+      (done (string-append "stopped: the health facts did not read (" (get r 'why "no reason") ")"))
+      (let ((v (get r 'result '())))
+        (measure (get v 'facts '()) (get v 'open '()))
+        (if (null? (recall 'sick '()))
+            (finish)
+            (begin (after 120 finish)
+                   (need-brain 'diagnose "These health laws failed on our box. In one sentence: the likely cause and the smallest next step." (recall 'sick '()))))))))
+
+(on 'brain (lambda (b)
+  (report 'diagnosis (if (string? b) b (get b 'why "no sentence")))
+  (finish)))

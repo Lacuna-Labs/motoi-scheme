@@ -1,0 +1,153 @@
+;; ci-cd — dev → QA → her iPad as one cart: notes, pass, promote, build, install, verify (THE-FABRIC §5 "the CI/CD card";
+;; CARTS-ARE-THE-WORK §3). Every act waits for the owner's press. Triage reads each red, Scribe writes the notes, Verdict
+;; says whether her iPad runs the new build. The 26B is asked only at new-red and rollback; with no brain, the owner is.
+;; release.sks keeps the front half (sort, judge, narrow tests, check-in) and spawns this cart; it no longer copies 5–7.
+;; Source: LACUNA-ARCHITECTURE ch. 5 §5.11, verbatim but for one clause in (advance), marked; E-cicd in test/carts.test.mjs.
+(lacuna-cart 'ci-cd
+  '((does . "takes dev's head to QA and her iPad: notes, pass, promote, build, install, verify; stops at a real red and says why")
+    (version . 2)
+    (agent . ((tier . act)
+              (verbs . (on after hand act mind-job mind need-brain report remember recall done))))
+    (acts . (pass promote build install-ipad))
+    (minds . ((triage  . ((job . signal->label) (labels . (regression flaky environment test-wrong)) (untrusted . #t) (role . triage)))
+              (scribe  . ((job . condense) (untrusted . #t) (role . scribe)))
+              (verdict . ((job . yes-no) (labels . (yes no unsure)) (untrusted . #t) (role . verdict)))))
+    (judgment . ((new-red . ask-owner) (rollback . ask-owner)))
+    (sentry . ((cart . log-watch) (watch . ("log:dev-api" "log:jobs")) (gates . #f)))
+    ;; done when the last `release-board` read says the tip is out: dev's head is the commit QA runs and the build on her
+    ;; iPad (a short sha and a long one of the same commit agree); a dev that moved during the run reads not done
+    (contract . ((goal . "QA and her iPad run dev's head")
+                 (done-check . "(and (has 'release-board) (get release-board 'ok #f)
+                                     (let* ((b (get release-board 'result '())) (sha (lambda (k) (get (get b k '()) 'sha #f)))
+                                            (tip (sha 'dev))
+                                            (same? (lambda (x) (and (string? x) (> (string-length x) 6)
+                                                                    (or (string-prefix? x tip) (string-prefix? tip x))))))
+                                       (and (string? tip) (> (string-length tip) 6) (same? (sha 'qa)) (same? (sha 'ipad)))))")))
+    (deadlines . ((hand . 120) (mind . 30) (pass . 3600) (promote . 900) (build . 1800) (install-ipad . 900) (cart . 10800)))
+    (restart . temporary)
+    (touches . ("release" "qa" "ipad"))
+    (done . "her iPad runs the promoted build and Verdict says it is up, or the cart stopped at a named step and said why")
+    (exam . E-cicd)))
+
+(mind-job 'triage '(:ask "A check in our app's test battery went red. What kind of red is it? regression: the app did something wrong that it should do right (overlapping text anywhere is a regression). flaky: timing or a slow load; a rerun would likely pass. environment: the test machine, a server down, a missing login or key, not the app. test-wrong: the check itself expects the wrong thing." :needs (line) :labels (regression flaky environment test-wrong) :untrusted #t))
+(mind-job 'scribe '(:ask "Here is one commit: its subject and the files it changed. Write one release-note line, at most 90 characters, in active voice, saying what changed for the person using the app." :needs (commit) :untrusted #t))
+(mind-job 'verdict '(:ask "Here is what the release board reads after an install: the build on her iPad, the build QA runs, and the app's launch line. Is the new build up on her iPad? yes, no, or unsure." :needs (board) :labels (yes no unsure) :untrusted #t))
+
+;; ── helpers ───────────────────────────────────────────────────────────────────────────────────────────────────────
+(define (sym-of x) (if (string? x) (string->symbol x) x))      ; a mind's job arrives as a string; case compares symbols
+(define (step! s) (remember 'step s) (report 'step (string-append "starting " (symbol->string s))))
+(define (finish said) (report 'summary said) (report 'notes (recall 'notes '())) (done said))
+(define (begin-act s) (step! s) (act s))
+(define (red-line? l) (or (string-contains l "✗") (string-contains l "FAIL") (string-contains l " red ") (string-contains l "STOPPED")))
+(define (all-flaky? ks) (cond ((null? ks) #t) ((eq? (car ks) 'flaky) (all-flaky? (cdr ks))) (else #f)))
+
+;; ── 1. where the lanes stand ──────────────────────────────────────────────────────────────────────────────────────
+(define (start)
+  (remember 'reruns 0) (remember 'notes '())
+  (step! 'board)
+  (hand 'release-board))
+
+(define (board r)
+  (let* ((b (get r 'result '())) (dev (get (get b 'dev '()) 'sha "")) (qa (get (get b 'qa '()) 'sha "")))
+    (cond ((not (get r 'ok #f)) (finish (string-append "stopped at board: " (get r 'why "the board could not be read"))))
+          ((equal? dev qa) (finish "nothing to release: QA already runs dev's head"))
+          (else (remember 'dev dev) (remember 'qa qa)
+                (step! 'notes)
+                (hand 'git-log qa dev)))))
+
+;; ── 2. the notes (Scribe, one line a commit, at most 40) ──────────────────────────────────────────────────────────
+(define (notes r)
+  (let ((cs (get (get r 'result '()) 'commits '())))
+    (remember 'commits (min 40 (length cs))) (remember 'written 0)
+    (if (null? cs)
+        (begin-act 'pass)
+        (for-each (lambda (c) (mind 'scribe (list (cons 'commit c)))) (take cs 40)))))
+
+;; ── 3. the pass, read by Triage ───────────────────────────────────────────────────────────────────────────────────
+(define (followed r)
+  (let ((j (get r 'result '())) (s (recall 'step 'board)))
+    (cond ((not (get r 'ok #f)) (after 60 (lambda () (hand 'job (recall 'job "")))))
+          ((get j 'running #f) (after 30 (lambda () (hand 'job (recall 'job "")))))
+          ((get j 'ok #f) (report 'step (string-append (symbol->string s) " done")) (advance))
+          ((eq? s 'pass)
+             (let ((reds (filter red-line? (get j 'lines '()))))
+               (remember 'reds (length reds)) (remember 'read 0) (remember 'kinds '())
+               (if (null? reds)
+                   (finish "stopped at pass: it failed without a red line to read")
+                   (for-each (lambda (l) (mind 'triage (list (cons 'line l)))) reds))))
+          (else (finish (string-append "stopped at " (symbol->string s) ": its job failed"))))))
+
+(define (decide)
+  (let ((ks (recall 'kinds '())))
+    (cond ((and (all-flaky? ks) (< (recall 'reruns 0) 1))
+             (remember 'reruns 1) (report 'step "every red was flaky: the pass runs once more") (begin-act 'pass))
+          ((member 'unread ks) (report 'step "waiting for a judgment on a red Triage could not read"))
+          (else (finish (string-append "stopped at pass: " (number->string (recall 'reds 0)) " red, not flaky"))))))
+
+;; ── 4–6. promote, build, install; 7. verify ───────────────────────────────────────────────────────────────────────
+(define (advance)
+  (let ((s (recall 'step 'board)))
+    (cond ((eq? s 'pass) (begin-act 'promote))
+          ((eq? s 'promote) (begin-act 'build))
+          ((eq? s 'build) (begin-act 'install-ipad))
+          ;; lane C, 2026-10-23: the dry check comes before verify; in ch. 5 §5.11 it came after, so it never ran
+          ((and (eq? s 'install-ipad) (recall 'dry #f)) (finish "dry run: every act answered what it would do; nothing was touched"))
+          ((eq? s 'install-ipad) (step! 'verify) (hand 'release-board))
+          (else (finish "released: the pass held, QA is promoted, the build is on her iPad and up")))))
+
+(define (verify r)
+  (let ((b (get r 'result '())))
+    (if (not (equal? (get (get b 'ipad '()) 'sha "x") (recall 'dev "y")))
+        (need-brain 'rollback "Her iPad does not run the build this release promoted. Roll QA back to the build before? Answer yes or no." b)
+        (mind 'verdict (list (cons 'board b))))))
+
+;; ── events: one handler per kind (cart.mjs:125) ───────────────────────────────────────────────────────────────────
+(on 'hand (lambda (r)
+  (case (recall 'step 'board)
+    ((board) (board r))
+    ((notes) (notes r))
+    ((verify) (verify r))
+    (else (followed r)))))
+
+(on 'act (lambda (r)
+  (let ((s (recall 'step 'board)))
+    (cond ((get r 'waiting #f) (report 'press (get r 'said "waiting for the owner's press")))
+          ((not (get r 'ok #f)) (finish (string-append "stopped at " (symbol->string s) ": " (get r 'why "no reason"))))
+          ((get r 'dry #f) (remember 'dry #t) (report 'would (get r 'would "")) (advance))
+          (else (remember 'job (get r 'job "")) (after 30 (lambda () (hand 'job (recall 'job "")))))))))
+
+(on 'mind (lambda (m)
+  (case (sym-of (get m 'job 'none))
+    ((scribe)
+       (when (get m 'ok #f) (remember 'notes (cons (get m 'text (get m 'summary "")) (recall 'notes '()))))
+       (remember 'written (+ 1 (recall 'written 0)))
+       (when (>= (recall 'written 0) (recall 'commits 0)) (begin-act 'pass)))
+    ((triage)
+       (let ((kind (if (get m 'ok #f) (get m 'label 'regression) 'unread)) (line (get (get m 'of '()) 'line "")))
+         (remember 'read (+ 1 (recall 'read 0)))
+         (remember 'kinds (cons kind (recall 'kinds '())))
+         (report 'red (string-append (symbol->string kind) ": " line))
+         (when (eq? kind 'unread)
+           (need-brain 'new-red "A red from the pass that Triage could not read. Our law: overlapping text anywhere and anything the app does wrong stop a release. Stop? Answer yes to stop, no to run the pass again." line))
+         (when (>= (recall 'read 0) (recall 'reds 0)) (decide))))
+    ((verdict)
+       (if (and (get m 'ok #f) (eq? (get m 'label 'unsure) 'yes))
+           (advance)
+           (need-brain 'rollback "Verdict could not say the new build is up on her iPad. Roll QA back to the build before? Answer yes or no." (get m 'of '()))))
+    (else #f))))
+
+;; the 26B's answer, or the owner's when the brain is down (judgment fallback ask-owner): {by, yes, why}
+(on 'brain (lambda (b)
+  (if (eq? (recall 'step 'board) 'pass)
+      (if (get b 'yes #t) (finish "stopped at pass: a red no one could read, and the judgment was to stop")
+          (begin (remember 'reruns 1) (begin-act 'pass)))
+      (finish (if (get b 'yes #f) "stopped at verify: the owner rolls QA back (a separate press on the rollback cart)"
+                  "stopped at verify: the build is not up; left as it is, and said")))))
+
+;; 3.0: after a foreman restart the run resumes from its contract. An act whose ticket was issued is never issued again;
+;; the cart follows its job instead. (restart . temporary): a crash is not restarted — the owner presses again.
+(on 'resume (lambda (c)
+  (remember 'step (get c 'step 'board))
+  (if (get c 'job #f)
+      (begin (remember 'job (get c 'job "")) (hand 'job (get c 'job "")))
+      (start))))

@@ -1,0 +1,69 @@
+# Example playbook: enumerate Docker containers across hosts and remediate
+# unhealthy ones. Demonstrates the playbook spec; real execution engine
+# lands in v2.2.7.
+#
+# Run: lacuna run docker-health --inputs hosts=host-a,host-b
+version: 1
+name: docker-health
+description: |
+  Enumerate docker containers on each host, identify unhealthy ones,
+  attempt restart, report. Continues on per-host failure unless the
+  failure is the SSH connection itself.
+
+inputs:
+  hosts:
+    type: list
+    required: true
+    description: SSH targets — comma-separated when passed via --inputs
+
+  restart_attempts:
+    type: int
+    required: false
+    default: 1
+    description: How many times to retry restart per unhealthy container
+
+steps:
+  - id: list
+    role: rel-eng
+    description: List containers + status on each host
+    for_each: hosts
+    shell: |
+      ssh {{ item }} "docker ps -a --format '{{.ID}} {{.Names}} {{.Status}}'"
+    capture: per_host_containers   # dict<host, [str]>
+
+  - id: filter-unhealthy
+    role: engineering
+    description: Pick lines containing "unhealthy"
+    transform: |
+      filter lines containing "unhealthy"
+    input: per_host_containers
+    capture: unhealthy             # dict<host, [{id, name}]>
+
+  - id: restart
+    role: rel-eng
+    description: Restart unhealthy containers
+    for_each: unhealthy
+    shell: |
+      ssh {{ item.host }} "docker restart {{ item.id }}"
+    retries: "{{ inputs.restart_attempts }}"
+    continue_on_error: true
+    capture: restart_log
+
+  - id: report
+    role: architect
+    description: Human-readable summary
+    prompt: |
+      Across {{ hosts | length }} hosts:
+      - {{ unhealthy | total }} unhealthy containers identified
+      - {{ restart_log | succeeded }} restarted successfully
+      - {{ restart_log | failed }} still failing after {{ inputs.restart_attempts }} attempts
+
+      List the still-failing containers with host + name.
+
+# ── Notes for orchestration runtime (v2.2.7+) ─────────────────────────────
+# - shell steps: run via subprocess.run with PIPE, timeout default 300s
+# - role: which team member's system prompt the runtime uses for prompt steps
+# - for_each: iterate; `item` (and `item.host` for dict) bound in template
+# - capture: store result for later steps
+# - allowlist (lacuna.yaml playbooks.allowlist): when non-empty, shell command
+#   first token must be in the list. Default empty = any.

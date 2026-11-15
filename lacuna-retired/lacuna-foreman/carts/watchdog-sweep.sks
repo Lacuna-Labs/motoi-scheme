@@ -1,0 +1,110 @@
+;; watchdog-sweep — the standing 300 s watchdog sweep as a watch cart (CL-H17; P-2026-10-31-cortex-proposal-loop;
+;; LACUNA-1.0-FINALE §1 rulings 6 and 7; SRE-PRINCIPLES-LACUNA-1.0 ch. 6, 10). Before this cart,
+;; `tools/sre/watchdogs.mjs` ran only when a person or the night checkup invoked it; on 2026-10-31 the cortex proposal
+;; loop ran 5,451 turns before a person looked.
+;; Every 300 s the cart calls `(hand 'box-watchdogs)`, which evaluates every row of `~/lacuna-world/sre/watchdogs.slat`
+;; in the hands daemon (at most 8 in flight, 1 try and 3 s per probe).
+;; Rules (LACUNA-1.0-FINALE §1 rulings 6 and 7):
+;;   1. A row that turns red emits one `(report 'warn …)` at the start of its red episode (for its first 3 h), and one
+;;      `(report 'alert …)` once it has been continuously red for 3 h (10,800 s); staying red emits no duplicate warn or
+;;      alert.
+;;   2. A red row that turns green again emits one `(report 'clear …)` and leaves the red set, so a later red episode
+;;      starts fresh with a warn.
+;;   3. Tier `watch`: the cart never acts and never pages; the reports feed the telemetry card's Lacuna section.
+;;   4. The alert at 3 h also files one work order for the judge (the 26B) to diagnose the row: a red the loop cannot clear
+;;      becomes work, once per red episode (2026-11-06, E14 row 11: a red older than 3 h had no work row).
+;; U-sweep: fixture clock over 0 h (warn), < 3 h (quiet), 3 h (one alert), > 3 h (quiet), and green (one clear).
+(lacuna-cart 'watchdog-sweep
+  '((does . "runs box-watchdogs every 300 s and reports warn when a row turns red, alert once it stays red for 3 h, and clear when it turns green again; never acts or pages")
+    (version . 2)
+    (agent . ((tier . watch)
+              (verbs . (on every hand report remember recall work-order))))
+    (restart . permanent)
+    (deadlines . ((hand . 30)))
+    (contract . ((goal . "every watchdog in watchdogs.slat is evaluated every 300 s; each red episode reports warn at 0 h, alert at 3 h, and clear when green again")
+                 (done-check . "a standing cart: one warn at 0 h, one alert at 3 h, and one clear when green again per red episode; zero acts and zero pages")))
+    (sentry . ())
+    (touches . ("sre:watchdogs"))
+    (done . "a standing cart: it runs until the owner stops it")
+    (exam . U-sweep)))
+
+(define alert-after-s 10800)          ; 3 h continuously red promotes a warn episode to one alert
+
+(define (red-reading row)
+  (let ((w (get row 'why "")))
+    (if (and (string? w) (> (string-length w) 0))
+        w
+        (let ((rd (get row 'read "")))
+          (if (and (string? rd) (> (string-length rd) 0)) rd "unreadable")))))
+
+(define (green-reading row)
+  (let ((rd (get row 'read "")))
+    (if (and (string? rd) (> (string-length rd) 0)) rd "ok")))
+
+;; each entry in (recall 'reds '()) is (name since alerted)
+(define (find-red name entries)
+  (cond ((null? entries) #f)
+        ((equal? (car (car entries)) name) (car entries))
+        (else (find-red name (cdr entries)))))
+
+(define (drop-red name entries)
+  (filter (lambda (e) (not (equal? (car e) name))) entries))
+
+(define (put-red name since alerted entries)
+  (cons (list name since alerted) (drop-red name entries)))
+
+(define (check-row row t)
+  (let* ((name (get row 'name ""))
+         (subsystem (get row 'subsystem ""))
+         (mode (get row 'mode ""))
+         (ok (get row 'ok #f))
+         (reds (recall 'reds '()))
+         (entry (find-red name reds)))
+    (cond ((and (not ok) (not entry))
+             (remember 'reds (put-red name t #f reds))
+             (report 'warn
+                     (list (list 'row name)
+                           (list 'name name)
+                           (list 'subsystem subsystem)
+                           (list 'mode mode)
+                           (list 'reading (red-reading row))
+                           (list 'since t))))
+          ((and (not ok) entry)
+             (let ((since (car (cdr entry)))
+                   (alerted (car (cdr (cdr entry)))))
+               (when (and (not alerted) (>= (- t since) alert-after-s))
+                 (remember 'reds (put-red name since #t reds))
+                 (report 'alert
+                         (list (list 'row name)
+                               (list 'name name)
+                               (list 'subsystem subsystem)
+                               (list 'mode mode)
+                               (list 'reading (red-reading row))
+                               (list 'since since)))
+                 (work-order (string-append "Diagnose the watchdog " name " (" subsystem "): red for 3 h, reading "
+                                            (red-reading row) "; its mode: " mode)
+                             'judge))))
+          ((and ok entry)
+             (remember 'reds (drop-red name reds))
+             (report 'clear
+                     (list (list 'row name)
+                           (list 'name name)
+                           (list 'subsystem subsystem)
+                           (list 'mode mode)
+                           (list 'reading (green-reading row))))))))
+
+(define (tick) (hand 'box-watchdogs))
+(define (start) (tick))
+(every 300 tick)
+
+(on 'hand (lambda (r)
+  (if (get r 'ok #f)
+      (let* ((res (get r 'result '()))
+             (t (get res 'at (now))))
+        (for-each (lambda (row) (check-row row t)) (get res 'rows '()))
+        (remember 'last-red (get res 'red 0))
+        (remember 'last-green (get res 'green 0)))
+      (report 'step (string-append "the box-watchdogs read did not answer: " (get r 'why "no reason") "; the next sweep reads again")))))
+
+(on 'hand-timeout (lambda (x)
+  (report 'step "the box-watchdogs read overran its 30 s deadline; the next sweep reads again")))

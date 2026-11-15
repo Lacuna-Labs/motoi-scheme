@@ -1,0 +1,156 @@
+;; sentry-watch — the line sentry as a watch cart (design §9; §21 O-77; ch. 6 §6.4). It replaces `sentry.py`'s loop
+;; (ai.lacunalabs.sentry, work order §12.2), whose flood was 407 identical prod_fence notices 10-21 → 10-23 (F-15).
+;; Each minute it reads the dev API's log; routine lines (INFO, DEBUG) are counted, never asked about. A warning or error
+;; line is judged by the hard rules (lacuna-foreman/cascade/rules.json: a traceback, or an Error at error level, is never
+;; noise) and the kNN vote (`knn sentry …`, EmbeddingGemma, no generation). One typed verdict per line body per hour:
+;;   {class real-error·regression·needs-owner·noise·new-thing·recovered, layer knn, confidence, evidence, action, shadow}
+;; Repeats inside the hour raise the body's count, reported once per pass. The Sentry mind is asked only when the vote
+;; is unsure (< 0.6), and its answer is advice beside the verdict, never the verdict.
+;; Shadow until the gate (§9: per-class recall ≥ 90% over ≥ 200 gold lines, Wilson lower bound ≥ 85%): every action is
+;; `advise`; no notice, no kick. `gate-passed` flips only with the owner's press on the Sentry's forge card.
+;; U-sentry: a replay of 10-23's notices → ≤ 1 verdict per body per hour, with counts (test/carts.test.mjs).
+(lacuna-cart 'sentry-watch
+  '((does . "reads the dev API's log once a minute, judges each warning or error line by the hard rules and the kNN vote, and keeps one typed verdict per line body per hour with a count")
+    (version . 1)
+    (agent . ((tier . watch)
+              (verbs . (on every hand report remember recall mind-job mind))))
+    (minds . ((label . ((job . signal->label)
+                        (labels . (noise real-error regression needs-owner new-thing recovered))
+                        (untrusted . #t)
+                        (role . sentry)))))           ; the job is 'label: a mind named 'sentry collides with the header key
+    (shadow . #t)
+    (restart . permanent)
+    (deadlines . ((hand . 60) (mind . 30)))
+    (contract . ((goal . "every warning or error line in the dev API's log has one typed verdict per body per hour")
+                 (done-check . "a standing cart: verdict rows carry class, layer, confidence, evidence, action and shadow; no body twice in an hour")))
+    (sentry . ())
+    (touches . ("log:dev-api"))
+    (done . "a standing cart: it runs until the owner stops it")
+    (exam . U-sentry)))
+
+(mind-job 'label '(:ask "Label this line from our dev API's log. noise: routine output or one frame of a stack trace. real-error: a traceback header or a line that names a failure a person should fix. regression: something that worked before and now fails. recovered: an error that was handled. needs-owner: a decision only a person can make. new-thing: none of these." :needs (line) :labels (noise real-error regression needs-owner new-thing recovered) :untrusted #t))
+
+(define gate-passed #f)               ; §9: advisory until the Sentry passes its gate
+(define window 3600)                  ; one verdict per body per hour
+(define unsure 0.6)                   ; a vote below this asks the Sentry mind for advice
+(define kept-bodies 300)              ; the memory holds at most this many bodies inside the window
+
+;; ── reading a line ────────────────────────────────────────────────────────────────────────────────────────────────
+;; the string value of "key":"…" in one JSON log line, or #f (the dev API writes JSON lines; a traceback frame is plain)
+(define (field line key)
+  (let ((at (string-contains line (string-append "\"" key "\":\""))))
+    (if (not at)
+        #f
+        (let* ((rest (substring line (+ at (string-length key) 4) (string-length line)))
+               (end (string-contains rest "\"")))
+          (if end (substring rest 0 end) rest)))))
+
+(define (clip s n) (if (> (string-length s) n) (substring s 0 n) s))
+
+(define (level-of line)
+  (or (field line "level")
+      (if (or (string-contains line "Traceback") (string-contains line "Error") (string-contains line "Exception")) "ERROR" "INFO")))
+
+(define (body-of line) (clip (or (field line "msg") (field line "message") line) 400))
+(define (evidence-of line body) (or (field line "request_id") (clip body 60)))
+(define (routine? level) (or (equal? level "INFO") (equal? level "DEBUG")))
+
+;; the hard rules (cascade/rules.json, signal->label): the rule's name when one says "never noise", else #f
+(define (rule-of line)
+  (cond ((string-contains line "Traceback (most recent call last)") "a traceback is never noise")
+        ((and (or (string-contains line "ERROR") (string-contains line "CRITICAL") (string-contains line "FATAL"))
+              (or (string-contains line "Error") (string-contains line "Exception")))
+           "an Error or Exception at error level is never noise")
+        (else #f)))
+
+;; ── the window: (body first count reported) rows ──────────────────────────────────────────────────────────────────
+(define (row-of body rows)
+  (cond ((null? rows) #f) ((equal? (car (car rows)) body) (car rows)) (else (row-of body (cdr rows)))))
+(define (fresh rows t) (filter (lambda (x) (< (- t (car (cdr x))) window)) rows))
+(define (without body rows) (filter (lambda (x) (not (equal? (car x) body))) rows))
+
+;; a body seen inside the window counts; a new one opens its row and is judged. → #t when new
+(define (see! body t)
+  (let* ((rows (fresh (recall 'seen '()) t)) (x (row-of body rows)))
+    (if x
+        (begin (remember 'seen (cons (list body (car (cdr x)) (+ 1 (car (cdr (cdr x)))) (car (cdr (cdr (cdr x)))))
+                                     (without body rows)))
+               #f)
+        (begin (remember 'seen (take (cons (list body t 1 1) rows) kept-bodies)) #t))))
+
+;; the counts that rose since they were last said, once per pass
+(define (say-counts)
+  (let ((risen (filter (lambda (x) (> (car (cdr (cdr x))) (car (cdr (cdr (cdr x)))))) (recall 'seen '()))))
+    (unless (null? risen)
+      (report 'counts (map (lambda (x) (list (list 'body (car x)) (list 'count (car (cdr (cdr x)))))) risen))
+      (remember 'seen (map (lambda (x) (list (car x) (car (cdr x)) (car (cdr (cdr x))) (car (cdr (cdr x)))))
+                           (recall 'seen '()))))))
+
+;; ── the verdict (O-77) ────────────────────────────────────────────────────────────────────────────────────────────
+(define (action-of class)
+  (if (and gate-passed (member class '(real-error regression needs-owner))) 'notice 'advise))
+
+(define (verdict! class confidence evidence rule)
+  (remember 'verdicts (+ 1 (recall 'verdicts 0)))
+  (report 'verdict (list (list 'class class) (list 'layer 'knn) (list 'confidence confidence)
+                         (list 'evidence (list evidence)) (list 'action (action-of class))
+                         (list 'shadow (not gate-passed)) (list 'rule (or rule "none")))))
+
+;; the vote runs one line at a time, so each answer belongs to the head of the queue: (body evidence rule)
+(define (vote-next)
+  (let ((q (recall 'queue '())))
+    (unless (or (null? q) (recall 'voting #f))
+      (remember 'voting #t)
+      (hand 'knn "sentry" (car (car q))))))
+
+(define (voted r)
+  (unless (null? (recall 'queue '())) (judge-head r)))
+
+(define (judge-head r)
+  (let* ((q (recall 'queue '())) (head (car q)) (body (car head)) (ev (car (cdr head))) (rule (car (cdr (cdr head))))
+         (v (get r 'result '()))
+         (label (if (get r 'ok #f) (string->symbol (get v 'label "new-thing")) 'new-thing))
+         (conf (if (get r 'ok #f) (get v 'confidence 0) 0))
+         (class (if (and rule (eq? label 'noise)) 'real-error label)))
+    (remember 'queue (cdr q))
+    (remember 'voting #f)
+    (verdict! class conf ev rule)
+    (when (< conf unsure) (mind 'label (list (list 'line body))))
+    (vote-next)))
+
+;; ── the pass ──────────────────────────────────────────────────────────────────────────────────────────────────────
+(define (read-line! line t)
+  (let ((level (level-of line)) (rule (rule-of line)))
+    (if (and (routine? level) (not rule))
+        (remember 'noise (+ 1 (recall 'noise 0)))
+        (let ((body (body-of line)))
+          (when (see! body t)
+            (remember 'queue (append (recall 'queue '()) (list (list body (evidence-of line body) rule)))))))))
+
+(define (pass r)
+  (let ((t (now)))
+    (for-each (lambda (line) (read-line! line t)) (get (get r 'result '()) 'lines '()))
+    (say-counts)
+    (vote-next)))
+
+(define (tick) (hand 'tail-log "dev-api" 400))
+(define (start) (tick))
+(every 60 tick)
+
+(on 'hand (lambda (r)
+  (case (get r 'op 'none)
+    ((knn) (voted r))
+    (else (if (get r 'ok #f)
+              (pass r)
+              (report 'step (string-append "the log did not read: " (get r 'why "no reason"))))))))
+
+(on 'mind (lambda (m)
+  (report 'advice (list (list 'body (get (get m 'of '()) 'line ""))
+                        (list 'label (if (get m 'ok #f) (get m 'label 'new-thing) 'unread))
+                        (list 'shadow #t)))))
+
+;; a vote that never answered frees the queue; its line is judged new-thing with confidence 0
+(on 'hand-timeout (lambda (x)
+  (if (eq? (get x 'op 'none) 'knn)
+      (voted (list (list 'ok #f) (list 'op 'knn)))
+      (report 'step "the log read overran its deadline; the next minute reads again"))))

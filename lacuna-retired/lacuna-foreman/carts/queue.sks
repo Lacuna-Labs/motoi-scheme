@@ -1,0 +1,75 @@
+;; queue — the work queue's runner as a cart (architecture ch. 5 §5.10 row 11; design §5.1 `file`; it replaces the
+;; minute tick of `workqueue.py`). The queue stays one file of slat records (~/lacuna-world/work/QUEUE.slat); the
+;; `queue` read answers it, and this cart decides: while the queue is on and nothing of it runs, the first queued item is
+;; filed as a run with `(file …)` under key `queue@<id>` (the foreman never files one key twice; the cart's memory
+;; keeps the filed ids too, so a reboot never files it again); an open item
+;; whose goal says the same as an earlier open one is named for a merge, once. Same goal is judged by shared words
+;; (Jaccard ≥ 0.6 over words of 3+ letters) until the `nearness` hand lands. The cart writes nothing; the queue's own
+;; writer applies `merge` and the run's state (mail C→K).
+;; U-queue: survives a reboot with the head unchanged and filed once; ~13 "train Sentry" duplicates named (test/carts.test.mjs).
+(lacuna-cart 'queue
+  '((does . "files the first queued work item as a run when the queue is on and nothing of it runs, and names an item whose goal duplicates an earlier open one for a merge")
+    (version . 1)
+    (agent . ((tier . watch)
+              (verbs . (on every hand file report remember recall))))
+    (restart . permanent)
+    (deadlines . ((hand . 30)))
+    (contract . ((goal . "the queue moves one item at a time, in order, and no goal is filed twice")
+                 (done-check . "a standing cart: one filing per item key in the run record; each duplicate named once")))
+    (sentry . ())
+    (touches . ("work-queue"))
+    (done . "a standing cart: it runs until the owner stops it")
+    (exam . U-queue)))
+
+(define same-goal 0.6)
+(define (open? item) (member (get item 'state "") '("queued" "paused")))
+
+;; the words of a goal: lowercase, letters and digits, 3+ characters, each once
+(define (clean-char c) (if (or (char-alphabetic? c) (char-numeric? c)) c #\space))
+(define (words-of s)
+  (delete-duplicates
+    (filter (lambda (w) (>= (string-length w) 3))
+            (string-split (list->string (map clean-char (string->list (string-downcase s)))) " "))))
+(define (jaccard a b)
+  (let ((both (length (filter (lambda (w) (member w b)) a)))
+        (either (length (delete-duplicates (append a b)))))
+    (if (= either 0) 0 (/ both either))))
+
+(define (twin-of item earlier)
+  (cond ((null? earlier) #f)
+        ((>= (jaccard (words-of (get item 'goal "")) (words-of (get (car earlier) 'goal ""))) same-goal) (car earlier))
+        (else (twin-of item (cdr earlier)))))
+
+(define (name-twins items earlier)
+  (unless (null? items)
+    (let* ((it (car items)) (id (get it 'id "")) (twin (and (open? it) (twin-of it earlier))))
+      (when (and twin (not (member id (recall 'named '()))))
+        (remember 'named (cons id (recall 'named '())))
+        (report 'merge (list (list 'item id) (list 'into (get twin 'id "")) (list 'why "the same goal by shared words"))))
+      (name-twins (cdr items) (if (and (open? it) (not twin)) (append earlier (list it)) earlier)))))
+
+(define (first-queued items)
+  (cond ((null? items) #f)
+        ((and (equal? (get (car items) 'state "") "queued") (not (member (get (car items) 'id "") (recall 'named '())))) (car items))
+        (else (first-queued (cdr items)))))
+
+(define (move q)
+  (let ((items (get q 'items '())) (busy (get q 'running #f)))
+    (name-twins items '())
+    (when (and (get q 'on #f) (not busy))
+      (let ((head (first-queued items)))
+        (when (and head (not (member (get head 'id "") (recall 'filed '()))))
+          (remember 'filed (cons (get head 'id "") (recall 'filed '())))
+          (file (list (list 'key (string-append "queue@" (get head 'id ""))) (list 'cart (get head 'ref ""))
+                      (list 'goal (get head 'goal "")) (list 'trigger (get head 'id "")) (list 'evidence (get head 'kind "goal")))))))))
+
+(define (tick) (hand 'queue))
+(define (start) (tick))
+(every 60 tick)
+
+(on 'hand (lambda (r)
+  (if (get r 'ok #f)
+      (move (get r 'result '()))
+      (report 'step (string-append "the queue did not read: " (get r 'why "no reason"))))))
+
+(on 'hand-timeout (lambda (x) (report 'step "the queue read overran its deadline; the next minute reads again")))

@@ -1,0 +1,132 @@
+;; cleanup — the disk, kept (design §12.4; §21 O-47; CARTS-ARE-THE-WORK-1.0 §4). Version 2 of the world's cleanup.sks:
+;; the owner is asked about EVERY candidate, one at a time, with Janitor's opinion beside it, until Janitor passes its
+;; gate (ch. 5 §5.10.1). Candidates are the files on the owner's disk list and every eater of 5 GB or more. Refused
+;; without asking: any path under a live forge run. Held for the whole run: disk work while an eval checkpoint is near.
+;; A yes moves that one path to the Trash (act `trash`, never `rm`); a no leaves it. Janitor reads folder names, which
+;; are outside text, so it is quarantined. Until K lands the `yes-no` class, Janitor's yes/no rides as a label set.
+;; U-clean: a fixture tree of 20 paths, 5 never safe and 2 under a live forge run; 0 of those touched (test/carts.test.mjs).
+(lacuna-cart 'cleanup
+  '((does . "asks the owner about each file on his disk list and each eater of 5 GB or more, with Janitor's opinion, and trashes only what he says yes to; never a path under a live forge run")
+    (version . 3)
+    (agent . ((tier . act)
+              (verbs . (on hand act ask mind-job mind report remember recall done))))
+    (acts . (trash))
+    (minds . ((janitor . ((job . signal->label)
+                          (labels . (yes no unsure))
+                          (untrusted . #t)
+                          (role . janitor)))))
+    (restart . transient)
+    (deadlines . ((hand . 120) (mind . 30) (trash . 300) (cart . 86400)))
+    ;; done when the items removed match the plan: the trash acts the executor answered ok are as many as the paths it says
+    ;; it trashed, each of those is a candidate of the `disk` read, and none is under a run the `forge-runs` read names
+    ;; live; or the `forge-runs` read says an eval checkpoint is near and nothing was asked of the disk (the hold)
+    (contract . ((goal . "every candidate on the disk was put to the owner, and only his yeses were trashed")
+                 (done-check . "(or (and (has 'forge-runs) (not (has 'disk)) (get (get forge-runs 'result '()) 'eval_near #f))
+                                    (and (has 'forge-runs) (has 'disk) (get disk 'ok #f)
+                                         (let* ((plan (get disk 'result '()))
+                                                (paths (append (map (lambda (p) (if (string? p) p (get p 'path #f))) (get plan 'files '()))
+                                                               (map (lambda (c) (get c 'path #f))
+                                                                    (filter (lambda (c) (>= (get c 'gb 0) 5)) (get plan 'culprits '())))))
+                                                (live (get (get forge-runs 'result '()) 'live '()))
+                                                (under? (lambda (p) (pair? (filter (lambda (l) (or (equal? p l) (string-prefix? (string-append l \"/\") p))) live))))
+                                                (gone (map car (reported 'trashed))))
+                                           (and (= (length gone) (get (answered 'trash) 'ok 0))
+                                                (null? (filter (lambda (p) (or (not (member p paths)) (under? p))) gone))))))")))
+    (sentry . ())
+    (touches . ("disk"))
+    (done . "every candidate was answered by the owner, or the run held for a near eval checkpoint and said so")
+    (exam . U-clean)))
+
+(mind-job 'janitor '(:ask "Here is a folder or file on our dev box and its size. Is it safe to remove without asking anyone: a cache, a retired worktree, a build output, a temporary file? Code, data, keys, a repository's own history, a model in use or anything a person made are never safe." :needs (folder) :labels (yes no unsure) :untrusted #t))
+
+(define janitor-passed #f)            ; ch. 5 §5.10.1: every candidate goes to the owner until Janitor passes its gate
+(define eater-gb 5)
+(define most 20)                      ; candidates put to the owner in one run
+
+(define (step! s) (remember 'step s) (report 'step (string-append "starting " (symbol->string s))))
+(define (finish said) (report 'summary said) (done said))
+(define (n->s x) (number->string x))
+
+;; ── candidates ────────────────────────────────────────────────────────────────────────────────────────────────────
+(define (under-any? path roots)
+  (cond ((null? roots) #f)
+        ((or (equal? path (car roots)) (string-prefix? (string-append (car roots) "/") path)) #t)
+        (else (under-any? path (cdr roots)))))
+
+(define (candidates plan)
+  (append (map (lambda (p) (list (if (string? p) p (get p 'path "?")) (if (string? p) 0 (get p 'gb 0)))) (get plan 'files '()))
+          (map (lambda (c) (list (get c 'path "?") (get c 'gb 0)))
+               (filter (lambda (c) (>= (get c 'gb 0) eater-gb)) (get plan 'culprits '())))))
+
+(define (sort-out plan)
+  (let ((live (recall 'live '())))
+    (for-each (lambda (c)
+                (if (under-any? (car c) live)
+                    (begin (remember 'refused (+ 1 (recall 'refused 0)))
+                           (report 'refused (string-append (car c) ": under a live forge run; never touched (O-47)")))
+                    (remember 'queue (append (recall 'queue '()) (list c)))))
+              (candidates plan))
+    (remember 'queue (take (recall 'queue '()) most))
+    (next)))
+
+;; ── one candidate at a time: Janitor's opinion, then the owner's answer, then the act ──────────────────────────────
+(define (head) (car (recall 'queue '())))
+(define (label-of c) (string-append (car c) " · " (n->s (car (cdr c))) " GB"))
+
+(define (next)
+  (if (null? (recall 'queue '()))
+      (finish (string-append "every candidate answered: " (n->s (recall 'trashed 0)) " trashed, " (n->s (recall 'kept 0))
+                             " kept, " (n->s (recall 'refused 0)) " refused (live forge run)"))
+      (mind 'janitor (list (list 'folder (label-of (head)))))))
+
+(define (put-to-owner said)
+  (remember 'janitor said)
+  (if (and janitor-passed (equal? said "yes"))
+      (act 'trash (car (head)))
+      (ask (string-append "Move " (label-of (head)) " to the Trash? Janitor says: " said
+                          ". Nothing on the disk changes unless you say yes."))))
+
+(define (answered yes)
+  (if yes
+      (act 'trash (car (head)))
+      (begin (remember 'kept (+ 1 (recall 'kept 0)))
+             (report 'kept (car (head)))
+             (remember 'queue (cdr (recall 'queue '())))
+             (next))))
+
+(define (yes? a)
+  (cond ((boolean? a) a)
+        ((list? a) (or (get a 'yes #f) (get a 'approve #f)))
+        (else #f)))
+
+;; ── events ────────────────────────────────────────────────────────────────────────────────────────────────────────
+(define (start) (step! 'forge) (hand 'forge-runs))
+
+(on 'hand (lambda (r)
+  (let ((v (get r 'result '())))
+    (case (get r 'op 'none)
+      ((forge-runs)
+         (cond ((not (get r 'ok #f)) (finish (string-append "stopped at forge: the live forge runs could not be read ("
+                                                            (get r 'why "no reason") "); no disk work without them")))
+               ((get v 'eval_near #f) (finish "held: an eval checkpoint is near; no disk work this run (O-47)"))
+               (else (remember 'live (get v 'live '())) (step! 'disk) (hand 'disk))))
+      ((disk)
+         (if (get r 'ok #f)
+             (begin (report 'step (string-append "disk " (n->s (get (get v 'disk '()) 'free_pct 0)) "% free"))
+                    (step! 'ask) (sort-out v))
+             (finish (string-append "stopped at disk: " (get r 'why "the disk could not be read")))))
+      (else #f)))))
+
+(on 'mind (lambda (m)
+  (put-to-owner (if (get m 'ok #f) (symbol->string (get m 'label 'unsure)) "unread"))))
+
+(on 'answer (lambda (a) (answered (yes? a))))
+
+(on 'act (lambda (r)
+  (cond ((get r 'waiting #f) (report 'press (get r 'said "waiting for the owner's press")))
+        (else
+          (if (and (get r 'ok #f) (not (get r 'dry #f)))
+              (begin (remember 'trashed (+ 1 (recall 'trashed 0))) (report 'trashed (car (head))))
+              (report 'step (string-append (car (head)) ": " (if (get r 'dry #f) (get r 'would "dry run") (get r 'why "the trash refused")))))
+          (remember 'queue (cdr (recall 'queue '())))
+          (next)))))

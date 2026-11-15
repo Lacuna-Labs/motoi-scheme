@@ -1,0 +1,83 @@
+;; memory-audit — the weekly memory audit as a watch cart (lane R1, unit R1.7; ROLEBENCH-2.0 §7 "RAG compression, retention,
+;; audit"; the owner's notes of 2026-10-30). Once a week the cart calls `(hand 'memory-audit)`, which walks the folders the
+;; retention table rules (`lacuna-foreman/retention.slat`) and answers per class its files, bytes and oldest row, the plan (what
+;; is past its time to drop or to condense), the unruled files, the runs with no contract and the cortex's bytes.
+;; Rules:
+;;   1. One `(report 'info …)` row a class: its files, its bytes, its growth since the last audit (the bytes this cart
+;;      remembered a week before; the first audit says none), its oldest row and its rule.
+;;   2. One `(report 'info …)` row for the plan, the unruled files, the orphan runs and the cortex; a `(report 'warn …)` when a
+;;      class has rows past its time (the cleanup's work, press-gated; this cart never removes).
+;;   3. Tier `watch`: the cart never acts and never pages; its reports feed the telemetry card's Lacuna section.
+;;   4. Its step deadline is a week and a day: the cart takes one step a week by its own clock. Under the cart sentry's
+;;      default (600 s) every quiet 10 min of the week read as an abandoned run: 13 kicks and 547 `would-stop` rows in
+;;      `foreman.log` from 2026-11-02 to 11-06, while the hand answered in 487 ms and the ten rows were written (order
+;;      2026-11-06 §1.11).
+;; U-memory-audit: a fixture answer twice a week apart (no growth the first week, the growth the second), a class past its
+;; time (one warn), and a read that does not answer (one step row).
+(lacuna-cart 'memory-audit
+  '((does . "reads memory-audit once a week and reports each retention class's size and growth, the plan, the unruled files, the orphan runs and the cortex; warns when rows are past their time; never removes, acts or pages")
+    (version . 2)
+    (agent . ((tier . watch)
+              (verbs . (on every hand report remember recall))))
+    (restart . permanent)
+    (deadlines . ((hand . 30) (step . 691200)))
+    (contract . ((goal . "every week, one report row per retention class with its growth, and one for the plan; a warn for rows past their time")
+                 (done-check . "a standing cart: one info row a class and one for the plan each week; zero acts and zero pages")))
+    (sentry . ())
+    (touches . ("world:memory"))
+    (done . "a standing cart: it runs until the owner stops it")
+    (exam . U-memory-audit)))
+
+(define week-s 604800)
+
+;; each entry in (recall 'sizes '()) is (class bytes)
+(define (last-bytes name entries)
+  (cond ((null? entries) #f)
+        ((equal? (car (car entries)) name) (car (cdr (car entries))))
+        (else (last-bytes name (cdr entries)))))
+
+(define (class-row c sizes)
+  (let* ((name (get c 'class ""))
+         (bytes (get c 'bytes 0))
+         (was (last-bytes name sizes)))
+    (report 'info
+            (list (list 'class name)
+                  (list 'files (get c 'files 0))
+                  (list 'bytes bytes)
+                  (list 'grew (if was (- bytes was) "none"))
+                  (list 'oldest-days (get c 'oldestDays "none"))
+                  (list 'keep (get c 'keep "forever"))
+                  (list 'past (get c 'past "forever"))))
+    (list name bytes)))
+
+(define (tick) (hand 'memory-audit))
+(define (start) (tick))
+(every week-s tick)
+
+(on 'hand (lambda (r)
+  (if (get r 'ok #f)
+      (let* ((res (get r 'result '()))
+             (sizes (recall 'sizes '()))
+             (plan (get res 'plan '()))
+             (now-sizes (map (lambda (c) (class-row c sizes)) (get res 'classes '()))))
+        (remember 'sizes now-sizes)
+        (report 'info
+                (list (list 'plan "memory")
+                      (list 'drop (get plan 'drop 0))
+                      (list 'drop-bytes (get plan 'dropBytes 0))
+                      (list 'condense (get plan 'condense 0))
+                      (list 'stands (get plan 'stands 0))
+                      (list 'unruled (get (get res 'unruled '()) 'count 0))
+                      (list 'orphan-runs (get (get res 'orphans '()) 'count 0))
+                      (list 'cortex-bytes (get (get res 'cortex '()) 'bytes 0))
+                      (list 'partial (get res 'partial #f))))
+        (when (> (+ (get plan 'drop 0) (get plan 'condense 0)) 0)
+          (report 'warn
+                  (list (list 'row "memory.past-time")
+                        (list 'drop (get plan 'drop 0))
+                        (list 'condense (get plan 'condense 0))
+                        (list 'reading "rows are past their retention time; the cleanup removes them on the owner's press")))))
+      (report 'step (string-append "the memory-audit read did not answer: " (get r 'why "no reason") "; next week reads again")))))
+
+(on 'hand-timeout (lambda (x)
+  (report 'step "the memory-audit read overran its 30 s deadline; next week reads again")))

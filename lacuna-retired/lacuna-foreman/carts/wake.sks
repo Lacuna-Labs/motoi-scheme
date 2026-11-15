@@ -1,0 +1,81 @@
+;; wake — a finished job wakes Lacuna between turns, with the facts (architecture ch. 5 §5.10 row 23; it replaces
+;; `wake.py`, one of the five half-supervisors with its own clock). The rules of wake.py, kept:
+;;   nothing goes INTO a running turn: an event waits until no turn runs and the owner's last turn ended 8 s ago;
+;;   events coalesce: up to 8 in one wake; a loop cannot run away: at most 6 wakes in 600 s, the rest ride the next;
+;;   worth a turn: a failure always; a routine watcher or verifier that ended well never; under 15 s and well, never.
+;; The `wake-state` read answers what works now, what ended recently with its outcome, and whether a turn may start.
+;; Pending events live in the cart's memory, so a restart loses none. The wake itself travels up as `(report 'wake …)`;
+;; the brain loop turns it into one system turn under its own session (mail C→K, C→B). It never names the owner's chat.
+;; U-wake: 3 jobs end inside 4 s → one wake; a routine verifier that passed → none; 7 wakes asked in 600 s → 6 (test).
+(lacuna-cart 'wake
+  '((does . "notices what finished since the last look and, when no turn runs and the owner is quiet, sends one coalesced wake with the facts")
+    (version . 1)
+    (agent . ((tier . watch)
+              (verbs . (on every hand report remember recall))))
+    (restart . permanent)
+    (deadlines . ((hand . 10)))
+    (contract . ((goal . "every finished job worth a turn reaches the brain once, between turns, coalesced")
+                 (done-check . "a standing cart: each worth-it ending appears in exactly one wake; at most 6 wakes in any 600 s")))
+    (sentry . ())
+    (touches . ("wake"))
+    (done . "a standing cart: it runs until the owner stops it")
+    (exam . U-wake)))
+
+(define max-events 8)
+(define max-wakes 6)
+(define wake-window 600)
+(define quiet-s 8)
+(define debounce-s 4)
+
+(define (has? s words) (cond ((null? words) #f) ((string-contains s (car words)) #t) (else (has? s (cdr words)))))
+(define (bad? outcome) (has? (string-downcase outcome) '("fail" "error" "stopped" "crash" "grave" "stalled" "timeout")))
+(define (routine? item) (has? (string-downcase (string-append (get item 'what "") " " (get item 'id ""))) '("watch" "verif" "sentry" "heartbeat")))
+
+(define (worth? item outcome ran)
+  (cond ((bad? outcome) #t)
+        ((routine? item) #f)
+        ((and ran (< ran 15)) #f)
+        (else #t)))
+
+(define (find-id id rows) (cond ((null? rows) #f) ((equal? (get (car rows) 'id "") id) (car rows)) (else (find-id id (cdr rows)))))
+
+;; what left the working list since the last look has finished; its outcome comes from the read's recent endings
+(define (diff! working recent t)
+  (for-each (lambda (k)
+              (unless (find-id (get k 'id "") working)
+                (let* ((end (find-id (get k 'id "") recent))
+                       (outcome (if end (get end 'outcome "ended") "ended"))
+                       (ran (if (get k 'since #f) (- t (get k 'since 0)) #f)))
+                  (when (worth? k outcome ran)
+                    (remember 'pending (append (recall 'pending '())
+                                               (list (list (list 'id (get k 'id "")) (list 'kind (get k 'kind "job"))
+                                                           (list 'title (get k 'what (get k 'id ""))) (list 'outcome outcome)
+                                                           (list 't t) (list 'ran (or ran 0))))))))))
+            (recall 'known '()))
+  (remember 'known working))
+
+(define (cooling? t)
+  (let ((recent (filter (lambda (w) (< (- t w) wake-window)) (recall 'wakes '()))))
+    (remember 'wakes recent)
+    (>= (length recent) max-wakes)))
+
+(define (deliver! idle t)
+  (let ((p (recall 'pending '())))
+    (when (and (not (null? p)) idle (>= (- t (get (car p) 't t)) debounce-s) (not (cooling? t)))
+      (let ((batch (take p max-events)))
+        (remember 'pending (list-tail p (length batch)))
+        (remember 'wakes (cons t (recall 'wakes '())))
+        (report 'wake batch)))))
+
+(define (look r)
+  (let* ((v (get r 'result '())) (t (now))
+         (idle (and (not (get v 'turn_running #t)) (>= (get v 'quiet_s 0) quiet-s))))
+    (diff! (get v 'working '()) (get v 'recent '()) t)
+    (deliver! idle t)))
+
+(define (tick) (hand 'wake-state))
+(define (start) (tick))
+(every 5 tick)
+
+(on 'hand (lambda (r) (when (get r 'ok #f) (look r))))
+(on 'hand-timeout (lambda (x) #f))
