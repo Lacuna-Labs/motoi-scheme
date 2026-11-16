@@ -1,0 +1,561 @@
+#!/usr/bin/env python3
+"""lacuna — the Studio's control plane from a terminal (Lacuna Beta, 2026-09-24). Talks to http://127.0.0.1:1138.
+
+  lacuna svc                          every service: up/down, supervised, pid
+  lacuna svc restart dev-api          start | stop | restart | supervise | why <name>   (QA asks: --yes to confirm)
+  lacuna health | self | drift        the machine, Lacuna itself, what has drifted
+  lacuna errors [--env qa] [--hours 6]   error classes with NEW / RISING / RETURNED
+  lacuna logs [--env dev] [--problems] [--grep text]
+  lacuna jobs | job <id>              long jobs and one job's log
+  lacuna builds | build <ref> | deploy <build-id> --yes      her iPad: build, then install (a rollback = an older build)
+  lacuna battery [release|full] | tests web|api
+  lacuna ask "what is going on?"      talk to Lacuna (the model; tools behind it)
+  lacuna petitions [approve|decline <id>]   approve/decline is the owner's press: signed with ~/.lacuna/owner-key
+  lacuna petitions approve --all       every waiting card listed, then one typed 'yes' approves them all
+  lacuna pair [--list | --revoke <device>]  pair the desk or the phone for the owner's press (a one-time six-word phrase)
+  lacuna minds [history] | minds rollback <role>   the trained minds in service; back to the previous version
+  lacuna exam [status] | exam start E10 | exam stop E10   the exam (§37.1): ten items handed to the carts; start = a card
+  lacuna watch [-n 200] [--only forge]   Lacuna at work, live: the last events first, then everything as it happens
+  lacuna cascade report               the cascade's calibration (B50): per job × model, accuracy vs the 26B, ms, certainty
+  lacuna status                       the glance: all clear, or what needs you (the phone's Home)
+  lacuna package | promote --yes [--build]   dev → QA: what is waiting; promote it (gated, rolls back)
+  lacuna chat                         talk to Lacuna in the terminal
+  lacuna release [--yes] [--skip-pass]   THE ONE PATH: workflow pass → promote+build → install on her iPad → it reports the build
+                                      without --yes: the latest release and its four steps
+  lacuna boot                         what came back after the last reboot (or restart of Lacuna); who would not survive one
+  lacuna checks                       run the minute's checks now — kick the watchdogs; says what it raised
+  lacuna watchdogs                    every watchdog's latest word on both sides, with its age
+  lacuna drill kill|bootout <svc>     DiRT: break one of OUR services on purpose and time its return (never QA)
+  lacuna drill self                   restart Lacuna itself (kickstart) and time the console's return
+  lacuna notify [test|set imessage <to>|set ntfy <url>|clear <channel>]   where a notice goes; send one now
+  lacuna work                         the work queue: on/off, every item in order, what runs (control/workqueue.py)
+  lacuna work add "goal" [--cart NAME|--card NAME|--exam E3] [--top]   queue a goal (it becomes a card), a cart, a card
+  lacuna work on | off                the queue's switch (on stands a 24 h work order; releases still wait for you)
+  lacuna work start|stop|pause|resume|up|down|drop W3    one item's hands
+  lacuna work show W3 [-f]            an item's run, step by step (-f follows it live)
+  --narrow                            the phone cut (automatic below 70 columns)
+Anything else goes to the classic lacuna CLI. LACUNA_WHO=claude marks who asked (default: alfred). Standard library only.
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+BASE = os.environ.get("LACUNA_URL", "http://127.0.0.1:1138")
+WHO = os.environ.get("LACUNA_WHO", "alfred")
+NEW = {"svc", "health", "self", "drift", "errors", "logs", "jobs", "job", "builds", "build", "deploy", "battery", "tests", "ask",
+       "petitions", "status", "package", "promote", "chat", "boot", "checks", "watchdogs", "drill", "notify", "release", "disk", "tell", "result", "usage", "limits", "skills", "reports", "sentinel", "exam", "watch", "pair", "minds", "work"}
+
+# ★ THE PHONE CUT OF THE CLI (his, 2026-09-25: "even of the CLI… a mobile-first cut and a server-first cut"). Over SSH from
+# a phone the terminal is ~40–50 columns and the wide rows wrapped into noise. Below 70 columns (or --narrow, or
+# LACUNA_NARROW=1) every item is two lines: the thing, then its facts, indented — nothing wider than the screen.
+import shutil
+import textwrap
+COLS = shutil.get_terminal_size((100, 24)).columns
+NARROW = COLS < 70 or "--narrow" in sys.argv or os.environ.get("LACUNA_NARROW") == "1"
+if "--narrow" in sys.argv:
+    sys.argv.remove("--narrow")
+BOLD, DIM, OFF = ("\033[1m", "\033[2m", "\033[0m") if sys.stdout.isatty() else ("", "", "")
+
+
+def item(head, facts=""):
+    """one entry: wide = one line; narrow = the head in bold, the facts wrapped and indented under it"""
+    if not NARROW:
+        print(f"{head}  {facts}".rstrip())
+        return
+    print(f"{BOLD}{head}{OFF}")
+    for ln in textwrap.wrap(str(facts), width=max(20, COLS - 3)) if facts else []:
+        print(f"  {DIM}{ln}{OFF}")
+
+
+def call(method, path, body=None, timeout=300):
+    req = urllib.request.Request(BASE + path, method=method, data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Content-Type": "application/json", "X-Lacuna-Who": WHO})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode() or "null")
+    except urllib.error.HTTPError as e:
+        try:
+            d = json.loads(e.read().decode())
+        except Exception:
+            d = {"detail": str(e)}
+        sys.exit(f"lacuna: {e.code} — {d.get('detail')}")
+    except urllib.error.URLError as e:
+        sys.exit(f"lacuna: the console on {BASE} did not answer ({e.reason}) — `launchctl kickstart -k gui/$(id -u)/ai.lacunalabs.lacuna`")
+
+
+def owner():
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    import lacuna_owner
+    return lacuna_owner
+
+
+def flag(args, name, default=None):
+    if name in args:
+        i = args.index(name)
+        v = args[i + 1] if i + 1 < len(args) and not args[i + 1].startswith("--") else True
+        return v
+    return default
+
+
+def work(rest):
+    """the work queue from a terminal (control/workqueue.py; the owner, 2026-10-19: "on the command line as tasks in a queue")"""
+    sub = rest[0] if rest else "list"
+    if sub == "list":
+        q = call("GET", "/api/work/queue")
+        st = q["standing"]
+        print(f"work queue · {'ON' if st['on'] else 'OFF'} · {st['said']}")
+        mark = {"queued": "·", "running": "▶", "reviewing": "◉", "done": "✓", "stopped": "■", "failed": "✗", "paused": "‖"}
+        for it in q["items"]:
+            print(f"  {mark.get(it['state'], '?')} {it['id']:<4} {it['state']:<9} {it['kind']:<5} {it['title'][:70]}"
+                  + (f"  — {str(it.get('review') or it.get('note') or '')[:80]}" if it['state'] in ('done', 'stopped', 'failed') else ""))
+        return
+    if sub == "add":
+        words = [a for a in rest[1:] if not a.startswith("--") and a not in (flag(rest, "--cart"), flag(rest, "--card"), flag(rest, "--exam"))]
+        kind, ref = ("cart", flag(rest, "--cart")) if flag(rest, "--cart") else ("card", flag(rest, "--card")) if flag(rest, "--card") \
+            else ("exam", flag(rest, "--exam")) if flag(rest, "--exam") else ("goal", "")
+        title = " ".join(words) or str(ref)
+        r = call("POST", "/api/work/queue", {"title": title, "goal": title, "kind": kind, "ref": ref or "", "at": "top" if "--top" in rest else "end"})
+        print(r.get("said") or r.get("why"))
+        return
+    if sub in ("on", "off"):
+        print(call("POST", f"/api/work/queue/{sub}")["said"])
+        return
+    if sub in ("start", "stop", "pause", "resume", "up", "down", "drop") and len(rest) > 1:
+        print(call("POST", f"/api/work/queue/{rest[1]}/{sub}")["said"])
+        return
+    if sub == "show" and len(rest) > 1:
+        since, follow = 0.0, "-f" in rest
+        while True:
+            for e in call("GET", f"/api/work/queue/{rest[1]}/events?since={since}")["events"]:
+                since = max(since, float(e.get("t") or 0))
+                k = e.get("type")
+                if k == "round" and e.get("why"):
+                    print(f"↺ {e['why']}")
+                elif k == "call":
+                    print(f"● {e.get('tool')} {json.dumps(e.get('args') or {})[:120]}")
+                elif k == "result":
+                    print(f"  {'✓' if e.get('ok') else '✗'} {str(e.get('text') or '')[:300]}")
+                elif k in ("token", "answer", "note", "thinking"):
+                    t = str(e.get("text") or "")
+                    print(("  " if k == "note" else "") + (t if k != "thinking" else f"(thinking) {t[:200]}"), end="" if k == "token" else "\n")
+            if not follow:
+                return
+            time.sleep(2)
+    sys.exit("lacuna work [list] · add \"goal\" [--cart N|--card N|--exam E] [--top] · on · off · start|stop|pause|resume|up|down|drop ID · show ID [-f]")
+
+
+def main(argv):
+    if not argv or argv[0] not in NEW:
+        here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+        py = os.path.join(here, ".venv", "bin", "python")
+        os.execv(py, [py, "-m", "lacuna", *argv])
+    cmd, rest = argv[0], argv[1:]
+    yes = "--yes" in rest
+    if cmd == "work":
+        return work(rest)
+    if cmd == "svc":
+        if not rest:
+            for s in call("GET", "/api/services"):
+                if NARROW:
+                    item(f"{'●' if s['up'] else '○'} {s['name']}  {'UP' if s['up'] else 'DOWN'}", f":{s['port']} · {'launchd' if s['supervised'] else 'hand-started'}{' · HERS' if s['hers'] else ''}")
+                    continue
+                print(f"{'●' if s['up'] else '○'} {s['name']:<14} :{s['port']:<6} {'UP' if s['up'] else 'DOWN':<5} "
+                      f"{'launchd' if s['supervised'] else 'hand-started':<13} pid {s['pid'] or '—':<7} {'HERS' if s['hers'] else ''}")
+            return
+        action, name = rest[0], (rest[1] if len(rest) > 1 else None)
+        if action == "why":
+            x = call("GET", f"/api/services/{name}/explain")
+            print(f"{name}: {x['cause']}\n\n{x['log']}")
+            return
+        r = call("POST", f"/api/services/{name}/{action}", {"confirm": yes})
+        print(f"{name}: {action} → {'ok' if r.get('ok') else 'FAILED'}; {'up' if r.get('up') else 'down'}")
+        if r.get("explain"):
+            print(f"why: {r['explain']['cause']}")
+        return
+    if cmd == "release":
+        if yes:
+            r = owner().release("--skip-pass" in rest)                # signed with the owner key (bin/lacuna_owner.py)
+            print(f"release started — job {r['job']['id']}; follow it: lacuna release · lacuna job {r['job']['id']}")
+            return
+        st = call("GET", "/api/release")
+        if not st.get("job"):
+            print("no release yet — `lacuna release --yes` starts one"); return
+        j = st["job"]
+        import time as _t
+        print(f"{j['title']} · {'running' if j.get('running') else 'exit ' + str(j.get('code'))} · started {_t.strftime('%H:%M', _t.localtime(j.get('started') or 0))} · job {j['id']}")
+        marks = {"waiting": "○", "running": "◐", "done": "●", "failed": "✗"}
+        for s_ in st["steps"]:
+            item(f"{marks.get(s_['state'], '○')} {s_['n']}/4 {s_['title']}", s_.get("said") or "")
+        if st.get("done"): print(f"DONE — {st['done']}")
+        if st.get("stopped"): print(f"STOPPED — {st['stopped']}")
+        return
+    if cmd == "boot":
+        b = call("GET", "/api/boot")
+        if not b.get("done"):
+            print("the boot report is still being written (Lacuna waits up to 150 s for every service)"); return
+        import time as _t
+        item(f"{b.get('kind', '?')} · {_t.strftime('%Y-%m-%d %H:%M', _t.localtime(b.get('at', 0)))}{' (previous)' if b.get('previous') else ''}",
+             f"took {b.get('took_s')} s · machine up {int((b.get('uptime_s') or 0) // 60)} min at the time")
+        for n, sec in (b.get("up") or {}).items():
+            item(f"● {n}", f"back in {sec} s")
+        for n in b.get("down") or []:
+            item(f"○ {n}", "DID NOT COME BACK")
+        for n in b.get("not_kept_for_reboot") or []:
+            item(f"! {n}", "would not survive a reboot — no RunAtLoad agent loaded; `lacuna svc supervise " + n + "`")
+        return
+    if cmd == "checks":
+        r = call("POST", "/api/checks/run")
+        print(f"checks ran · {r['alerts']} open alert(s) · {len(r['drift'])} drift row(s)")
+        for a in r.get("raised") or []:
+            item(f"{a['level']} · {a['title']}", a["body"])
+        return
+    if cmd == "watchdogs":
+        w = call("GET", "/api/watchdogs")
+        for env in ("dev", "qa"):
+            print(f"{env}:")
+            for x in w.get(env) or []:
+                age = x.get("age_s", 0)
+                when = f"{age}s" if age < 120 else f"{age // 60}m" if age < 7200 else f"{age // 3600}h"
+                item(f"  {x['level']:<5} {x['name']}{' (stale)' if x.get('stale') else ''}", f"{when} ago — {str(x.get('summary'))[:150]}")
+        return
+    if cmd == "drill":
+        kind = rest[0] if rest else None
+        if kind == "self":
+            import subprocess as _sp, time as _t
+            print("restarting Lacuna itself (launchctl kickstart -k) …")
+            t0 = _t.time()
+            _sp.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/ai.lacunalabs.lacuna"], capture_output=True, timeout=15)
+            back = None
+            while _t.time() - t0 < 90:
+                try:
+                    with urllib.request.urlopen(BASE + "/api/self", timeout=2) as r:
+                        if r.status == 200:
+                            back = round(_t.time() - t0, 1); break
+                except Exception:
+                    pass
+                _t.sleep(0.5)
+            if back is None:
+                sys.exit(f"lacuna: it did not come back within 90 s — `tail -50 ~/.lacuna/logs/console.log`")
+            s = call("GET", "/api/self")
+            print(f"back in {back} s · heartbeat {s.get('heartbeat_age_s')} s · passes {s.get('passes')} · launchd pid {(s.get('launchd') or {}).get('pid')}")
+            return
+        if kind not in ("kill", "bootout") or len(rest) < 2:
+            sys.exit("usage: lacuna drill kill|bootout <service> · lacuna drill self")
+        name = rest[1]
+        print(f"drill {kind} {name} … (up to 120 s)")
+        r = call("POST", f"/api/drills/{kind}/{name}", {}, timeout=200)
+        if r.get("ok"):
+            print(f"{name}: back in {r.get('back_s')} s · pid {r.get('pid')} → {r.get('new_pid')} · launchd restarted it: {r.get('launchd_restarted')} · the watcher said something: {r.get('watcher_said')}")
+        else:
+            sys.exit(f"drill FAILED: {r.get('why') or r.get('refused') or r}")
+        return
+    if cmd == "notify":
+        sub = rest[0] if rest else None
+        if sub == "test":
+            r = call("POST", "/api/notify/test")
+            print("sent down: " + ", ".join(r.get("sent") or [])); return
+        if sub in ("set", "clear"):
+            home = os.environ.get("LACUNA_HOME", os.path.expanduser("~/.lacuna")); path = os.path.join(home, "notify.json")
+            try:
+                cfg = json.load(open(path))
+            except Exception:
+                cfg = {}
+            if sub == "set" and len(rest) >= 3 and rest[1] in ("imessage", "ntfy"):
+                cfg[rest[1]] = rest[2]
+            elif sub == "clear" and len(rest) >= 2:
+                cfg.pop(rest[1], None)
+            else:
+                sys.exit("usage: lacuna notify set imessage <number-or-apple-id> · set ntfy <url> · clear imessage|ntfy")
+            with open(path, "w") as f:
+                json.dump(cfg, f, indent=1)
+        ch = call("GET", "/api/notify")
+        item("banner", "the macOS notification on the Studio (always)")
+        item("imessage", ch.get("imessage") or "— (lacuna notify set imessage <number or Apple ID>)")
+        item("ntfy", ch.get("ntfy") or "— (lacuna notify set ntfy https://ntfy.sh/<topic>)")
+        return
+    if cmd == "tell":
+        words = " ".join(rest).strip()
+        if not words:
+            print('lacuna tell "what you expect" — e.g. lacuna tell "fix the cart favorites-velocity-watcher"')
+            return
+        out = call("POST", "/api/tell", {"words": words, "who": WHO})
+        print(out.get("say") or out)
+        return
+    if cmd == "result":
+        if not rest:
+            print("lacuna result <job id>")
+            return
+        r = call("GET", f"/api/result/{rest[0]}")
+        rep = r.get("report") or {}
+        print(f"{r['id']}: {r.get('state')}" + (f" — {rep.get('said')}" if rep else (f" — {r.get('note')}" if r.get("note") else "")))
+        if rep.get("verdict"):
+            print(f"verdict: {rep['verdict'].get('before')} → {rep['verdict'].get('after')} · {rep.get('rounds')} round(s) · {rep.get('minutes')} min")
+        if not rep and r.get("log"):
+            print(r["log"].rstrip())
+        return
+    if cmd == "sentinel":
+        if rest[:1] == ["accept"] and len(rest) == 2:
+            # the API's own package path: lacuna_api needs the `lacuna` package beside it (2026-10-19: the bare import crashed)
+            import sys as _s
+            root = __import__("pathlib").Path(__file__).resolve().parents[1]
+            _s.path[:0] = [str(root / "lacuna-api"), str(root / "lacuna-src")]
+            from lacuna_api.control import sentinel
+            print(sentinel.accept(rest[1]))
+        else:                                    # the read goes through the running API, like every other command
+            r = call("GET", "/api/sentinel")
+            print(f"baseline: {r.get('listeners')} listeners, {r.get('launch_items')} launch items, {r.get('logins')} login items")
+            for f in r.get("unaccepted") or []:
+                print(f"  not accepted: {f}")
+        return
+    if cmd == "reports":
+        if rest[:1] == ["last"]:
+            r = call("GET", f"/api/reports?kind={rest[1] if len(rest) > 1 else 'true-state'}")
+            print(r.get("text") or r.get("said"))
+        else:
+            print(call("GET", "/api/reports").get("words"))
+        return
+    if cmd == "skills":
+        if rest[:1] == ["pick"] and len(rest) >= 2:
+            import urllib.parse as _up
+            r = call("GET", f"/api/skills?kind={_up.quote(rest[1])}&ask={_up.quote(' '.join(rest[2:]))}")
+            print(f"for {r['kind']}: {', '.join(r['pick']) or 'nothing fits'}")
+        else:
+            print(call("GET", "/api/skills").get("words"))
+        return
+    if cmd == "usage":
+        u = call("GET", "/api/usage")
+        print(f"{u['day']}: {u['workers']} job(s) · {u['brain_min']} brain-minutes · {u['tokens_in']} in / {u['tokens_out']} out tokens · "
+              f"{u['pages']} web pages · {u['claude_calls']} Claude calls")
+        for k, v in u.get("against_limits", {}).items():
+            print(f"  {k:<13} {v}")
+        return
+    if cmd == "limits":
+        print(json.dumps(call("GET", "/api/limits"), indent=2))
+        return
+    if cmd == "disk":
+        # the owner's list, and the one Enter that deletes it (the disk guard, 2026-10-17)
+        p = call("GET", "/api/disk/plan")
+        print(p.get("words") or "")
+        if rest[:1] == ["clean"]:
+            if not p.get("files"):
+                print("nothing on your list to delete")
+                return
+            try:
+                input(f"\nDelete these {len(p['files'])} file(s), {p['total_gb']} GB? Press Enter to delete, Ctrl-C to keep them. ")
+            except (KeyboardInterrupt, EOFError):
+                print("\nkept — nothing deleted")
+                return
+            out = call("POST", "/api/disk/clean", {"confirm": True, "who": WHO})
+            print(f"deleted {out.get('deleted')} file(s), freed {out.get('freed_gb')} GB · now {((out.get('disk') or {}).get('free_pct'))}% free")
+        return
+    if cmd == "health":
+        h = call("GET", "/api/health")
+        print(f"disk {h['disk']['free_gb']} GB free · memory {h['memory']['available_gb']} GB ({h['memory']['pressure']})")
+        for e, a in h["apis"].items():
+            print(f"{a['label']:<16} :{a['port']} {'UP ' + str((a.get('healthz') or {}).get('sha')) if a['up'] else 'DOWN'}")
+            for w in h["watchdogs"][e]:
+                if w["level"] in ("warn", "error"):
+                    print(f"   {w['level']:<5} {w['name']}: {str(w['summary'])[:110]}")
+        return
+    if cmd == "self":
+        print(json.dumps(call("GET", "/api/self"), indent=2))
+        return
+    if cmd == "drift":
+        rows = call("GET", "/api/overview")["drift"]
+        if not rows:
+            print("no drift")
+        for d in rows:
+            item(f"{d['service']} ({d['kind']})", d["detail"]) if NARROW else print(f"{d['kind']:<6} {d['service']:<8} {d['detail']}")
+        return
+    if cmd == "errors":
+        q = f"?hours={flag(rest, '--hours', 24)}" + (f"&env={flag(rest, '--env')}" if flag(rest, "--env") else "")
+        for r in call("GET", "/api/errors/classes" + q)[:40]:
+            if NARROW:
+                item(f"{(r['signal'] or '').upper() + ' ' if r['signal'] else ''}{r['subsystem']} · {r['action']}",
+                     f"{r['env']} {r['level']} · {r['last_hour']}/h · {r['last_day']}/24h — {r['template'][:140]}")
+                continue
+            print(f"{(r['signal'] or '').upper():<9}{r['level']:<6}{r['env']:<4}{r['last_hour']:>5}/h {r['last_day']:>6}/24h  {r['subsystem']} · {r['action']}: {r['template'][:90]}")
+        return
+    if cmd == "logs":
+        q = [("limit", 80), ("quiet", "true")]
+        if flag(rest, "--env"): q.append(("env", flag(rest, "--env")))
+        if flag(rest, "--problems"): q.append(("level", "problems"))
+        if flag(rest, "--grep"): q.append(("q", flag(rest, "--grep")))
+        import time as _t
+        for r in call("GET", "/api/logs?" + "&".join(f"{k}={urllib.request.quote(str(v))}" for k, v in q)):
+            if NARROW:
+                item(f"{_t.strftime('%H:%M:%S', _t.localtime(r['t']))} {r['env']} {r['level']}", f"{r['subsystem']} · {r['action']} — {r['summary'][:160]}")
+                continue
+            print(f"{_t.strftime('%H:%M:%S', _t.localtime(r['t']))} {r['env']:<3} {r['level']:<5} {r['subsystem']} · {r['action']}  {r['summary'][:140]}")
+        return
+    if cmd == "jobs":
+        for j in call("GET", "/api/jobs")[:20]:
+            if NARROW:
+                item(f"{'… ' if j['running'] else ('✓ ' if j['code'] == 0 else '✗ ')}{j['title']}", f"{'running' if j['running'] else 'exit ' + str(j['code'])} · {j['who']} · {j['id']}")
+                continue
+            print(f"{j['id']}  {'running' if j['running'] else 'exit ' + str(j['code']):<9} {j['who']:<22} {j['title']}")
+        return
+    if cmd == "job":
+        print(call("GET", f"/api/jobs/{rest[0]}/log")["text"])
+        return
+    if cmd == "builds":
+        d = call("GET", "/api/deploys")
+        for b in d["builds"]:
+            if NARROW:
+                item(f"{b.get('version') or '?'} · {b['ref']} · {b['sha']}", f"build {b['build']} · id {b['id']}")
+                continue
+            print(f"{b['id']}  {b.get('version') or '?':<7} {b['ref']:<12} {b['sha']:<11} build {b['build']}  → {b['origin']}")
+        print("\nversions: " + ", ".join(v["ref"] for v in d["versions"]))
+        return
+    if cmd == "build":
+        r = call("POST", "/api/deploys/build", {"ref": rest[0]})
+        print(f"building {rest[0]} → {r['build']} (job {r['job']['id']}; `lacuna job {r['job']['id']}`)")
+        return
+    if cmd == "deploy":
+        if not yes:
+            sys.exit("lacuna: installing on HER iPad needs --yes")
+        r = call("POST", f"/api/deploys/{rest[0]}/install", {"confirm": True})
+        print(f"installing (job {r['job']['id']})")
+        return
+    if cmd == "battery":
+        if rest:
+            r = call("POST", f"/api/battery/{rest[0]}")
+            print(f"started (job {r['job']['id']})")
+            return
+        for p in call("GET", "/api/battery")[:5]:
+            print(f"{p['log']:<14} {p['began']:<32} {len(p['runs'])} runs · {p['problems']} with problems{'' if p['finished'] else ' · running'}")
+        return
+    if cmd == "tests":
+        r = call("POST", f"/api/tests/{rest[0]}")
+        print(f"started (job {r['job']['id']})")
+        return
+    if cmd == "status":
+        # the phone's Home, in a terminal: one line that says whether anything needs you, then the few facts
+        o = call("GET", "/api/overview")
+        try:
+            pk = call("GET", "/api/packages")
+        except SystemExit:
+            pk = {}
+        down = [s for s in o["services"] if not s["up"] and s["name"] != "tunnel"]
+        waiting = o.get("petitions") or []
+        alerts = [a for a in o.get("alerts") or [] if not a.get("acked") and a.get("level") != "info"]
+        n = len(down) + len(waiting) + len(alerts) + len(o.get("drift") or [])
+        print(f"{BOLD}{'All clear' if not n else f'{n} thing(s) need you'}{OFF}")
+        for s in down: item(f"○ {s['title']} is DOWN", f":{s['port']} — `lacuna svc why {s['name']}`")
+        for p in waiting: item(f"? {p.get('effect') or p['action']}", f"waiting for your yes — `lacuna petitions approve {p['id']}`")
+        for a in alerts[:5]: item(f"! {a['title']}", a["body"])
+        for d in o.get("drift") or []: item(f"~ drift · {d['service']}", d["detail"])
+        wait = (pk.get("waiting_on_dev_not_on_qa") or {}).get("count", 0)
+        item("QA", f"runs {pk.get('qa_is_running_commit') or '—'}{' (main)' if pk.get('qa_matches_main') else ''} · {wait} commit(s) waiting on dev")
+        item("her iPad", f"build {pk.get('her_ipad_is_running_build') or '— (not on the network)'}")
+        item("disk / memory", f"{o['disk']['free_gb']} GB free · {o['memory']['available_gb']} GB available ({o['memory']['pressure']})")
+        return
+    if cmd == "package":
+        pk = call("GET", "/api/packages")
+        w = pk.get("waiting_on_dev_not_on_qa") or {}
+        print(f"{BOLD}{w.get('count', 0)} commit(s) on dev, not on QA{OFF}" if w.get("count") else f"{BOLD}Nothing to promote{OFF}")
+        for c in w.get("commits") or []: print(f"  · {c[:COLS - 6] if NARROW else c}")
+        item("QA runs", f"{pk.get('qa_is_running_commit')} · main {pk.get('main_commit')} · dev {pk.get('dev_commit')}")
+        item("her iPad", f"build {pk.get('her_ipad_is_running_build') or '—'}")
+        return
+    if cmd == "promote":
+        if not yes:
+            sys.exit("lacuna: promoting restarts HER server (~20 s) — add --yes.  `lacuna package` shows what would go.")
+        r = call("POST", "/api/deploys/promote" + ("?build=true" if "--build" in rest else ""), {"confirm": True})
+        print(f"promoting — `lacuna job {r['job']['id']}` follows it (gate → main → QA restart → verify; rolls back if QA does not come up)")
+        return
+    if cmd == "chat":
+        # talk to Lacuna in the terminal — the same model and tools as the dock; answers wrapped to the screen
+        print(f"{DIM}Lacuna is listening. Empty line or Ctrl-D to leave.{OFF}")
+        while True:
+            try:
+                q = input(f"{BOLD}you ›{OFF} ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print(); return
+            if not q:
+                return
+            r = call("POST", "/api/chat", {"text": q, "session": "cli"}, timeout=7200)
+            for t in r.get("trace") or []:
+                print(f"  {DIM}→ {t['tool']}{OFF}")
+            for para in (r.get("answer") or "(no answer)").split("\n"):
+                print(textwrap.fill(para, width=max(20, COLS - 2)) if para.strip() else "")
+    if cmd == "ask":
+        r = call("POST", "/api/chat", {"text": " ".join(rest), "session": f"cli-{WHO}"}, timeout=7200)
+        for t in r.get("trace", []):
+            print(f"  → {t['tool']}({json.dumps(t['args'])})")
+        print(r.get("answer"))
+        return
+    if cmd == "watch":                                    # read-only; the tool lives in Lacuna's world
+        os.execv(sys.executable, [sys.executable, os.path.expanduser("~/lacuna-world/tools/watch"), *rest])
+    if cmd == "exam":
+        op = rest[0] if rest else "status"
+        if op in ("start", "stop") and len(rest) >= 2:
+            r = call("POST", f"/api/exam/{rest[1]}/{op}", {})
+            if op == "start" and r.get("petition"):
+                print(f"{r['exam']}: the cart {r['cart'].get('name')} passed its trial; it is on a permission card ({r['petition']}) — "
+                      f"it runs on your yes (lacuna petitions approve {r['petition']})")
+                for j, m in (r["cart"].get("minds") or {}).items():
+                    item(f"  mind {j} → {m.get('model')}", m.get("why") or "")
+            elif r.get("ok"):
+                print(f"{r.get('exam')}: stopping worker {r.get('worker')}; its artifact will say who stopped it")
+            else:
+                sys.exit("lacuna: " + (" | ".join(r.get("fix_first") or []) or str(r.get("why"))))
+            return
+        if op != "status":
+            sys.exit("lacuna exam [status] | exam start E# | exam stop E#")
+        e = call("GET", "/api/exam")
+        print(f"{e['press']} of 10 at your press · {e['done']} done · {e['running']} running · {e['failed']} failed · "
+              f"{e['minutes']} min · {e['brain_seconds']} brain-seconds")
+        for i in e["items"]:
+            item(f"{i['id']:<4} {i['state']:<8} {i['cart']}",
+                 f"{i['minutes']} min · {i['brain_seconds']} bs · {', '.join(i['minds']) or '—'} · {i['said'] or i['title']}")
+        return
+    if cmd == "cascade":
+        if (rest[:1] or ["report"])[0] != "report":
+            sys.exit("lacuna cascade report")
+        r = call("GET", "/api/cascade/report")
+        f = lambda v, fmt="{}": "—" if v is None else fmt.format(v)  # noqa: E731
+        print(f"shadow rows from {r['dir']} · a threshold is suggested where a rung holds {int(r['bar'] * 100)}% against the 26B")
+        for x in r["rows"]:
+            item(f"{x['job']:<14} {x['model']:<20} n {x['n']}" + (" (truth)" if x["truth"] else ""),
+                 f"accuracy {f(x['accuracy'], '{:.0%}')} · {x['mean_ms']} ms · certainty {f(x['mean_certainty'])} · "
+                 f"threshold {f(x['suggested_threshold'])} · memory ≥ {f(x['min_available_gb'])} GB · swap ≤ {f(x['max_swap_used_mb'])} MB")
+        for job, c in r["escalations"].items():
+            print(f"{job}: {c['climbs']} climbs · accepted by {c['accepted_by'] or '—'} · {c['unheld']} held by none · "
+                  f"{c['candidate_pairs']} candidate pairs")
+        if not r["rows"] and not r["escalations"]:
+            print("nothing yet: no job has climbed, and no shadow pass has run (LACUNA_SHADOW=1, or (shadow . #t) in a cart)")
+        return
+    if cmd == "pair":
+        return owner().pair(rest)
+    if cmd == "minds":
+        return owner().minds(rest)
+    if cmd == "petitions":
+        if rest[:2] == ["approve", "--all"]:                # every waiting card, listed, then ONE Enter from the owner
+            waiting = [p for p in call("GET", "/api/petitions") if p["state"] == "waiting"]
+            if not waiting:
+                print("nothing is waiting on you")
+                return
+            for p in waiting:
+                print(f"  {p['id']}  {p['action']:<12} {p['reason'][:90]}")
+            if input(f"approve all {len(waiting)}? type yes: ").strip().lower() != "yes":
+                print("nothing approved")
+                return
+            for p in waiting:
+                r = owner().decide(p["id"], True)
+                print(f"  {p['id']}  {(r.get('petition') or {}).get('state', r.get('detail', r))}")
+            return
+        if rest and rest[0] in ("approve", "decline"):
+            r = owner().decide(rest[1], rest[0] == "approve")         # the owner's press, signed (bin/lacuna_owner.py)
+            print(json.dumps(r.get("petition"), indent=2, default=str))
+            return
+        for p in call("GET", "/api/petitions")[:20]:
+            print(f"{p['id']}  {p['state']:<9} {p['action']:<11} by {p['by']}: {p['reason']}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

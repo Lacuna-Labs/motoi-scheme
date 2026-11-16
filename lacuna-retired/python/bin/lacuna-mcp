@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""lacuna-mcp — Lacuna's door for Claude, as an MCP server over stdio (LACUNA-1.3-DESIGN §18; 2.0 §10).
+
+"Claude, tell Lacuna to fix the ads carts tonight" is one call. Six tools: five a thin call to Lacuna's API on :1138, and the
+restart through the lacuna command itself (one road for the owner and for Claude, 2026-11-02):
+  lacuna_tell(words)        say what you expect; Lacuna plans it and starts the worker (or asks, or refuses with why)
+  lacuna_result(id)         a job's state and its taxonomy report
+  lacuna_usage()            what Lacuna's work spent today, against its limits
+  lacuna_recall(query)      what Lacuna's memory (the cortex) holds about something
+  lacuna_status()           the box at a glance: services, disk, memory, alerts
+  lacuna_restart(name, why) one service restarted by `lacuna restart` (refused while the owner's turn runs)
+Standard library only; JSON-RPC 2.0, one message per line (the MCP stdio transport).
+Register: claude mcp add lacuna -- /Users/alfred/code/lacuna/bin/lacuna-mcp   (or: … -- /Users/alfred/code/lacuna/bin/lacuna mcp)
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.request
+
+BASE = os.environ.get("LACUNA_URL", "http://127.0.0.1:1138")
+WHO = os.environ.get("LACUNA_WHO", "claude")
+LACUNA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lacuna")
+
+TOOLS = [
+    {"name": "lacuna_tell", "description": "Tell Lacuna (the Lacuna Labs SRE on this Mac) what you expect, in one plain sentence — "
+     "e.g. 'fix the cart favorites-velocity-watcher' or 'look up what vintage Navajo cuffs sell for'. Lacuna plans it, starts a "
+     "supervised worker under its limits and answers in words with a job id; it refuses QA, production and releases (the owner's "
+     "press) and asks a question when the sentence is unclear.",
+     "inputSchema": {"type": "object", "properties": {"words": {"type": "string", "description": "the expectation, one sentence"}},
+                     "required": ["words"]}},
+    {"name": "lacuna_result", "description": "Read a Lacuna job's state and its report (what it did, verdict before → after, minutes).",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "string", "description": "the job id from lacuna_tell, e.g. w-repair-1018-001500"}},
+                     "required": ["id"]}},
+    {"name": "lacuna_usage", "description": "What Lacuna's work spent today — jobs, brain-minutes, tokens, web pages — against its daily limits.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "lacuna_recall", "description": "Ask Lacuna's memory (its cortex: facts, episodes, decisions, repairs) about something.",
+     "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
+    {"name": "lacuna_status", "description": "The box at a glance from Lacuna: services up or down, disk, memory pressure, open alerts.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "lacuna_restart", "description": "Restart one Lacuna service by its name (lacuna.frontend, lacuna.executor, lacuna.foreman, "
+     "lacuna.legacy-api, …; lacuna_status lists them), with the reason in one sentence. It runs the lacuna command's own restart, "
+     "which is refused while the owner's turn runs.",
+     "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "one service, e.g. lacuna.foreman"},
+                                                      "why": {"type": "string", "description": "why, in one sentence"}},
+                     "required": ["name", "why"]}},
+]
+
+
+def api(method, path, body=None, timeout=300):
+    req = urllib.request.Request(BASE + path, method=method, data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Content-Type": "application/json", "X-Lacuna-Who": WHO})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode() or "null")
+
+
+def run(name, args):
+    if name == "lacuna_tell":
+        out = api("POST", "/api/tell", {"words": args.get("words", ""), "who": WHO})
+        return out.get("say") or json.dumps(out)
+    if name == "lacuna_result":
+        return json.dumps(api("GET", f"/api/result/{args.get('id', '')}"), indent=1, ensure_ascii=False)[:8000]
+    if name == "lacuna_usage":
+        return json.dumps(api("GET", "/api/usage"), indent=1)
+    if name == "lacuna_recall":
+        p = subprocess.run([os.path.expanduser("~/lacuna-world/tools/cortex"), "recall", *str(args.get("query", "")).split()],
+                           capture_output=True, text=True, timeout=60)
+        return (p.stdout or p.stderr or "nothing recalled").strip()[:6000]
+    if name == "lacuna_status":
+        h = api("GET", "/api/health")
+        al = api("GET", "/api/alerts")
+        al = al if isinstance(al, list) else (al or {}).get("alerts", [])
+        lines = [f"disk {h['disk']['free_gb']} GB free · memory {h['memory']['available_gb']} GB ({h['memory']['pressure']})"]
+        lines += [f"{a['label']}: {'up' if a['up'] else 'DOWN'}" for a in h.get("apis", {}).values()]
+        lines += [f"alert: {a.get('title')} — {a.get('body', '')[:160]}" for a in al[:5] if not a.get("acked")]
+        return "\n".join(lines)
+    if name == "lacuna_restart":
+        svc, why = str(args.get("name", "")), str(args.get("why", "")).strip()
+        if not re.fullmatch(r"lacuna\.[a-z][a-z-]*", svc):
+            return f"refused: name one service as lacuna.<function> (lacuna_status lists them), not {svc!r}"
+        if not why:
+            return "refused: a restart says why, in one sentence"
+        p = subprocess.run([LACUNA, "restart", svc, "--why", why[:200]], capture_output=True, text=True, timeout=180)
+        return (p.stdout + p.stderr).strip()[:4000] or f"lacuna restart {svc}: exit {p.returncode}"
+    raise ValueError(f"no tool {name}")
+
+
+def reply(i, result=None, error=None):
+    m = {"jsonrpc": "2.0", "id": i}
+    if error:
+        m["error"] = {"code": -32000, "message": error}
+    else:
+        m["result"] = result
+    sys.stdout.write(json.dumps(m) + "\n")
+    sys.stdout.flush()
+
+
+def main():
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        i, method = msg.get("id"), msg.get("method")
+        if method == "initialize":
+            reply(i, {"protocolVersion": msg.get("params", {}).get("protocolVersion", "2025-06-18"),
+                      "capabilities": {"tools": {}}, "serverInfo": {"name": "lacuna", "version": "1.3"}})
+        elif method == "tools/list":
+            reply(i, {"tools": TOOLS})
+        elif method == "tools/call":
+            p = msg.get("params") or {}
+            try:
+                text = run(p.get("name"), p.get("arguments") or {})
+                reply(i, {"content": [{"type": "text", "text": text}]})
+            except Exception as e:  # noqa: BLE001 — said back to the caller, never a crash
+                reply(i, {"content": [{"type": "text", "text": f"Lacuna could not do that: {type(e).__name__}: {e}"}], "isError": True})
+        elif i is not None and method not in ("notifications/initialized",):
+            reply(i, {})
+
+
+if __name__ == "__main__":
+    main()
